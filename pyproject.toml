@@ -1,0 +1,17 @@
+[project]
+name = "maker-arm-lab"
+version = "0.1.0"
+description = "Research layer for the MakerMods Maker Arm: identification, model learning, gated milestone experiments"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["source"]
+
+[tool.ruff]
+line-length = 100
+src = ["source", "tests"]
