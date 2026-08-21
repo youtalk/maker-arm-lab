@@ -10,23 +10,71 @@ Date: 2026-08-20
 | vcan integration green in CI | PASS | CI run: https://github.com/youtalk/maker-arm-rs/actions/runs/32433778128 (`vcan` job green, ran `cargo test -p maker-arm-transport --features socketcan -- --ignored`). Re-run locally on Thor against real `vcan0` today: 6 passed, 0 failed. |
 | aarch64 wheel builds + golden-parity pytest | PASS | CI run: https://github.com/youtalk/maker-arm-rs/actions/runs/32433778128 (`wheels (ubuntu-24.04-arm)` job green — builds the wheel via `maturin-action` and runs `pytest bindings/maker-arm-py/tests/`). Thor-native (Task 11 Step 5): built `maker_arm_rs-0.1.0-cp312-cp312-linux_aarch64.whl` via `maturin develop`, `pytest` — 6 passed. Module resolves to `.venv/.../site-packages/maker_arm_rs/__init__.py` (correct name `maker_arm_rs`, not `maker_arm`). |
 | Thor PREEMPT_RT kernel active | **FAIL** | `uname -a`: `Linux thor 6.8.12-tegra #1 SMP PREEMPT Tue Dec 30 15:40:41 PST 2025 aarch64 aarch64 aarch64 GNU/Linux`. `/sys/kernel/realtime`: does not exist. See "Notes and deviations" for the full explanation — this is the stock PREEMPT (voluntary) kernel, not PREEMPT_RT. |
-| cyclictest baseline recorded | **NOT RUN** | `cyclictest` requires root; the operating user's `ulimit -r` is `0` and `sudo -n true` fails ("a password is required"), so it cannot run unprivileged in this session. The controller has asked the owner to run it manually; the result has not come back at the time of writing. Pending command: `sudo cyclictest -m -Sp90 -i200 -l100000 -h400 -q > ~/cyclictest-baseline.txt` |
+| cyclictest baseline recorded | PASS | `sudo cyclictest -m -Sp90 -i200 -l100000 -h400 -q > ~/cyclictest-baseline.txt`, run interactively by the owner (root required — the operating user's `ulimit -r` is `0` and `sudo -n` fails). 14 threads, SCHED_FIFO priority 90, 200 µs interval, 100000 loops. Min 2–3 µs, avg 4 µs on every core, worst-case max **323 µs**, zero histogram overflows at the 400 µs ceiling. Per-core figures in "cyclictest detail" below. **Stock PREEMPT baseline, not PREEMPT_RT** — see the row above. |
 | SocketCAN sanity (vcan roundtrip on Thor) | PASS | Task 11 Step 4, `cansend`/`candump` roundtrip on `vcan0`: `vcan0  01800001   [8]  80 00 80 00 05 1F 33 33` — byte-identical to the golden MIT vector from the protocol tests. Reconfirmed today: `cargo test -p maker-arm-transport --features socketcan -- --ignored` against live `vcan0` (interface state `<NOARP,UP,LOWER_UP> mtu 72`) — 6 passed, including `roundtrip_extended_frame_over_vcan`, `remote_frames_are_not_delivered_as_motor_data`, and `standard_id_frames_are_not_delivered_as_motor_data`. |
 | maker-arm-lab CI green | PASS | CI run: https://github.com/youtalk/maker-arm-lab/actions/runs/32431942689 — `test` job green (post-fix commit `e7751f1`, which made the package installable and derived `__version__` from package metadata). |
 
 ## cyclictest detail
 
-Not available. The baseline run is pending — see the "NOT RUN" row above for
-the exact reason (requires root; `ulimit -r` is 0 for the operating user) and
-the exact pending command. The histogram summary (min/avg/max per priority
-class) will be pasted here once `~/cyclictest-baseline.txt` exists.
+Command, run by the owner on 2026-08-20:
 
-**This gate item, when it lands, will be a stock-PREEMPT baseline, not the
-PREEMPT_RT baseline the plan originally intended** (see the "Thor
-PREEMPT_RT kernel active" FAIL above). This matters for any later milestone
-that compares a tuned kernel/scheduler configuration against "the MA0
-baseline" — that comparison will be stock-PREEMPT vs. tuned, not
-PREEMPT_RT-vs-tuned, and should be labeled as such wherever it is used.
+```
+sudo cyclictest -m -Sp90 -i200 -l100000 -h400 -q > ~/cyclictest-baseline.txt
+```
+
+`-S` gives one SCHED_FIFO priority-90 thread per CPU (14 on this Thor),
+`-i200` a 200 µs interval, `-l100000` 100000 loops per thread, `-h400` a
+histogram to 400 µs. `/dev/cpu_dma_latency` was set to 0 µs by `-m`, which
+holds the CPUs out of deep idle states for the duration.
+
+Summary lines from `~/cyclictest-baseline.txt` (values in µs, one column per
+CPU 0–13):
+
+```
+# Min Latencies: 00002 00002 00002 00002 00002 00003 00002 00002 00002 00002 00002 00002 00003 00003
+# Avg Latencies: 00004 00004 00004 00004 00004 00004 00004 00004 00004 00004 00004 00004 00004 00004
+# Max Latencies: 00086 00024 00057 00320 00041 00018 00323 00234 00019 00045 00103 00019 00089 00083
+# Histogram Overflows: 00000 00000 00000 00000 00000 00000 00000 00000 00000 00000 00000 00000 00000 00000
+```
+
+| Statistic | Value |
+|-----------|-------|
+| Threads (CPUs) | 14 |
+| Min latency | 2 µs (2–3 µs across cores) |
+| Avg latency | 4 µs — identical on all 14 cores |
+| Worst-case max | **323 µs** (CPU 6); next worst 320 µs (CPU 3), 234 µs (CPU 7) |
+| Mean of per-core max | 104 µs |
+| Best-case max | 18 µs (CPU 5) |
+| Histogram overflows | 0 — every sample landed under the 400 µs ceiling |
+
+Reading it: the typical case is excellent and very consistent — 4 µs average
+on every core, with no dispersion between cores. The tail is what matters for
+control, and it is uneven: four cores stay under 25 µs while three exceed
+230 µs, a roughly 18× spread between the best and worst core. That asymmetry
+is characteristic of a stock PREEMPT kernel with housekeeping work (timers,
+IRQs, and on Tegra the various platform daemons) unevenly distributed rather
+than steered away from a shielded set.
+
+For a 1 kHz control loop — the working assumption for this arm — a 1000 µs
+period against a 323 µs worst-case scheduling latency leaves roughly 68% of
+the period for everything else. That is workable but not comfortable, and it
+is a worst case measured on an *idle* machine: under load from perception or
+logging the tail will grow. MA4's tuning work should target the tail, not the
+average, and the obvious levers are CPU isolation/affinity for the control
+thread onto one of the well-behaved cores (5, 8, or 11 in this run), IRQ
+steering, and — if the tail still dominates — revisiting PREEMPT_RT.
+
+**This is a stock-PREEMPT baseline, not the PREEMPT_RT baseline the plan
+originally intended** (see the "Thor PREEMPT_RT kernel active" FAIL above).
+Any later milestone that compares a tuned configuration against "the MA0
+baseline" is comparing against stock PREEMPT, not PREEMPT_RT, and must label
+it as such. Note also that these numbers say nothing about PREEMPT_RT's
+actual benefit here — that comparison has not been made, and the numbers
+above should not be used to argue either for or against it.
+
+The full 400-bucket histogram lives in `~/cyclictest-baseline.txt` on the
+Thor and is deliberately not committed (42 KB of mostly-zero buckets); the
+summary lines above are the reproducible part.
 
 ## Notes and deviations
 
