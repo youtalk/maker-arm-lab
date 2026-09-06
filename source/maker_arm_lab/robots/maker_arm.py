@@ -17,25 +17,24 @@ MAKER_ARM_USD_PATH = _REPO_ROOT / "assets" / "usd" / "maker_arm.usd"
 # Gains and caps come from the Rust profile; see core.profile. No literals here on purpose.
 _GAINS = _profile.arm_gains(_profile.load_profile())
 
-# Raised from the URDF's 20 N by Task D3 step 4.3, which authorises exactly this raise when
-# the pinch will not hold. A DOCUMENTED SIM/REAL DIVERGENCE, and a cheap one: the URDF's own
-# README calls its 20 N a placeholder, so the number being diverged from was never a
-# measurement of the real gripper either.
+# The URDF's value, kept because it is the vendored one (README: "Gripper effort 20 N ...
+# are placeholders"). Task D3 step 4.3 authorises raising this to 40 N when the pinch will
+# not hold, and part 12 established that it does not hold: two of ten trials are proper
+# pinches at the close that slip during the lift. Part 13 pulled that lever and MEASURED IT
+# INERT, so ruling D3-17 put the number back and kept the knowledge here.
 #
-# MEASURED INERT, and that is the useful part. Task D3 part 13 ran the ten-trial gate at 20 N
-# and at 40 N with nothing else changed. The two lift slips this raise was aimed at came out
-# the same at both caps -- trial 5 is bit-identical (grip 4.78/4.97 N, stall 4.329 mm) and
-# trial 9 moves 5.26/5.26 -> 5.35/5.34 N -- so the effort limit is NOT what caps the grip.
-# The gripper's implicit PD is: the jaws are commanded to 0.0 (closed) and stall on the brick
-# at ~7.6 mm, so stiffness 1000 N/m x 7.6 mm = ~7.6 N of demand against the observed
-# ~7.0 N peak. A ~7 N demand never reached the old 20 N cap, let alone this one.
+# The A/B, ten trials at each cap with nothing else changed: the two lift slips came out the
+# same at both. Trial 5 is bit-identical (grip 4.78/4.97 N, stall 4.329 mm) and trial 9 moves
+# 5.26/5.26 -> 5.35/5.34 N. The effort limit is NOT what caps the grip -- the gripper's
+# implicit PD is. The jaws are commanded to 0.0 (closed) and stall on the brick at ~7.6 mm,
+# so stiffness 1000 N/m x 7.6 mm = ~7.6 N of demand against the observed ~7.0 N peak. A ~7 N
+# demand never reached even this 20 N cap, let alone a 40 N one.
 #
 # So the lever on a grip that will not survive the lift is `stiffness` below, not this
-# constant. 40 N is kept as headroom for that change rather than reverted, because the value
-# it replaced was itself an unmeasured placeholder and neither number is load-bearing today.
-# Revisit against the real gripper's rated holding force during MA-series bring-up rather
-# than treating either as a property of the hardware.
-GRIPPER_EFFORT_LIMIT_N = 40.0
+# constant, and raising this one is a sim/real divergence that buys nothing. Whatever the
+# real gripper turns out to hold at, measured during MA-series bring-up, belongs here -- but
+# a strengthened-looking constant that changes no outcome does not.
+GRIPPER_EFFORT_LIMIT_N = 20.0
 
 MAKER_ARM_CFG = ArticulationCfg(
     class_type=GravityCompensatedArticulation,
