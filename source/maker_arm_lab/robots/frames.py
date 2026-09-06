@@ -40,6 +40,31 @@ GRIPPER_OPEN_POS = 0.0524125
 WRIST_ROLL_SIGN = 1.0
 BASE_YAW_SIGN = -1.0
 
+# Tool-axis tilt off world -z that the oracle GRASPS at, in degrees. NOT a comfort number:
+# this arm cannot hold a level tool over the scatter band at hover height, so demanding one
+# spends joint travel it does not have. The OpenYAM port asked for exactly 0.000 deg, which
+# on this arm drives link_005_joint (only 0.30 rad from its stop at home, the tightest of the
+# six) into that stop within 60 hover steps, after which the arm is jammed and the servo is
+# driving a dead mechanism -- measured, Task D3, /tmp/d3r_hover_diag2.log.
+#
+# Measured by /tmp/d3_tilt_sweep2.py on 2026-09-05 -- a numpy FK of the vendored URDF plus
+# urdf_prep's Z-up mount, reproducing the live Isaac grasp_center and tool angle at
+# HOME_JOINT_POS to 4 decimals (0.2749, 0.0371, 0.1646 / 23.85 deg) before being trusted.
+# Sweeping link_003..link_006 on a 3 deg grid and binning by reach radius over the scatter
+# band (radius 0.130-0.294 m), the SMALLEST tilt the arm can hold in the worst bin is:
+#
+#     joint-margin floor   0.10    0.15    0.20    0.30  rad
+#     hover  (brick+0.12)  8.61    8.21   10.81   13.01  deg
+#     descend (at brick)   0.45    2.23    1.86    2.16  deg
+#
+# The whole band is covered at every floor, so the binding case is hover at the far edge of
+# the band. 15.0 deg is the smallest round value clearing the strictest of those (13.01 deg
+# at a 0.30 rad margin floor), keeping the tilt as small as the grasp geometry allows while
+# staying reachable everywhere. It is well inside the spec's 30 deg tool cone, and close
+# enough to the home pose's own 23.85 deg that the servo barely has to change attitude.
+GRASP_TILT_DEG = 15.0
+GRASP_TILT_RAD = math.radians(GRASP_TILT_DEG)
+
 # Home pose, URDF joint coordinates. Tool axis within 30 deg of world -z, grasp_center over
 # the scatter zone at the achievable height of roughly 0.16-0.19 m above the desk -- the
 # spec's original ~0.25 m target is geometrically unreachable at this tool-axis and

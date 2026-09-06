@@ -38,6 +38,7 @@ from maker_arm_lab.robots.frames import (
     BASE_YAW_SIGN,
     CANON_IN_BODY,
     DESCEND_CLEARANCE_MEASURED,
+    GRASP_TILT_RAD,
     GRIPPER_CLOSED_POS,
     GRIPPER_JOINT_NAMES,
     JAW_AXIS_BODY,
@@ -635,7 +636,8 @@ class OracleRig:
         tilt_rad: float,
         hold_xy: tuple[tuple[float, float], ...] = (),
     ) -> torch.Tensor:
-        """Tool z-axis tilted ``tilt_rad`` toward +x; jaws squared to ``yaw`` (or held).
+        """Tool z-axis tilted ``max(tilt_rad, GRASP_TILT_RAD)`` toward +x; jaws squared
+        to ``yaw`` (or held).
 
         Ported from OpenYAM's ``GraspRig.desired_quat`` (scripts/scripted_grasp_check.py)
         and generalized from a fixed tool-axis-straight-down (tilt=0) to an arbitrary
@@ -672,6 +674,17 @@ class OracleRig:
         else:
             want = self.commanded_yaw[i]
         c, s = math.cos(want), math.sin(want)
+        # GRASP_TILT_RAD is the FLOOR, not an offset. core.oracle is the ported,
+        # arm-agnostic state machine and is not modified (spec section 5 item 5), so it
+        # still asks for tilt_rad=0.0 on every grasp phase, meaning "hold the tool level".
+        # This arm cannot hold a level tool over the scatter band -- measured minimum
+        # 13.01 deg at the far edge at hover height, Task D3 -- and demanding one jams
+        # link_005_joint against its stop. So 0.0 is read here as "as level as this arm
+        # gets", which is frames.GRASP_TILT_RAD. RELEASE is unaffected: its
+        # oracle.RELEASE_TILT_RAD of 0.70 rad is already well past the floor.
+        # scripts/scripted_grasp_check.py builds the identical frame; the two must agree
+        # or the oracle fails where the scripted rehearsal passes.
+        tilt_rad = max(tilt_rad, GRASP_TILT_RAD)
         axis_x = torch.tensor([c, s, 0.0], device=self.device)
         axis_z = torch.tensor([math.sin(tilt_rad), 0.0, -math.cos(tilt_rad)], device=self.device)
         axis_y = torch.cross(axis_z, axis_x, dim=-1)

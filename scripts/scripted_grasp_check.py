@@ -16,7 +16,8 @@ for the measurements that forced it:
               jaws open. Gates rest stability: every brick's drift over the second
               half of the settle must be < 5 mm and its final speed < 0.01 m/s.
   1. hover    servo the PICK point (see below) to 0.12 m above the target brick,
-              with the tool axis on world -z and the jaws squared to the brick.
+              with the tool axis at frames.GRASP_TILT_DEG off world -z and the jaws
+              squared to the brick.
   2. descend  servo the PICK point onto the brick and slightly past it, so the
               jaw plates come to rest on the desk. Stops on stall.
   3. close    45 steps of gripper action -1.0, holding the descend's pose
@@ -125,6 +126,7 @@ from maker_arm_lab.robots.frames import (
     ARM_JOINT_NAMES,
     CANON_IN_BODY,
     DESCEND_CLEARANCE_MEASURED,
+    GRASP_TILT_RAD,
     GRIPPER_CLOSED_POS,
     GRIPPER_JOINT_NAMES,
     GRIPPER_OPEN_POS,
@@ -289,28 +291,43 @@ class GraspRig:
         return self.env.scene[f"brick_{index}"].data.root_pos_w[0]
 
     def desired_quat(self, brick_index: int):
-        """Tool axis on world -z, jaws square across the brick's 15.8 mm width.
+        """Tool axis GRASP_TILT_DEG off world -z toward +x, jaws square across the brick.
 
         A jaw is symmetric under a half turn, so the target heading is folded to
         whichever of ``yaw`` / ``yaw + pi`` the wrist is already nearer -- joint6
         only spans +-2.0944 rad and the far representative can be unreachable.
+
+        The tilt is the arm-specific part. The OpenYAM port asked for the tool exactly
+        on world -z; this arm cannot hold that over the scatter band at hover height
+        (measured minimum 13.01 deg at the far edge, ``frames.GRASP_TILT_DEG``), and
+        demanding it jams link_005_joint against its stop. What the grasp actually
+        needs is the jaw axis square to the brick -- which is unchanged here -- plus
+        the tool pointed down enough to reach the brick between the jaws.
+
+        Built identically to ``oracle_runtime.OracleRig.desired_quat``, deliberately:
+        this script is the oracle's rehearsal, so if the two disagreed about grasp
+        attitude the oracle would fail in a way that looks like an oracle bug. Both
+        assemble the frame in canonical tool coordinates (x = jaw axis, z = tool axis)
+        and convert to the ``grasp_center`` body frame with ``canonical_to_body``.
         """
         brick_quat = self.env.scene[f"brick_{brick_index}"].data.root_quat_w[0].unsqueeze(0)
         long_axis = math_utils.quat_apply(brick_quat, self.ex)[0]
         want = math.atan2(long_axis[1].item(), long_axis[0].item()) + math.pi / 2
         want += math.pi * round(_wrap_to_pi(self.jaw_yaw() - want) / math.pi)
         c, s = math.cos(want), math.sin(want)
-        # A rotation matrix's columns are the world-frame images of the CANONICAL
-        # axes, so build it from the axes as columns via torch.stack(dim=1):
-        #   canon x -> (c, s, 0)   the jaw closing direction, horizontal
-        #   canon z -> (0, 0, -1)  the tool axis, straight down
-        #   canon y -> z x x = (s, -c, 0), which keeps the frame right-handed
-        # then convert from "desired rotation of the canonical frame" to
-        # "desired rotation of the body frame" via canonical_to_body -- the
-        # canonical axes are not the body axes on this arm (CANON_IN_BODY).
+        # A rotation matrix's columns are the world-frame images of the CANONICAL axes,
+        # so build it from the axes as columns via torch.stack(dim=1):
+        #   canon x -> (c, s, 0)                     the jaw closing direction
+        #   canon z -> (sin tilt, 0, -cos tilt)      the tool axis, leaning toward +x
+        #   canon y -> z x x, normalized             keeps the frame right-handed
+        # then re-orthogonalize x against the tilted z (a no-op at tilt = 0, which is
+        # why this reduces exactly to the OpenYAM closed form when the tilt is zero).
+        tilt = GRASP_TILT_RAD
         axis_x = torch.tensor([c, s, 0.0], device=self.device)
-        axis_y = torch.tensor([s, -c, 0.0], device=self.device)
-        axis_z = torch.tensor([0.0, 0.0, -1.0], device=self.device)
+        axis_z = torch.tensor([math.sin(tilt), 0.0, -math.cos(tilt)], device=self.device)
+        axis_y = torch.cross(axis_z, axis_x, dim=-1)
+        axis_y = axis_y / axis_y.norm()
+        axis_x = torch.cross(axis_y, axis_z, dim=-1)
         rot = torch.stack([axis_x, axis_y, axis_z], dim=1)
         rot = canonical_to_body(rot, self.canon_in_body)
         return math_utils.quat_from_matrix(rot.unsqueeze(0))
