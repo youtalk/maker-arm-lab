@@ -146,7 +146,11 @@ from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 import maker_arm_lab.tasks  # noqa: F401 -- registers MakerArm-* envs
 from maker_arm_lab.core import layout
 from maker_arm_lab.core import profile as _profile
-from maker_arm_lab.core.checker import PINCH_MIN_FORCE, PINCH_MIN_STALL
+from maker_arm_lab.core.checker import (
+    PINCH_MAX_ASYMMETRY,
+    PINCH_MIN_FORCE,
+    PINCH_MIN_STALL,
+)
 from maker_arm_lab.core.global_ik import (
     JAW_TIP_REACH,
     MAX_WAYPOINT_STEP,
@@ -212,15 +216,37 @@ DESCEND_TILT_LADDER = (
     if args.descend_tilt_deg is not None
     else descend_tilt_ladder(BRICK_HALF_HEIGHT)
 )
+
+
 # The offset the HOVER is solved at. The descend picks its own per rung, but the hover has
 # to commit before the ladder runs; the rungs differ by ~1-2 mm of offset, far inside the
 # continuity cap, so the first descend waypoint reconverges from the hover pose without
 # trouble. --pick_offset_z overrides it, for probing.
-NOMINAL_OFFSET_Z = (
-    PICK_OFFSET[2]
-    if args.pick_offset_z is not None
-    else descend_pick_offset(DESCEND_TILT_LADDER[0], BRICK_HALF_HEIGHT)[0]
-)
+def _nominal_offset_z() -> float:
+    """The hover's offset, with the one failure mode this expression can have made loud.
+
+    `descend_pick_offset` returns None when the requested tilt is above the angle at which
+    the jaw plates foul the desk (~4.40 deg), which `--descend_tilt_deg 10` reaches. Indexing
+    [0] on that None raised a TypeError at MODULE SCOPE -- outside `main`'s try:, whose whole
+    stated purpose is that any failure becomes GRASP_FAIL rather than a crash -- so the script
+    exited with a traceback and printed no token at all. A caller parsing for GRASP_OK /
+    GRASP_FAIL cannot tell that from a hang.
+    """
+    if args.pick_offset_z is not None:
+        return PICK_OFFSET[2]
+    nominal = descend_pick_offset(DESCEND_TILT_LADDER[0], BRICK_HALF_HEIGHT)
+    if nominal is None:
+        raise SystemExit(
+            f"--descend_tilt_deg {math.degrees(DESCEND_TILT_LADDER[0]):.2f} is above the "
+            f"tilt at which the jaw plates foul the desk, so there is no pick offset at "
+            f"which this descend can be solved. Use a smaller tilt, or pass an explicit "
+            f"--pick_offset_z."
+        )
+    return nominal[0]
+
+
+# The offset the HOVER is solved at (see above).
+NOMINAL_OFFSET_Z = _nominal_offset_z()
 # The brick's position ACROSS the plate face (body x), which is the axis the plate is
 # asymmetric on: it spans -62.5..+20.5 mm about grasp_center, so a brick centred on
 # grasp_center sits 21 mm off the plate's own centre, toward the short edge, with only
@@ -230,10 +256,18 @@ NOMINAL_OFFSET_Z = (
 # Ruling D3-11 candidate 3 asked for the jaw-heading FOLD to be chosen by plate side. It
 # cannot help: a half-turn roll about the tool axis maps the brick's long axis onto itself,
 # so both representatives put the brick at the same body x. Measured, both folds ->
-# +8.63 mm, identical to 2 dp. What the ruling actually wants -- a rule that cannot place a
-# brick off the end of its own plate -- is this offset, which is the constant designed for
-# it and which was an unmeasured 0.0 until now. Centring the brick on the plate face turns
-# 4.6 mm of edge margin into 25.6 mm on BOTH edges.
+# +8.63 mm, identical to 2 dp.
+#
+# THE OBVIOUS FIX WAS TRIED AND REVERTED, so do not re-derive it. Centring the brick on the
+# plate face looks like it turns 4.6 mm of edge margin into 25.6 mm on both edges. Taken to
+# GPU it made things strictly WORSE -- at -0.021 the jaws closed on nothing and pushed the
+# brick to -81.9 mm, right off the plate that centring was supposed to protect it on. The
+# reason is in frames.PICK_OFFSET_MEASURED's comment: the collision box is the whole finger
+# BODY, bracket and rail included, and the gripping surface is only the part of it near the
+# tool axis, so "the centre of the box" is not where the jaws grip.
+#
+# So this stays 0.0, which is a MEASUREMENT and not an unset default -- evidenced by ten
+# clean carries at 7.59-7.62 N with the brick there (Task D3 part 16).
 PICK_OFFSET_LATERAL = PICK_OFFSET[0]
 
 # --- Path resolution ---------------------------------------------------------
@@ -273,12 +307,12 @@ LIFT_MAX_XY_ERROR = 0.03  # m
 # that do separate them are (a) the jaws stalling short of their target because
 # something is between them and (b) equal force on both fingers.
 #
-# PINCH_MIN_FORCE (2.0 N on the weaker finger) is imported from core.checker
-# rather than redefined here: this measurement set is where the OpenYAM number
-# came from, but the oracle's runtime check and the eval harness's strict grasp
-# grading use the same number, and it was three copies of 2.0 there until it
-# was consolidated.
-PINCH_MAX_ASYMMETRY = 0.30  # |L - R| / max(L, R)
+# All three thresholds -- PINCH_MIN_FORCE (2.0 N on the weaker finger),
+# PINCH_MIN_STALL (4.8 mm) and PINCH_MAX_ASYMMETRY (0.30) -- are imported from
+# core.checker rather than redefined here. This measurement set is where the
+# OpenYAM numbers came from, but the oracle's runtime check and the eval
+# harness's strict grasp grading ask the same question, and each threshold was
+# separately-maintained copies until it moved.
 
 # Jaw-plate extent relative to grasp_center, on the three axes that gate a grasp, read off
 # the vendored collision geometry quoted in robots/frames.py's wrist-camera block. These are
@@ -425,9 +459,14 @@ class GraspRig:
         This replaces the quaternion ``desired_quat`` the differential IK needed. The solver
         constrains the jaw heading directly, so the attitude is now three scalars (tilt
         magnitude, lean azimuth, jaw heading) rather than a rotation matrix that has to be
-        assembled and re-orthogonalised. ``oracle_runtime`` must build its target the same
-        way, through the same ``core.global_ik``, so the check and the oracle cannot drift
-        apart -- this task has already paid once for exactly that.
+        assembled and re-orthogonalised.
+
+        THE ORACLE DOES NOT YET DO THIS, and stating otherwise would be false at HEAD.
+        ``oracle_runtime`` still builds a quaternion in its own ``desired_quat`` and drives
+        the differential IK -- the solver this task measured as never once closing the jaws
+        on a brick. Moving it onto ``core.global_ik`` is Task D5's work and is marked in
+        ``oracle_runtime`` and ``LegoSortDatagenEnvCfg``; until then the check and the oracle
+        ARE drifted apart, and this task has already paid once for exactly that.
         """
         brick_quat = self.env.scene[f"brick_{brick_index}"].data.root_quat_w[0].unsqueeze(0)
         long_axis = math_utils.quat_apply(brick_quat, self.ex)[0]
@@ -695,9 +734,13 @@ def pick_target_brick(rig, num_bricks: int, requested: str, rng: random.Random) 
         return int(requested)
     xs = [rig.brick_pos(i)[0].item() for i in range(num_bricks)]
     reachable = [i for i in range(num_bricks) if xs[i] <= TOP_DOWN_X_LIMIT]
-    # No reachable brick should be possible now that layout.SCATTER_X is bounded
-    # by TOP_DOWN_X_LIMIT, but fall back to the full set rather than crashing --
-    # and let the grasp fail honestly if the scene ever changes underneath.
+    # An UNREACHABLE brick should not be possible: layout.SCATTER_MAX_RADIUS caps every
+    # sampled brick at 0.280 from the base axis, hence at x <= 0.280, which is inside this
+    # filter -- so `reachable` is currently always the full set and this screen is inert.
+    # (TOP_DOWN_X_LIMIT is the bin-clearance bound, not the reach bound; see core.layout.)
+    # Kept, and the fallback with it, because both move: the radius clip is the tighter of
+    # the two only for the DEFAULT bin layout. Fall back to the full set rather than
+    # crashing, and let the grasp fail honestly if the scene ever changes underneath.
     return rng.choice(reachable or list(range(num_bricks)))
 
 

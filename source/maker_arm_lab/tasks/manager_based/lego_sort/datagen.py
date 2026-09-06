@@ -90,7 +90,21 @@ def sample_run_draw(rng):
 
 @configclass
 class LegoSortDatagenEnvCfg(LegoSortIKRelVisionEnvCfg):
-    """Registered as MakerArm-LegoSort-Datagen-v0."""
+    """Registered as MakerArm-LegoSort-Datagen-v0.
+
+    D5 PREREQUISITE -- THIS ACTION SPACE IS HALF OF A CHANGE THAT MUST BE MADE AS ONE.
+
+    This inherits the IK-Rel action space, whose term reads its input as CARTESIAN DELTAS.
+    Task D3 established that the differential IK behind it never closed the jaws on a brick
+    in six rounds, and replaced it with `core.global_ik` in
+    scripts/scripted_grasp_check.py, which then took the gate to 10/10. The oracle that
+    drives datagen (tasks.manager_based.lego_sort.oracle_runtime) has NOT moved yet.
+
+    When D5 moves it, this cfg must move with it: the global solver emits JOINT TARGETS, so
+    an oracle ported to it while this still exposes IK-Rel would hand joint angles to a term
+    that interprets them as Cartesian deltas -- silently, with no error, producing a dataset
+    of nonsense. See oracle_runtime's module docstring for the other half.
+    """
 
     # Run-level draws (one per generation run, sampled by scripts/generate_batch.py)
     bin_x: float = 0.44

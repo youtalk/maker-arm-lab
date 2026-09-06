@@ -21,6 +21,26 @@ coordinates: the per-env origin cancels in the difference either way, so
 picking the origin-local convention throughout is free, and it is required for
 the goals core.oracle builds from constants that are the same for every env
 (bin centers, RETREAT_POINT) to mean the same physical pose in every env.
+
+D5 PREREQUISITE -- THIS MODULE STILL USES THE SOLVER D3 MEASURED AS BROKEN.
+
+`desired_quat` below builds a rotation matrix and this class servos it through the
+IK-Rel differential IK. Task D3 replaced exactly that pairing in
+scripts/scripted_grasp_check.py with `core.global_ik`, because over six rounds the
+differential IK never once closed the jaws on a brick; the global solver then took the
+same gate to 10/10. `core.global_ik` currently has ZERO importers under source/ -- the
+physics proof does not yet reach the path that generates the dataset.
+
+Moving this module onto `core.global_ik` is Task D5's work, deliberately not done in D3.
+When it happens, TWO THINGS MUST MOVE TOGETHER:
+
+  1. this module, to build its target as three scalars (tilt magnitude, lean azimuth, jaw
+     heading) and solve globally, the way `GraspRig.jaw_heading_target` documents; and
+  2. `MakerArm-LegoSort-Datagen-v0` (see datagen.LegoSortDatagenEnvCfg), because the
+     global solver emits JOINT TARGETS while the IK-Rel action term reads its input as
+     CARTESIAN DELTAS. Changing one without the other silently misinterprets every action.
+
+Doing (1) alone is worse than doing neither.
 """
 
 import math
@@ -32,7 +52,11 @@ import torch
 from maker_arm_lab.core import layout, oracle
 from maker_arm_lab.core.action_scale import IK_SCALE
 from maker_arm_lab.core.attitude_hold import AttitudeHold
-from maker_arm_lab.core.checker import PINCH_MIN_FORCE, PINCH_MIN_STALL
+from maker_arm_lab.core.checker import (
+    PINCH_MAX_ASYMMETRY,
+    PINCH_MIN_FORCE,
+    PINCH_MIN_STALL,
+)
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_REGEX,
     BASE_YAW_SIGN,
@@ -69,13 +93,16 @@ ROT_CONVERGED = 0.02
 # finger<->brick and not the desk press): a real pinch stalls the jaws short of
 # GRIPPER_CLOSED_POS and puts equal, non-trivial filtered force on both
 # fingers; entrainment (brick merely cammed in the jaw pocket) rises and
-# centers identically but does neither. See OpenYAM's scripted_grasp_check.py's
-# PINCH_MIN_STALL/PINCH_MIN_FORCE/PINCH_MAX_ASYMMETRY comments for the
-# measurements (8.71/8.71 N, 0.0087 m stall), on OpenYAM's arm, that set these
-# thresholds -- not yet re-validated on the Maker Arm.
-# PINCH_MIN_FORCE (2.0 N on the weaker finger) is imported from
-# core.checker rather than redefined: it is one threshold with three consumers.
-PINCH_MAX_ASYMMETRY = 0.30  # |L - R| / max(L, R)
+# centers identically but does neither.
+#
+# All three thresholds are imported from core.checker above, and THIS REPO is
+# now their authority -- not OpenYAM's script, which an earlier version of this
+# comment pointed at. PINCH_MIN_STALL in particular is no longer OpenYAM's
+# 0.0087 m nor the 0.003 m this module used to define locally: it is derived
+# from THIS brick as min(BRICK_SIZE)/2 = 0.0048 m, and core.checker carries the
+# derivation. PINCH_MIN_FORCE was validated against Task D3's 10/10 gate on
+# this arm and closed; PINCH_MAX_ASYMMETRY remains inherited from OpenYAM.
+# Read core.checker for which is which -- the distinction is recorded there.
 LIFT_MIN_RISE = 0.05  # m
 LIFT_MAX_XY_ERROR = 0.03  # m
 
@@ -677,7 +704,8 @@ class OracleRig:
         # arm-agnostic state machine and is not modified (spec section 5 item 5), so it
         # still asks for tilt_rad=0.0 on every grasp phase, meaning "hold the tool level".
         # This arm cannot hold a level tool over the scatter band -- measured minimum
-        # 13.01 deg at the far edge at hover height, Task D3 -- and demanding one jams
+        # 18.42 deg at the band's outer corners at hover height, Task D3 -- and demanding
+        # one jams
         # link_005_joint against its stop. So 0.0 is read here as "as level as this arm
         # gets", which is frames.GRASP_TILT_RAD. RELEASE is unaffected: its
         # oracle.RELEASE_TILT_RAD of 0.70 rad is already well past the floor.
