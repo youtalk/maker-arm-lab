@@ -542,13 +542,26 @@ class JointTrim:
         binding. On those joints the trim does NOT integrate, which is the anti-windup this
         class was missing.
 
-        Why it matters, measured on this arm (Task D3 part 11): a trim at its 0.35 rad clamp
-        on `link_003_joint`, whose kp is 150, commands 150 x 0.35 = 52.5 N.m into a joint
-        rated 17 N.m. The traces showed exactly that -- 56 to 79 N.m of demand past the
-        rating, sustained, and vanishing entirely when the trim was disabled. A saturated
-        joint does not move in response to more command, so integrating against it only
-        inflates a demand that is already being refused, and the integrator then has to
-        unwind before the joint can track again.
+        Why it matters is ARITHMETIC, not a measurement, and that distinction is deliberate:
+        a trim at its 0.35 rad clamp on `link_003_joint`, whose kp is 150, commands
+        150 x 0.35 = 52.5 N.m into a joint rated 17 N.m. A saturated joint does not move in
+        response to more command, so integrating against it only inflates a demand that is
+        already being refused, and the integrator then has to unwind before the joint can
+        track again.
+
+        WHAT THIS DOES *NOT* REST ON, because the evidence is dead. An earlier version cited
+        "56 to 79 N.m of demand past the rating, sustained (Task D3 part 11)". That number
+        was sampled from ArticulationData while the arm was in the Nyquist-rate chatter that
+        `robots.maker_arm`'s ARM_ARMATURE comment describes, so it was reading opposite
+        phases of a period-2 oscillation; every parts 11-13 torque sample is a casualty. On
+        the quiet arm the lever is INERT: re-running the 10-trial gate with this mask on and
+        off (Task D3 part 15) gave 9/10 both ways with 44 of 45 phase lines byte-identical,
+        because nothing saturates during a normal grasp.
+
+        It is kept anyway, and the honest reason is that an integrator without anti-windup is
+        a latent failure whatever a passing gate says -- the arithmetic above is true whenever
+        a joint does saturate. It costs nothing measurable today. Do not re-justify it with a
+        torque trace from parts 11-13.
 
         Clamping alone is not anti-windup: it bounds the trim's magnitude but still lets it
         run all the way to the bound while the joint is immobile. Conditional integration

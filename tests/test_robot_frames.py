@@ -108,3 +108,60 @@ def test_sign_relations_are_unit_magnitude_directions():
         value = getattr(frames, name)
         assert isinstance(value, float), name
         assert abs(value) == 1.0, name
+
+
+def test_pick_offset_z_reproduces_the_formula_its_comment_names():
+    """Tie PICK_OFFSET_MEASURED's z to the shipped code that produced it.
+
+    Task D3 exists to pin this constant and GRASP_TILT_DEG, and the sign relations got a
+    literal-pinning test on the explicit principle that measured physical facts about the
+    arm are worth pinning. These two had none.
+
+    This one is stronger than a literal, because the z offset is exactly reproducible from
+    shipped code: `descend_pick_offset` balances desk clearance against tip margin at a given
+    tilt, and the pinned value is its output at MIN_DESCEND_TILT for this brick, rounded to
+    0.1 mm. Asserting the round-trip catches a drift in EITHER the constant or the formula,
+    and it would have caught the comment defect the D3 review found (a paragraph describing
+    an intermediate -0.030 m offset with a 4.8 mm tip margin, twelve lines above a pinned
+    -0.0321 whose margin is 2.1 mm).
+    """
+    from maker_arm_lab.core.global_ik import MIN_DESCEND_TILT, descend_pick_offset
+    from maker_arm_lab.core.layout import BRICK_SIZE
+
+    solved = descend_pick_offset(MIN_DESCEND_TILT, BRICK_SIZE[2] / 2.0)
+    assert solved is not None
+    offset_z, tip_margin = solved
+    assert frames.PICK_OFFSET_MEASURED[2] == pytest.approx(offset_z, abs=5e-5)
+    assert round(offset_z, 4) == frames.PICK_OFFSET_MEASURED[2]
+    # The margin the shipped offset actually buys, which is NOT the 4.8 mm an intermediate
+    # offset in the same comment block buys. The factor of two decides whether the jaw
+    # plates foul the desk.
+    assert tip_margin == pytest.approx(0.00213, abs=5e-5)
+
+
+def test_pick_offset_lateral_and_descend_clearance_are_measured_zeros():
+    """Both are 0.0 as a RESULT, not as an unset default, so pin them.
+
+    A zero that means "measured, and it came out zero" is indistinguishable at a glance from
+    a zero that means "nobody set this". frames.py's comments record which these are -- x is
+    where the jaws actually grip (centring the brick on the plate face was tried on GPU and
+    made things strictly worse), and the descend clearance is degenerate with the pick offset
+    on the global-IK path, which commands the descend to a position rather than driving it
+    into the desk.
+    """
+    assert frames.PICK_OFFSET_MEASURED[0] == 0.0
+    assert frames.PICK_OFFSET_MEASURED[1] == 0.0
+    assert frames.DESCEND_CLEARANCE_MEASURED == 0.0
+
+
+def test_grasp_tilt_deg_is_pinned_to_its_measured_worst_case():
+    """20.0 deg, the smallest round value clearing the measured 18.42 deg worst case.
+
+    Pinned as a literal for the same reason as the sign relations: nothing else in the CPU
+    suite reads it, so a wrong value passes everything. The 18.42 figure is the corrected
+    one -- an earlier sweep over the wrong band (|y| <= 0.05) produced 15.0, and a stale
+    13.01 from that sweep survived in oracle_runtime.py until the D3 review found it.
+    """
+    assert frames.GRASP_TILT_DEG == 20.0
+    assert frames.GRASP_TILT_DEG > 18.42
+    assert frames.GRASP_TILT_RAD == pytest.approx(math.radians(20.0))

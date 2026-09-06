@@ -18,22 +18,28 @@ MAKER_ARM_USD_PATH = _REPO_ROOT / "assets" / "usd" / "maker_arm.usd"
 _GAINS = _profile.arm_gains(_profile.load_profile())
 
 # The URDF's value, kept because it is the vendored one (README: "Gripper effort 20 N ...
-# are placeholders"). Task D3 step 4.3 authorises raising this to 40 N when the pinch will
-# not hold, and part 12 established that it does not hold: two of ten trials are proper
-# pinches at the close that slip during the lift. Part 13 pulled that lever and MEASURED IT
-# INERT, so ruling D3-17 put the number back and kept the knowledge here.
+# are placeholders"). Task D3 step 4.3 authorises raising it to 40 N if the pinch will not
+# hold; ruling D3-17 put it back after measuring the raise inert.
 #
-# The A/B, ten trials at each cap with nothing else changed: the two lift slips came out the
-# same at both. Trial 5 is bit-identical (grip 4.78/4.97 N, stall 4.329 mm) and trial 9 moves
-# 5.26/5.26 -> 5.35/5.34 N. The effort limit is NOT what caps the grip -- the gripper's
-# implicit PD is. The jaws are commanded to 0.0 (closed) and stall on the brick at ~7.6 mm,
-# so stiffness 1000 N/m x 7.6 mm = ~7.6 N of demand against the observed ~7.0 N peak. A ~7 N
-# demand never reached even this 20 N cap, let alone a 40 N one.
+# WHY IT IS INERT, and this is the part that survives: the effort limit is not what caps the
+# grip -- the gripper's implicit PD below is. The jaws are commanded to 0.0 (closed) and
+# stall on the brick, so the demand is `stiffness` x the stall, and on the shipping arm that
+# reads 1000 N/m x 7.43-7.71 mm = 7.4-7.7 N against a measured 7.59-7.62 N of grip on all ten
+# carries of the 10/10 gate (Task D3 part 16, symmetric to 0.001). A ~7.6 N demand never
+# reached even this 20 N cap, let alone a 40 N one, so raising it cannot change an outcome.
 #
-# So the lever on a grip that will not survive the lift is `stiffness` below, not this
-# constant, and raising this one is a sim/real divergence that buys nothing. Whatever the
-# real gripper turns out to hold at, measured during MA-series bring-up, belongs here -- but
-# a strengthened-looking constant that changes no outcome does not.
+# HISTORICAL NOTE ON THE A/B, because its numbers are dead. The raise was pulled in part 13
+# against two trials that pinched properly and then slipped during the lift, and the A/B
+# showed both slips unchanged at 20 N and 40 N. That defect NO LONGER EXISTS -- it was the
+# Nyquist-rate chatter described in this file's ARM_ARMATURE comment modulating the grip, and
+# at HEAD the ENTRAINED bucket is empty and every trial is pinch_ok. So the part-13 grip
+# figures are chatter-era and are not cited above; the quiet-arm numbers are, and they support
+# the same conclusion far better -- they match the stiffness arithmetic to within 0.2 N.
+#
+# The lever on a grip that will not survive a lift is therefore `stiffness` below, not this
+# constant. Whatever the real gripper turns out to hold at, measured during MA-series
+# bring-up, belongs here -- but a strengthened-looking constant that changes no outcome does
+# not.
 GRIPPER_EFFORT_LIMIT_N = 20.0
 
 # Rotor inertia reflected through the gearbox, for all six arm joints.

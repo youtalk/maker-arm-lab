@@ -152,7 +152,11 @@ class TestPinchMinStall:
         """The oracle squares the jaws to BRICK_SIZE[1]; that grip must pass comfortably."""
         ideal_stall = layout.BRICK_SIZE[1] / 2.0
         assert ideal_stall > checker.PINCH_MIN_STALL
-        # Contact compliance closes the jaws further than geometry alone; the Task D3
-        # part-10 carries stalled 5.797-7.487 mm against this 7.9 mm ideal, so the floor
-        # needs to sit below the worst of those.
+        # Contact compliance closes the jaws further than geometry alone. The shipping
+        # arm's 10/10 gate (Task D3 part 16) stalled 7.43-7.71 mm against this 7.9 mm
+        # ideal, so the floor needs to sit below the worst of those. The bound asserted
+        # here stays at the older, WIDER 5.797 mm -- the worst carry seen in the part-10
+        # chatter era -- because a floor that clears the noisier case clears the quiet one
+        # too, and pinning to the tighter number would make this test fail for a future
+        # arm that merely grips a little softer.
         assert checker.PINCH_MIN_STALL < 0.005797

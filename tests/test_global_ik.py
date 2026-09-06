@@ -310,6 +310,49 @@ class TestJointTrim:
         with pytest.raises(ValueError):
             JointTrim(gain=2.0)
 
+    # --- Anti-windup (Task D3 ruling D3-16). These belong to JointTrim, and lived
+    # under TestDescendGeometry until the D3 review caught the misfiling.
+    def test_a_saturated_joint_does_not_wind_the_trim(self):
+        """Anti-windup: no integration on a joint whose actuator is already refusing.
+
+        The failure this prevents is arithmetic, not a measured trace: a trim at its clamp on
+        a joint with kp 150 commands 52.5 Nm into a 17 Nm actuator. Clamping alone does not
+        prevent it -- the trim still runs to the bound while the joint sits immobile.
+
+        Measured cost on the quiet arm is zero (Task D3 part 15): nothing saturates during a
+        normal grasp, so the mask never fires. This behaviour is pinned because it is correct
+        when a joint DOES saturate, not because a gate improved.
+        """
+        trim = JointTrim(gain=0.5)
+        desired = torch.zeros(ARM_DOF, dtype=torch.float64)
+        saturated = torch.zeros(ARM_DOF, dtype=torch.bool)
+        saturated[1] = True
+        for _ in range(50):
+            trim.update(desired, desired - 0.1, saturated=saturated)
+        assert float(trim.value[1]) == 0.0, "the saturated joint must not accumulate"
+        assert float(trim.value[0]) > 0.0, "unsaturated joints must still integrate"
+
+    def test_saturation_freezes_rather_than_resets_the_trim(self):
+        """A joint that saturates keeps the trim it had earned, it does not lose it."""
+        trim = JointTrim(gain=0.5)
+        desired = torch.zeros(ARM_DOF, dtype=torch.float64)
+        none_saturated = torch.zeros(ARM_DOF, dtype=torch.bool)
+        for _ in range(10):
+            trim.update(desired, desired - 0.1, saturated=none_saturated)
+        earned = trim.value.clone()
+        assert float(earned[1]) > 0.0
+        all_saturated = torch.ones(ARM_DOF, dtype=torch.bool)
+        for _ in range(50):
+            trim.update(desired, desired - 0.1, saturated=all_saturated)
+        assert torch.allclose(trim.value, earned)
+
+    def test_the_mask_is_optional_and_omitting_it_keeps_the_old_behaviour(self):
+        trim = JointTrim(gain=0.5, limit=0.2)
+        desired = torch.zeros(ARM_DOF, dtype=torch.float64)
+        for _ in range(50):
+            trim.update(desired, desired - 0.1)
+        assert float(trim.value.max()) == pytest.approx(0.2)
+
 
 def test_tool_axis_world_matches_the_fk(ik, home):
     """The shared attitude helper must agree with the FK it is a shortcut for."""
@@ -397,40 +440,3 @@ class TestDescendGeometry:
             tool_axis_world(MIN_DESCEND_TILT, 2.0),
             atol=1e-6,
         )
-
-    def test_a_saturated_joint_does_not_wind_the_trim(self):
-        """Anti-windup: no integration on a joint whose actuator is already refusing.
-
-        The failure this prevents, measured on the arm: a trim at its clamp on a joint with
-        kp 150 commands 52.5 Nm into a 17 Nm actuator. Clamping alone does not prevent it --
-        the trim still runs to the bound while the joint sits immobile.
-        """
-        trim = JointTrim(gain=0.5)
-        desired = torch.zeros(ARM_DOF, dtype=torch.float64)
-        saturated = torch.zeros(ARM_DOF, dtype=torch.bool)
-        saturated[1] = True
-        for _ in range(50):
-            trim.update(desired, desired - 0.1, saturated=saturated)
-        assert float(trim.value[1]) == 0.0, "the saturated joint must not accumulate"
-        assert float(trim.value[0]) > 0.0, "unsaturated joints must still integrate"
-
-    def test_saturation_freezes_rather_than_resets_the_trim(self):
-        """A joint that saturates keeps the trim it had earned, it does not lose it."""
-        trim = JointTrim(gain=0.5)
-        desired = torch.zeros(ARM_DOF, dtype=torch.float64)
-        none_saturated = torch.zeros(ARM_DOF, dtype=torch.bool)
-        for _ in range(10):
-            trim.update(desired, desired - 0.1, saturated=none_saturated)
-        earned = trim.value.clone()
-        assert float(earned[1]) > 0.0
-        all_saturated = torch.ones(ARM_DOF, dtype=torch.bool)
-        for _ in range(50):
-            trim.update(desired, desired - 0.1, saturated=all_saturated)
-        assert torch.allclose(trim.value, earned)
-
-    def test_the_mask_is_optional_and_omitting_it_keeps_the_old_behaviour(self):
-        trim = JointTrim(gain=0.5, limit=0.2)
-        desired = torch.zeros(ARM_DOF, dtype=torch.float64)
-        for _ in range(50):
-            trim.update(desired, desired - 0.1)
-        assert float(trim.value.max()) == pytest.approx(0.2)

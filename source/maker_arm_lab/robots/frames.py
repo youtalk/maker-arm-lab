@@ -112,9 +112,17 @@ HOME_JOINT_POS: dict[str, float] = {
 #
 # So a desk-resting brick is necessarily gripped near the plate TIP, not at grasp_center:
 # the tip has to clear the desk, which puts grasp_center at least 34.2 mm up, while the
-# brick centre sits at 4.8 mm. -0.030 m leaves the brick 29.4 mm along the tool axis with
-# 4.8 mm of tip margin, and the plates clear of the desk (0.00/0.00 N of plate contact,
-# against 46-110 N at shallower offsets). Swept over -0.038..-0.010 m; outside a narrow
+# brick centre sits at 4.8 mm.
+#
+# READ THE SHIPPED VALUE FROM THE BOTTOM OF THIS BLOCK, NOT FROM HERE. The sweep below
+# examined several offsets and this paragraph describes an intermediate one; the pinned
+# value is -0.0321 and its tip margin is 2.1 mm, derived at MIN_DESCEND_TILT and restated
+# where it is set. For orientation only: -0.030 m would leave the brick 29.4 mm along the
+# tool axis with 4.8 mm of tip margin, and the plates clear of the desk (0.00/0.00 N of
+# plate contact, against 46-110 N at shallower offsets). Do not read 4.8 mm as the shipped
+# clearance -- it is 2.1 mm, and the factor of two decides whether the plates foul the desk.
+#
+# Swept over -0.038..-0.010 m; outside a narrow
 # window the grasp fails in two distinct ways, and both are visible in the telemetry:
 # too shallow puts the brick at the tip and the closing jaw skates over it, too deep jams
 # the plates on the desk so the arm stalls short and the realised offset is not the

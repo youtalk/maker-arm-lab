@@ -18,12 +18,24 @@ strict grading. It lives here, beside `held_brick_from_forces`, because it is
 that function's `min_force` argument at the three call sites that ask the quality
 question -- it used to be three separately-maintained copies of 2.0.
 
-Carried over from the OpenYAM LegoSort checker (openyam-lab M1 Task 10/11,
-measured there on OpenYAM's gripper: a settled pinch on a 15.8 mm brick read
-8.71/8.71 N with the jaws stalled short of that gripper's closed position,
-against <= 3e-5 N on a fully-closed jaw holding nothing). The Maker Arm's
-gripper differs; `scripts/scripted_grasp_check.py` (Task D3) re-measures the
-pinch criterion on this arm and is the authority for changing this number.
+VALIDATED ON THIS ARM AND CLOSED (Task D3 part 16). It arrived from the
+OpenYAM LegoSort checker (openyam-lab M1 Task 10/11, measured there at
+8.71/8.71 N on a 15.8 mm brick against <= 3e-5 N on a jaw holding nothing) with
+a forward reference to Task D3. D3 is done, and its 10/10 gate is the data that
+reference was waiting for: every one of the ten carries read 7.59-7.62 N on the
+weaker jaw, symmetric to 0.001, against 0.00 N on the single non-grasp.
+
+The number is KEPT AT 2.0 rather than raised toward the observed 7.6 N, and
+that is a decision, not an oversight. Any threshold in (0, 7.5) separates this
+data, so the gate does not constrain the choice; what does is what the constant
+is FOR. It is a floor that rejects "no contact", and the discriminator between
+a real pinch and an entrainment is PINCH_MIN_STALL below, which is derived from
+the brick's geometry. Fitting this to ten samples of one brick face would
+narrow it to the grip this arm happens to produce on the 15.8 mm width and risk
+rejecting a legitimately weaker but real grip on another face -- the same
+argument PINCH_MIN_STALL's derivation makes for using min(BRICK_SIZE). 2.0 sits
+3.8x below the observed grip and three orders of magnitude above a jaw holding
+nothing.
 
 NOT the only force threshold in the codebase, and deliberately so: scripts/
 eval_policy.py's HELD_MIN_FORCE is looser (1.0) because it answers a different
@@ -65,6 +77,23 @@ above the entrainment -- where 3.0 mm had only 0.114 mm of headroom above it.
 Single-copy here because it was two: `scripts/scripted_grasp_check.py` and the lego_sort
 oracle's runtime grasp check each carried their own 3.0, exactly as PINCH_MIN_FORCE was
 three copies of 2.0 before it moved here.
+"""
+
+
+PINCH_MAX_ASYMMETRY = 0.30
+"""Largest |L - R| / max(L, R) of filtered finger forces a real pinch may show.
+
+The third of the three pinch thresholds, and single-copy here for the same reason as its
+two neighbours: `scripts/scripted_grasp_check.py` and the lego_sort oracle's runtime grasp
+check each carried their own 0.30, exactly as PINCH_MIN_FORCE was three copies of 2.0 and
+PINCH_MIN_STALL two copies of 3.0 before they moved here. The comment sentence that
+introduced all three named them together while only two of them were consolidated.
+
+Carried over from OpenYAM unchanged. Task D3's 10/10 gate on this arm is consistent with it
+by a wide margin -- every carry came in at an asymmetry <= 0.001, against this 0.30 bound --
+but that is a one-sided check: nothing in D3 produced a lopsided-but-real grip, so the bound
+has not been exercised from the side it exists to reject. Treat it as inherited, not
+re-measured.
 """
 
 

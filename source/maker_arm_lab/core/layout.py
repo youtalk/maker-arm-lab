@@ -71,7 +71,7 @@ MIN_SEPARATION = 0.06
 # not an annulus: the arm tracks to 0.3082 m at +30 deg and to at least 0.295 m at
 # |azimuth| >= 25 deg, but gives out between 0.280 and 0.290 near azimuth 0. A radius bound
 # cannot express a wedge, so this clip pays for the whole annulus to remove one -- 19.18 % of
-# band area against the 2.87 % the old 0.315 cost, both by uniform sampling over the box.
+# band area against the 2.86 % the old 0.315 cost, both by uniform sampling over the box.
 # 0.280 is the largest radius every measured azimuth tracked to.
 #
 # The cheaper-looking 0.300 (7.48 %) was considered and REJECTED as fitted to the gate: it
@@ -103,13 +103,33 @@ MIN_SEPARATION = 0.06
 # should sweep TRACKING, not just IK, or it will re-derive the bound that was not binding.
 SCATTER_MAX_RADIUS = 0.280
 
-# Largest brick x at which the arm can complete a top-down pick -- i.e. descend
-# to the desk with the tool axis on world -z.
+# BIN-CLEARANCE bound: the largest brick x at which the arm can descend to the desk with
+# the tool axis on world -z WITHOUT its forearm fouling the bins' back walls.
 #
-# Carried over from the OpenYAM LegoSort layout (openyam-lab M1 Task 10). The
-# Maker Arm's reach and elbow geometry differ; `scripts/release_envelope_check.py`
-# (Task D4) re-validates every bin position and the scatter band on this arm and
-# is the authority for changing these numbers.
+# THIS IS NOT A REACH MEASUREMENT, and reading it as one is the mistake to avoid. It is
+# derived, not measured: `top_down_x_limit(bl)` returns `bin_front_x(bl) - X_LIMIT_MARGIN`,
+# so it is a function of where the BINS are, and this constant is just its value for
+# DEFAULT_BIN_LAYOUT (0.44 - 0.045 - 0.005 - 0.10). Move the bins and it moves;
+# test_default_bin_layout_reproduces_current_constants pins the identity and
+# test_scatter_zone_tracks_jittered_bins pins the tracking (bin_x 0.43 -> 0.28, 0.46 -> 0.31).
+#
+# The arm's actual reach bound is SCATTER_MAX_RADIUS above, which is MEASURED and, at 0.280,
+# is tighter than this at every azimuth. So as a filter this is currently inert -- every
+# sampled brick is already inside 0.280, hence inside 0.29. It is kept for two reasons:
+# it answers a different physical question (bin fouling, not tracking), and it is NOT
+# uniformly slacker -- `top_down_x_limit` drops below 0.280 for any bin_x <= 0.43, at which
+# point it binds again and the oracle's screen (core.oracle, which calls the per-layout
+# function rather than this constant) starts doing work.
+#
+# Do not "correct" this to 0.280 to match the reach bound: that would break its own
+# derivation from bin geometry and the tests that pin it, and would conflate two bounds that
+# move independently.
+#
+# Carried over from the OpenYAM LegoSort layout (openyam-lab M1 Task 10) and NOT re-measured
+# on this arm. `scripts/release_envelope_check.py` (Task D4) re-validates every bin position
+# and the scatter band and is the authority for changing it -- and must sweep TRACKING, not
+# just IK feasibility, or it will re-derive the bound that was never binding (see
+# SCATTER_MAX_RADIUS).
 #
 # THIS IS WHY SCATTER_X's UPPER BOUND IS 0.29. Do not widen one without the
 # other -- test_scatter_zone_is_pickable ties them together.
