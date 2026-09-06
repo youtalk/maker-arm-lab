@@ -1,6 +1,6 @@
 """Gate-evaluation env: the Datagen scene/DR with the dataset's action space.
 
-Registered as MakerArm-LegoSort-Eval-v0 (design spec section 5.5, M3).
+Registered as MakerArm-LegoSort-Eval-v0 (design spec section 5.5).
 Deltas from LegoSortDatagenEnvCfg, and nothing else:
 
 - actions: the BASE joint-position ActionsCfg -- absolute joint-position

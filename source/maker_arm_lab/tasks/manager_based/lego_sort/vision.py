@@ -177,7 +177,7 @@ class ImagesObsCfg(ObsGroup):
 def _add_cameras(cfg: LegoSortEnvCfg) -> None:
     """Attach both cameras and the ``images`` observation group to ``cfg``.
 
-    Warning for anyone adding a THIRD camera here (M2 recording, extra views):
+    Warning for anyone adding a THIRD camera here (recording, extra views):
     on openyam-lab, with six or seven ``TiledCamera`` sensors in one scene,
     the last-declared one came back at a pose that was not the one configured
     -- twice, in two independent probe runs (task-12-report.md). It did not
