@@ -35,6 +35,33 @@ SCATTER_Y = (-0.18, 0.18)
 SPAWN_Z = 0.02
 MIN_SEPARATION = 0.06
 
+# Corner clip: bricks never spawn further than this from the arm's base axis.
+#
+# The box above has corners the arm provably cannot pick. Task D3 mapped the shipping
+# 6-DOF grasp task -- position, tilt magnitude, world +x lean, jaw heading square to the
+# brick -- over 35 brick positions x 6 jaw headings, with a 64-restart confirmation before
+# any cell was called infeasible, and found the failure is a RADIUS bound, not a box bound:
+#
+#     every fully-covered position                 inside radius 0.3199 m
+#     a live gate trial's UNREACHABLE brick        radius 0.3257 m
+#     the fully-uncovered corner (0.290, +-0.180)  radius 0.3413 m, 0 of 6 headings
+#
+# Trimming SCATTER_X or SCATTER_Y ALONE drops none of it, because the bad corner shares its
+# x with covered positions and its |y| with covered positions -- it is the combination that
+# is out of reach. Trimming a box until its worst corner is inside 0.32 m costs 15.9 % of the
+# band (via x) or 25.0 % (via y). The radius clip costs 2.87 %, measured by uniform sampling.
+#
+# 0.315 sits below the last verified-good radius (0.3199) with a centimetre of margin to the
+# measured-infeasible one (0.3257). It is applied as an unconditional invariant in
+# `mdp.events._sample_brick_poses`, NOT as a preference like MIN_SEPARATION: a brick outside
+# the arm's reach is a permanent failure floor in any dataset generated from this scene,
+# whereas two bricks slightly too close is merely awkward.
+#
+# Spec section 5 item 5 permits this ("the Maker Arm's reach ... may require moving the bins
+# and the scatter band. The oracle state machine is not modified; only layout numbers are").
+# `scripts/release_envelope_check.py` (Task D4) re-validates it with its own reach sweep.
+SCATTER_MAX_RADIUS = 0.315
+
 # Largest brick x at which the arm can complete a top-down pick -- i.e. descend
 # to the desk with the tool axis on world -z.
 #
@@ -80,6 +107,24 @@ class BinLayout:
 
 
 DEFAULT_BIN_LAYOUT = BinLayout()
+
+
+def clip_to_reach(x: float, y: float, max_radius: float = SCATTER_MAX_RADIUS):
+    """Pull a scatter point back along its own radius if it is outside the arm's reach.
+
+    Lives here rather than in the sampler that calls it because `mdp.events` imports
+    isaaclab and cannot be unit-tested; this is the invariant worth testing, so it goes in
+    the isaaclab-free module, the same split `core.checker` documents for the gate metric.
+
+    Radial rather than clamping x or y alone: the unreachable region is an annulus corner,
+    so pulling along the radius is the smallest move that restores reachability, and it
+    leaves the point's azimuth -- which is what the base yaw has to cover -- untouched.
+    """
+    radius = math.hypot(x, y)
+    if radius <= max_radius or radius == 0.0:
+        return x, y
+    scale = max_radius / radius
+    return x * scale, y * scale
 
 
 def bin_front_x(bl: BinLayout) -> float:

@@ -146,7 +146,7 @@ from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 import maker_arm_lab.tasks  # noqa: F401 -- registers MakerArm-* envs
 from maker_arm_lab.core import layout
 from maker_arm_lab.core import profile as _profile
-from maker_arm_lab.core.checker import PINCH_MIN_FORCE
+from maker_arm_lab.core.checker import PINCH_MIN_FORCE, PINCH_MIN_STALL
 from maker_arm_lab.core.global_ik import (
     JAW_TIP_REACH,
     MAX_WAYPOINT_STEP,
@@ -278,7 +278,6 @@ LIFT_MAX_XY_ERROR = 0.03  # m
 # came from, but the oracle's runtime check and the eval harness's strict grasp
 # grading use the same number, and it was three copies of 2.0 there until it
 # was consolidated.
-PINCH_MIN_STALL = 0.003  # m short of GRIPPER_CLOSED_POS
 PINCH_MAX_ASYMMETRY = 0.30  # |L - R| / max(L, R)
 
 # Jaw-plate extent relative to grasp_center, on the three axes that gate a grasp, read off

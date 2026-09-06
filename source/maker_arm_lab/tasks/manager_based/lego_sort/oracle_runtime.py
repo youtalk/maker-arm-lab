@@ -32,7 +32,7 @@ import torch
 from maker_arm_lab.core import layout, oracle
 from maker_arm_lab.core.action_scale import IK_SCALE
 from maker_arm_lab.core.attitude_hold import AttitudeHold
-from maker_arm_lab.core.checker import PINCH_MIN_FORCE
+from maker_arm_lab.core.checker import PINCH_MIN_FORCE, PINCH_MIN_STALL
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_REGEX,
     BASE_YAW_SIGN,
@@ -75,7 +75,6 @@ ROT_CONVERGED = 0.02
 # thresholds -- not yet re-validated on the Maker Arm.
 # PINCH_MIN_FORCE (2.0 N on the weaker finger) is imported from
 # core.checker rather than redefined: it is one threshold with three consumers.
-PINCH_MIN_STALL = 0.003  # m short of GRIPPER_CLOSED_POS
 PINCH_MAX_ASYMMETRY = 0.30  # |L - R| / max(L, R)
 LIFT_MIN_RISE = 0.05  # m
 LIFT_MAX_XY_ERROR = 0.03  # m

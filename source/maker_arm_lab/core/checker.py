@@ -6,6 +6,8 @@ must delegate here, so the gate metric has CPU unit tests.
 
 import torch
 
+from maker_arm_lab.core import layout
+
 PINCH_MIN_FORCE = 2.0
 """Newtons on the WEAKER jaw for a pinch to count as a real, quality grasp.
 
@@ -27,6 +29,42 @@ NOT the only force threshold in the codebase, and deliberately so: scripts/
 eval_policy.py's HELD_MIN_FORCE is looser (1.0) because it answers a different
 question -- which brick was between the jaws mid-transport, where the normal load
 dips as the arm decelerates -- and it is single-copy where it is used.
+"""
+
+
+PINCH_MIN_STALL = min(layout.BRICK_SIZE) / 2.0
+"""Metres the jaws must stall SHORT of closed for a pinch to count (0.0048 m).
+
+Derived from the brick, not fitted to a trial. The two jaws open symmetrically about the
+tool axis -- `gripper_left_joint`'s URDF axis is +y and `gripper_right_joint`'s is its
+negative, both spanning 0 (touching) to GRIPPER_OPEN_POS -- so the gap between the plates is
+twice the per-jaw travel that `stall` measures. For the jaws to be spanning the brick AT ALL,
+in any orientation, that gap must be at least the brick's smallest dimension:
+
+    gap = 2 * stall >= min(BRICK_SIZE)   =>   stall >= min(BRICK_SIZE) / 2 = 4.8 mm
+
+Below that the plates are closer together than the thinnest cross-section the brick has, so
+they cannot be around it: they are on a corner, on a chamfer, or on nothing. That is exactly
+the entrainment this gate exists to reject -- fingers closed with the brick merely cammed
+into the jaw pocket, which lifts and travels just like a real grasp.
+
+The brick's SMALLEST dimension is the right bound rather than the 15.8 mm width the oracle
+actually squares the jaws to. It is the loosest threshold that still proves contact, so it
+cannot reject a legitimate grasp that happened to take the brick on another face; a bound
+built from the intended width would be stricter but would encode the intent rather than the
+geometry.
+
+Replaces an inherited OpenYAM 3.0 mm, which the Task D3 brief named these trials as the
+authority to re-validate. The derived floor is STRICTER, not looser. Checked against the
+Task D3 part-10 gate afterwards, having been derived first: the six carries stalled
+5.797-7.487 mm (against 7.9 mm for an ideal grip on the 15.8 mm width, the difference being
+contact compliance), the two dropped trials 0.000 and 0.008 mm, and one entrained trial
+2.886 mm. 4.8 mm separates them with 1.0 mm of headroom below the worst carry and 1.9 mm
+above the entrainment -- where 3.0 mm had only 0.114 mm of headroom above it.
+
+Single-copy here because it was two: `scripts/scripted_grasp_check.py` and the lego_sort
+oracle's runtime grasp check each carried their own 3.0, exactly as PINCH_MIN_FORCE was
+three copies of 2.0 before it moved here.
 """
 
 

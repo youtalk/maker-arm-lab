@@ -216,3 +216,66 @@ def test_sample_bin_layout_respects_envelope_and_separation():
             assert abs(y0 - dy) <= 0.02 + 1e-9
         gaps = [b - a for a, b in zip(bl.bin_ys, bl.bin_ys[1:])]
         assert min(gaps) >= 0.11
+
+
+class TestScatterCornerClip:
+    """The scatter box has corners the arm provably cannot reach (Task D3, ruling D3-13)."""
+
+    def test_the_clip_excludes_the_measured_unreachable_corner(self):
+        """(0.290, +-0.180) solved 0 of 6 jaw headings with 64 restarts each."""
+        corner = math.hypot(layout.SCATTER_X[1], layout.SCATTER_Y[1])
+        assert corner == pytest.approx(0.3413, abs=1e-3)
+        assert layout.SCATTER_MAX_RADIUS < corner
+
+    def test_the_clip_keeps_the_verified_reachable_band(self):
+        """Every fully-covered grid position was inside 0.3199 m; do not clip inside that.
+
+        The lower bound matters as much as the upper one: a clip that ate verified-good
+        band would be trading measured reach for nothing.
+        """
+        assert layout.SCATTER_MAX_RADIUS <= 0.3199
+        # ...and it must still leave a margin under the measured-infeasible 0.3257 m sample.
+        assert layout.SCATTER_MAX_RADIUS < 0.3257
+
+    def test_the_whole_inner_edge_survives_the_clip(self):
+        """The clip is a corner trim, not a range cut -- the near edge is untouched."""
+        for y in (layout.SCATTER_Y[0], 0.0, layout.SCATTER_Y[1]):
+            assert math.hypot(layout.SCATTER_X[0], y) < layout.SCATTER_MAX_RADIUS
+
+    def test_a_box_bound_could_not_do_this_job(self):
+        """Why the constant is a radius and not a tighter SCATTER_X or SCATTER_Y.
+
+        The unreachable corner shares its x with reachable positions and its |y| with
+        reachable positions, so neither box bound separates it. Only the combination does.
+        """
+        bad_x, bad_y = layout.SCATTER_X[1], layout.SCATTER_Y[1]
+        assert math.hypot(bad_x, 0.0) < layout.SCATTER_MAX_RADIUS
+        assert math.hypot(layout.SCATTER_X[0], bad_y) < layout.SCATTER_MAX_RADIUS
+        assert math.hypot(bad_x, bad_y) > layout.SCATTER_MAX_RADIUS
+
+    def test_clip_to_reach_leaves_reachable_points_alone(self):
+        for x, y in ((0.13, 0.0), (0.21, 0.0), (0.29, 0.0), (0.13, 0.18), (0.20, 0.10)):
+            assert layout.clip_to_reach(x, y) == (x, y)
+
+    def test_clip_to_reach_pulls_the_bad_corner_in_along_its_radius(self):
+        x, y = layout.clip_to_reach(layout.SCATTER_X[1], layout.SCATTER_Y[1])
+        assert math.hypot(x, y) == pytest.approx(layout.SCATTER_MAX_RADIUS)
+        # Radial: the azimuth is preserved, which is what the base yaw has to cover.
+        assert math.atan2(y, x) == pytest.approx(
+            math.atan2(layout.SCATTER_Y[1], layout.SCATTER_X[1])
+        )
+        # ...and it stays inside the scatter box, so a clipped brick is still on the desk.
+        assert layout.SCATTER_X[0] <= x <= layout.SCATTER_X[1]
+        assert layout.SCATTER_Y[0] <= y <= layout.SCATTER_Y[1]
+
+    def test_clip_to_reach_is_idempotent(self):
+        once = layout.clip_to_reach(layout.SCATTER_X[1], layout.SCATTER_Y[1])
+        assert layout.clip_to_reach(*once) == pytest.approx(once)
+
+    def test_clip_to_reach_handles_the_origin(self):
+        assert layout.clip_to_reach(0.0, 0.0) == (0.0, 0.0)
+
+    def test_every_corner_of_the_scatter_box_is_reachable_after_clipping(self):
+        for x, y in itertools.product(layout.SCATTER_X, layout.SCATTER_Y):
+            cx, cy = layout.clip_to_reach(x, y)
+            assert math.hypot(cx, cy) <= layout.SCATTER_MAX_RADIUS + 1e-12
