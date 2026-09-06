@@ -36,13 +36,14 @@ BASE_YAW_SIGN = 1.0
 
 # Home pose, URDF joint coordinates. Tool axis within 30 deg of world -z, grasp_center about
 # 0.25 m above the desk over the scatter zone.
-# INITIAL: mid-range guess; pinned by scripts/find_home_pose.py (Task C10).
+# Pinned by scripts/find_home_pose.py on 2026-09-05: grasp_center at (0.2745, 0.0375, 0.1628),
+# tool axis 23.57 deg off -z, min joint margin 0.30 rad.
 HOME_JOINT_POS: dict[str, float] = {
     "link_002_joint": 0.0,
-    "link_003_joint": -1.2,
-    "link_004_joint": 1.6,
-    "link_005_joint": 0.0,
-    "link_006_joint": 0.0,
+    "link_003_joint": -1.79,
+    "link_004_joint": 2.05,
+    "link_005_joint": -1.3,
+    "link_006_joint": -0.22,
     "link_007_joint": 0.0,
     "gripper_left_joint": GRIPPER_OPEN_POS,
     "gripper_right_joint": GRIPPER_OPEN_POS,

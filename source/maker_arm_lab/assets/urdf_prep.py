@@ -27,9 +27,11 @@ ARM_JOINT_NAMES: tuple[str, ...] = (
 GRIPPER_JOINT_NAMES: tuple[str, str] = ("gripper_left_joint", "gripper_right_joint")
 
 # Rotation taking the CAD's Y-up base to world Z-up: +90 deg about x maps base +y to world +z.
-# A yaw term (third element) is where a workspace-facing correction goes if the home-pose FK
-# check (scripts/find_home_pose.py) finds the arm facing away from +x.
-MOUNT_RPY: tuple[float, float, float] = (math.pi / 2, 0.0, 0.0)
+# The yaw term (third element) is a workspace-facing correction: scripts/find_home_pose.py
+# found the arm at all-zero joints facing -x (FORWARD_XY -0.2281 -0.0000, matching Task B6's
+# GRASP_CENTER_W x < 0 on the unrotated USD), while the scatter band and bins sit at +x. A
+# further +180 deg about the new z turns the arm to face +x.
+MOUNT_RPY: tuple[float, float, float] = (math.pi / 2, 0.0, math.pi)
 
 
 def _joints(root: ET.Element) -> dict[str, ET.Element]:
