@@ -184,7 +184,7 @@ def test_hold_correction_keeps_the_error_axis_when_it_saturates(magnitude):
 
     A componentwise clamp turns a mostly-pitch error into a full-deflection
     command on all three axes, which injects roll and yaw nobody asked for. On
-    the arm that turned the hold into a divergence.
+    openyam-lab's arm that turned the hold into a divergence.
 
     Swept from 5 deg to 179 deg because the failure this guards against gets
     *worse* with error magnitude, and because ``axis_angle_from_quat`` changes
@@ -264,11 +264,11 @@ def test_hold_reference_stays_a_unit_quaternion():
 def test_hold_gives_up_on_an_attitude_the_tool_is_being_carried_away_from():
     """Graceful degradation: a hold that cannot win must stop fighting.
 
-    Measured on the arm: with the tool pinned by joint4's stop the servo demanded
-    full pitch and got nothing, and the tool axis drifted 62.64 deg -- worse than
-    the 24.21 deg that leaving the rotation channel open produces on the same
-    path. Conceding puts the floor back near "no worse than the stock action
-    term".
+    Measured on openyam-lab's arm: with the tool pinned by a joint's stop the
+    servo demanded full pitch and got nothing, and the tool axis drifted
+    62.64 deg -- worse than the 24.21 deg that leaving the rotation channel
+    open produces on the same path. Conceding puts the floor back near "no
+    worse than the stock action term".
     """
     hold = _hold(give_up_steps=30)
     conceded_at = _run_until_concession(hold, limit=200)
@@ -278,9 +278,10 @@ def test_hold_gives_up_on_an_attitude_the_tool_is_being_carried_away_from():
     assert conceded_at < 30 + math.degrees(0.25) / 0.5 + 2
     # Disengaged means no attitude feedback: the command comes back as given
     # (bounded, but this one is well inside the unit ball) however far the tool
-    # has since wandered. Re-capturing alone was not enough -- the hold
-    # re-engaged against the same unwinnable pose and kept pushing, drifting the
-    # tool axis 60.63 deg where having no hold at all drifts 24.21 deg.
+    # has since wandered. On openyam-lab's arm, re-capturing alone was not
+    # enough -- the hold re-engaged against the same unwinnable pose and kept
+    # pushing, drifting the tool axis 60.63 deg where having no hold at all
+    # drifts 24.21 deg.
     for extra in range(2, 200):
         command = torch.tensor([0.0, 0.0, 0.4])
         action = hold.advance(_rot_y(math.radians(0.5 * (conceded_at + extra))), command)
@@ -346,7 +347,7 @@ def test_hold_does_not_give_up_while_it_is_winning():
 
 
 def test_hold_does_not_give_up_during_ordinary_commanded_rotation():
-    """The measured worst in-envelope error is 2.29 deg; the threshold is 14.3 deg."""
+    """The worst in-envelope error openyam-lab measured was 2.29 deg; the threshold is 14.3 deg."""
     hold = _hold()
     measured = torch.tensor([1.0, 0.0, 0.0, 0.0])
     for _ in range(3000):
@@ -361,9 +362,9 @@ def test_hold_does_not_give_up_during_ordinary_commanded_rotation():
 def test_give_up_disabled_by_an_infinite_threshold():
     """What a scripted caller passes when it wants the servo to keep trying.
 
-    ``scripts/scripted_grasp_check.py`` does this: it starts each phase 13.6-25.0
-    deg off target, well above the default threshold, and manages its own step
-    budgets and stall detection.
+    openyam-lab's ``scripts/scripted_grasp_check.py`` does this: it started
+    each phase 13.6-25.0 deg off target, well above the default threshold, and
+    managed its own step budgets and stall detection.
     """
     hold = _hold(give_up_error=float("inf"))
     for step in range(500):
@@ -445,7 +446,8 @@ def test_capture_moves_the_reference_to_the_measured_attitude():
     # Not exactly zero: dividing by rot_scale amplifies float32 quaternion
     # round-off by 1/0.01 = 100x. 1e-4 of full deflection is 1e-6 rad/step --
     # four orders below the 0.01 rad/step the operator commands, and two orders
-    # below the ~1e-4 rad of solver noise the arm sits in anyway.
+    # below the ~1e-4 rad of solver noise openyam-lab's arm sat in anyway (not
+    # re-validated on the Maker Arm).
     assert torch.all(action.abs() < 1e-4)
 
 
