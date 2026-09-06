@@ -19,10 +19,12 @@ from maker_arm_lab.core.global_ik import (
     MAX_DESCEND_TILT,
     MAX_WAYPOINT_STEP,
     MIN_DESCEND_TILT,
+    DescendInfeasibleError,
     GlobalIK,
     GraspTarget,
     JointTrim,
     descend_pick_offset,
+    descend_pick_offset_or_raise,
     descend_tilt_ceiling,
     descend_tilt_ladder,
     fold_to_half_turn,
@@ -440,3 +442,42 @@ class TestDescendGeometry:
             tool_axis_world(MIN_DESCEND_TILT, 2.0),
             atol=1e-6,
         )
+
+
+class TestDescendInfeasibleIsRaisable:
+    """`descend_pick_offset_or_raise` exists so a single-tilt caller fails diagnosably.
+
+    The None return of `descend_pick_offset` is right for the ladder search, where "this rung
+    is infeasible" is an ordinary answer. It is a trap for a caller with one caller-supplied
+    tilt, which indexed it and got a TypeError far from the cause.
+    """
+
+    HALF = 0.0048  # half a 9.6 mm brick
+
+    def test_it_returns_the_offset_when_the_tilt_is_feasible(self):
+        assert descend_pick_offset_or_raise(MIN_DESCEND_TILT, self.HALF) == descend_pick_offset(
+            MIN_DESCEND_TILT, self.HALF
+        )
+
+    def test_it_raises_above_the_fouling_ceiling(self):
+        with pytest.raises(DescendInfeasibleError):
+            descend_pick_offset_or_raise(math.radians(10.0), self.HALF)
+
+    def test_the_error_is_an_exception_and_not_a_systemexit(self):
+        """The whole point of the type, and the reason fix round 1's first attempt failed.
+
+        `scripts/scripted_grasp_check.py` wraps its work in `except Exception` so that any
+        failure becomes a GRASP_FAIL token, which the D6/D7 supervisor parses. `SystemExit`
+        is a `BaseException`, so it would pass straight through that handler and terminate
+        with no token -- indistinguishable from a hang.
+        """
+        assert issubclass(DescendInfeasibleError, ValueError)
+        assert issubclass(DescendInfeasibleError, Exception)
+        assert not issubclass(DescendInfeasibleError, SystemExit)
+
+    def test_the_message_names_the_ceiling_it_exceeded(self):
+        with pytest.raises(DescendInfeasibleError) as excinfo:
+            descend_pick_offset_or_raise(math.radians(10.0), self.HALF)
+        message = str(excinfo.value)
+        assert "10.00 deg" in message
+        assert f"{math.degrees(descend_tilt_ceiling(self.HALF)):.2f} deg" in message

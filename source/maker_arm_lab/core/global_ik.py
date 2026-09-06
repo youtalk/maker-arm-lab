@@ -144,6 +144,37 @@ def descend_tilt_ceiling(brick_half_height: float) -> float:
     return math.asin(min(1.0, brick_half_height / JAW_FACE_FAR))
 
 
+class DescendInfeasibleError(ValueError):
+    """No pick offset exists at the requested descend tilt.
+
+    Deliberately a ``ValueError`` and therefore an ``Exception``, not a ``SystemExit``.
+    Callers that promise a machine-readable outcome on every path -- notably
+    ``scripts/scripted_grasp_check.py``, whose ``GRASP_OK`` / ``GRASP_FAIL`` token is parsed
+    by the D6/D7 supervisor -- wrap their work in ``except Exception`` and turn a failure
+    into a token. A ``SystemExit`` is a ``BaseException``, so it would sail straight through
+    that handler and terminate with no token at all, which reads to a supervisor as a hang
+    rather than a failure.
+    """
+
+
+def descend_pick_offset_or_raise(tilt: float, brick_half_height: float) -> tuple[float, float]:
+    """`descend_pick_offset`, with the None turned into a diagnosable exception.
+
+    The None return is correct for callers searching a ladder of tilts, where "this rung is
+    infeasible" is an ordinary answer. It is a trap for callers using a single caller-supplied
+    tilt, which indexed the result and got a TypeError far from the cause.
+    """
+    solved = descend_pick_offset(tilt, brick_half_height)
+    if solved is None:
+        raise DescendInfeasibleError(
+            f"no pick offset exists at a descend tilt of {math.degrees(tilt):.2f} deg for a "
+            f"brick of half-height {brick_half_height * 1000:.1f} mm: above roughly "
+            f"{math.degrees(descend_tilt_ceiling(brick_half_height)):.2f} deg the jaw plates "
+            f"cannot clear the desk at any offset. Use a smaller tilt."
+        )
+    return solved
+
+
 def descend_pick_offset(tilt: float, brick_half_height: float) -> tuple[float, float] | None:
     """The pick offset for a descend at `tilt`, and the margin it leaves.
 

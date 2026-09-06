@@ -64,11 +64,35 @@ import json
 import math
 import os
 import random
+import sys
 import traceback
 
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser()
+
+class _TokenEmittingParser(argparse.ArgumentParser):
+    """An ArgumentParser whose USAGE ERRORS still honour the GRASP_OK / GRASP_FAIL contract.
+
+    argparse's `error()` exits 2 with a usage message and no token. That is the third way
+    this script could terminate silently, and it is not hypothetical: `--contact_sensor` is
+    `type=int`, so the natural-looking `--contact_sensor` as a bare flag exits here before
+    the simulator ever starts. A supervisor parsing for a token cannot distinguish that from
+    a hang, which is exactly the failure this file's bottom-of-module `try:` exists to
+    prevent for every other path.
+
+    `--help` is deliberately NOT covered: it exits 0 through `exit()` rather than `error()`,
+    it is not an execution path, and printing a grasp verdict after a help text would be
+    nonsense.
+    """
+
+    def error(self, message: str):
+        self.print_usage(sys.stderr)
+        print(f"{self.prog}: error: {message}", file=sys.stderr, flush=True)
+        print("GRASP_FAIL", flush=True)
+        raise SystemExit(2)
+
+
+parser = _TokenEmittingParser()
 parser.add_argument("--task", type=str, default="MakerArm-LegoSort-v0")
 parser.add_argument("--num_bricks", type=int, default=6)
 parser.add_argument(
@@ -132,7 +156,16 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
-app_launcher = AppLauncher(args)
+# The third module-scope path that can fail on bad input: AppLauncher validates its own
+# arguments (a bad --device, for one) and raises before the `try:` at the bottom of this
+# file can convert anything to a token. Same treatment as the pick offset -- the contract is
+# that no invocation of this script terminates without GRASP_OK or GRASP_FAIL.
+try:
+    app_launcher = AppLauncher(args)
+except Exception:  # noqa: BLE001 -- a launch failure must be a token, not a bare traceback.
+    traceback.print_exc()
+    print("GRASP_FAIL", flush=True)
+    raise SystemExit(1) from None
 simulation_app = app_launcher.app
 
 # isaaclab (and friends) are only importable once AppLauncher has launched Kit;
@@ -158,6 +191,7 @@ from maker_arm_lab.core.global_ik import (
     GraspTarget,
     JointTrim,
     descend_pick_offset,
+    descend_pick_offset_or_raise,
     descend_tilt_ladder,
     tool_axis_world,
     wrap_to_pi,
@@ -222,31 +256,21 @@ DESCEND_TILT_LADDER = (
 # to commit before the ladder runs; the rungs differ by ~1-2 mm of offset, far inside the
 # continuity cap, so the first descend waypoint reconverges from the hover pose without
 # trouble. --pick_offset_z overrides it, for probing.
-def _nominal_offset_z() -> float:
-    """The hover's offset, with the one failure mode this expression can have made loud.
-
-    `descend_pick_offset` returns None when the requested tilt is above the angle at which
-    the jaw plates foul the desk (~4.40 deg), which `--descend_tilt_deg 10` reaches. Indexing
-    [0] on that None raised a TypeError at MODULE SCOPE -- outside `main`'s try:, whose whole
-    stated purpose is that any failure becomes GRASP_FAIL rather than a crash -- so the script
-    exited with a traceback and printed no token at all. A caller parsing for GRASP_OK /
-    GRASP_FAIL cannot tell that from a hang.
-    """
+#
+# COMPUTED LAZILY, AND THAT IS THE WHOLE POINT. `descend_pick_offset` has no answer above the
+# tilt at which the jaw plates foul the desk (~4.40 deg for this brick), which
+# `--descend_tilt_deg 10` asks for. Evaluating that at MODULE SCOPE put the failure outside
+# the `try:` at the bottom of this file, whose entire purpose is that any failure becomes a
+# GRASP_FAIL token rather than a bare exit -- and a script that exits with no token reads to
+# the D6/D7 supervisor as a HANG rather than a failure. Raising a friendlier message from
+# module scope does not fix that; only moving the computation inside the guarded call does.
+def nominal_offset_z() -> float:
+    """The hover's pick offset. Raises DescendInfeasibleError if the tilt admits none."""
     if args.pick_offset_z is not None:
         return PICK_OFFSET[2]
-    nominal = descend_pick_offset(DESCEND_TILT_LADDER[0], BRICK_HALF_HEIGHT)
-    if nominal is None:
-        raise SystemExit(
-            f"--descend_tilt_deg {math.degrees(DESCEND_TILT_LADDER[0]):.2f} is above the "
-            f"tilt at which the jaw plates foul the desk, so there is no pick offset at "
-            f"which this descend can be solved. Use a smaller tilt, or pass an explicit "
-            f"--pick_offset_z."
-        )
-    return nominal[0]
+    return descend_pick_offset_or_raise(DESCEND_TILT_LADDER[0], BRICK_HALF_HEIGHT)[0]
 
 
-# The offset the HOVER is solved at (see above).
-NOMINAL_OFFSET_Z = _nominal_offset_z()
 # The brick's position ACROSS the plate face (body x), which is the axis the plate is
 # asymmetric on: it spans -62.5..+20.5 mm about grasp_center, so a brick centred on
 # grasp_center sits 21 mm off the plate's own centre, toward the short edge, with only
@@ -498,8 +522,13 @@ class GraspRig:
         pick_point,
         jaw_heading: float,
         tilt: float = GRASP_TILT_RAD,
-        offset_z: float = NOMINAL_OFFSET_Z,
+        offset_z: float | None = None,
     ) -> GraspTarget:
+        # `None`, not NOMINAL_OFFSET_Z: a default argument is evaluated when the `def` is
+        # executed, i.e. at import, which would drag the lazy computation back to module
+        # scope and re-break the token contract by the back door.
+        if offset_z is None:
+            offset_z = nominal_offset_z()
         return GraspTarget(
             position=self.grasp_center_for(pick_point, tilt, jaw_heading, offset_z),
             tilt=tilt,
