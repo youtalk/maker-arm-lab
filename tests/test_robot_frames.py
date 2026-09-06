@@ -54,3 +54,28 @@ def test_home_pose_names_every_arm_joint_inside_its_limits():
         assert lo + 0.05 <= frames.HOME_JOINT_POS[name] <= hi - 0.05, name
     for name in urdf_prep.GRIPPER_JOINT_NAMES:
         assert frames.HOME_JOINT_POS[name] == frames.GRIPPER_OPEN_POS
+
+
+def test_measured_sign_relations_are_pinned_to_their_measured_values():
+    """Pin the SHIPPED sign constants, not just the fold's handling of arbitrary signs.
+
+    ``core.oracle.fold_jaw_heading`` takes ``roll_sign`` / ``base_sign`` as arguments and
+    ``test_oracle.py`` exercises it with both polarities, which is the right way to test the
+    fold. It cannot catch a wrong value in ``frames.py``, though, because it never reads
+    these constants -- and Task D3 measured both of them to be the OPPOSITE of the OpenYAM
+    values the repo shipped with, a flip that the whole CPU suite passed straight through.
+
+    These are measured physical facts about the arm, so pinning the literals is the point.
+    Re-measure with ``scripts/scripted_grasp_check.py --signs`` before changing either; the
+    provenance comment in ``frames.py`` records the run that set them.
+    """
+    assert frames.WRIST_ROLL_SIGN == 1.0
+    assert frames.BASE_YAW_SIGN == -1.0
+
+
+def test_sign_relations_are_unit_magnitude_directions():
+    """Each is a d(jaw_yaw)/d(joint) direction, so +-1 exactly -- never 0, never a gain."""
+    for name in ("WRIST_ROLL_SIGN", "BASE_YAW_SIGN"):
+        value = getattr(frames, name)
+        assert isinstance(value, float), name
+        assert abs(value) == 1.0, name

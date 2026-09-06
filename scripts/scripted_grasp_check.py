@@ -7,17 +7,20 @@ space ``oracle_runtime.py`` drives.
 
 Run:  $ISAACLAB_PATH/isaaclab.sh -p scripts/scripted_grasp_check.py --headless
 
-Phases (all driven through the 7-element IK-Rel action
-``[dx dy dz drx dry drz gripper]``, never by writing joint targets):
+Every phase that MOVES the arm is driven through the 7-element IK-Rel action
+``[dx dy dz drx dry drz gripper]``, never by writing joint targets. Phase 0 is the
+one exception and does not move the arm at all -- see ``GraspRig.hold_home_joints``
+for the measurements that forced it:
 
-  0. settle   240 steps, zero delta, jaws open. Gates rest stability: every
-              brick's drift over the second half of the settle must be < 5 mm
-              and its final speed < 0.01 m/s.
+  0. settle   240 steps with the arm's joint targets pinned at HOME_JOINT_POS,
+              jaws open. Gates rest stability: every brick's drift over the second
+              half of the settle must be < 5 mm and its final speed < 0.01 m/s.
   1. hover    servo the PICK point (see below) to 0.12 m above the target brick,
               with the tool axis on world -z and the jaws squared to the brick.
   2. descend  servo the PICK point onto the brick and slightly past it, so the
               jaw plates come to rest on the desk. Stops on stall.
-  3. close    45 steps of gripper action -1.0, zero position/rotation deltas.
+  3. close    45 steps of gripper action -1.0, holding the descend's pose
+              closed-loop.
   4. lift     servo the PICK point 0.10 m straight up, jaws still closed.
 
 Success needs the brick to have risen more than 0.05 m and finished within
@@ -331,9 +334,85 @@ class GraspRig:
         self.env.step(action)
 
     def hold(self, steps: int, gripper: float):
+        """Send a zero position/rotation delta for ``steps`` steps.
+
+        This does NOT hold the arm's pose -- ``hold_pose`` does. Use this only where
+        the arm's pose is not what is being measured (the gripper-direction probe).
+        """
         zero = torch.zeros(3, device=self.device)
         for _ in range(steps):
             self.step(zero, zero, gripper)
+
+    def capture_pose(self):
+        """``(pick point, tool quaternion)`` right now, to hand to ``hold_pose``."""
+        return (self.pick_point()[0].clone(), self.tool_quat()[0].clone())
+
+    def hold_pose(self, steps: int, gripper: float, reference=None):
+        """Hold a pose closed-loop for exactly ``steps`` steps, jaws at ``gripper``.
+
+        The difference from ``hold`` is load-bearing. A zero delta through
+        ``DifferentialIKController`` in relative mode does not mean "stay where you
+        are": ``process_actions`` re-references the desired pose from the *measured*
+        pose every control step, so a steady-state tracking error is never corrected
+        -- it is adopted as the next setpoint, and the pose ratchets away under
+        gravity without bound. Measured on this arm (Task D3) at roughly 0.003 rad
+        per step, which over the 240-step settle walked the tool angle from the
+        pinned 23.85 deg to 71.69 deg and handed the hover servo a 280 mm starting
+        error it had no budget left to close.
+
+        Holding against a reference captured ONCE feeds that error back instead of
+        forgetting it. Same servo law as ``servo`` -- P on position, ``AttitudeHold``
+        on attitude -- but with no convergence exit, because the job is to stay put
+        for a fixed number of steps rather than to arrive.
+
+        ``reference`` is a ``capture_pose()`` pair, defaulting to the pose at the
+        moment of the call.
+        """
+        target, quat_des = self.capture_pose() if reference is None else reference
+        attitude = AttitudeHold(
+            rot_scale=self.scale_rot, gain=SERVO_GAIN_ROT, give_up_error=float("inf")
+        )
+        attitude.capture(quat_des)
+        zero_rot_command = torch.zeros(3, device=self.device)
+        for _ in range(steps):
+            pos_err = target - self.pick_point()[0]
+            self.step(
+                torch.clamp(SERVO_GAIN_POS * pos_err / self.scale_pos, -1.0, 1.0),
+                attitude.advance(self.tool_quat()[0], zero_rot_command),
+                gripper,
+            )
+
+    def hold_home_joints(self, steps: int):
+        """Step ``steps`` control steps with every joint target pinned at the home pose.
+
+        The settle's job is for the arm to change nothing for 240 control steps while the
+        bricks come to rest, and on this arm NO hold driven through the IK-Rel action can
+        do that -- not even the closed-loop ``hold_pose``. The action term's authority is
+        ``IK_SCALE[0:3]`` = 2 mm per control step, while the arm's own sag away from the
+        home pose runs at about 4.5 mm per control step over the first 20 steps (measured,
+        Task D3). A servo that cannot command as fast as the arm falls cannot converge:
+        measured, ``hold_pose`` drifts 111 mm and then runs ``link_005_joint`` into its
+        URDF stop at step 153 and ``link_004_joint`` at step 173, after which the arm is
+        frozen and every later phase is servoing a dead mechanism.
+
+        So this phase alone is held in JOINT space, at ``robot.data.default_joint_pos``
+        (which is ``robots.frames.HOME_JOINT_POS``), and the IK-Rel action term takes over
+        for the grasp phases with the arm exactly where the home pose says it should be.
+        Bypassing the action term is sound precisely here and nowhere else: the settle is a
+        measurement phase about the BRICKS, it commands no arm motion, and it contributes
+        no action to any dataset.
+
+        ``steps`` is counted in control steps and expanded by ``cfg.decimation``, so a
+        given ``--settle_steps`` covers the same simulated time as the other phases.
+        """
+        robot, scene, sim = self.robot, self.env.scene, self.env.sim
+        home = robot.data.default_joint_pos.clone()
+        dt = sim.get_physics_dt()
+        for _ in range(steps * self.env.cfg.decimation):
+            robot.set_joint_position_target(home)
+            scene.write_data_to_sim()
+            sim.step(render=False)
+            scene.update(dt)
 
     def finger_joints(self) -> list[float]:
         return self.robot.data.joint_pos[0, self.finger_ids].tolist()
@@ -474,7 +553,7 @@ def _saturation_str(sat_frac: list[float]) -> str:
 
 
 def check_rest_stability(rig, num_bricks: int, steps: int) -> dict:
-    """Phase 0. Hold a zero delta with the jaws open and watch the bricks settle.
+    """Phase 0. Hold the home pose with the jaws open and watch the bricks settle.
 
     Drift is measured over the *second half* of the window. The whole-window
     displacement is dominated by the reset scatter's 15.2 mm drop from
@@ -482,15 +561,24 @@ def check_rest_stability(rig, num_bricks: int, steps: int) -> dict:
     thickness), which is the brick falling into place, not instability. What the
     spec's rest-stability gate is actually about is whether a settled brick then
     stays put instead of jittering or sinking, so the tail is the honest window.
+
+    The arm is held with ``hold_home_joints``, not ``hold`` and not ``hold_pose``;
+    that method's docstring has the measurements ruling the other two out. The arm's
+    own drift is reported on the same second-half window as the bricks', so "the
+    settle does not move the arm" is a logged number rather than an inference.
     """
-    zero = torch.zeros(3, device=rig.device)
     half = steps // 2
-    for _ in range(half):
-        rig.step(zero, zero, GRIPPER_OPEN_ACTION)
+    arm_start = rig.pick_point()[0].clone()
+    angle_start = rig.tool_angle_deg()
+    rig.hold_home_joints(half)
     mid = torch.stack([rig.brick_pos(i).clone() for i in range(num_bricks)])
-    for _ in range(steps - half):
-        rig.step(zero, zero, GRIPPER_OPEN_ACTION)
+    arm_mid = rig.pick_point()[0].clone()
+    angle_mid = rig.tool_angle_deg()
+    rig.hold_home_joints(steps - half)
     end = torch.stack([rig.brick_pos(i).clone() for i in range(num_bricks)])
+    tail = max(steps - half, 1)
+    arm_drift = (rig.pick_point()[0] - arm_mid).norm().item() / tail
+    angle_drift = (rig.tool_angle_deg() - angle_mid) / tail
     speed = torch.stack(
         [rig.env.scene[f"brick_{i}"].data.root_lin_vel_w[0] for i in range(num_bricks)]
     ).norm(dim=-1)
@@ -504,6 +592,12 @@ def check_rest_stability(rig, num_bricks: int, steps: int) -> dict:
         "z_error": (rest_z - expected_z).abs().max().item(),
         "max_drift": drift.max().item(),
         "max_speed": speed.max().item(),
+        # Arm-side drift, over the same second-half window as the bricks'.
+        "arm_drift_per_step": arm_drift,
+        "arm_total_drift": (rig.pick_point()[0] - arm_start).norm().item(),
+        "angle_drift_per_step": angle_drift,
+        "angle_start": angle_start,
+        "angle_end": rig.tool_angle_deg(),
         "ok": bool(drift.max() < REST_MAX_DRIFT and speed.max() < REST_MAX_SPEED),
     }
 
@@ -571,9 +665,14 @@ def grasp_one(rig, brick_index: int, label: str, num_bricks: int) -> bool:
         flush=True,
     )
 
+    # Held closed-loop against the pose the descend ended at: the jaws must close
+    # around the brick where the descend left them, and 45 steps of zero delta is
+    # long enough for the ratchet in ``hold_pose``'s docstring to drag the plates
+    # off the brick before they ever touch it.
+    close_reference = rig.capture_pose()
     peak = [0.0, 0.0]
     for _ in range(CLOSE_STEPS):
-        rig.hold(1, GRIPPER_CLOSE_ACTION)
+        rig.hold_pose(1, GRIPPER_CLOSE_ACTION, close_reference)
         left, right = rig.finger_brick_forces(brick_index)
         peak = [max(peak[0], left), max(peak[1], right)]
     joints = rig.finger_joints()
@@ -591,7 +690,9 @@ def grasp_one(rig, brick_index: int, label: str, num_bricks: int) -> bool:
     steps, perr, rerr, _, _ = rig.servo(
         lift_target, quat_des, MAX_PHASE_STEPS, GRIPPER_CLOSE_ACTION, 0.002
     )
-    rig.hold(30, GRIPPER_CLOSE_ACTION)
+    # Closed-loop again: the pinch evidence below is read after this settle, so the
+    # arm must actually be holding the brick up rather than sinking with it.
+    rig.hold_pose(30, GRIPPER_CLOSE_ACTION)
 
     brick_end = rig.brick_pos(brick_index)
     rise = (brick_end[2] - brick_start[2]).item()
@@ -795,6 +896,13 @@ def run() -> bool:
             f"max_speed={rest['max_speed'] * 1000:.4f}mm/s (limit {REST_MAX_SPEED * 1000:.0f}) "
             f"max_rest_z_error={rest['z_error'] * 1000:.3f}mm -> "
             f"{'REST_OK' if rest['ok'] else 'REST_FAIL'}",
+            flush=True,
+        )
+        print(
+            f"  arm_hold: tool_angle {rest['angle_start']:.2f}->{rest['angle_end']:.2f}deg "
+            f"drift={rest['arm_drift_per_step'] * 1000:.5f}mm/step "
+            f"({rest['angle_drift_per_step']:+.5f}deg/step) "
+            f"total_grasp_center_drift={rest['arm_total_drift'] * 1000:.3f}mm",
             flush=True,
         )
         print(

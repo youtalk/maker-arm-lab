@@ -4,6 +4,13 @@ Run with:  $ISAACLAB_PATH/isaaclab.sh -p scripts/convert_urdf_to_usd.py
 Prints CONVERT_OK <usd path> or CONVERT_FAIL; exits 0/1 via os._exit (Kit's teardown does
 not reliably preserve exit codes -- see smoke_usd.py).
 
+The USD this writes is a git-ignored build artifact, so changing this script does NOT update
+anyone else's checkout. RE-RUN IT after pulling a change to this file: a stale
+`assets/usd/maker_arm.usd` loads without complaint and then misbehaves physically instead of
+failing. The mimic fix below is exactly such a change -- a checkout that predates it still
+has a USD whose right gripper jaw carries a PhysX mimic constraint and no drive, and whose
+jaws therefore do not track their targets.
+
 What is converted is not the vendored file but the Z-up derived copy written by
 maker_arm_lab.assets.urdf_prep.write_zup_urdf into the build directory (plan refinement 1).
 Mimic joints become independent joints, so both gripper jaws are driven to the same target
