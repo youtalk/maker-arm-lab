@@ -114,6 +114,72 @@ class GraspTarget:
     """World azimuth the tool leans toward (rad). 0.0 is the shipping convention, +x."""
 
 
+# --- what descend the jaw plates actually allow -------------------------------------
+# The jaw-plate collision box relative to `grasp_center`, from the vendored STLs (quoted in
+# robots/frames.py's wrist-camera block). Two of its three extents gate the descend:
+JAW_TIP_REACH = 0.0342
+"""How far the plates reach PAST grasp_center along the tool axis (m)."""
+JAW_FACE_FAR = 0.0625
+"""How far the plate face reaches ACROSS the tool axis, on the far side (m)."""
+
+# A tilted plate dips its far corner `JAW_FACE_FAR * sin(tilt)` below its own axial tip, and
+# the plate face is nearly twice as long across the tool axis as along it. So tilt costs far
+# more desk clearance than it buys, and above this ceiling NO pick offset both clears the
+# desk and keeps the brick inside the tip: the condition is `JAW_FACE_FAR sin(t) <
+# brick_half_height`, measured at 4.40 deg for a 9.6 mm brick.
+#
+# The floor is a different problem entirely. At EXACTLY zero tilt the tool axis is vertical,
+# so the lean azimuth `atan2(a_y, a_x)` is undefined and the azimuth constraint row of the
+# solver goes singular. Measured (Task D3 part 10): with the descend interpolating tilt to
+# exactly 0.0, the continuity-constrained path failed at waypoint 39 OF 40 -- the last one,
+# the only one at zero tilt -- on five of six bricks tested, including one whose endpoint was
+# solvable standalone at 0.534 rad of margin. A descend must therefore be NEAR level, never
+# level.
+MIN_DESCEND_TILT = math.radians(0.5)
+MAX_DESCEND_TILT = math.radians(3.0)
+
+
+def descend_tilt_ceiling(brick_half_height: float) -> float:
+    """Largest tilt (rad) at which some pick offset still clears the desk AND the tip."""
+    return math.asin(min(1.0, brick_half_height / JAW_FACE_FAR))
+
+
+def descend_pick_offset(tilt: float, brick_half_height: float) -> tuple[float, float] | None:
+    """The pick offset for a descend at `tilt`, and the margin it leaves.
+
+    Returns `(offset_along_tool_axis, margin)` where the offset is NEGATIVE in the
+    `PICK_OFFSET_MEASURED` sign convention, or None if the plates cannot clear the desk at
+    this tilt at all.
+
+    Two constraints pull against each other and the offset is placed to balance them:
+
+      * deep enough that the brick stays inside the plate tip -- `|offset| <= JAW_TIP_REACH`;
+      * shallow enough that the plates' lowest corner clears the desk --
+        `|offset| >= JAW_TIP_REACH + JAW_FACE_FAR tan(t) - brick_half_height / cos(t)`.
+
+    Equalising the two margins is what this returns. The window is small by construction on
+    this gripper -- about 2.1 mm either side at 0.5 deg -- because `grasp_center` sits only
+    34.2 mm inside a plate that has to reach past a brick resting on a table.
+    """
+    lower = JAW_TIP_REACH + JAW_FACE_FAR * math.tan(tilt) - brick_half_height / math.cos(tilt)
+    if lower >= JAW_TIP_REACH:
+        return None
+    offset = (JAW_TIP_REACH + lower * math.cos(tilt)) / (1.0 + math.cos(tilt))
+    return -offset, JAW_TIP_REACH - offset
+
+
+def descend_tilt_ladder(brick_half_height: float, steps: int = 6) -> list[float]:
+    """Tilts to try for a descend, smallest first, all inside the fouling window.
+
+    Ruling D3-11 candidate (2): level where level solves, otherwise the minimum tilt that
+    brick admits. "Level" is `MIN_DESCEND_TILT`, not zero, for the singularity above.
+    """
+    top = min(MAX_DESCEND_TILT, descend_tilt_ceiling(brick_half_height))
+    if top <= MIN_DESCEND_TILT:
+        return [MIN_DESCEND_TILT]
+    return [MIN_DESCEND_TILT + (top - MIN_DESCEND_TILT) * i / (steps - 1) for i in range(steps)]
+
+
 def tool_axis_world(tilt: float, lean_azimuth: float) -> torch.Tensor:
     """World-frame unit vector the tool axis points along for a commanded attitude.
 

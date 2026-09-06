@@ -14,10 +14,17 @@ import torch
 from maker_arm_lab.assets.urdf_prep import ARM_JOINT_NAMES
 from maker_arm_lab.core.global_ik import (
     ARM_DOF,
+    JAW_FACE_FAR,
+    JAW_TIP_REACH,
+    MAX_DESCEND_TILT,
     MAX_WAYPOINT_STEP,
+    MIN_DESCEND_TILT,
     GlobalIK,
     GraspTarget,
     JointTrim,
+    descend_pick_offset,
+    descend_tilt_ceiling,
+    descend_tilt_ladder,
     fold_to_half_turn,
     tool_axis_world,
     wrap_to_pi,
@@ -320,3 +327,73 @@ def test_tool_axis_world_is_a_unit_vector_pointing_down(ik):
     # Zero azimuth is the shipping convention: lean toward world +x.
     assert float(axis[0]) > 0.0
     assert float(axis[1]) == pytest.approx(0.0, abs=1e-12)
+
+
+class TestDescendGeometry:
+    """The jaw plates decide what descend is possible; these pin that arithmetic."""
+
+    HALF = 0.0048  # half a 9.6 mm brick
+
+    def test_tilt_ceiling_is_where_the_plate_corner_eats_the_clearance(self):
+        """Above the ceiling no offset both clears the desk and keeps the brick inside."""
+        ceiling = descend_tilt_ceiling(self.HALF)
+        assert math.degrees(ceiling) == pytest.approx(4.40, abs=0.02)
+        assert descend_pick_offset(ceiling + math.radians(0.5), self.HALF) is None
+
+    def test_offset_balances_desk_clearance_against_tip_margin(self):
+        offset, margin = descend_pick_offset(MIN_DESCEND_TILT, self.HALF)
+        assert offset < 0.0, "the offset is negative in PICK_OFFSET_MEASURED's convention"
+        # The brick must sit inside the plate tip...
+        assert -offset < JAW_TIP_REACH
+        assert margin == pytest.approx(JAW_TIP_REACH + offset, abs=1e-12)
+        # ...and the plates' lowest corner must clear the desk by the same margin.
+        lowest = (
+            -offset * math.cos(MIN_DESCEND_TILT)
+            - JAW_TIP_REACH * math.cos(MIN_DESCEND_TILT)
+            - JAW_FACE_FAR * math.sin(MIN_DESCEND_TILT)
+            + self.HALF
+        )
+        # The balance point sets the desk clearance EQUAL to the tip margin, so the lowest
+        # corner sits exactly `margin` above the desk -- no cosine, that is what balancing
+        # means.
+        assert lowest == pytest.approx(margin, abs=1e-9)
+
+    def test_margin_shrinks_as_the_tilt_grows(self):
+        """More tilt is strictly worse for the plates -- that is the whole finding."""
+        margins = [descend_pick_offset(math.radians(d), self.HALF)[1] for d in (0.5, 1.0, 2.0, 3.0)]
+        assert margins == sorted(margins, reverse=True)
+        assert all(m > 0.0 for m in margins)
+
+    def test_the_ladder_starts_near_level_but_never_at_level(self):
+        """Exactly vertical makes the lean azimuth undefined; the ladder must avoid it."""
+        ladder = descend_tilt_ladder(self.HALF)
+        assert ladder[0] == MIN_DESCEND_TILT > 0.0
+        assert ladder == sorted(ladder)
+        assert all(descend_pick_offset(t, self.HALF) is not None for t in ladder)
+        assert max(ladder) <= descend_tilt_ceiling(self.HALF)
+
+    def test_a_thin_brick_collapses_the_ladder_to_one_rung(self):
+        """It is a THIN brick that leaves no room to search, not a tall one.
+
+        The brick's own height is what buys the tilt: the plates may dip by up to
+        `brick_half_height` before they reach the desk. A vanishingly thin brick has no
+        budget at all, so the ceiling collapses onto the floor and only the near-level rung
+        survives. A tall brick has the opposite effect and the ladder runs to
+        MAX_DESCEND_TILT -- worth pinning too, since I had this backwards first time.
+        """
+        assert descend_tilt_ladder(1e-6) == [MIN_DESCEND_TILT]
+        assert max(descend_tilt_ladder(1.0)) == pytest.approx(MAX_DESCEND_TILT)
+
+    def test_the_azimuth_constraint_is_singular_at_exactly_zero_tilt(self, ik):
+        """Why MIN_DESCEND_TILT is not 0: at vertical the azimuth row carries no information.
+
+        Two different commanded azimuths at zero tilt must produce the same tool axis, which
+        is what makes the constraint degenerate there -- and non-degenerate just off it.
+        """
+        straight_down = tool_axis_world(0.0, 0.0)
+        assert torch.allclose(straight_down, tool_axis_world(0.0, 2.0), atol=1e-12)
+        assert not torch.allclose(
+            tool_axis_world(MIN_DESCEND_TILT, 0.0),
+            tool_axis_world(MIN_DESCEND_TILT, 2.0),
+            atol=1e-6,
+        )

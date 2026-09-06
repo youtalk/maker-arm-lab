@@ -109,13 +109,13 @@ parser.add_argument(
     "--descend_tilt_deg",
     type=float,
     default=None,
-    help="Tool tilt (deg off world -z) at the DESCEND and LIFT, defaulting to "
-    "frames.GRASP_TILT_DEG, i.e. unchanged behaviour. Exists because Task D3 part 9 "
-    "measured that at the hover tilt the jaw plates foul the desk at EVERY pick offset: "
-    "the plate box is 82.5 mm long across the tool axis, so a 20 deg tilt drops its far "
-    "corner 21 mm below the axial tip. frames.GRASP_TILT_DEG's own comment records that "
-    "the tilt is a cost of the APPROACH only and that the arm can be level at the brick to "
-    "within 0.42 deg at every radius, which is what makes a level descend available.",
+    help="Pin the DESCEND/LIFT tool tilt (deg off world -z) instead of searching for the "
+    "smallest one that brick admits. Default (unset) is ruling D3-11 candidate 2: try "
+    "core.global_ik.descend_tilt_ladder in order and take the first tilt whose descend "
+    "path solves. The tilt is near level because at the hover tilt the jaw plates foul the "
+    "desk at EVERY pick offset -- the plate face is 82.5 mm across the tool axis against "
+    "34.2 mm along it, so 20 deg drops its far corner 21.4 mm below the axial tip -- and it "
+    "is never EXACTLY level because at vertical the lean azimuth is undefined.",
 )
 parser.add_argument(
     "--gripper_probe",
@@ -148,10 +148,13 @@ from maker_arm_lab.core import layout
 from maker_arm_lab.core import profile as _profile
 from maker_arm_lab.core.checker import PINCH_MIN_FORCE
 from maker_arm_lab.core.global_ik import (
+    JAW_TIP_REACH,
     MAX_WAYPOINT_STEP,
     GlobalIK,
     GraspTarget,
     JointTrim,
+    descend_pick_offset,
+    descend_tilt_ladder,
     tool_axis_world,
     wrap_to_pi,
 )
@@ -196,11 +199,42 @@ TOP_DOWN_X_LIMIT = layout.TOP_DOWN_X_LIMIT
 # convention cannot reach, but it GRASPS WORSE -- 4/9 against 8/9 -- because a redundancy
 # resolved for joint margin picks poses that are bad for the grasp. See core.global_ik.
 LEAN_AZIMUTH = 0.0
-# The descend/lift tilt. Defaults to the hover tilt, so the shipping behaviour is unchanged
-# unless --descend_tilt_deg is passed.
-DESCEND_TILT_RAD = (
-    GRASP_TILT_RAD if args.descend_tilt_deg is None else math.radians(args.descend_tilt_deg)
+
+# Ruling D3-10: the descend is near level by default. GRASP_TILT_DEG keeps its meaning as
+# the APPROACH tilt and is untouched; these are different constants for different phases.
+# Ruling D3-11 candidate 2: rather than one fixed descend tilt, try the ladder in order and
+# take the smallest tilt whose descend path actually solves. Every rung is inside the
+# fouling window by construction (core.global_ik.descend_tilt_ladder), so raising the tilt
+# to buy path feasibility can never buy it by putting the plates into the desk.
+BRICK_HALF_HEIGHT = layout.BRICK_SIZE[2] / 2
+DESCEND_TILT_LADDER = (
+    [math.radians(args.descend_tilt_deg)]
+    if args.descend_tilt_deg is not None
+    else descend_tilt_ladder(BRICK_HALF_HEIGHT)
 )
+# The offset the HOVER is solved at. The descend picks its own per rung, but the hover has
+# to commit before the ladder runs; the rungs differ by ~1-2 mm of offset, far inside the
+# continuity cap, so the first descend waypoint reconverges from the hover pose without
+# trouble. --pick_offset_z overrides it, for probing.
+NOMINAL_OFFSET_Z = (
+    PICK_OFFSET[2]
+    if args.pick_offset_z is not None
+    else descend_pick_offset(DESCEND_TILT_LADDER[0], BRICK_HALF_HEIGHT)[0]
+)
+# The brick's position ACROSS the plate face (body x), which is the axis the plate is
+# asymmetric on: it spans -62.5..+20.5 mm about grasp_center, so a brick centred on
+# grasp_center sits 21 mm off the plate's own centre, toward the short edge, with only
+# 4.6 mm to spare once its own 15.9 mm half-length is counted. That is what the 10-trial
+# gate's single DROPPED was -- lateral +20.5 mm against a plate ending at +20.5 mm.
+#
+# Ruling D3-11 candidate 3 asked for the jaw-heading FOLD to be chosen by plate side. It
+# cannot help: a half-turn roll about the tool axis maps the brick's long axis onto itself,
+# so both representatives put the brick at the same body x. Measured, both folds ->
+# +8.63 mm, identical to 2 dp. What the ruling actually wants -- a rule that cannot place a
+# brick off the end of its own plate -- is this offset, which is the constant designed for
+# it and which was an unmeasured 0.0 until now. Centring the brick on the plate face turns
+# 4.6 mm of edge margin into 25.6 mm on BOTH edges.
+PICK_OFFSET_LATERAL = PICK_OFFSET[0]
 
 # --- Path resolution ---------------------------------------------------------
 # The approach is joint-space, so its waypoint count only sets how gently the arm leaves
@@ -259,7 +293,7 @@ PINCH_MAX_ASYMMETRY = 0.30  # |L - R| / max(L, R)
 #     the tips have to clear the desk -- which is exactly what PICK_OFFSET_MEASURED pins.
 JAW_CLOSURE_BUDGET = GRIPPER_OPEN_POS - 0.5 * layout.BRICK_SIZE[1]
 JAW_PLATE_LATERAL = (-0.0625, 0.0200)
-JAW_TIP_BEYOND_GRASP_CENTER = 0.0342
+JAW_TIP_BEYOND_GRASP_CENTER = JAW_TIP_REACH
 JAW_PLATE_BEHIND_GRASP_CENTER = 0.0664
 # The eight corners of the jaw-plate collision box in grasp_center coordinates, from the
 # same vendored AABBs. Used to report how far the plates actually are from the desk, which
@@ -401,26 +435,45 @@ class GraspRig:
         want = math.atan2(long_axis[1].item(), long_axis[0].item()) + math.pi / 2
         return want + math.pi * round(wrap_to_pi(self.jaw_yaw() - want) / math.pi)
 
-    def grasp_center_for(self, pick_point, tilt: float) -> tuple[float, float, float]:
+    def grasp_center_for(self, pick_point, tilt: float, jaw_heading: float, offset_z: float):
         """The `grasp_center` position that puts the PICK point at ``pick_point``.
 
-        ``pick_point = grasp_center + R @ PICK_OFFSET`` and ``PICK_OFFSET`` lies on the tool
-        axis, so ``R @ (0, 0, pz) = -pz * a`` with ``a`` the world tool axis. The attitude is
-        commanded, not measured, so ``a`` is known before the solve.
+        ``pick_point = grasp_center + R @ (ox, 0, oz)``, so
+        ``grasp_center = pick_point - ox * (body x in world) - oz * (body z in world)``.
+        Body z maps to the negated tool axis, which the commanded attitude gives exactly.
+        Body x is the plate-face direction: it is ``body y x body z``, and since body y is
+        the jaw axis at world heading ``jaw_heading``, body x points at
+        ``jaw_heading - 90 deg`` in the horizontal plane, exactly at zero tilt and to within
+        the descend tilt otherwise. At the ladder's near-level tilts that approximation is
+        worth ``|ox| * sin(tilt)`` = 0.2 mm, which is an order of magnitude below the
+        smallest margin it is used to protect.
         """
         axis = tool_axis_world(tilt, LEAN_AZIMUTH)
+        face = torch.tensor(
+            [math.sin(jaw_heading), -math.cos(jaw_heading), 0.0], dtype=torch.float64
+        )
         point = torch.as_tensor(pick_point, dtype=torch.float64).reshape(3).cpu()
-        return tuple(float(v) for v in point + PICK_OFFSET[2] * axis)
+        return tuple(float(v) for v in point + offset_z * axis - PICK_OFFSET_LATERAL * face)
 
     def target_for(
-        self, pick_point, jaw_heading: float, tilt: float = GRASP_TILT_RAD
+        self,
+        pick_point,
+        jaw_heading: float,
+        tilt: float = GRASP_TILT_RAD,
+        offset_z: float = NOMINAL_OFFSET_Z,
     ) -> GraspTarget:
         return GraspTarget(
-            position=self.grasp_center_for(pick_point, tilt),
+            position=self.grasp_center_for(pick_point, tilt, jaw_heading, offset_z),
             tilt=tilt,
             jaw_heading=jaw_heading,
             lean_azimuth=LEAN_AZIMUTH,
         )
+
+    def set_pick_offset(self, offset_z: float) -> None:
+        """Point the telemetry's PICK frame at the offset this descend actually used."""
+        self.pick_offset = torch.tensor(
+            [PICK_OFFSET_LATERAL, PICK_OFFSET[1], offset_z], device=self.device
+        ).unsqueeze(0)
 
     def lowest_jaw_corner(self) -> float:
         """World z of the lowest corner of the jaw-plate collision box (desk top is 0).
@@ -696,22 +749,48 @@ def grasp_one(rig, brick_index: int, label: str, num_bricks: int) -> bool:
         flush=True,
     )
 
-    # -- descend: straight Cartesian line, every waypoint solved globally ------
+    # -- descend: the tilt ladder, smallest tilt first (ruling D3-11 candidate 2) ------
+    # Level where level solves; otherwise the least tilt this brick admits. Every rung is
+    # inside the jaw-plate fouling window, and each rung carries its OWN pick offset,
+    # because the offset that balances desk clearance against tip margin moves with tilt.
     descend_pick = brick_xyz + torch.tensor([0.0, 0.0, DESCEND_CLEARANCE], dtype=torch.float64)
     points = [
         hover_pick + (descend_pick - hover_pick) * t
         for t in torch.linspace(0.0, 1.0, CARTESIAN_WAYPOINTS)
     ]
-    tilts = torch.linspace(
-        GRASP_TILT_RAD, DESCEND_TILT_RAD, CARTESIAN_WAYPOINTS, dtype=torch.float64
-    )
-    chain = rig.ik.solve_path(
-        [rig.target_for(p, heading, float(t)) for p, t in zip(points, tilts, strict=True)],
-        seed=hover.q,
-    )
+    chain, descend_tilt, descend_offset_z, tip_margin, rungs = None, None, None, None, 0
+    for rung in DESCEND_TILT_LADDER:
+        geometry = descend_pick_offset(rung, BRICK_HALF_HEIGHT)
+        if geometry is None:
+            continue
+        rungs += 1
+        offset_z, margin = geometry
+        tilts = torch.linspace(GRASP_TILT_RAD, rung, CARTESIAN_WAYPOINTS, dtype=torch.float64)
+        chain = rig.ik.solve_path(
+            [
+                rig.target_for(p, heading, float(t), offset_z)
+                for p, t in zip(points, tilts, strict=True)
+            ],
+            seed=hover.q,
+        )
+        if chain is not None:
+            descend_tilt, descend_offset_z, tip_margin = rung, offset_z, margin
+            break
     if chain is None:
-        print(f"PHASE descend [{label}]: NO CONTINUOUS SOLUTION along the descend", flush=True)
+        print(
+            f"PHASE descend [{label}]: NO CONTINUOUS SOLUTION at any of the {rungs} tilts in "
+            f"the ladder ({math.degrees(DESCEND_TILT_LADDER[0]):.2f}"
+            f"..{math.degrees(DESCEND_TILT_LADDER[-1]):.2f}deg)",
+            flush=True,
+        )
         return False
+    rig.set_pick_offset(descend_offset_z)
+    print(
+        f"SOLVE descend [{label}]: tilt={math.degrees(descend_tilt):.2f}deg "
+        f"(rung {DESCEND_TILT_LADDER.index(descend_tilt) + 1}/{len(DESCEND_TILT_LADDER)}) "
+        f"pick_offset_z={descend_offset_z:+.4f}m tip_margin={tip_margin * 1000:.2f}mm",
+        flush=True,
+    )
     print(_path_str("descend", chain, points), flush=True)
     for step in chain:
         rig.drive(step.q, GRIPPER_OPEN_ACTION, WAYPOINT_STEPS)
@@ -757,11 +836,11 @@ def grasp_one(rig, brick_index: int, label: str, num_bricks: int) -> bool:
     # AT the brick, and needs 10-18 deg of tilt (by radius) at hover height. Measured, with
     # a level lift: "NO CONTINUOUS SOLUTION along the lift" on the very first trial.
     lift_tilts = torch.linspace(
-        DESCEND_TILT_RAD, GRASP_TILT_RAD, CARTESIAN_WAYPOINTS, dtype=torch.float64
+        descend_tilt, GRASP_TILT_RAD, CARTESIAN_WAYPOINTS, dtype=torch.float64
     )
     lift = rig.ik.solve_path(
         [
-            rig.target_for(p, heading, float(t))
+            rig.target_for(p, heading, float(t), descend_offset_z)
             for p, t in zip(lift_points, lift_tilts, strict=True)
         ],
         seed=chain[-1].q,
@@ -867,7 +946,9 @@ def run() -> bool:
     print(
         f"GEOMETRY pick_offset_z={PICK_OFFSET[2]:+.4f} descend_clearance={DESCEND_CLEARANCE:+.4f} "
         f"grasp_tilt={math.degrees(GRASP_TILT_RAD):.1f}deg "
-        f"descend_tilt={math.degrees(DESCEND_TILT_RAD):.1f}deg "
+        f"descend_tilt_ladder=["
+        + ",".join(f"{math.degrees(t):.2f}" for t in DESCEND_TILT_LADDER)
+        + "]deg "
         f"lean_azimuth={LEAN_AZIMUTH:.3f}rad",
         flush=True,
     )

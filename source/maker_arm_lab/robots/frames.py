@@ -128,8 +128,27 @@ HOME_JOINT_POS: dict[str, float] = {
 # measured with a LEVEL descend (scripted_grasp_check.py --descend_tilt_deg 0.0), which is
 # available precisely because GRASP_TILT_DEG's own comment records that the tilt is a cost
 # of the APPROACH only and that the arm is level to within 0.42 deg at the brick at every
-# radius. Making the level descend the default is a behaviour change and is NOT taken here.
-PICK_OFFSET_MEASURED: tuple[float, float, float] = (0.0, 0.0, -0.030)
+# radius. Ruling D3-10 makes that the default: GRASP_TILT_DEG keeps its meaning as the
+# APPROACH tilt and is untouched, and the descend runs near level.
+#
+# NEAR level, never level. At exactly zero tilt the tool axis is vertical, so the lean
+# azimuth is undefined and the solver's azimuth constraint goes singular -- measured, the
+# continuity-constrained descend then failed at waypoint 39 OF 40, the only one at zero
+# tilt, on five of six bricks. core.global_ik.MIN_DESCEND_TILT is 0.5 deg for that reason,
+# and the z value below is the offset that balances desk clearance against tip margin AT
+# that tilt (core.global_ik.descend_pick_offset), 2.1 mm either side. The descend searches
+# a ladder of tilts and recomputes this offset per rung, so this is the nominal, not a
+# ceiling.
+# The x component is ZERO, and that is a measurement, not an omission. grasp_center is not
+# centred on the jaw plates' collision box -- it spans -0.0625..+0.0205 in body x, so
+# grasp_center sits 21.0 mm toward the short edge, leaving a brick's 15.9 mm half-length
+# only 4.6 mm of plate. Moving the brick to the box's centre (-0.021) looks like the fix and
+# is NOT: tried on GPU, the jaws then closed on nothing and pushed the brick to -81.9 mm,
+# right off the plate, where centring it was supposed to protect it. The collision box is
+# the whole finger BODY -- bracket and rail included -- and the gripping surface is the part
+# of it near the tool axis. x = 0 is where the jaws actually grip, evidenced by 4/4 clean
+# carries at 6.5-6.9 N of symmetric force with the brick there.
+PICK_OFFSET_MEASURED: tuple[float, float, float] = (0.0, 0.0, -0.0321)
 # Zero, and not for want of measuring. On the differential-IK path the descend was driven
 # into the desk until it stalled, and this term was the extra depth that took the jaw tips
 # down to the brick. The global-IK path commands the descend to a POSITION instead, so the
