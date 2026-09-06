@@ -49,7 +49,32 @@ MAKER_ARM_CFG = ArticulationCfg(
             joint_names_expr=[ARM_JOINT_REGEX],
             stiffness={name: g["kp"] for name, g in _GAINS.items()},
             damping={name: g["kd"] for name, g in _GAINS.items()},
-            armature=0.0,
+            # Rotor inertia reflected through the gearbox. The URDF omits it and this was
+            # 0.0, which is not a neutral default: it is the reason the arm was buzzing.
+            #
+            # Measured by /tmp/d3_decompose.py on 2026-09-06 (Task D3 part 14), instrumented
+            # INSIDE MITModeActuator.compute so the law's three terms are read at the
+            # instant it differences them. At armature 0.0 every wrist joint sat in a
+            # period-2 limit cycle at the Nyquist frequency of the 120 Hz physics rate:
+            # link_005_joint reversed sign EVERY substep at +-4.2 rad/s with the applied
+            # torque flipping +-9 N.m, while its mean position error was 0.25 mrad. The
+            # torque was almost entirely the damping term reacting to its own last step.
+            #
+            # That is the classic explicit-damping instability, kd*dt/M_eff >= 2. It bites
+            # the wrist joints because they carry almost no inertia, so M_eff is whatever
+            # armature says -- and it said zero. The predicted marginal value for kd=2.0 at
+            # dt=1/120 is kd*dt/2 = 0.00833, and the measured bracket is exactly that:
+            # 0.005 still chatters, 0.01 is clean. 0.02 is the round value at ~2.4x margin.
+            #
+            # What it cost while it was 0.0, and this is the part that matters: the chatter
+            # aliased every post-hoc reading taken from ArticulationData, because
+            # computed_torque comes from the last of decimation=4 substeps while joint_pos
+            # and joint_vel are read back after that substep integrated -- opposite phases of
+            # a period-2 oscillation. Task D3 part 12's "-0.9 N.m at 0.16 rad of error, which
+            # fits no PD law" was that artifact, not a physical anomaly; with armature set,
+            # the same decomposition closes to 5e-6 N.m and the arm is genuinely at rest
+            # (max |qd| 4.99 -> 0.002 rad/s).
+            armature=0.02,
             gravity_compensation=True,
             tau_ff_limit={name: g["tau_max"] for name, g in _GAINS.items()},
             effort_limit={name: g["effort_limit"] for name, g in _GAINS.items()},
