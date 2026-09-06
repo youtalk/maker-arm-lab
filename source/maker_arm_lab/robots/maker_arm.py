@@ -17,8 +17,9 @@ MAKER_ARM_USD_PATH = _REPO_ROOT / "assets" / "usd" / "maker_arm.usd"
 # Gains and caps come from the Rust profile; see core.profile. No literals here on purpose.
 _GAINS = _profile.arm_gains(_profile.load_profile())
 
-# Placeholder from the URDF (README: "Gripper effort 20 N ... are placeholders"). Whether it
-# holds a brick through the pinch criterion is measured in scripted_grasp_check (Task D3).
+# Placeholder from the URDF (README: "Gripper effort 20 N ... are placeholders").
+# INITIAL: whether it holds a brick through the pinch criterion is measured by
+# scripts/scripted_grasp_check.py (Task D3).
 GRIPPER_EFFORT_LIMIT_N = 20.0
 
 MAKER_ARM_CFG = ArticulationCfg(

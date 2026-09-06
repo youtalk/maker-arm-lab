@@ -22,6 +22,13 @@ pulls in isaaclab -- on first access, while ``from maker_arm_lab.robots import f
 never touches it at all.
 """
 
+# There is no fallback for the profile (see core.profile): a missing maker_arm_rs must break
+# `import maker_arm_lab.robots` immediately, not only when MAKER_ARM_CFG is first touched, which
+# is what the lazy __getattr__ below would otherwise silently allow. Do not delete this as
+# "unused" -- pulling in maker_arm_rs itself, not anything from it, is the point. It imports no
+# isaaclab, so it does not undermine the lazy split for the isaaclab-dependent names.
+import maker_arm_rs  # noqa: F401 -- fail fast at import, not deferred to first attribute access.
+
 from .frames import *  # noqa: F403 -- isaaclab-free; safe to re-export eagerly
 
 _LAZY_NAMES = frozenset({"MAKER_ARM_CFG", "MAKER_ARM_USD_PATH", "GRIPPER_EFFORT_LIMIT_N"})
