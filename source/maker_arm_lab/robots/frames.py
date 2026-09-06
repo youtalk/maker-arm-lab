@@ -47,22 +47,30 @@ BASE_YAW_SIGN = -1.0
 # six) into that stop within 60 hover steps, after which the arm is jammed and the servo is
 # driving a dead mechanism -- measured, Task D3, /tmp/d3r_hover_diag2.log.
 #
-# Measured by /tmp/d3_tilt_sweep2.py on 2026-09-05 -- a numpy FK of the vendored URDF plus
+# Measured by /tmp/d3_band_sweep.py on 2026-09-06 -- a numpy FK of the vendored URDF plus
 # urdf_prep's Z-up mount, reproducing the live Isaac grasp_center and tool angle at
 # HOME_JOINT_POS to 4 decimals (0.2749, 0.0371, 0.1646 / 23.85 deg) before being trusted.
-# Sweeping link_003..link_006 on a 3 deg grid and binning by reach radius over the scatter
-# band (radius 0.130-0.294 m), the SMALLEST tilt the arm can hold in the worst bin is:
+# Sweeping link_003..link_006 on a 2 deg grid (69,984,000 shapes) and binning by reach
+# radius over core.layout's ACTUAL scatter band -- SCATTER_X (0.13, 0.29) and SCATTER_Y
+# (-0.18, 0.18), i.e. radius 0.130-0.341 m and azimuth +-54.2 deg. The smallest tilt the
+# arm can hold with every joint at least 0.30 rad from its stops, by radius:
 #
-#     joint-margin floor   0.10    0.15    0.20    0.30  rad
-#     hover  (brick+0.12)  8.61    8.21   10.81   13.01  deg
-#     descend (at brick)   0.45    2.23    1.86    2.16  deg
+#     radius (m)   0.13-0.25   0.25-0.27   0.27-0.29   0.29-0.31   0.31-0.33   0.33-0.35
+#     hover            10.42       10.42       12.42       14.42       16.42       18.42  deg
+#     descend           0.42        0.42        0.42        0.42        0.42        0.42  deg
 #
-# The whole band is covered at every floor, so the binding case is hover at the far edge of
-# the band. 15.0 deg is the smallest round value clearing the strictest of those (13.01 deg
-# at a 0.30 rad margin floor), keeping the tilt as small as the grasp geometry allows while
-# staying reachable everywhere. It is well inside the spec's 30 deg tool cone, and close
-# enough to the home pose's own 23.85 deg that the servo barely has to change attitude.
-GRASP_TILT_DEG = 15.0
+# So the tilt is a cost of the APPROACH only -- at the brick the arm is level to within half
+# a degree everywhere -- and the binding case is hover at the outer corners of the band
+# (x=0.29, |y|=0.18). 20.0 deg is the smallest round value clearing that 18.42 deg worst
+# case, keeping the tilt as small as the grasp geometry allows. It is inside the spec's
+# 30 deg tool cone and close to the home pose's own 23.85 deg, so the servo barely has to
+# change attitude from home.
+#
+# The first version of this constant was 15.0 deg, from a sweep that used |y| <= 0.05. That
+# is find_home_pose.py's constraint on where HOME may sit, NOT the band bricks scatter over;
+# it understated the reach radius (0.294 m vs 0.341 m) and the azimuth (+-11 deg vs
+# +-54 deg), and 15.0 deg does not cover the outer corners.
+GRASP_TILT_DEG = 20.0
 GRASP_TILT_RAD = math.radians(GRASP_TILT_DEG)
 
 # Home pose, URDF joint coordinates. Tool axis within 30 deg of world -z, grasp_center over

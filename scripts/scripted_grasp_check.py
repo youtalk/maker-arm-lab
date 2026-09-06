@@ -15,14 +15,17 @@ for the measurements that forced it:
   0. settle   240 steps with the arm's joint targets pinned at HOME_JOINT_POS,
               jaws open. Gates rest stability: every brick's drift over the second
               half of the settle must be < 5 mm and its final speed < 0.01 m/s.
-  1. hover    servo the PICK point (see below) to 0.12 m above the target brick,
+  1. align    swing the base until the tool faces the target brick, at unchanged
+              reach and height. See GraspRig.base_swing_pose for why this is its
+              own phase and not part of the hover.
+  2. hover    servo the PICK point (see below) to 0.12 m above the target brick,
               with the tool axis at frames.GRASP_TILT_DEG off world -z and the jaws
               squared to the brick.
-  2. descend  servo the PICK point onto the brick and slightly past it, so the
+  3. descend  servo the PICK point onto the brick and slightly past it, so the
               jaw plates come to rest on the desk. Stops on stall.
-  3. close    45 steps of gripper action -1.0, holding the descend's pose
+  4. close    45 steps of gripper action -1.0, holding the descend's pose
               closed-loop.
-  4. lift     servo the PICK point 0.10 m straight up, jaws still closed.
+  5. lift     servo the PICK point 0.10 m straight up, jaws still closed.
 
 Success needs the brick to have risen more than 0.05 m and finished within
 0.03 m (horizontally) of the tool axis, AND to be genuinely pinched: the jaws
@@ -219,6 +222,9 @@ LIFT_MAX_XY_ERROR = 0.03  # m
 PINCH_MIN_STALL = 0.003  # m short of GRIPPER_CLOSED_POS
 PINCH_MAX_ASYMMETRY = 0.30  # |L - R| / max(L, R)
 
+# The align phase only has to get the base round; the hover that follows closes the
+# remaining position error, so converging it tightly would just burn steps.
+ALIGN_STOP_POS = 0.02
 HOVER_HEIGHT = 0.12
 LIFT_HEIGHT = 0.10
 MAX_PHASE_STEPS = 300
@@ -300,8 +306,8 @@ class GraspRig:
 
         The tilt is the arm-specific part. The OpenYAM port asked for the tool exactly
         on world -z; this arm cannot hold that over the scatter band at hover height
-        (measured minimum 13.01 deg at the far edge, ``frames.GRASP_TILT_DEG``), and
-        demanding it jams link_005_joint against its stop. What the grasp actually
+        (measured minimum 18.42 deg at the band's outer corners, ``frames.GRASP_TILT_DEG``),
+        and demanding it jams link_005_joint against its stop. What the grasp actually
         needs is the jaw axis square to the brick -- which is unchanged here -- plus
         the tool pointed down enough to reach the brick between the jaws.
 
@@ -364,6 +370,45 @@ class GraspRig:
     def capture_pose(self):
         """``(pick point, tool quaternion)`` right now, to hand to ``hold_pose``."""
         return (self.pick_point()[0].clone(), self.tool_quat()[0].clone())
+
+    def base_swing_pose(self, brick_pos):
+        """The current pose, yawed about the base until it faces ``brick_pos``.
+
+        The approach's first move, and it exists because of how the differential IK
+        fails without it. Isaac Lab's DLS controller is a greedy local solver with no
+        joint-limit avoidance, and a null-space term is unavailable on this arm (6
+        joints against a 6-DOF task leaves the null space generically empty). Asked to
+        go straight from home to a hover pose over a brick 20-50 deg round the scatter
+        band, it spends link_005_joint's 0.30 rad of travel rather than turning the
+        base, pins that joint against its stop by step 90, and then moves 0.1-0.4 mm
+        per 30 steps for the rest of the phase -- measured, Task D3, over 600 steps.
+        The hover target itself is reachable with 0.349 rad of margin on every joint,
+        so it is the path that fails, not the goal.
+
+        A pure rotation about the base's vertical axis is exactly what joint 1 does, so
+        commanding one -- the pick point swept along its own radius, the attitude yawed
+        by the same angle -- is a motion whose most direct solution IS joint 1, and the
+        Jacobian says so. That gets the base turned before the Cartesian servo has to
+        find the rest.
+
+        It is commanded through the delta-pose action space like every other moving
+        phase, NOT by writing joint targets: the dataset's action stream is the post-IK
+        joint-position target (mdp/recorders.py), so a motion produced outside the
+        action pipeline would not replay from the recorded actions.
+        """
+        origin = self.env.scene.env_origins[0]
+        here = self.pick_point()[0] - origin
+        there = brick_pos - origin
+        delta = _wrap_to_pi(
+            math.atan2(there[1].item(), there[0].item())
+            - math.atan2(here[1].item(), here[0].item())
+        )
+        c, s = math.cos(delta), math.sin(delta)
+        yaw = torch.tensor([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], device=self.device)
+        target = origin + yaw @ here
+        # World-frame pre-multiply, matching how apply_delta_pose composes rotations.
+        quat = math_utils.quat_mul(math_utils.quat_from_matrix(yaw.unsqueeze(0)), self.tool_quat())
+        return target, quat, delta
 
     def hold_pose(self, steps: int, gripper: float, reference=None):
         """Hold a pose closed-loop for exactly ``steps`` steps, jaws at ``gripper``.
@@ -445,6 +490,17 @@ class GraspRig:
         computed = self.robot.data.computed_torque[0, self.arm_joint_ids]
         applied = self.robot.data.applied_torque[0, self.arm_joint_ids]
         return ((computed - applied).abs() > SATURATION_EPS).tolist()
+
+    def joint_margins(self) -> list[float]:
+        """Each arm joint's distance (rad) to its nearer URDF stop, motor-id order.
+
+        Printed per phase because a jammed joint and a slow servo look identical in a
+        position error alone: Task D3 spent two rounds distinguishing them by hand.
+        """
+        q = self.robot.data.joint_pos[0, self.arm_joint_ids]
+        lo = self.robot.data.joint_pos_limits[0, self.arm_joint_ids, 0]
+        hi = self.robot.data.joint_pos_limits[0, self.arm_joint_ids, 1]
+        return torch.minimum(q - lo, hi - q).tolist()
 
     def servo(
         self,
@@ -565,6 +621,12 @@ class GraspRig:
         )[0]
 
 
+def _margin_str(margins: list[float]) -> str:
+    """``min=j4:0.00`` -- the tightest arm joint and how far it is from its stop."""
+    k = min(range(len(margins)), key=lambda i: margins[i])
+    return f"j{k + 1}:{margins[k]:.2f}"
+
+
 def _saturation_str(sat_frac: list[float]) -> str:
     """``j1:0% j2:12% ...`` -- ARM_JOINT_NAMES in motor-id order (1-6)."""
     return " ".join(f"j{i + 1}:{frac * 100:.0f}%" for i, frac in enumerate(sat_frac))
@@ -651,6 +713,21 @@ def grasp_one(rig, brick_index: int, label: str, num_bricks: int) -> bool:
     others_start = torch.stack(
         [rig.brick_pos(i).clone() for i in range(num_bricks) if i != brick_index]
     )
+    # Turn the base to face the brick before asking for anything else -- see
+    # GraspRig.base_swing_pose for the measurement that makes this its own phase.
+    align_target, align_quat, align_delta = rig.base_swing_pose(brick_start)
+    steps, perr, rerr, _, sat = rig.servo(
+        align_target, align_quat, MAX_PHASE_STEPS, GRIPPER_OPEN_ACTION, ALIGN_STOP_POS
+    )
+    print(
+        f"PHASE align [{label}]: steps={steps} swing={math.degrees(align_delta):+.2f}deg "
+        f"pos_err={perr * 1000:.2f}mm rot_err={math.degrees(rerr):.2f}deg "
+        f"tool_angle={rig.tool_angle_deg():.2f}deg torque_sat=({_saturation_str(sat)}) "
+        f"min_margin={_margin_str(rig.joint_margins())}",
+        flush=True,
+    )
+
+    # After the swing, not before: the half-turn fold reads the CURRENT jaw heading.
     quat_des = rig.desired_quat(brick_index)
 
     hover_target = brick_start.clone()
@@ -661,7 +738,7 @@ def grasp_one(rig, brick_index: int, label: str, num_bricks: int) -> bool:
     print(
         f"PHASE hover [{label}]: steps={steps} pos_err={perr * 1000:.2f}mm "
         f"rot_err={math.degrees(rerr):.2f}deg tool_angle={rig.tool_angle_deg():.2f}deg "
-        f"torque_sat=({_saturation_str(sat)})",
+        f"torque_sat=({_saturation_str(sat)}) min_margin={_margin_str(rig.joint_margins())}",
         flush=True,
     )
 
@@ -679,7 +756,7 @@ def grasp_one(rig, brick_index: int, label: str, num_bricks: int) -> bool:
         f"brick_in_tool=({tool_brick[0].item():+.4f},{tool_brick[1].item():+.4f},"
         f"{tool_brick[2].item():.4f}) finger_total_force={desk_left:.2f}/{desk_right:.2f}N"
         " (mostly the desk press -- the plates are driven onto the desk on purpose) "
-        f"torque_sat=({_saturation_str(sat)})",
+        f"torque_sat=({_saturation_str(sat)}) min_margin={_margin_str(rig.joint_margins())}",
         flush=True,
     )
 
