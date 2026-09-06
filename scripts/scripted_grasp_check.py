@@ -119,6 +119,7 @@ from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
 import maker_arm_lab.tasks  # noqa: F401 -- registers MakerArm-* envs
 from maker_arm_lab.core import layout
+from maker_arm_lab.core import profile as _profile
 from maker_arm_lab.core.action_scale import IK_SCALE, IK_SCALE_ROT
 from maker_arm_lab.core.attitude_hold import AttitudeHold
 from maker_arm_lab.core.checker import PINCH_MIN_FORCE
@@ -801,6 +802,22 @@ def run() -> bool:
     env.reset(seed=args.seed)
     rig = GraspRig(env, env.scene["contact"] if args.contact_sensor else None)
     num_bricks = env.cfg.num_bricks
+
+    # Provenance for every number below: which maker_arm_rs profile this run actually
+    # loaded. Gains and torque caps come from the Rust SDK (core.profile, no fallback), and
+    # that SDK is installed into the Isaac venv separately from the one uv manages -- so a
+    # run can execute against a different profile than the repo's pin implies. Print the
+    # caps so the log says which, instead of leaving it to be inferred from the pin.
+    print(
+        "PROFILE_GAINS "
+        + json.dumps(
+            {
+                name: {"kp": g["kp"], "kd": g["kd"], "tau_max": g["tau_max"]}
+                for name, g in _profile.arm_gains(_profile.load_profile()).items()
+            }
+        ),
+        flush=True,
+    )
 
     if args.gripper_probe:
         # Direction check (spec section 3.3): open action must INCREASE the jaw joint values.

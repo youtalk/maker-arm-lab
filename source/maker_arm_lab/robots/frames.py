@@ -71,8 +71,15 @@ GRASP_TILT_RAD = math.radians(GRASP_TILT_DEG)
 # joint-margin constraint; see scripts/find_home_pose.py's module docstring for the sweep
 # that established the ceiling and the reasoning for lowering the target instead of either
 # constraint.
-# Pinned by scripts/find_home_pose.py on 2026-09-05: grasp_center at (0.2745, 0.0375, 0.1628),
-# tool axis 23.57 deg off -z, min joint margin 0.30 rad.
+# Pinned by scripts/find_home_pose.py on 2026-09-05. The sweep's own winning candidate was
+# grasp_center (0.2745, 0.0375, 0.1628) at 23.57 deg off -z, but the joint values below are
+# that candidate ROUNDED to 2 decimals, and the rounding moves the tool. What this dict
+# actually produces, confirmed against both a numpy FK of the vendored URDF and the live
+# Isaac reading (Task D3, /tmp/d3r_tilt_sweep.log), is:
+#     grasp_center (0.2749, 0.0371, 0.1646), tool axis 23.85 deg off -z.
+# Min joint margin 0.30 rad, on link_005_joint -- the tightest of the six by a factor of
+# three, and the joint that limits how far the tool can be tilted toward vertical over the
+# scatter band (see GRASP_TILT_DEG).
 HOME_JOINT_POS: dict[str, float] = {
     "link_002_joint": 0.0,
     "link_003_joint": -1.79,
