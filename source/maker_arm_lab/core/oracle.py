@@ -1,0 +1,686 @@
+"""Scripted pick-and-place oracle: per-env phase sequencing (spec section 5.4).
+
+Torch + stdlib only -- NO isaaclab imports. The GPU binding that turns Goals
+into IK-Rel actions lives in tasks/manager_based/lego_sort/oracle_runtime.py;
+this module owns WHAT to do next, not how to servo there.
+
+Release constants: TCP (0.42, y_bin, 0.30), tool tilt from above the rim --
+the open gripper spans 92.9 mm vs the 90 mm bin interior, and no
+collision-free pose exists below z ~= 0.24. Carried over unchanged from
+OpenYAM's LegoSort oracle (OpenYAM's M1 Task 9); RELEASE_TILT_RAD itself is
+OpenYAM's Task 8 number, not Task 9's original ~23.6 deg (0.41 rad) estimate:
+running RAISE/EXTEND for real on OpenYAM's GPU rig (its OracleRig had never
+executed those phases before that task) found 0.41 left joint4 pinned on its
+-1.5708 stop with a 3-12 deg rotation residual that never closed, across the
+whole bin-jitter envelope OpenYAM's release-envelope probe exercised -- see
+RELEASE_TILT_RAD's own comment for the measurement and the fix. All of these
+numbers came from OpenYAM's arm and bin geometry; Task D4
+(`scripts/release_envelope_check.py`) is what re-validates the release
+envelope for the Maker Arm.
+"""
+
+import enum
+import math
+import random
+from dataclasses import dataclass
+
+import torch
+
+from . import checker, layout
+
+RELEASE_Z = 0.30
+# Carried over unchanged from OpenYAM's LegoSort oracle; the derivation below
+# is OpenYAM's own measurement, on OpenYAM's arm and layout, not yet
+# re-validated on the Maker Arm -- Task D4 (`scripts/release_envelope_check.py`)
+# is the authority for changing this number here.
+#
+# 0.41 (OpenYAM's M1 Task 9 nominal-layout number) was MEASURED INSUFFICIENT
+# by a later OpenYAM GPU run (Task 8): OracleRig had never executed
+# RAISE/EXTEND for real before that task, and doing so found the release pose
+# left joint4 not just "at" its -1.5708 stop (Task 9's own finding) but
+# PINNED there with a 3-12 deg residual rotation error that never closes,
+# across every pick position and corner of the bin-jitter envelope tried.
+# 0.70 (more tilt, same fix direction Task 9's own notes call out -- "more
+# tilt or higher z near the reach ceiling") gave joint4 real, positive margin
+# (0.23-0.45 rad measured at the nominal layout's four release poses,
+# OpenYAM's task-8-report.md) instead of zero, and both EXTEND's own
+# convergence and the RETREAT leg leaving that pose (see RETREAT's tilt
+# below) needed that margin to work at all.
+RELEASE_TILT_RAD = 0.70
+RELEASE_X_SETBACK = 0.02
+RETREAT_POINT = (0.26, 0.0, 0.28)
+MAX_GRASP_RETRIES = 2
+
+# Phase budgets, in 30 Hz control steps. HOVER/EXTEND cover the longest legs
+# OpenYAM measured (HOME -> bin took 67-226 steps in OpenYAM's Task 9);
+# DESCEND relies on its stall detector, CLOSE is OpenYAM's measured 45-step
+# jaw stroke + margin. Carried over unchanged; Task D5
+# (`scripts/oracle_check.py`) is what re-validates these budgets on the
+# Maker Arm's own step timings.
+SETTLE_STEPS = 240
+CLOSE_STEPS = 45
+DEFAULT_MAX_STEPS = 300
+DESCEND_STALL_STEPS = 12
+LIFT_HEIGHT = 0.10
+
+# RAISE's own target height and budget -- OpenYAM MEASURED this (Task 8), not
+# the RELEASE_Z a first reading of "raise" suggests. Carried over unchanged
+# from OpenYAM's arm and layout, along with the reasoning below; Task D4
+# (`scripts/release_envelope_check.py`) and Task D5 (`scripts/oracle_check.py`)
+# are what re-validate it on the Maker Arm. Climbing straight to RELEASE_Z
+# (0.30, near the reach ceiling) while holding a fixed attitude and NOT
+# translating ran joint4 (tilt=0.0, the original design) or joint6
+# (tilt=RELEASE_TILT_RAD applied all at once, from a pick whose desk yaw
+# happens to be unfavorable) onto its stop before the climb finished, well
+# short of a leg EXTEND's own translate+climb+tilt convergence handled
+# cleanly (OpenYAM measured: EXTEND alone, from LIFT's pose, reaches the
+# release pose in 100-230 steps with real joint margin). RAISE_CLEARANCE_Z
+# (0.22) only needs to clear the bin rim
+# (layout._BIN_FLOOR_TOP_Z + BIN_INTERIOR[2] = 0.195) before EXTEND starts
+# translating over the bins -- it is deliberately NOT RELEASE_Z; EXTEND climbs
+# the remaining ~80 mm together with the lateral move and the tilt. Applying
+# RELEASE_TILT_RAD here too (not 0.0) still matters: it gives joint4 the same
+# margin during this partial climb that EXTEND's own approach needs, and
+# avoids a second abrupt tilt jump between RAISE and EXTEND on top of the one
+# already coming from LIFT. RAISE_MAX_STEPS (60) is short ON PURPOSE: a real
+# reach-ceiling contact (RAISE's own tilt application, at an unfavorable pick
+# yaw, OpenYAM measured pinning joint6 within 30-40 steps) must end this phase
+# on "budget" -- report() advances to EXTEND regardless of RAISE's outcome --
+# before OracleRig's watchdog's 30-consecutive-near-limit trip fires and
+# abandons the episode instead.
+RAISE_CLEARANCE_Z = 0.22
+RAISE_STOP_POS = 0.02
+RAISE_MAX_STEPS = 60
+
+_JOINT_LIMIT_GUARD_RAD = 0.05
+_JOINT_SPEED_MAX = 6.0
+
+# Margin from each joint6 stop that ``fold_jaw_heading``'s PREDICTED span must
+# keep before the near representative is accepted. Deliberately NOT the
+# watchdog's 0.05: that band is about a measured joint position, this one is
+# about a prediction, and OpenYAM MEASURED (139 fold decisions over an
+# instrumented 8-env run, on OpenYAM's arm) that the prediction UNDER-shoots
+# the joint6 a leg actually reaches. Over the 15 legs whose predicted span
+# landed within 0.30 rad of a stop -- the only ones this band governs -- four
+# undershot, by +0.064, +0.082, +0.131 and +0.210 rad; the +0.064 one is a leg
+# that was measured to pin joint6 at +2.0944 during RAISE and lose the
+# episode to the watchdog while its predicted 2.030 sat "inside" a 0.05 band.
+# So a prediction that clears a stop by less than roughly its own error is
+# not evidence of clearance.
+#
+# 0.10 and not more: raising it further started flipping legs where BOTH
+# representatives were predicted to violate (measured at 0.15: two more
+# flips, one of them decided by a 0.007 rad difference between two losing
+# options), which is a coin toss dressed as a decision. Flipping is never a
+# downgrade -- the fold only switches when the far representative violates
+# strictly less -- so erring toward this band costs at most a wrist
+# half-turn at HOVER, with the jaws open and no brick held.
+#
+# Carried over unchanged from OpenYAM; no task in this plan re-measures this
+# magnitude for the Maker Arm's own joint6 servo behavior -- Task D5's
+# full-episode runs (`scripts/oracle_check.py`) are what would surface a
+# watchdog abandon if it is wrong here.
+_FOLD_GUARD_RAD = 0.10
+
+
+@dataclass(frozen=True)
+class OracleNoise:
+    """Range config for per-episode noise draws (spec section 5.4 item 2)."""
+
+    hover_height: tuple[float, float] = (0.10, 0.14)
+    lateral_offset: float = 0.003
+    yaw_offset: float = 0.0873  # 5 deg
+    gain_scale: tuple[float, float] = (0.7, 1.0)
+    action_noise_std: float = 0.05  # raw-action units, translation channels
+    via_jitter: float = 0.02  # RETREAT via-point jitter, m
+
+
+@dataclass(frozen=True)
+class EpisodeDraw:
+    hover_height: float
+    lateral_dx: float
+    lateral_dy: float
+    yaw_offset: float
+    gain_scale: float
+    action_noise_std: float
+    via_dx: float
+    via_dy: float
+
+
+def sample_episode_draw(rng: random.Random, noise: OracleNoise) -> EpisodeDraw:
+    return EpisodeDraw(
+        hover_height=rng.uniform(*noise.hover_height),
+        lateral_dx=rng.uniform(-noise.lateral_offset, noise.lateral_offset),
+        lateral_dy=rng.uniform(-noise.lateral_offset, noise.lateral_offset),
+        yaw_offset=rng.uniform(-noise.yaw_offset, noise.yaw_offset),
+        gain_scale=rng.uniform(*noise.gain_scale),
+        action_noise_std=noise.action_noise_std,
+        via_dx=rng.uniform(-noise.via_jitter, noise.via_jitter),
+        via_dy=rng.uniform(-noise.via_jitter, noise.via_jitter),
+    )
+
+
+@dataclass(frozen=True)
+class FailureInduction:
+    """Deliberate first-attempt grasp failures, recovered by the existing retry.
+
+    Applied per pick with probability ``prob`` when HOVER selects a new
+    target brick. Only the first attempt (``retries_used == 0``) is
+    affected; the REOPEN retry runs with clean targeting, which is what
+    makes the episode succeed and export.
+
+    Offset-style sabotage (see ``EnvOracle._sabotage_offset``) is drawn
+    perpendicular to the jaw closing axis, +-30 deg jitter, not a uniform
+    random direction: on OpenYAM's arm, the first live probe found
+    uniform-direction offsets almost never caused a failure, because
+    OpenYAM's parallel jaws open ~9.5 cm and any offset with a large
+    component along the closing axis gets funneled -- swept back into the
+    grip as the jaws close. Only offsets along the jaw line (perpendicular to
+    closing) reliably miss. The jaw geometry this reasoning depends on is
+    OpenYAM's, carried over unvalidated for the Maker Arm's own jaw span.
+    """
+
+    prob: float = 0.0
+    offset_weight: float = 0.7  # offset style vs noise style
+    offset_range: tuple[float, float] = (0.015, 0.025)  # m, radial
+    noise_boost: float = 5.0  # action_noise_std multiplier, DESCEND/CLOSE
+
+
+@dataclass
+class SceneSnapshot:
+    """Ground-truth state for one env, world frame (env-origin subtracted)."""
+
+    brick_pos: torch.Tensor  # (B, 3)
+    brick_yaw: torch.Tensor  # (B,)
+    brick_lin_vel: torch.Tensor  # (B, 3)
+    pick_point: torch.Tensor  # (3,)
+
+
+class Phase(enum.Enum):
+    SETTLE = enum.auto()
+    HOVER = enum.auto()
+    DESCEND = enum.auto()
+    CLOSE = enum.auto()
+    LIFT = enum.auto()
+    REOPEN = enum.auto()
+    RAISE = enum.auto()
+    EXTEND = enum.auto()
+    RELEASE = enum.auto()
+    RETREAT = enum.auto()
+    DONE = enum.auto()
+    ABANDON = enum.auto()
+
+
+@dataclass
+class Goal:
+    phase: Phase
+    target_pos: torch.Tensor | None
+    # Brick long-axis heading; None = hold the current attitude. The runtime
+    # squares the jaws across this axis (``desired_quat`` folds against
+    # ``yaw + pi/2`` for the actual closing axis).
+    yaw: float | None
+    tilt_rad: float  # tool-axis tilt toward +x (0 = straight down)
+    gripper: float  # +1 open / -1 close (raw binary action)
+    stop_pos: float | None
+    stall_steps: int
+    max_steps: int
+    hold_steps: int
+    # Every xy waypoint the heading commanded by ``yaw`` will still be held at,
+    # for ``fold_jaw_heading``'s joint6 budget. Only the yaw-setting phases
+    # (HOVER/DESCEND) fill this; the runtime turns it into a base-yaw range.
+    # It is the oracle's to supply because only the oracle knows the rest of
+    # the plan -- which bin this brick is bound for, and that nothing re-yaws
+    # between here and RETREAT.
+    yaw_hold_xy: tuple[tuple[float, float], ...] = ()
+
+
+@dataclass
+class PhaseResult:
+    outcome: str  # "converged" | "stalled" | "budget"
+    pinch_ok: bool | None = None
+    lifted: bool | None = None
+
+
+def wrap_to_pi(angle: float) -> float:
+    return (angle + math.pi) % (2 * math.pi) - math.pi
+
+
+def fold_jaw_heading(
+    want: float,
+    jaw_yaw: float,
+    joint6: float,
+    joint6_limits: tuple[float, float],
+    base_yaw_range: tuple[float, float] = (0.0, 0.0),
+    guard_rad: float = _FOLD_GUARD_RAD,
+    *,
+    roll_sign: float = -1.0,
+    base_sign: float = 1.0,
+) -> float:
+    """Pick the half-turn representative of ``want`` that joint6 can hold all the way.
+
+    A jaw is symmetric under a half turn, so ``want`` and ``want + pi`` are the
+    same physical grasp -- but they are not the same wrist pose, and joint6
+    spans only +-2.0944 rad, narrower than the +-pi ambiguity the fold reasons
+    over. Choosing purely by "which representative is the wrist already nearer"
+    (raw ``wrap_to_pi`` proximity, what this fold did before) picks an
+    unreachable heading whenever the wrist starts far enough round that the
+    nearer representative sits outside joint6's remaining travel.
+
+    OpenYAM MEASURED this relation on its own arm (two instrumented full
+    oracle runs of 13437 and 14920 control steps, ``layout_seed=0 run_seed=0
+    num_envs=1``): with the tool axis at tilt 0 the jaw's world heading was
+
+        jaw_yaw = joint1 - joint6 + c,   c = 1.5747 +- 0.0248 rad (n = 4169)
+
+    i.e. ``roll_sign = -1`` and ``base_sign = +1`` in the general form below.
+    ``roll_sign`` is d(jaw_yaw)/d(joint6) and ``base_sign`` is
+    d(jaw_yaw)/d(joint1), each +-1. The defaults reproduce that OpenYAM
+    relation exactly; the Maker Arm runtime passes
+    ``robots.frames.WRIST_ROLL_SIGN`` / ``BASE_YAW_SIGN``, measured for this
+    arm by ``scripts/scripted_grasp_check.py --signs`` (Task D3). With the
+    defaults, holding a commanded heading while the base yaw moves by ``d``
+    costs joint6 exactly
+
+        required(d) = joint6 + d - wrap_to_pi(want - jaw_yaw)
+
+    -- byte-for-byte OpenYAM's original formula.
+
+    ``base_yaw_range`` is a RANGE, not a single value, because ``Goal.yaw`` is
+    None for every phase from CLOSE through RETREAT: the heading a pick commits
+    to at HOVER is still held while EXTEND swings out to the bin and RETREAT
+    comes back, and joint6 pays for that whole excursion. OpenYAM found this
+    the hard way when it first measured the single-point version -- checking
+    only the reach to the brick moved the abandon from the second brick's
+    HOVER to the third brick's EXTEND, joint6 pinned at the OTHER (+2.0944)
+    stop, same mechanism one phase later.
+
+    The two fatal cases this is pinned against, both OpenYAM measurements from
+    those runs, on OpenYAM's arm, under the default signs:
+
+    * ``RETREAT -> HOVER``, brick 2, control step 13380: ``jaw_yaw=3.0434``,
+      ``joint6=-1.5179``, ``base_yaw_range=(-0.703, 0.0)``. The nearer
+      representative (``want=3.7790``, only 0.736 rad of heading away) needs
+      joint6 in ``[-2.957, -2.254]``, a full radian past its -2.0944 stop; the
+      far one needs ``[0.184, 0.885]``. Unfixed, joint6 walked onto that stop in
+      29 control steps and stayed pinned, and the watchdog abandoned 30 strikes
+      later at HOVER step 56 of its 300-step budget.
+    * ``HOVER``, brick 3, control step 14402: near needs ``[1.658, 2.123]``, far
+      ``[-1.484, -1.019]``. Unfixed, joint6 pinned at +2.0944 during EXTEND.
+
+    RETREAT is what sets the first one up: it deliberately holds the previous
+    brick's release heading (see the RETREAT goal's comment), so the wrist
+    enters the next HOVER already 1.5 rad round.
+
+    Deliberately conservative -- the near representative is kept unless it is
+    predicted to violate ``guard_rad`` AND the far one violates it less, so a
+    flip is never a downgrade. OpenYAM measured this, over a 139-fold
+    instrumented 8-env run on its own arm: it fired on 7 of 139 decisions;
+    every other one was bit-identical to the old proximity fold. The
+    prediction is a good estimate, not a bound (the servo overshoots the
+    waypoint bearings in transit, and ``c`` shifts ~0.07 rad under
+    RELEASE_TILT_RAD), which is what ``_FOLD_GUARD_RAD`` is sized for and why
+    this is used only to veto, never to seek.
+
+    What it does NOT fix, OpenYAM measured in the same run: a pose where BOTH
+    representatives are out. ``jaw_yaw=3.057``, ``joint6=-1.458``, a -0.876 rad
+    base swing to the brick -- near needs ``[-2.328, -1.420]``, and the far one
+    is not the mirror image at ``+0.81`` but ``[-5.470, -4.561]``, because the
+    attitude servo walks the SHORT way round and for a near-pi heading change
+    the short way is the losing direction. That episode still abandons. Fixing
+    it needs the wrist re-centred before HOVER (RETREAT holds the previous
+    brick's heading by design), not a better fold.
+
+    Args:
+        want: Any representative of the desired jaw heading; folded here.
+        jaw_yaw: The jaw's current world heading.
+        joint6: The wrist-roll joint's current position, rad.
+        joint6_limits: ``(lower, upper)`` stops for that joint, rad.
+        base_yaw_range: ``(min, max)`` signed joint1 excursion, relative to the
+            current pose, over every waypoint this heading will be held across.
+        guard_rad: Margin from each stop that counts as a violation. Defaults to
+            ``_FOLD_GUARD_RAD`` (0.10), deliberately wider than the watchdog's
+            own 0.05 -- see that constant's comment for the measurement, and
+            ``tests/test_oracle.py`` for the fatal case 0.05 lets through.
+        roll_sign: d(jaw_yaw)/d(joint6), +-1. Defaults to -1.0, the OpenYAM
+            relation.
+        base_sign: d(jaw_yaw)/d(joint1), +-1. Defaults to +1.0, the OpenYAM
+            relation.
+
+    Returns:
+        The chosen representative, in the same unwrapped convention the caller
+        passed in (callers hold it across phases, so it is not re-wrapped).
+    """
+    near = want + math.pi * round(wrap_to_pi(jaw_yaw - want) / math.pi)
+    far = near + math.pi
+    lower, upper = joint6_limits
+    # Wrist excursion needed to hold a heading across the base swing: joint6 changes by
+    # -base_sign * swing / roll_sign per radian of base yaw.
+    k = -base_sign / roll_sign
+    swing_lo, swing_hi = sorted((k * base_yaw_range[0], k * base_yaw_range[1]))
+
+    def overshoot(heading: float) -> float:
+        held = joint6 + roll_sign * wrap_to_pi(heading - jaw_yaw)
+        return max(
+            lower + guard_rad - (held + swing_lo), (held + swing_hi) - (upper - guard_rad), 0.0
+        )
+
+    near_overshoot = overshoot(near)
+    if near_overshoot == 0.0 or overshoot(far) >= near_overshoot:
+        return near
+    return far
+
+
+def watchdog_trips(
+    joint_pos: torch.Tensor,
+    joint_vel: torch.Tensor,
+    limits: torch.Tensor,
+    guard_rad: float = _JOINT_LIMIT_GUARD_RAD,
+    speed_max: float = _JOINT_SPEED_MAX,
+) -> bool:
+    """Self-collision is off (OpenYAM's M1 ruling, carried over here via the
+    task cfg's ``enabled_self_collisions=False``): abort evidence is
+    joint-space only.
+
+    Args:
+        joint_pos: (6,) arm joint positions.
+        joint_vel: (6,) arm joint velocities.
+        limits: (6, 2) lower/upper joint limits.
+    """
+    near = (joint_pos - limits[:, 0] < guard_rad) | (limits[:, 1] - joint_pos < guard_rad)
+    return bool(near.any() or (joint_vel.abs() > speed_max).any())
+
+
+class EnvOracle:
+    """Sequences one env's episode: settle, then per brick pick->place."""
+
+    def __init__(
+        self,
+        bl: layout.BinLayout,
+        num_bricks: int,
+        draw: EpisodeDraw,
+        induction: FailureInduction | None = None,
+        rng: random.Random | None = None,
+    ):
+        self.bl = bl
+        self.num_bricks = num_bricks
+        self.draw = draw
+        self.phase = Phase.SETTLE
+        self.target_brick: int | None = None
+        self.retries_used = 0
+        self._brick_start: torch.Tensor | None = None
+        self._sorted: set[int] = set()
+        self.induction = induction
+        self.rng = rng
+        self._induced_style: str | None = None
+        self._sabotage_radius = 0.0
+        self._sabotage_side = 1.0
+        self._sabotage_jitter = 0.0
+        self.induced_offset = 0
+        self.induced_noise = 0
+
+    @property
+    def abandoned(self) -> bool:
+        return self.phase == Phase.ABANDON
+
+    def noise_factor(self) -> float:
+        """Multiplier on the runtime's per-step action noise, for noise-style
+        induced picks: boosted only on the first attempt's approach (DESCEND)
+        and grip (CLOSE); the retry runs at nominal noise."""
+        if (
+            self._induced_style == "noise"
+            and self.retries_used == 0
+            and self.phase in (Phase.DESCEND, Phase.CLOSE)
+        ):
+            return self.induction.noise_boost
+        return 1.0
+
+    # -- brick bookkeeping ---------------------------------------------------
+
+    def _stowed(self, scene: SceneSnapshot) -> set[int]:
+        color_ids = torch.arange(self.num_bricks) % len(layout.BRICK_COLOR_ORDER)
+        ok = checker.bricks_at_rest_in_bins(
+            scene.brick_pos.unsqueeze(0),
+            scene.brick_lin_vel.unsqueeze(0),
+            layout.bin_interior_centers(self.bl),
+            layout.bin_half_extents(),
+            color_ids,
+        )[0]
+        return {i for i in range(self.num_bricks) if bool(ok[i])}
+
+    def _next_brick(self, scene: SceneSnapshot) -> int | None:
+        limit = layout.top_down_x_limit(self.bl)
+        for index in range(self.num_bricks):
+            if index in self._sorted or index in self._stowed(scene):
+                continue
+            if scene.brick_pos[index, 0].item() <= limit:
+                return index
+        return None
+
+    def _release_target(self, brick: int) -> torch.Tensor:
+        color = brick % len(layout.BRICK_COLOR_ORDER)
+        slot = layout.color_slot(self.bl, color)
+        return torch.tensor([self.bl.bin_x - RELEASE_X_SETBACK, self.bl.bin_ys[slot], RELEASE_Z])
+
+    # -- goal construction ---------------------------------------------------
+
+    def _goal(self, phase, target, yaw, tilt, gripper, stop, stall, steps, hold=0, hold_xy=()):
+        return Goal(
+            phase=phase,
+            target_pos=target,
+            yaw=yaw,
+            tilt_rad=tilt,
+            gripper=gripper,
+            stop_pos=stop,
+            stall_steps=stall,
+            max_steps=steps,
+            hold_steps=hold,
+            yaw_hold_xy=hold_xy,
+        )
+
+    def _sabotage_offset(self, yaw: float) -> tuple[float, float]:
+        """Offset along the jaw LINE (heading ``yaw``), so the jaws close beside
+        the brick instead of funneling it in.
+
+        ``yaw`` here is the brick's long-axis heading (``Goal.yaw``); the
+        runtime squares the jaws to it and commands the CLOSING axis at
+        ``yaw + pi/2`` (``oracle_runtime.desired_quat``). The parallel jaws
+        open far wider than the sabotage radius, so an offset along the
+        closing axis is swept back into the grip -- the sabotage must
+        therefore stay ON the jaw line (``yaw``, not ``yaw + pi/2``),
+        perpendicular to closing, where the fingers do not sweep (OpenYAM
+        measured this on its own arm's first live probe -- 0 retries from
+        ~10 induced picks; not re-measured on the Maker Arm)."""
+        angle = yaw + (1.0 - self._sabotage_side) * math.pi / 2.0 + self._sabotage_jitter
+        return self._sabotage_radius * math.cos(angle), self._sabotage_radius * math.sin(angle)
+
+    def _yaw_hold_xy(self, target: torch.Tensor) -> tuple[tuple[float, float], ...]:
+        """Every xy this pick's commanded jaw heading is still held at.
+
+        ``Goal.yaw`` is set at HOVER and DESCEND and then None all the way to
+        RETREAT, so the heading chosen here is the heading EXTEND swings out to
+        the bin with and RETREAT comes home with. joint6 pays for that whole
+        base-yaw excursion (see ``fold_jaw_heading``), so the fold has to see
+        the bin and the retreat point, not just the brick.
+        """
+        release = self._release_target(self.target_brick)
+        return (
+            (float(target[0]), float(target[1])),
+            (float(release[0]), float(release[1])),
+            (RETREAT_POINT[0] + self.draw.via_dx, RETREAT_POINT[1] + self.draw.via_dy),
+        )
+
+    def next_goal(self, scene: SceneSnapshot) -> Goal | None:
+        if self.phase in (Phase.DONE, Phase.ABANDON):
+            return None
+        if self.phase == Phase.SETTLE:
+            return self._goal(
+                Phase.SETTLE, None, None, 0.0, 1.0, None, 0, SETTLE_STEPS, hold=SETTLE_STEPS
+            )
+        if self.phase == Phase.HOVER:
+            if self.target_brick is None:
+                self.target_brick = self._next_brick(scene)
+                self.retries_used = 0
+                if self.target_brick is None:
+                    # Nothing reachable left: done if everything is stowed,
+                    # abandoned if an unreachable/lost brick remains.
+                    self.phase = (
+                        Phase.DONE
+                        if self._stowed(scene) | self._sorted >= set(range(self.num_bricks))
+                        else Phase.ABANDON
+                    )
+                    return None
+                self._brick_start = scene.brick_pos[self.target_brick].clone()
+                self._induced_style = None
+                self._sabotage_radius = 0.0
+                self._sabotage_side = 1.0
+                self._sabotage_jitter = 0.0
+                if (
+                    self.induction is not None
+                    and self.induction.prob > 0.0
+                    and self.rng.random() < self.induction.prob
+                ):
+                    if self.rng.random() < self.induction.offset_weight:
+                        self._induced_style = "offset"
+                        self._sabotage_radius = self.rng.uniform(*self.induction.offset_range)
+                        self._sabotage_side = 1.0 if self.rng.random() < 0.5 else -1.0
+                        self._sabotage_jitter = self.rng.uniform(-math.pi / 6.0, math.pi / 6.0)
+                        self.induced_offset += 1
+                    else:
+                        self._induced_style = "noise"
+                        self.induced_noise += 1
+            target = self._brick_start.clone()
+            target[0] += self.draw.lateral_dx
+            target[1] += self.draw.lateral_dy
+            target[2] += self.draw.hover_height
+            yaw = scene.brick_yaw[self.target_brick].item() + self.draw.yaw_offset
+            if self._induced_style == "offset" and self.retries_used == 0:
+                sdx, sdy = self._sabotage_offset(yaw)
+                target[0] += sdx
+                target[1] += sdy
+            return self._goal(
+                Phase.HOVER,
+                target,
+                yaw,
+                0.0,
+                1.0,
+                0.005,
+                0,
+                DEFAULT_MAX_STEPS,
+                hold_xy=self._yaw_hold_xy(target),
+            )
+        if self.phase == Phase.DESCEND:
+            target = self._brick_start.clone()
+            target[0] += self.draw.lateral_dx
+            target[1] += self.draw.lateral_dy
+            # DESCEND_CLEARANCE_MEASURED is applied by the runtime (it owns the
+            # robots import); the core target is the brick's resting z.
+            yaw = scene.brick_yaw[self.target_brick].item() + self.draw.yaw_offset
+            if self._induced_style == "offset" and self.retries_used == 0:
+                sdx, sdy = self._sabotage_offset(yaw)
+                target[0] += sdx
+                target[1] += sdy
+            return self._goal(
+                Phase.DESCEND,
+                target,
+                yaw,
+                0.0,
+                1.0,
+                0.0008,
+                DESCEND_STALL_STEPS,
+                DEFAULT_MAX_STEPS,
+                hold_xy=self._yaw_hold_xy(target),
+            )
+        if self.phase == Phase.CLOSE:
+            return self._goal(
+                Phase.CLOSE, None, None, 0.0, -1.0, None, 0, CLOSE_STEPS, hold=CLOSE_STEPS
+            )
+        if self.phase == Phase.LIFT:
+            target = scene.pick_point.clone()
+            target[2] += LIFT_HEIGHT
+            return self._goal(
+                Phase.LIFT, target, None, 0.0, -1.0, 0.002, 0, DEFAULT_MAX_STEPS, hold=30
+            )
+        if self.phase == Phase.REOPEN:
+            return self._goal(Phase.REOPEN, None, None, 0.0, 1.0, None, 0, 20, hold=20)
+        if self.phase == Phase.RAISE:
+            target = scene.pick_point.clone()
+            target[2] = RAISE_CLEARANCE_Z
+            return self._goal(
+                Phase.RAISE,
+                target,
+                None,
+                RELEASE_TILT_RAD,
+                -1.0,
+                RAISE_STOP_POS,
+                0,
+                RAISE_MAX_STEPS,
+            )
+        if self.phase == Phase.EXTEND:
+            return self._goal(
+                Phase.EXTEND,
+                self._release_target(self.target_brick),
+                None,
+                RELEASE_TILT_RAD,
+                -1.0,
+                0.008,
+                0,
+                DEFAULT_MAX_STEPS,
+            )
+        if self.phase == Phase.RELEASE:
+            return self._goal(
+                Phase.RELEASE, None, None, RELEASE_TILT_RAD, 1.0, None, 0, 20, hold=20
+            )
+        if self.phase == Phase.RETREAT:
+            # tilt_rad=RELEASE_TILT_RAD, not 0.0 (level): OpenYAM measured
+            # (Task 8) that snapping straight back to level, on top of the
+            # position change from the release pose to RETREAT_POINT, was its
+            # own joint4/joint6-exhausting abrupt attitude change on that arm
+            # -- the same class of problem RAISE's tilt fix above addresses,
+            # mirrored. Holding the release tilt through the whole retreat
+            # converged cleanly instead; releveling is deferred to the next
+            # brick's HOVER (goal.yaw is set there), which starts from
+            # RETREAT_POINT -- a far friendlier pose for that change than the
+            # release pose is. Carried over unchanged; Task D5
+            # (`scripts/oracle_check.py`) is what re-validates this on the
+            # Maker Arm.
+            target = torch.tensor(RETREAT_POINT)
+            target[0] += self.draw.via_dx
+            target[1] += self.draw.via_dy
+            return self._goal(
+                Phase.RETREAT, target, None, RELEASE_TILT_RAD, 1.0, 0.01, 0, DEFAULT_MAX_STEPS
+            )
+        raise AssertionError(f"unhandled phase {self.phase}")
+
+    # -- transitions ---------------------------------------------------------
+
+    def report(self, result: PhaseResult, scene: SceneSnapshot) -> None:
+        if self.phase == Phase.SETTLE:
+            self.phase = Phase.HOVER
+        elif self.phase == Phase.HOVER:
+            self.phase = Phase.DESCEND
+        elif self.phase == Phase.DESCEND:
+            # Stall IS the expected outcome: the plates land on the desk.
+            self.phase = Phase.CLOSE
+        elif self.phase == Phase.CLOSE:
+            self.phase = Phase.LIFT
+        elif self.phase == Phase.LIFT:
+            if result.pinch_ok and result.lifted:
+                self.phase = Phase.RAISE
+            elif self.retries_used < MAX_GRASP_RETRIES:
+                self.retries_used += 1
+                self.phase = Phase.REOPEN
+            else:
+                self.phase = Phase.ABANDON
+        elif self.phase == Phase.REOPEN:
+            self._brick_start = scene.brick_pos[self.target_brick].clone()
+            self.phase = Phase.HOVER  # same target_brick, fresh brick pose
+        elif self.phase == Phase.RAISE:
+            self.phase = Phase.EXTEND
+        elif self.phase == Phase.EXTEND:
+            self.phase = Phase.RELEASE
+        elif self.phase == Phase.RELEASE:
+            self.phase = Phase.RETREAT
+        elif self.phase == Phase.RETREAT:
+            self._sorted.add(self.target_brick)
+            self.target_brick = None
+            self.phase = Phase.HOVER  # HOVER's entry selects the next brick
