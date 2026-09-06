@@ -8,6 +8,7 @@ table: a missing ``maker_arm_rs`` fails here, at import.
 from collections.abc import Sequence
 
 import maker_arm_rs
+import torch
 
 from maker_arm_lab.assets import urdf_prep
 
@@ -96,3 +97,27 @@ def clamp_joint_targets(
         out_pos.append([c[0] for c in clamped_cmds[:ARM_JOINT_COUNT]])
         flags.append(bool(changed))
     return out_pos, flags
+
+
+def clamp_targets_tensor(
+    targets: torch.Tensor,
+    gripper_open: torch.Tensor,
+    profile: dict,
+    out_flags: torch.Tensor,
+    accumulate: bool = False,
+) -> torch.Tensor:
+    """Batched (N, 6) targets through the Rust clamp; one host sync per call.
+
+    By default ``out_flags`` is overwritten with this call's flags. With ``accumulate=True``,
+    this call's flags are OR-ed into whatever ``out_flags`` already holds, for callers that
+    invoke this once per physics substep but want the flag to record "clamped on any substep
+    this control step" rather than just the last one -- see
+    ``mdp.actions.ClampedDifferentialIKAction``.
+    """
+    pos, flags = clamp_joint_targets(targets.tolist(), gripper_open.tolist(), profile)
+    new_flags = torch.tensor(flags, dtype=torch.bool, device=out_flags.device)
+    if accumulate:
+        out_flags |= new_flags
+    else:
+        out_flags.copy_(new_flags)
+    return torch.tensor(pos, dtype=targets.dtype, device=targets.device)

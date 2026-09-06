@@ -1,4 +1,5 @@
 import pytest
+import torch
 
 from maker_arm_lab.assets import urdf_prep
 from maker_arm_lab.core import profile as prof
@@ -47,3 +48,35 @@ def test_clamp_joint_targets_flags_and_clamps_out_of_range_envs():
     assert out[0] == pytest.approx(inside)
     assert out[1][2] == pytest.approx(limits[2][1])
     assert len(out[1]) == 6
+
+
+def test_clamp_targets_tensor_round_trips_device_and_flags():
+    p = prof.sim_profile()
+    limits = urdf_prep.arm_joint_limits()
+    inside = torch.tensor([[(lo + hi) / 2 for lo, hi in limits]] * 2)
+    inside[1, 0] = limits[0][1] + 5.0
+    flags = torch.zeros(2, dtype=torch.bool)
+    out = prof.clamp_targets_tensor(inside, torch.tensor([True, True]), p, flags)
+    assert out.shape == (2, 6) and out.dtype == inside.dtype
+    assert flags.tolist() == [False, True]
+    assert out[1, 0] == pytest.approx(limits[0][1])
+
+
+def test_clamp_targets_tensor_accumulate_keeps_an_earlier_clamp_flag():
+    """A True flag from an earlier (clamped) call must survive a later call whose own
+    outcome is False -- this is the substep-vs-control-step case ClampedDifferentialIKAction
+    depends on: an early physics substep clamps, a later one converges back inside limits,
+    and the control-step-level flag must still read True.
+    """
+    p = prof.sim_profile()
+    limits = urdf_prep.arm_joint_limits()
+    inside = torch.tensor([[(lo + hi) / 2 for lo, hi in limits]])
+    outside = inside.clone()
+    outside[0, 0] = limits[0][1] + 5.0
+    flags = torch.zeros(1, dtype=torch.bool)
+
+    prof.clamp_targets_tensor(outside, torch.tensor([True]), p, flags, accumulate=True)
+    assert flags.tolist() == [True]
+
+    prof.clamp_targets_tensor(inside, torch.tensor([True]), p, flags, accumulate=True)
+    assert flags.tolist() == [True]  # must not be overwritten back to False
