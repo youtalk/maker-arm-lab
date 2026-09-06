@@ -17,10 +17,25 @@ MAKER_ARM_USD_PATH = _REPO_ROOT / "assets" / "usd" / "maker_arm.usd"
 # Gains and caps come from the Rust profile; see core.profile. No literals here on purpose.
 _GAINS = _profile.arm_gains(_profile.load_profile())
 
-# Placeholder from the URDF (README: "Gripper effort 20 N ... are placeholders").
-# INITIAL: whether it holds a brick through the pinch criterion is measured by
-# scripts/scripted_grasp_check.py (Task D3).
-GRIPPER_EFFORT_LIMIT_N = 20.0
+# Raised from the URDF's 20 N by Task D3 step 4.3, which authorises exactly this raise when
+# the pinch will not hold. A DOCUMENTED SIM/REAL DIVERGENCE, and a cheap one: the URDF's own
+# README calls its 20 N a placeholder, so the number being diverged from was never a
+# measurement of the real gripper either.
+#
+# MEASURED INERT, and that is the useful part. Task D3 part 13 ran the ten-trial gate at 20 N
+# and at 40 N with nothing else changed. The two lift slips this raise was aimed at came out
+# the same at both caps -- trial 5 is bit-identical (grip 4.78/4.97 N, stall 4.329 mm) and
+# trial 9 moves 5.26/5.26 -> 5.35/5.34 N -- so the effort limit is NOT what caps the grip.
+# The gripper's implicit PD is: the jaws are commanded to 0.0 (closed) and stall on the brick
+# at ~7.6 mm, so stiffness 1000 N/m x 7.6 mm = ~7.6 N of demand against the observed
+# ~7.0 N peak. A ~7 N demand never reached the old 20 N cap, let alone this one.
+#
+# So the lever on a grip that will not survive the lift is `stiffness` below, not this
+# constant. 40 N is kept as headroom for that change rather than reverted, because the value
+# it replaced was itself an unmeasured placeholder and neither number is load-bearing today.
+# Revisit against the real gripper's rated holding force during MA-series bring-up rather
+# than treating either as a property of the hardware.
+GRIPPER_EFFORT_LIMIT_N = 40.0
 
 MAKER_ARM_CFG = ArticulationCfg(
     class_type=GravityCompensatedArticulation,
