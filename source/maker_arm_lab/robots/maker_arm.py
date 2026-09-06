@@ -36,6 +36,48 @@ _GAINS = _profile.arm_gains(_profile.load_profile())
 # a strengthened-looking constant that changes no outcome does not.
 GRIPPER_EFFORT_LIMIT_N = 20.0
 
+# Rotor inertia reflected through the gearbox, for all six arm joints.
+#
+# Still UNVERIFIED (spec section 7) -- this is NOT a measured rotor inertia. It is a
+# stability floor, and it is an arrival re-measurement item: the real value is the motor's
+# rotor inertia times the gear ratio squared, which the vendor URDF omits and the SDK does
+# not publish. Replace it on MA-series bring-up, and see below for what your measured value
+# has to clear.
+#
+# WHAT IT IS PROTECTING AGAINST. The URDF omits armature and this was 0.0, which is not a
+# neutral default. Measured by /tmp/d3_decompose.py on 2026-09-06 (Task D3 part 14),
+# instrumented inside MITModeActuator.compute so the law's three terms are read at the
+# instant it differences them: at 0.0 every wrist joint sat in a period-2 limit cycle at the
+# Nyquist frequency of the 120 Hz physics rate. link_005_joint reversed sign EVERY substep
+# at +-4.2 rad/s with the applied torque flipping +-9 N.m, while its mean position error was
+# 0.25 mrad -- the torque was almost entirely the damping term reacting to its own last step.
+#
+# That is the explicit-damping instability, and the bound is
+#
+#     kd * dt / M_eff  >=  2
+#
+# It bites the WRIST joints specifically, because they carry almost no link inertia, so
+# M_eff is whatever armature says -- and it said zero. For kd = 2.0 (link_005..007) at
+# dt = 1/120 the marginal value is kd*dt/2 = 0.00833, and the measured bracket straddles it:
+#
+#     armature 0.005  -> still chatters (qd -3.52 / +4.28 / -4.03 / +3.38 rad/s per substep)
+#     armature 0.01   -> clean          (qd ~0.004 rad/s)
+#     armature 0.02   -> clean, shipped (~2.4x margin on the 0.00833 bound)
+#
+# A MEASURED VALUE MUST STILL CLEAR THAT BOUND. If the real rotor inertia comes in below
+# ~0.0083 for the wrist joints, raising the physics rate or lowering kd is the fix -- do not
+# simply keep this number, because too LARGE an armature is its own sim/real divergence: it
+# silently adds fictitious inertia and slows dynamics the real arm would not have.
+#
+# What it cost while it was 0.0, which is why every number in this task's parts 11-13 should
+# be re-read: the chatter aliased every post-hoc sample from ArticulationData, because
+# computed_torque comes from the last of decimation=4 substeps while joint_pos and joint_vel
+# are read back after that substep integrated -- opposite phases of a period-2 oscillation.
+# With armature set, the same decomposition closes to 5e-6 N.m and max |qd| across the arm
+# falls from 4.99 to 0.002 rad/s.
+ARM_ARMATURE_UNVERIFIED = True
+ARM_ARMATURE = 0.02
+
 MAKER_ARM_CFG = ArticulationCfg(
     class_type=GravityCompensatedArticulation,
     spawn=sim_utils.UsdFileCfg(
@@ -49,32 +91,7 @@ MAKER_ARM_CFG = ArticulationCfg(
             joint_names_expr=[ARM_JOINT_REGEX],
             stiffness={name: g["kp"] for name, g in _GAINS.items()},
             damping={name: g["kd"] for name, g in _GAINS.items()},
-            # Rotor inertia reflected through the gearbox. The URDF omits it and this was
-            # 0.0, which is not a neutral default: it is the reason the arm was buzzing.
-            #
-            # Measured by /tmp/d3_decompose.py on 2026-09-06 (Task D3 part 14), instrumented
-            # INSIDE MITModeActuator.compute so the law's three terms are read at the
-            # instant it differences them. At armature 0.0 every wrist joint sat in a
-            # period-2 limit cycle at the Nyquist frequency of the 120 Hz physics rate:
-            # link_005_joint reversed sign EVERY substep at +-4.2 rad/s with the applied
-            # torque flipping +-9 N.m, while its mean position error was 0.25 mrad. The
-            # torque was almost entirely the damping term reacting to its own last step.
-            #
-            # That is the classic explicit-damping instability, kd*dt/M_eff >= 2. It bites
-            # the wrist joints because they carry almost no inertia, so M_eff is whatever
-            # armature says -- and it said zero. The predicted marginal value for kd=2.0 at
-            # dt=1/120 is kd*dt/2 = 0.00833, and the measured bracket is exactly that:
-            # 0.005 still chatters, 0.01 is clean. 0.02 is the round value at ~2.4x margin.
-            #
-            # What it cost while it was 0.0, and this is the part that matters: the chatter
-            # aliased every post-hoc reading taken from ArticulationData, because
-            # computed_torque comes from the last of decimation=4 substeps while joint_pos
-            # and joint_vel are read back after that substep integrated -- opposite phases of
-            # a period-2 oscillation. Task D3 part 12's "-0.9 N.m at 0.16 rad of error, which
-            # fits no PD law" was that artifact, not a physical anomaly; with armature set,
-            # the same decomposition closes to 5e-6 N.m and the arm is genuinely at rest
-            # (max |qd| 4.99 -> 0.002 rad/s).
-            armature=0.02,
+            armature=ARM_ARMATURE,
             gravity_compensation=True,
             tau_ff_limit={name: g["tau_max"] for name, g in _GAINS.items()},
             effort_limit={name: g["effort_limit"] for name, g in _GAINS.items()},
