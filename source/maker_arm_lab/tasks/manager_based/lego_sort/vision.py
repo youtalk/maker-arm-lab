@@ -10,11 +10,13 @@ the batched-env path; the cfg fields are identical, ``TiledCameraCfg`` only
 swaps ``class_type``).
 
 The overhead camera pose is derived from `core.layout` (unchanged). The wrist
-camera pose IS a placeholder: the vendor URDF has no camera frame and the SDK
-publishes no optics, so `robots.frames.WRIST_CAM_POS_IN_WRIST` /
-`WRIST_CAM_ROT_IN_WRIST` / `WRIST_FOV_DEG` are marked UNVERIFIED and are
-re-measured when the arm arrives (spec section 7). The mount body is
-`link_007` (the wrist); the offset is expressed in its frame.
+camera pose is still UNVERIFIED -- the vendor URDF has no camera frame and the
+SDK publishes no optics, so `robots.frames.WRIST_CAM_POS_IN_WRIST` /
+`WRIST_CAM_ROT_IN_WRIST` / `WRIST_FOV_DEG` are re-measured when the arm arrives
+(spec section 7) -- but it is no longer a free guess. It is bounded by a hardware
+fact, that the camera sits IN FRONT OF the wrist motor, and by the arm's own
+measured collision geometry; `robots.frames` carries that derivation. The mount
+body is `link_007` (the wrist); the offset is expressed in its frame.
 """
 
 import math
@@ -53,16 +55,34 @@ def _focal_for_fov(fov_deg: float) -> float:
 # --------------------------------------------------------------------------
 # Wrist camera
 # --------------------------------------------------------------------------
-# UNVERIFIED placeholder (spec section 7): the vendor URDF has no camera
-# frame of its own, and the vendor SDK publishes no optics, so there is no
-# asset-derived pose to mount on the way the overhead camera derives from
-# core.layout below. WRIST_LINK (link_007, the wrist) is the mount body;
-# robots.frames.WRIST_CAM_POS_IN_WRIST / WRIST_CAM_ROT_IN_WRIST are a guessed
-# offset in that body's frame, and WRIST_FOV_DEG just below is a guessed
-# field of view. All three are re-measured when the physical arm arrives.
+# UNVERIFIED (spec section 7): the vendor URDF has no camera frame of its own,
+# and the vendor SDK publishes no optics, so there is no asset-derived pose to
+# mount on the way the overhead camera derives from core.layout below, and the
+# real lens is an arrival re-measurement item. WRIST_LINK (link_007, the wrist)
+# is the mount body; robots.frames.WRIST_CAM_POS_IN_WRIST /
+# WRIST_CAM_ROT_IN_WRIST are the offset in that body's frame, derived there
+# from the measured motor/jaw collision bounds and from the hardware fact that
+# the camera is mounted in front of the wrist motor (front face z = -0.1128 in
+# link_007). What follows is the FOV half of that derivation.
 _WRIST_CAM_PRIM_PATH = "{ENV_REGEX_NS}/Robot/" + WRIST_LINK + "/wrist_cam"
 
-WRIST_FOV_DEG = 70.0  # UNVERIFIED placeholder (spec section 7)
+# Kept at 70.0 deliberately, not left alone. The mount clears the jaws by
+# offsetting 30 mm along +x over a 51.6 mm standoff to grasp_center
+# (robots.frames), and at that range the FOV decides whether the jaws frame the
+# grasp point or swallow it. Rendered and measured at the home pose:
+#
+#     FOV     fully-open jaw tip      what enters the top of the frame
+#     70     u = 218.0 of 224        nothing but desk (top ray lands at x=0.062)
+#     85     u = 193.0               the arm's own base (top ray lands at x=-0.004)
+#    100     u = 174.3               ditto, further behind the base (x=-0.097)
+#
+# So 70 deg is very nearly the exact FOV that puts the fully-open jaw tips ON
+# the frame edge: wider pulls the jaws inward, shrinks the brick, and starts
+# imaging the robot's own column instead of the workspace. It is wide enough for
+# the workspace -- at the home pose the frame covers 0.32 m of desk at 0.23 m
+# range, spanning core.layout's scatter band. Widening was the obvious lever for
+# the short standoff and it was tested and rejected on the renders, not assumed.
+WRIST_FOV_DEG = 70.0
 
 _WRIST_CAM = TiledCameraCfg(
     prim_path=_WRIST_CAM_PRIM_PATH,
@@ -73,8 +93,9 @@ _WRIST_CAM = TiledCameraCfg(
     spawn=sim_utils.PinholeCameraCfg(
         focal_length=_focal_for_fov(WRIST_FOV_DEG),
         horizontal_aperture=_APERTURE,
-        # Near plane kept small since the guessed mount sits close to the
-        # jaws by construction (WRIST_CAM_POS_IN_WRIST, itself UNVERIFIED).
+        # Near plane kept small: the mount sits 51.6 mm from grasp_center and
+        # closer still to the jaw bodies, because clearing the wrist motor
+        # leaves it no more standoff than that (WRIST_CAM_POS_IN_WRIST).
         # Far plane covers the whole desk from any arm pose.
         clipping_range=(0.01, 5.0),
     ),

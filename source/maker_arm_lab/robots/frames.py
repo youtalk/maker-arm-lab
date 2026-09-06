@@ -153,14 +153,56 @@ def quat_wxyz_from_axes(right, down, forward) -> tuple[float, float, float, floa
     return (w, x, y, z)
 
 
-# Wrist camera placeholder (spec section 3.3): 50 mm off the tool axis on -x, 60 mm toward
-# the jaws, looking along the tool axis pitched 20 deg toward +x so the jaws stay in frame.
-# The URDF has no camera frame and the SDK publishes no optics, so this pose is UNVERIFIED
-# and is an arrival re-measurement item (spec section 7). Image "right" is the jaw axis (+y).
+# Wrist camera (spec section 3.3). Still UNVERIFIED -- the URDF has no camera frame and the
+# SDK publishes no optics, so the lens and the exact bracket remain an arrival
+# re-measurement item (spec section 7) -- but no longer a free guess: the pose below is
+# BOUNDED BY A HARDWARE FACT. On the physical arm the camera is mounted IN FRONT OF the
+# wrist motor, distal to it on the jaw side (owner, 2026-09-06), so the motor cannot appear
+# in the image at all. Image "right" is the jaw axis (+y), image "down" is +x.
+#
+# What that fact costs, measured off the vendored collision STLs (each scaled by 0.001 and
+# transformed by its collision origin xyz="-0.1854333 0 0.02930628"
+# rpy="1.5707963 -1.3962634 -3.1415927"), in link_007 coordinates:
+#
+#     body                     x                   y                   z
+#     link_007 (motor)  -0.0310 .. +0.1079  -0.0830 .. +0.0830  -0.1128 .. -0.0258
+#     gripper_left      -0.0625 .. +0.0200   0.0000 .. +0.0302  -0.2038 .. -0.1032
+#     gripper_right     -0.0625 .. +0.0205  -0.0303 ..  0.0000  -0.2038 .. -0.1058
+#     grasp_center            0                   0                -0.169639
+#
+# The motor's FRONT FACE is z = -0.1128, so the lens must sit below it. The first
+# placeholder here, (-0.05, 0, -0.06) with a 20 deg pitch toward +x, was 52 mm INSIDE that
+# z span -- level with the motor, not in front of it -- and the +x pitch then aimed the
+# lens back across the housing. Rendered, that filled the lower half to two thirds of every
+# wrist frame with motor and never showed the grasp point (/tmp/camcheck/base_*.png).
+#
+# Three constraints pin the replacement, and they fight each other:
+#   1. z < -0.1128, so the whole of link_007 is behind the lens.
+#   2. Clear of the jaw sweep. The jaws slide +-0.0524125 along y, so the volume they
+#      travel through is x -0.0625..+0.0205, |y| <= 0.0826, z -0.2038..-0.1032 -- wider in
+#      y than the static AABBs above. Only an offset in x clears them at EVERY opening.
+#   3. grasp_center (0, 0, -0.169639) centred in frame, jaw tips at the edges.
+# (1) and (2) cannot both be met near the tool axis: the only part of link_007 reaching
+# z = -0.1128 is the jaw rail, a narrow strip at |x| <= 0.0068 spanning the full y width,
+# and directly in front of that strip is inside the jaw sweep. So the camera sits off-axis
+# in x -- the axis perpendicular to jaw travel, which also puts the jaws left and right in
+# the image instead of across it.
+#
+# x = +0.030 keeps 9.5 mm of bracket clearance past the jaws' +x extreme (+0.0205);
+# z = -0.118 is 5 mm in front of the motor face. That leaves only 51.6 mm of standoff to
+# grasp_center for a 30 mm lateral offset, so the view is unavoidably oblique -- that is the
+# trade-off this pose makes, and it is forced, not chosen. A 30.0 deg pitch toward -x is
+# what buys the obliquity back: the optical axis then crosses x = 0 at z = -0.1700, i.e.
+# 0.4 mm from grasp_center, which renders at pixel (112.0, 111.6) of 224x224.
+#
+# The motor is out of frame by construction, not by luck: every ray of the 70 deg frustum
+# (vision.WRIST_FOV_DEG) tilted 30 deg off -z still descends, and link_007 lies entirely
+# above the lens. Rendered check: 0.0% of 1428 sampled link_007 collision vertices project
+# into the frame, against 18.4% for the old pose (/tmp/camcheck/final_*.png).
 WRIST_CAM_UNVERIFIED = True
-WRIST_CAM_POS_IN_WRIST: tuple[float, float, float] = (-0.05, 0.0, -0.06)
-_PITCH = math.radians(20.0)
-_FORWARD = (math.sin(_PITCH), 0.0, -math.cos(_PITCH))
+WRIST_CAM_POS_IN_WRIST: tuple[float, float, float] = (0.030, 0.0, -0.118)
+_PITCH = math.radians(30.0)  # toward -x, i.e. back toward the tool axis, NOT across the motor
+_FORWARD = (-math.sin(_PITCH), 0.0, -math.cos(_PITCH))
 _RIGHT = (0.0, 1.0, 0.0)
-_DOWN = (math.cos(_PITCH), 0.0, math.sin(_PITCH))  # forward x right
+_DOWN = (math.cos(_PITCH), 0.0, -math.sin(_PITCH))  # forward x right
 WRIST_CAM_ROT_IN_WRIST = quat_wxyz_from_axes(_RIGHT, _DOWN, _FORWARD)
