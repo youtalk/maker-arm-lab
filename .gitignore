@@ -1,5 +1,20 @@
-.venv/
+# Python
 __pycache__/
-*.egg-info/
+*.py[cod]
+.venv/
 .pytest_cache/
 .ruff_cache/
+lerobot_stack/.venv/
+
+# Generated assets and sim outputs
+assets/usd/
+outputs/
+*.hdf5
+
+# wandb run directories, if a run is ever started from inside the repo
+wandb/
+
+# Editors / worktrees
+.idea/
+.vscode/
+.worktrees/

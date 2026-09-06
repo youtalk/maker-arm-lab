@@ -1,8 +1,10 @@
 [project]
 name = "maker-arm-lab"
 version = "0.1.0"
-description = "Research layer for the MakerMods Maker Arm: identification, model learning, gated milestone experiments"
-requires-python = ">=3.12"
+description = "Research layer for the MakerMods Maker Arm: simulation, identification, model learning, gated milestone experiments"
+# Floor is 3.11, not 3.12: a later task installs this project editable into the
+# Isaac Sim virtualenv, which is pinned to Python 3.11.15, while CPU tests run on 3.12.
+requires-python = ">=3.11"
 dependencies = []
 
 [build-system]
@@ -13,11 +15,36 @@ build-backend = "hatchling.build"
 packages = ["source/maker_arm_lab"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = [
+    "h5py>=3.11",
+    "maker-arm-rs",
+    "numpy>=1.26",
+    "pytest>=8",
+    "ruff>=0.8",
+    "torch>=2.7",
+]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+maker-arm-rs = { git = "https://github.com/youtalk/maker-arm-rs", subdirectory = "bindings/maker-arm-py", rev = "7e7046b8efb72ee62db370b8843ddfb9d1560838" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["source"]
 
 [tool.ruff]
 line-length = 100
-src = ["source", "tests"]
+target-version = "py312"
+src = ["source", "tests", "scripts", "lerobot_stack"]
+# Vendored third-party files are not ours to lint or format.
+extend-exclude = ["assets/vendor"]
+
+[tool.ruff.lint]
+# F403 is off in ruff's default set; the mdp package re-exports isaaclab's mdp with a
+# checked `# noqa: F403`, so enable it explicitly (same reasoning as openyam-lab).
+extend-select = ["F403"]
