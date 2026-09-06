@@ -62,10 +62,12 @@ def test_feedforward_adds_gravity():
 def test_gravity_feedforward_sign_holds_a_static_joint():
     """kp=kd=0, no user feed-forward: the law must reproduce G(q) exactly.
 
-    This pins the sign convention that the empirical GPU check verifies on the
-    real articulation: G(q) is the torque that must be APPLIED to hold the
-    arm, so it enters tau_ff positively. Flipping it here would command
-    -G(q), i.e. twice the gravity torque in the falling direction.
+    This pins the sign convention that an empirical GPU check verified on
+    openyam-lab's real articulation: G(q) is the torque that must be APPLIED
+    to hold the arm, so it enters tau_ff positively. Flipping it here would
+    command -G(q), i.e. twice the gravity torque in the falling direction.
+    The same validation is still owed on the Maker Arm, once its
+    gravity-compensation path is exercised on GPU.
     """
     tau_gravity = torch.tensor([5.3, -1.2])
     tau = mit_mode_torque(

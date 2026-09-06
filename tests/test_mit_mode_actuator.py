@@ -231,7 +231,9 @@ def test_supplied_targets_take_the_ordinary_pd_path():
 
 def test_computed_effort_is_unclamped_and_applied_effort_is_clamped():
     """``computed_torque - applied_torque`` is how every saturation figure in
-    this milestone was measured. Collapsing the two makes it read zero forever.
+    openyam-lab's milestones was measured; the Maker Arm is expected to reuse
+    the same idiom once its own saturation is measured. Collapsing the two
+    makes it read zero forever.
     """
     actuator = _actuator()
     joint_pos, joint_vel = _state()

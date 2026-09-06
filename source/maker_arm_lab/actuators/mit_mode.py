@@ -53,8 +53,8 @@ class MITModeActuator(IdealPDActuator):
        whole point of this class -- it is what the CAN backend of spec
        section 5.2 will be -- and it is pinned by
        tests/test_mit_mode_actuator.py so it cannot rot while unused.
-    2. computed_effort is the *unclamped* demand, applied_effort is the
-       clamped one actually sent to the simulation -- matching
+    2. computed_effort is the demand *unclamped by effort_limit*, applied_effort
+       is the clamped one actually sent to the simulation -- matching
        IdealPDActuator's own convention (`computed_effort = raw PD+ff sum`,
        `applied_effort = self._clip_effort(computed_effort)`). mit_mode_torque
        itself only returns the clamped value (its clamp is a pinned interface
@@ -64,7 +64,13 @@ class MITModeActuator(IdealPDActuator):
        saturation via `computed_torque - applied_torque` depends on this
        distinction; collapsing both to the clamped value (as an earlier
        version of this method did) makes that difference read as zero
-       forever.
+       forever. computed_effort is NOT unclamped with respect to tau_ff_limit,
+       though: that cap is applied to tau_ff before this sum, so tau_ff_limit
+       saturation is already baked into computed_effort and is invisible to
+       the `computed_effort - applied_effort` idiom -- only effort_limit
+       saturation shows up there. (tests/test_mit_mode_actuator.py's tau_ff_limit
+       test asserts computed_effort == 4.0, not the uncapped 5.5, for exactly
+       this reason.)
 
     Gravity compensation enters through :attr:`gravity_torque`, which this
     class only ever *reads*. Filling it is the job of
