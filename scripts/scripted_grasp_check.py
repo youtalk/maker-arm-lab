@@ -381,7 +381,7 @@ class GraspRig:
             command = torch.clamp(self.trim.command(q), self.q_lower, self.q_upper)
             action[0, :6] = command.to(device=self.device, dtype=torch.float32)
             self.env.step(action)
-            self.trim.update(q, self.q_arm())
+            self.trim.update(q, self.q_arm(), saturated=self.joint_saturated())
 
     def hold(self, steps: int, gripper: float) -> None:
         """Hold wherever the arm currently is, for ``steps`` control steps."""
@@ -502,6 +502,17 @@ class GraspRig:
         lo = self.robot.data.joint_pos_limits[0, self.arm_joint_ids, 0]
         hi = self.robot.data.joint_pos_limits[0, self.arm_joint_ids, 1]
         return torch.minimum(q - lo, hi - q).tolist()
+
+    def joint_saturated(self) -> torch.Tensor:
+        """Per arm joint: is the actuator's effort limit binding this step?
+
+        ``computed_torque`` is the PD+feed-forward demand before the clamp and
+        ``applied_torque`` is what reached the sim, so they differ exactly when the effort
+        limit bound (see actuators/mit_mode.py). Feeds ``JointTrim``'s anti-windup.
+        """
+        computed = self.robot.data.computed_torque[0, self.arm_joint_ids]
+        applied = self.robot.data.applied_torque[0, self.arm_joint_ids]
+        return ((computed - applied).abs() > 1e-6).cpu()
 
     def joint_tracking_error(self, q_des) -> float:
         """Worst joint's distance from the commanded target (rad)."""

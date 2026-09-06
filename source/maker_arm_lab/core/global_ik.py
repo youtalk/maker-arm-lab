@@ -530,10 +530,37 @@ class JointTrim:
         """The biased target to send for `desired`."""
         return torch.as_tensor(desired, dtype=torch.float64).reshape(ARM_DOF) + self.value
 
-    def update(self, desired: torch.Tensor, measured: torch.Tensor) -> None:
-        """Fold one control step's tracking error into the trim."""
+    def update(
+        self,
+        desired: torch.Tensor,
+        measured: torch.Tensor,
+        saturated: torch.Tensor | None = None,
+    ) -> None:
+        """Fold one control step's tracking error into the trim.
+
+        `saturated` is a per-joint mask of actuators whose effort limit is currently
+        binding. On those joints the trim does NOT integrate, which is the anti-windup this
+        class was missing.
+
+        Why it matters, measured on this arm (Task D3 part 11): a trim at its 0.35 rad clamp
+        on `link_003_joint`, whose kp is 150, commands 150 x 0.35 = 52.5 N.m into a joint
+        rated 17 N.m. The traces showed exactly that -- 56 to 79 N.m of demand past the
+        rating, sustained, and vanishing entirely when the trim was disabled. A saturated
+        joint does not move in response to more command, so integrating against it only
+        inflates a demand that is already being refused, and the integrator then has to
+        unwind before the joint can track again.
+
+        Clamping alone is not anti-windup: it bounds the trim's magnitude but still lets it
+        run all the way to the bound while the joint is immobile. Conditional integration
+        is what stops it.
+        """
         desired = torch.as_tensor(desired, dtype=torch.float64).reshape(ARM_DOF)
         measured = torch.as_tensor(measured, dtype=torch.float64).reshape(ARM_DOF)
-        self.value = torch.clamp(
+        stepped = torch.clamp(
             self.value + self.gain * (desired - measured), -self.limit, self.limit
         )
+        if saturated is None:
+            self.value = stepped
+            return
+        saturated = torch.as_tensor(saturated, dtype=torch.bool).reshape(ARM_DOF)
+        self.value = torch.where(saturated, self.value, stepped)
