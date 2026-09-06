@@ -35,32 +35,73 @@ SCATTER_Y = (-0.18, 0.18)
 SPAWN_Z = 0.02
 MIN_SEPARATION = 0.06
 
-# Corner clip: bricks never spawn further than this from the arm's base axis.
+# Reach clip: bricks never spawn further than this from the arm's base axis.
 #
-# The box above has corners the arm provably cannot pick. Task D3 mapped the shipping
-# 6-DOF grasp task -- position, tilt magnitude, world +x lean, jaw heading square to the
-# brick -- over 35 brick positions x 6 jaw headings, with a 64-restart confirmation before
-# any cell was called infeasible, and found the failure is a RADIUS bound, not a box bound:
+# THIS IS A TRACKING BOUND, NOT AN IK BOUND, and the difference is the whole story. The
+# question is not "can the solver find a pose for this brick" -- it can, well past this
+# radius -- but "does the arm actually ARRIVE there". Those two answers differ, and only the
+# second one produces a usable episode.
 #
-#     every fully-covered position                 inside radius 0.3199 m
-#     a live gate trial's UNREACHABLE brick        radius 0.3257 m
-#     the fully-uncovered corner (0.290, +-0.180)  radius 0.3413 m, 0 of 6 headings
+# History, because the number moved a long way and the reason matters. Ruling D3-13 first set
+# this to 0.315 from an IK-FEASIBILITY sweep: 35 brick positions x 6 jaw headings with a
+# 64-restart confirmation, which found every fully-covered position inside radius 0.3199 m,
+# a live gate trial's UNREACHABLE brick at 0.3257 m, and the fully-uncovered corner
+# (0.290, +-0.180) at 0.3413 m solving 0 of 6 headings. That bound is real and still true --
+# it is just not the binding one.
 #
-# Trimming SCATTER_X or SCATTER_Y ALONE drops none of it, because the bad corner shares its
-# x with covered positions and its |y| with covered positions -- it is the combination that
-# is out of reach. Trimming a box until its worst corner is inside 0.32 m costs 15.9 % of the
-# band (via x) or 25.0 % (via y). The radius clip costs 2.87 %, measured by uniform sampling.
+# Ruling D3-19 replaced it with the MEASURED TRACKABLE radius, after one trial failed
+# identically in four consecutive gates (parts 10, 11, 13, 14): the arm stopped ~13 mm high
+# on a brick at radius 0.3082 m, inside the old clip, with the IK reporting
+# worst_pos_resid=0.00um and the path reporting continuous. Driving real descends on a grid
+# of (azimuth, radius) -- /tmp/d3_radius.py, Task D3 part 15 -- gives the boundary:
 #
-# 0.315 sits below the last verified-good radius (0.3199) with a centimetre of margin to the
-# measured-infeasible one (0.3257). It is applied as an unconditional invariant in
-# `mdp.events._sample_brick_poses`, NOT as a preference like MIN_SEPARATION: a brick outside
-# the arm's reach is a permanent failure floor in any dataset generated from this scene,
-# whereas two bricks slightly too close is merely awkward.
+#     azimuth     0.250  0.265  0.275  0.280  0.290  0.295  0.300  0.3082  0.315
+#       -54 deg   clean   -- IK infeasible beyond here --
+#       -40 deg   clean  clean         clean         clean
+#       -25 deg   clean  clean         clean         clean
+#     -19.8 deg                clean         clean         clean   FAIL    FAIL
+#       -10 deg   clean  clean         clean         FAIL
+#         0 deg          clean  clean         FAIL           FAIL    FAIL    FAIL
+#        10 deg   clean  clean         clean         FAIL
+#        25 deg   clean  clean         clean         clean
+#        30 deg                                             clean   clean   IK infeasible
+#        40 deg   clean  clean         clean         clean
+#
+# READ THAT SHAPE BEFORE CHANGING THIS NUMBER. The failures are a WEDGE around azimuth 0,
+# not an annulus: the arm tracks to 0.3082 m at +30 deg and to at least 0.295 m at
+# |azimuth| >= 25 deg, but gives out between 0.280 and 0.290 near azimuth 0. A radius bound
+# cannot express a wedge, so this clip pays for the whole annulus to remove one -- 19.18 % of
+# band area against the 2.87 % the old 0.315 cost, both by uniform sampling over the box.
+# 0.280 is the largest radius every measured azimuth tracked to.
+#
+# The cheaper-looking 0.300 (7.48 %) was considered and REJECTED as fitted to the gate: it
+# excludes the one failing trial and nothing else, leaving the measured failures at
+# |azimuth| <= 10 deg inside the band for D5 and D7 to inherit. The extra cost buys the
+# difference between a number fitted to the arm and one fitted to a test.
+#
+# Two causes were measured and EXCLUDED, so do not re-derive them: static torque (G(q) at the
+# descend pose never exceeds ~52 % of the binding joint's motor rating anywhere in the band,
+# including outside the old clip) and the joint trim (at trim_gain 0.0 the failures persist
+# unchanged AND nothing saturates, so the saturation seen with the trim on was a consequence
+# of it chasing an unreachable pose, not the cause). The wedge's mechanism is still unnamed;
+# the likeliest shape of it is that global_ik's lean azimuth is pinned to 0.0, so the descend
+# pose leans in a fixed WORLD direction regardless of where the brick is, which would make
+# the geometry genuinely asymmetric in azimuth. That is untested.
+#
+# Applied as an unconditional invariant in `mdp.events._sample_brick_poses`, NOT as a
+# preference like MIN_SEPARATION. A brick the arm cannot track is worse than a permanent
+# failure floor: the success-only export discards the failed episode, so datagen spends time
+# manufacturing waste AND biases what survives toward the easy part of the band.
+#
+# Does NOT affect the overhead camera. `overhead_view_region` frames SCATTER_X / SCATTER_Y,
+# the declared box, not this radius -- so the frame still covers corners bricks no longer
+# spawn in, which is correct and is why the framing tests are unchanged.
 #
 # Spec section 5 item 5 permits this ("the Maker Arm's reach ... may require moving the bins
 # and the scatter band. The oracle state machine is not modified; only layout numbers are").
-# `scripts/release_envelope_check.py` (Task D4) re-validates it with its own reach sweep.
-SCATTER_MAX_RADIUS = 0.315
+# `scripts/release_envelope_check.py` (Task D4) re-validates it with its own reach sweep, and
+# should sweep TRACKING, not just IK, or it will re-derive the bound that was not binding.
+SCATTER_MAX_RADIUS = 0.280
 
 # Largest brick x at which the arm can complete a top-down pick -- i.e. descend
 # to the desk with the tool axis on world -z.
