@@ -29,7 +29,7 @@ def test_write_zup_urdf_adds_mount_and_absolute_meshes(tmp_path):
     assert mount.find("parent").get("link") == "mount_link"
     assert mount.find("child").get("link") == "base_link"
     rpy = [float(v) for v in mount.find("origin").get("rpy").split()]
-    assert rpy == pytest.approx([math.pi / 2, 0.0, 0.0])
+    assert rpy == pytest.approx([math.pi / 2, 0.0, math.pi])
     # The arm chain is untouched.
     assert joints["link_002_joint"].find("origin").get("rpy") == "-1.5707963 0 0"
     for mesh in root.iter("mesh"):

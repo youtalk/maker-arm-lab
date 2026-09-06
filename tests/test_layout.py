@@ -1,0 +1,218 @@
+"""Tests for maker_arm_lab.core.layout (CPU-only)."""
+
+import itertools
+import math
+import random
+
+import pytest
+import torch
+
+from maker_arm_lab.core import layout
+
+
+def test_bin_centers_within_reach():
+    # OpenYAM reach is ~0.61 m from the base at the origin; require margin.
+    centers = layout.bin_interior_centers()
+    assert centers.shape == (4, 3)
+    assert (centers.norm(dim=-1) <= 0.58).all()
+
+
+def test_bins_disjoint():
+    centers = layout.bin_interior_centers()
+    outer = layout.BIN_INTERIOR[0] + 2 * layout.BIN_WALL
+    for i, j in itertools.combinations(range(4), 2):
+        assert (centers[i] - centers[j]).norm() >= outer
+
+
+def test_scatter_zone_reachable_and_off_shelf():
+    for x in layout.SCATTER_X:
+        for y in layout.SCATTER_Y:
+            assert (x * x + y * y) ** 0.5 <= 0.50
+    shelf_min_x = layout.SHELF_POS[0] - layout.SHELF_SIZE[0] / 2
+    assert layout.SCATTER_X[1] < shelf_min_x
+
+
+def test_scatter_zone_is_pickable():
+    """Every brick the scene can spawn must also be reachable by a top-down pick.
+
+    These two bounds were independent until the OpenYAM LegoSort layout's Task 10
+    (openyam-lab M1), and disagreed there: bricks spawned out to x = 0.36 while a
+    vertical-tool descent was blocked past the OpenYAM-measured 0.290-0.292
+    boundary (``layout.TOP_DOWN_X_LIMIT``) by that arm's link_4 fouling the bins'
+    back walls, so roughly a third of the zone spawned bricks that could never be
+    picked. Both bounds are carried over unchanged onto the Maker Arm, not yet
+    re-measured on it; `scripts/release_envelope_check.py` (Task D4) is the
+    authority for that. Tying them together here is what stops the spawn bound
+    being widened later without re-validating the pick limit.
+    """
+    assert layout.SCATTER_X[1] <= layout.TOP_DOWN_X_LIMIT
+    assert layout.SCATTER_X[0] < layout.SCATTER_X[1]
+
+
+def test_default_brick_grid_stays_inside_the_scatter_zone():
+    """The pre-first-reset grid in LegoSortEnvCfg.__post_init__ must not spill out.
+
+    It insets four columns by ``margin`` at each end of SCATTER_X and spaces them
+    evenly, so the grid follows the zone when it moves. Duplicated here rather
+    than imported because the env cfg module needs isaaclab, which the CPU test
+    suite deliberately does not.
+    """
+    margin = 0.02
+    spacing = (layout.SCATTER_X[1] - layout.SCATTER_X[0] - 2 * margin) / 3
+    assert spacing > layout.BRICK_SIZE[0], "columns must clear an unrotated brick's length"
+    worst_x = layout.SCATTER_X[0] + margin + spacing * 3
+    assert worst_x <= layout.SCATTER_X[1] + 1e-9
+    yaw_half_diagonal = ((layout.BRICK_SIZE[0] / 2) ** 2 + (layout.BRICK_SIZE[1] / 2) ** 2) ** 0.5
+    shelf_min_x = layout.SHELF_POS[0] - layout.SHELF_SIZE[0] / 2
+    assert worst_x + yaw_half_diagonal < shelf_min_x
+
+
+def test_bin_static_boxes_count_and_naming():
+    boxes = layout.bin_static_boxes()
+    assert len(boxes) == 20  # 4 bins x (floor + 4 walls)
+    names = [name for name, _, _ in boxes]
+    assert len(set(names)) == 20
+    for color in layout.BRICK_COLOR_ORDER:
+        assert sum(color in name for name in names) == 5
+
+
+def test_brick_dims_match_spec():
+    assert layout.BRICK_SIZE == (0.0318, 0.0158, 0.0096)
+    assert set(layout.BRICK_RGBA) == set(layout.BRICK_COLOR_ORDER)
+
+
+def _corners_visible(pose, fov_deg):
+    """Every corner of the region, at its own height, inside a straight-down frame.
+
+    Coverage is re-derived here from the camera height and the field of view
+    rather than calling back into layout, so the test is an independent check
+    and not a restatement of the implementation. A downward camera at height
+    ``h`` sees a half-width of ``(h - z) * tan(fov/2)`` on the plane ``z``.
+    """
+    (x_min, x_max), (y_min, y_max), z_top = layout.overhead_view_region()
+    cam_x, cam_y, cam_z = pose
+    for z in (0.0, z_top):
+        half_width = (cam_z - z) * math.tan(math.radians(fov_deg) / 2.0)
+        for x, y in itertools.product((x_min, x_max), (y_min, y_max)):
+            if abs(x - cam_x) > half_width or abs(y - cam_y) > half_width:
+                return False
+    return True
+
+
+def test_overhead_view_region_contains_scatter_zone_and_bins():
+    (x_min, x_max), (y_min, y_max), z_top = layout.overhead_view_region()
+    # the scatter zone, widened by a brick's worst-case yaw half-diagonal
+    half_diag = 0.5 * math.hypot(layout.BRICK_SIZE[0], layout.BRICK_SIZE[1])
+    assert x_min <= layout.SCATTER_X[0] - half_diag
+    assert x_max >= layout.SCATTER_X[1] + half_diag
+    assert y_min <= layout.SCATTER_Y[0] - half_diag
+    assert y_max >= layout.SCATTER_Y[1] + half_diag
+    # the bins' OUTER boxes, not their interiors
+    centers = layout.bin_interior_centers()
+    half = layout.bin_half_extents()
+    assert x_min <= float(centers[:, 0].min()) - float(half[0]) - layout.BIN_WALL
+    assert x_max >= float(centers[:, 0].max()) + float(half[0]) + layout.BIN_WALL
+    assert y_min <= float(centers[:, 1].min()) - float(half[1]) - layout.BIN_WALL
+    assert y_max >= float(centers[:, 1].max()) + float(half[1]) + layout.BIN_WALL
+    # z_top is the bin rim, the tallest thing that must stay in frame
+    assert z_top == pytest.approx(float((centers[:, 2] + half[2]).max()))
+
+
+def test_overhead_view_pose_frames_the_region():
+    fov = 60.0
+    pose = layout.overhead_view_pose(fov)
+    assert _corners_visible(pose, fov)
+    # centred on the region, and above its tallest feature
+    (x_min, x_max), (y_min, y_max), z_top = layout.overhead_view_region()
+    assert pose[0] == pytest.approx(0.5 * (x_min + x_max))
+    assert pose[1] == pytest.approx(0.5 * (y_min + y_max))
+    assert pose[2] > z_top
+
+
+def test_overhead_view_pose_solves_at_the_rim_not_the_desk():
+    """Regression guard on the one non-obvious step in the derivation.
+
+    A downward camera magnifies whatever is closest to it, so a height chosen
+    to cover the region at the DESK leaves the bin rims' outer corners outside
+    the frame. Assert the shipped pose is strictly higher than that naive one,
+    and that the naive one genuinely fails -- otherwise this test would pass
+    for a derivation that had the bug.
+    """
+    fov = 60.0
+    (x_min, x_max), (y_min, y_max), _ = layout.overhead_view_region()
+    half_span = 0.5 * max(x_max - x_min, y_max - y_min) * 1.15
+    naive_z = half_span / math.tan(math.radians(fov) / 2.0)  # solved at z = 0
+    pose = layout.overhead_view_pose(fov)
+    assert pose[2] > naive_z
+    assert not _corners_visible((pose[0], pose[1], naive_z), fov)
+
+
+@pytest.mark.parametrize(
+    "scatter_x, scatter_y",
+    [
+        ((0.13, 0.29), (-0.18, 0.18)),  # today's zone
+        ((0.18, 0.36), (-0.18, 0.18)),  # the pre-Task-10 zone
+        ((0.05, 0.20), (-0.30, 0.30)),  # wider than the bins in y
+        ((0.10, 0.55), (-0.05, 0.05)),  # longer than the bins in x
+    ],
+)
+def test_overhead_view_pose_follows_a_moved_scatter_zone(monkeypatch, scatter_x, scatter_y):
+    """The whole reason the pose is derived rather than hard-coded.
+
+    SCATTER_X has already moved once (Task 10, (0.18, 0.36) -> (0.13, 0.29)).
+    If it moves again the camera must re-frame itself, and nothing but a CPU
+    test can catch a regression here -- the alternative is a GPU render
+    silently losing half the zone.
+    """
+    monkeypatch.setattr(layout, "SCATTER_X", scatter_x)
+    monkeypatch.setattr(layout, "SCATTER_Y", scatter_y)
+    fov = 60.0
+    assert _corners_visible(layout.overhead_view_pose(fov), fov)
+
+
+def test_default_bin_layout_reproduces_current_constants():
+    bl = layout.DEFAULT_BIN_LAYOUT
+    assert layout.bin_front_x(bl) == pytest.approx(0.39)
+    assert layout.top_down_x_limit(bl) == pytest.approx(layout.TOP_DOWN_X_LIMIT)
+    assert layout.scatter_x(bl) == pytest.approx(layout.SCATTER_X)
+    # No-arg calls must keep returning exactly what M1 built.
+    assert torch.equal(layout.bin_interior_centers(), layout.bin_interior_centers(bl))
+    assert layout.bin_static_boxes() == layout.bin_static_boxes(bl)
+
+
+def test_bin_centers_follow_the_color_permutation():
+    # Swap red (0) and green (3): red occupies the rightmost slot, green the leftmost.
+    bl = layout.BinLayout(bin_x=0.44, bin_ys=(-0.21, -0.07, 0.07, 0.21), slot_colors=(3, 1, 2, 0))
+    centers = layout.bin_interior_centers(bl)
+    assert centers[0, 1] == pytest.approx(0.21)  # red -> slot 3 (y = +0.21)
+    assert centers[3, 1] == pytest.approx(-0.21)  # green -> slot 0 (y = -0.21)
+    boxes = {name: center for name, center, _ in layout.bin_static_boxes(bl)}
+    assert boxes["bin_red_floor"][1] == pytest.approx(0.21)
+    assert boxes["bin_green_floor"][1] == pytest.approx(-0.21)
+
+
+def test_scatter_zone_tracks_jittered_bins():
+    near = layout.BinLayout(
+        bin_x=0.43, bin_ys=layout.DEFAULT_BIN_LAYOUT.bin_ys, slot_colors=(0, 1, 2, 3)
+    )
+    far = layout.BinLayout(
+        bin_x=0.46, bin_ys=layout.DEFAULT_BIN_LAYOUT.bin_ys, slot_colors=(0, 1, 2, 3)
+    )
+    assert layout.top_down_x_limit(near) == pytest.approx(0.28)
+    assert layout.top_down_x_limit(far) == pytest.approx(0.31)
+    for bl in (near, far):
+        lo, hi = layout.scatter_x(bl)
+        assert hi == pytest.approx(layout.top_down_x_limit(bl))
+        assert lo == pytest.approx(layout.SCATTER_X[0])
+
+
+def test_sample_bin_layout_respects_envelope_and_separation():
+    rng = random.Random(0)
+    for _ in range(200):
+        bl = layout.sample_bin_layout(rng, slot_colors=(2, 0, 3, 1))
+        assert bl.slot_colors == (2, 0, 3, 1)
+        assert -0.01 - 1e-9 <= bl.bin_x - 0.44 <= 0.02 + 1e-9
+        for y0, dy in zip(bl.bin_ys, layout.DEFAULT_BIN_LAYOUT.bin_ys):
+            assert abs(y0 - dy) <= 0.02 + 1e-9
+        gaps = [b - a for a, b in zip(bl.bin_ys, bl.bin_ys[1:])]
+        assert min(gaps) >= 0.11
