@@ -30,9 +30,15 @@ GRIPPER_OPEN_POS = 0.0524125
 
 # Kinematic sign relations the jaw-heading fold (core.oracle.fold_jaw_heading) depends on:
 # d(jaw_yaw)/d(wrist roll) and d(jaw_yaw)/d(base yaw), each +-1.
-# INITIAL: the OpenYAM relation; measured by scripts/scripted_grasp_check.py --signs (Task D3).
-WRIST_ROLL_SIGN = -1.0
-BASE_YAW_SIGN = 1.0
+# Measured by scripted_grasp_check.py --signs on 2026-09-05: d_yaw_per_roll=0.9478,
+# d_yaw_per_base=-0.9999962, at the home pose (tool axis 23.85 deg off world -z).
+# BOTH flip relative to the OpenYAM relation this started from (roll -1, base +1). The base
+# one is exact and independently derivable: link_002_joint's URDF axis is (0, 0, -1) in a
+# frame rotated rpy=(-pi/2, 0, 0) from base_link, which assets.urdf_prep.MOUNT_RPY then
+# carries onto world -z, so d(jaw_yaw)/d(joint1) = -1 identically, at any pose. The roll
+# magnitude is below 1 because the wrist roll axis is off vertical by the home tool angle.
+WRIST_ROLL_SIGN = 1.0
+BASE_YAW_SIGN = -1.0
 
 # Home pose, URDF joint coordinates. Tool axis within 30 deg of world -z, grasp_center over
 # the scatter zone at the achievable height of roughly 0.16-0.19 m above the desk -- the
