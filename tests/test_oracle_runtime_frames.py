@@ -79,3 +79,45 @@ def test_canonical_to_body_maps_maker_arm_axes():
         rot_body @ torch.tensor(frames.TOOL_AXIS_BODY), torch.tensor([0.0, 0.0, -1.0]), atol=1e-6
     )
     assert torch.det(rot_body) == pytest.approx(1.0)
+
+
+def test_canonical_to_body_recovers_body_rotation_for_a_nonsymmetric_frame():
+    """Regression for a transpose bug: with a symmetric involutive C (this arm's actual
+    CANON_IN_BODY, C == C.T), `rot_canon @ C` and `rot_canon @ C.T` are indistinguishable, so
+    the tests above cannot catch the formula being transposed. A cyclic permutation matrix is
+    a proper rotation (det +1) that is NOT symmetric, so it tells the two formulas apart.
+
+    Ground truth is built independently of `canonical_to_body`, the way the derivation does:
+    pick an arbitrary body rotation ``R_body``, and for a ``canon_in_body`` whose row i is
+    canonical axis i in body coordinates, place ``R_body @ canon_in_body[i]`` in column i of
+    ``rot_canon`` (canonical axis i expressed in world coordinates). `canonical_to_body` must
+    then recover ``R_body`` from ``rot_canon`` and ``canon_in_body`` alone.
+    """
+    # Cyclic permutation of the axes: proper rotation (det +1), not symmetric (C != C.T).
+    canon_in_body = torch.tensor(
+        [
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+        ]
+    )
+    assert torch.det(canon_in_body) == pytest.approx(1.0)
+    assert not torch.allclose(canon_in_body, canon_in_body.T)
+
+    # An arbitrary proper rotation standing in for the true (unknown) body attitude: 90 degrees
+    # about world z. Also not symmetric, so it is a real check, not another coincidence.
+    body_rotation = torch.tensor(
+        [
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+
+    rot_canon = torch.stack(
+        [body_rotation @ canon_in_body[i] for i in range(3)],
+        dim=1,
+    )
+
+    recovered = _rt.canonical_to_body(rot_canon, canon_in_body)
+    assert torch.allclose(recovered, body_rotation, atol=1e-6)

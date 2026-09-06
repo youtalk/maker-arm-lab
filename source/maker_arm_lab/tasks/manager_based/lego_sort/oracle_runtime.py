@@ -125,9 +125,18 @@ WATCHDOG_TRIP_STRIKES = 30
 
 def canonical_to_body(rot_canon: torch.Tensor, canon_in_body: torch.Tensor) -> torch.Tensor:
     """World rotation of the tool BODY given the desired world rotation of the canonical
-    tool frame (columns: jaw axis, y, tool axis) and CANON_IN_BODY (rows: those axes in
-    body coordinates): R_world_body = R_world_canon @ C^T."""
-    return rot_canon @ canon_in_body.T
+    tool frame (columns: jaw axis, y, tool axis) and CANON_IN_BODY = C, whose rows are the
+    canonical axes (jaw axis, y, tool axis) expressed in body coordinates -- so C[i] is
+    canonical axis i written in body coordinates.
+
+    R_world_canon's column i is canonical axis i in world coordinates, which is the body
+    rotation applied to that same axis expressed in body coordinates:
+    R_world_canon[:, i] = R_world_body @ C[i] for every i, i.e.
+    R_world_canon = R_world_body @ C^T. Right-multiplying both sides by C (C is a proper
+    rotation, so C^T @ C = I) gives R_world_body = R_world_canon @ C -- a plain
+    right-multiply by C, no transpose.
+    """
+    return rot_canon @ canon_in_body
 
 
 class OracleRig:
