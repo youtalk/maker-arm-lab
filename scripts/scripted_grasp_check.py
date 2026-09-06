@@ -2,53 +2,64 @@
 
 The physics proof this milestone hangs on (design spec section 5.3): real-size 31.8 x 15.8
 x 9.6 mm bricks must rest stably on the desk, and the arm must be able to pick one up
-autonomously through the ``MakerArm-LegoSort-IK-Rel-v0`` action space -- the same action
-space ``oracle_runtime.py`` drives.
+autonomously.
+
+**Approved spec deviation (owner, 2026-09-06).** Spec section 5 item 4 specifies this check
+runs on ``MakerArm-LegoSort-IK-Rel-v0``. It now runs on ``MakerArm-LegoSort-v0``, the
+joint-position action space, and computes joint targets with ``core.global_ik`` instead of
+asking Isaac Lab's differential IK to discover them. **The dataset contract is unaffected**:
+``mdp/recorders.py`` always recorded the post-IK joint-position target, so the action stream
+is the same quantity in the same units either way -- what changed is how the oracle produces
+them. This must be carried into the F1 milestone report.
+
+Why the change. Task D3 measured Isaac Lab's differential IK to be correctly wired -- the
+Jacobian row it slices is `grasp_center`'s own to within 0.077 mm/rad of a kinematic finite
+difference -- and nonetheless unable to do this job: as a damped-least-squares local solver
+with no joint-limit avoidance it spends ``link_005_joint``'s 0.30 rad of home margin instead
+of turning the base, jams against the stop, and every later phase then servos a dead
+mechanism. Over six rounds it never once closed the jaws on a brick; ``finger_total_force``
+and ``peak_brick_force`` read 0.00/0.00 N throughout. The global solver carries the brick.
 
 Run:  $ISAACLAB_PATH/isaaclab.sh -p scripts/scripted_grasp_check.py --headless
 
-Every phase that MOVES the arm is driven through the 7-element IK-Rel action
-``[dx dy dz drx dry drz gripper]``, never by writing joint targets. Phase 0 is the
-one exception and does not move the arm at all -- see ``GraspRig.hold_home_joints``
-for the measurements that forced it:
+Every phase, including the settle, is driven through the 7-element joint-position action
+``[q1..q6 gripper]``. Nothing is written around the action pipeline, so ``arm_action`` still
+passes every target through maker_arm_rs's clamp.
 
-  0. settle   240 steps with the arm's joint targets pinned at HOME_JOINT_POS,
-              jaws open. Gates rest stability: every brick's drift over the second
-              half of the settle must be < 5 mm and its final speed < 0.01 m/s.
-  1. align    swing the base until the tool faces the target brick, at unchanged
-              reach and height. See GraspRig.base_swing_pose for why this is its
-              own phase and not part of the hover.
-  2. hover    servo the PICK point (see below) to 0.12 m above the target brick,
-              with the tool axis at frames.GRASP_TILT_DEG off world -z and the jaws
-              squared to the brick.
-  3. descend  servo the PICK point onto the brick and slightly past it, so the
-              jaw plates come to rest on the desk. Stops on stall.
-  4. close    45 steps of gripper action -1.0, holding the descend's pose
-              closed-loop.
-  5. lift     servo the PICK point 0.10 m straight up, jaws still closed.
+  0. settle   240 steps with the arm's joint targets pinned at HOME_JOINT_POS, jaws open.
+              Gates rest stability: every brick's drift over the second half of the settle
+              must be < 5 mm and its final speed < 0.01 m/s.
+  1. hover    approach home -> the globally-solved hover pose, interpolated IN JOINT SPACE
+              (continuous by construction, no IK branch to flip), putting the PICK point
+              0.12 m above the target brick with the tool axis at frames.GRASP_TILT_DEG off
+              world -z, leaning toward world +x, and the jaws squared to the brick.
+  2. descend  a straight Cartesian line down to the brick, every waypoint solved globally
+              with continuity enforced (|dq| <= global_ik.MAX_WAYPOINT_STEP per waypoint).
+  3. close    gripper action -1.0 while holding the descend's joint solution.
+  4. lift     a straight Cartesian line 0.10 m up, jaws closed, same waypoint treatment.
 
-Success needs the brick to have risen more than 0.05 m and finished within
-0.03 m (horizontally) of the tool axis, AND to be genuinely pinched: the jaws
-stalled short of ``GRIPPER_CLOSED_POS``, and equal, non-trivial force between
-each finger and that brick specifically (filtered per-pair contact sensors, so
-the desk press cannot be mistaken for a grip). Position alone cannot separate a
-pinch from the entrainment the brief's amendment 3 warns about -- fingers fully
-closed with the brick cammed into the jaw pocket rises just as far.
+Success needs the brick to have risen more than 0.05 m and finished within 0.03 m
+(horizontally) of the tool axis, AND to be genuinely pinched: the jaws stalled short of
+``GRIPPER_CLOSED_POS``, and equal, non-trivial force between each finger and that brick
+specifically (filtered per-pair contact sensors, so the desk press cannot be mistaken for a
+grip). Position alone cannot separate a pinch from the entrainment the brief's amendment 3
+warns about -- fingers fully closed with the brick cammed into the jaw pocket rises just as
+far.
 
-This script also has two measurement-only modes, run before any grasp trial and
-gated on their own criteria (Task D3):
+This script also has two measurement-only modes, run before any grasp trial and gated on
+their own criteria (Task D3):
 
-* ``--gripper_probe`` holds the gripper open then closed and reports the raw
-  joint travel, to catch an inverted jaw before anything downstream trusts the
-  open/close convention.
-* ``--signs`` nudges the base and wrist-roll joints one at a time and reads the
-  jaw heading before/after, to measure ``WRIST_ROLL_SIGN`` / ``BASE_YAW_SIGN``
+* ``--gripper_probe`` holds the gripper open then closed and reports the raw joint travel,
+  to catch an inverted jaw before anything downstream trusts the open/close convention.
+* ``--signs`` nudges the base and wrist-roll joints one at a time and reads the jaw heading
+  before/after, to measure ``WRIST_ROLL_SIGN`` / ``BASE_YAW_SIGN``
   (``core.oracle.fold_jaw_heading``'s kinematic sign relations) on this arm.
 
 Same AppLauncher/``os._exit()`` skeleton as smoke_lego_sort.py and smoke_usd.py.
 """
 
 import argparse
+import itertools
 import json
 import math
 import os
@@ -58,7 +69,7 @@ import traceback
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--task", type=str, default="MakerArm-LegoSort-IK-Rel-v0")
+parser.add_argument("--task", type=str, default="MakerArm-LegoSort-v0")
 parser.add_argument("--num_bricks", type=int, default=6)
 parser.add_argument(
     "--brick",
@@ -84,8 +95,8 @@ parser.add_argument(
     "--descend_clearance",
     type=float,
     default=None,
-    help="Override DESCEND_CLEARANCE (m). Negative commands the jaw plates into "
-    "the desk; the desk is what stops them. See the constant's comment.",
+    help="Override DESCEND_CLEARANCE (m): extra depth the descend commands the pick "
+    "point past the brick centre. See the constant's comment.",
 )
 parser.add_argument(
     "--pick_offset_z",
@@ -93,6 +104,18 @@ parser.add_argument(
     default=None,
     help="Override PICK_OFFSET_MEASURED[2] (m), along the tool axis. Used to probe "
     "the offset before it is measured and pinned in robots/frames.py.",
+)
+parser.add_argument(
+    "--descend_tilt_deg",
+    type=float,
+    default=None,
+    help="Tool tilt (deg off world -z) at the DESCEND and LIFT, defaulting to "
+    "frames.GRASP_TILT_DEG, i.e. unchanged behaviour. Exists because Task D3 part 9 "
+    "measured that at the hover tilt the jaw plates foul the desk at EVERY pick offset: "
+    "the plate box is 82.5 mm long across the tool axis, so a 20 deg tilt drops its far "
+    "corner 21 mm below the axial tip. frames.GRASP_TILT_DEG's own comment records that "
+    "the tilt is a cost of the APPROACH only and that the arm can be level at the brick to "
+    "within 0.42 deg at every radius, which is what makes a level descend available.",
 )
 parser.add_argument(
     "--gripper_probe",
@@ -123,12 +146,17 @@ from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 import maker_arm_lab.tasks  # noqa: F401 -- registers MakerArm-* envs
 from maker_arm_lab.core import layout
 from maker_arm_lab.core import profile as _profile
-from maker_arm_lab.core.action_scale import IK_SCALE, IK_SCALE_ROT
-from maker_arm_lab.core.attitude_hold import AttitudeHold
 from maker_arm_lab.core.checker import PINCH_MIN_FORCE
+from maker_arm_lab.core.global_ik import (
+    MAX_WAYPOINT_STEP,
+    GlobalIK,
+    GraspTarget,
+    JointTrim,
+    tool_axis_world,
+    wrap_to_pi,
+)
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_NAMES,
-    CANON_IN_BODY,
     DESCEND_CLEARANCE_MEASURED,
     GRASP_TILT_RAD,
     GRIPPER_CLOSED_POS,
@@ -139,7 +167,6 @@ from maker_arm_lab.robots.frames import (
     TOOL_AXIS_BODY,
     TOOL_BODY,
 )
-from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import canonical_to_body
 
 # --- Geometry, measured on THIS arm by this script (Task D3) -----------------
 #
@@ -150,51 +177,53 @@ from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import canonical
 # silently drift apart. The mechanism (not this arm's numbers) carried over from
 # OpenYAM: the jaws reach some distance past the tool frame along the tool axis,
 # so a brick resting on the desk is gripped near the jaw tips rather than at the
-# tool frame itself, and the descend has to be commanded close to (or slightly
-# past) the desk to reach it. ``--pick_offset_z``/``--descend_clearance`` exist so
-# this script can probe both before they are pinned.
+# tool frame itself. ``--pick_offset_z``/``--descend_clearance`` exist so this
+# script can probe both before they are pinned.
 PICK_OFFSET = (
     PICK_OFFSET_MEASURED[0],
     PICK_OFFSET_MEASURED[1],
     args.pick_offset_z if args.pick_offset_z is not None else PICK_OFFSET_MEASURED[2],
 )
-DESCEND_CLEARANCE = DESCEND_CLEARANCE_MEASURED
+DESCEND_CLEARANCE = (
+    DESCEND_CLEARANCE_MEASURED if args.descend_clearance is None else args.descend_clearance
+)
 TOP_DOWN_X_LIMIT = layout.TOP_DOWN_X_LIMIT
 
-# --- Servo gains -------------------------------------------------------------
-# Position: the brief's ``clamp(0.8 * err, -0.01, 0.01)`` expressed against the
-# action scale -- IK_SCALE's 0.002 m/unit means the 0.01 m clamp is already
-# beyond full deflection, so this is exactly ``clip(0.8 * err / IK_SCALE, +-1)``,
-# the same closed-loop Cartesian driver OpenYAM's Task 9 used to reach all four
-# bins.
-SERVO_GAIN_POS = 0.8
-# Rotation: handed to AttitudeHold rather than applied with an inline clamp. The
-# clamp this replaced was componentwise -- ``clamp(gain * err / scale, +-1)`` --
-# which preserves each component's sign but NOT the correction's axis once any
-# component saturates. Measured on OpenYAM's own seeds before that change (not
-# yet re-measured on the Maker Arm): the hover phase started 13.6-25.0 deg off
-# target and saturated the rotation channel on 29% (trial 0) and 97% (trial 1)
-# of its steps, during which the commanded rotation sat up to 39-44 deg away
-# from the true error axis. It still converged, because a componentwise clamp
-# keeps every sign right so the loop is always heading roughly the correct way
-# and the 58-84 step hover budget absorbed the detour -- but that margin was
-# accidental. AttitudeHold bounds the demand by magnitude instead, which keeps
-# the axis. OpenYAM's A/B at identical seeds: 2/2 CARRIED either way, rise
-# 98.43/98.44 -> 98.43/98.45 mm, grip 8.78/8.69 -> 8.78/8.70 N.
-SERVO_GAIN_ROT = 1.0
-# Per-step pick-point motion below which the descend is treated as blocked.
-# Full deflection commands 2 mm/step and delivers ~1.7 mm on OpenYAM's arm, so
-# 0.05 mm is ~3% of a moving step -- comfortably below any real motion and
-# above solver noise.
-STALL_EPS = 5e-5
-# Rotation error (rad) below which a servo phase counts as converged.
-ROT_CONVERGED = 0.02
-# Per-joint torque gap (N*m) above which computed_torque != applied_torque
-# counts as saturated for this step (core.mit_law's effort_limit clamp). See
-# actuators/mit_mode.py's docstring point 2 for why this idiom, rather than
-# comparing applied_torque to effort_limit directly, is the one that survives
-# tau_ff_limit clamping being invisible to it.
-SATURATION_EPS = 1e-6
+# --- The grasp attitude ------------------------------------------------------
+# The tool leans toward world +x. This is the convention that ships, and Task D3 part 8
+# measured that it is also the one to keep: freeing the lean azimuth (a 5-DOF relaxation)
+# more than doubles the band-wide worst-case joint margin and covers band corners this
+# convention cannot reach, but it GRASPS WORSE -- 4/9 against 8/9 -- because a redundancy
+# resolved for joint margin picks poses that are bad for the grasp. See core.global_ik.
+LEAN_AZIMUTH = 0.0
+# The descend/lift tilt. Defaults to the hover tilt, so the shipping behaviour is unchanged
+# unless --descend_tilt_deg is passed.
+DESCEND_TILT_RAD = (
+    GRASP_TILT_RAD if args.descend_tilt_deg is None else math.radians(args.descend_tilt_deg)
+)
+
+# --- Path resolution ---------------------------------------------------------
+# The approach is joint-space, so its waypoint count only sets how gently the arm leaves
+# home. The Cartesian legs are what the continuity constraint acts on: 24 waypoints over a
+# ~0.09-0.12 m leg is ~4-5 mm apiece, and the Jacobian columns measured in part 7 are
+# 0.23-0.27 m/rad, so the geometry needs ~0.02 rad per waypoint against the 0.12 rad cap.
+APPROACH_WAYPOINTS = 40
+# 40, not 24, because the descend now sweeps the TILT as well as the position: it rotates
+# the tool from the hover tilt to the descend tilt over the same leg, and that rotation adds
+# joint motion per waypoint on top of the translation. Measured at 24 waypoints with a level
+# descend: "NO CONTINUOUS SOLUTION along the descend" on 1 trial in 4, where the combined
+# translate-and-rotate step could not fit inside the 0.12 rad continuity cap.
+CARTESIAN_WAYPOINTS = 40
+# Restart spread for the ONE solve that has no previous waypoint to seed from. Deliberately
+# larger than core.global_ik's default: this solve is also what decides whether a brick is
+# reported UNREACHABLE, and calling a pose infeasible because the search was thin would
+# blame the layout for the solver's own weakness. Measured at ~1.7 s, once per trial.
+HOVER_RESTARTS = 64
+# Control steps held at each intermediate waypoint, and at the end of a leg. The end-of-leg
+# hold must outlast the trim's ~33-step time constant several times over or the trim's own
+# transient is reported as a pose error; see core.global_ik.JointTrim.
+WAYPOINT_STEPS = 4
+SETTLE_AT_WAYPOINT = 200
 
 # --- Acceptance thresholds ---------------------------------------------------
 REST_MAX_DRIFT = 0.005  # m, over the second half of the settle
@@ -210,10 +239,6 @@ LIFT_MAX_XY_ERROR = 0.03  # m
 # that do separate them are (a) the jaws stalling short of their target because
 # something is between them and (b) equal force on both fingers.
 #
-# Thresholds carried over from OpenYAM's LegoSort checker, set well between a
-# real pinch and a fully-closed empty jaw on THAT arm; this script's own
-# trials (Task D3) are what re-validates them on the Maker Arm's gripper.
-#
 # PINCH_MIN_FORCE (2.0 N on the weaker finger) is imported from core.checker
 # rather than redefined here: this measurement set is where the OpenYAM number
 # came from, but the oracle's runtime check and the eval harness's strict grasp
@@ -222,29 +247,59 @@ LIFT_MAX_XY_ERROR = 0.03  # m
 PINCH_MIN_STALL = 0.003  # m short of GRIPPER_CLOSED_POS
 PINCH_MAX_ASYMMETRY = 0.30  # |L - R| / max(L, R)
 
-# The align phase only has to get the base round; the hover that follows closes the
-# remaining position error, so converging it tightly would just burn steps.
-ALIGN_STOP_POS = 0.02
+# Jaw-plate extent relative to grasp_center, on the three axes that gate a grasp, read off
+# the vendored collision geometry quoted in robots/frames.py's wrist-camera block. These are
+# what the descend telemetry prints against, so a miss says WHICH way it missed.
+#   jaw travel (body y): the jaws close along +-GRIPPER_OPEN_POS, so a brick further out
+#     than half the opening minus half its own width can never be reached by a closing jaw.
+#   lateral (body x): the plate face spans -0.0625 .. +0.0200; past that the brick is off
+#     the end of the plate.
+#   tool axis: the plate reaches 0.0342 m past grasp_center and 0.0664 m back toward the
+#     wrist. A desk-resting brick necessarily sits near the far end of that span, because
+#     the tips have to clear the desk -- which is exactly what PICK_OFFSET_MEASURED pins.
+JAW_CLOSURE_BUDGET = GRIPPER_OPEN_POS - 0.5 * layout.BRICK_SIZE[1]
+JAW_PLATE_LATERAL = (-0.0625, 0.0200)
+JAW_TIP_BEYOND_GRASP_CENTER = 0.0342
+JAW_PLATE_BEHIND_GRASP_CENTER = 0.0664
+# The eight corners of the jaw-plate collision box in grasp_center coordinates, from the
+# same vendored AABBs. Used to report how far the plates actually are from the desk, which
+# the axial tip alone does not tell you.
+JAW_PLATE_CORNERS = torch.tensor(
+    [
+        [x, y, z]
+        for x in JAW_PLATE_LATERAL
+        for y in (-0.0303, 0.0302)
+        for z in (-JAW_TIP_BEYOND_GRASP_CENTER, JAW_PLATE_BEHIND_GRASP_CENTER)
+    ],
+    dtype=torch.float32,
+)
+
 HOVER_HEIGHT = 0.12
 LIFT_HEIGHT = 0.10
-MAX_PHASE_STEPS = 300
-CLOSE_STEPS = 45
+CLOSE_STEPS = 60
 GRIPPER_OPEN_ACTION = 1.0
 GRIPPER_CLOSE_ACTION = -1.0
 
-
-def _wrap_to_pi(angle: float) -> float:
-    return (angle + math.pi) % (2 * math.pi) - math.pi
+# Parking spots for the bricks the x-sweep is not picking: on the desk (which
+# spans x in [-0.15, 0.75], y in [-0.45, 0.45]), beyond the shelf and well clear
+# of the arm. Parking them off the desk edge instead would leave them free-falling
+# for the rest of the run, which silently makes the neighbour-disturbance figure
+# meaningless.
+PARK_X = 0.66
+PARK_Y0 = -0.40
+PARK_Y_SPACING = 0.04
 
 
 class GraspRig:
-    """Everything the phases need: frames, the servo, and telemetry."""
+    """Everything the phases need: frames, the global solver, the driver, and telemetry."""
 
     def __init__(self, env, sensor):
         self.env = env
         self.sensor = sensor
         self.robot = env.scene["robot"]
         self.device = env.device
+        self.ik = GlobalIK()
+        self.trim = JointTrim()
         self.tool = self.robot.find_bodies(TOOL_BODY)[0][0]
         # Joint order resolved from the articulation, never hard-coded (the
         # pattern check_success_teleport.py established on OpenYAM).
@@ -252,14 +307,14 @@ class GraspRig:
         self.arm_joint_ids = self.robot.find_joints(list(ARM_JOINT_NAMES))[0]
         self.action_dim = env.action_manager.total_action_dim
         if self.action_dim != 7:
-            raise RuntimeError(f"expected a 7-element IK-Rel action, got {self.action_dim}")
+            raise RuntimeError(f"expected a 7-element joint-position action, got {self.action_dim}")
         self.pick_offset = torch.tensor(PICK_OFFSET, device=self.device).unsqueeze(0)
         self.ex = torch.tensor([[1.0, 0.0, 0.0]], device=self.device)
         self.jaw_axis = torch.tensor([JAW_AXIS_BODY], device=self.device)
         self.tool_axis = torch.tensor([TOOL_AXIS_BODY], device=self.device)
-        self.canon_in_body = torch.tensor(CANON_IN_BODY, device=self.device)
-        self.scale_pos = torch.tensor(IK_SCALE[0:3], device=self.device)
-        self.scale_rot = torch.tensor(IK_SCALE_ROT, device=self.device)
+        limits = self.robot.data.joint_pos_limits[0, self.arm_joint_ids]
+        self.q_lower = limits[:, 0].double().cpu()
+        self.q_upper = limits[:, 1].double().cpu()
         self.finger_sensor_ids = (
             [sensor.body_names.index("gripper_left"), sensor.body_names.index("gripper_right")]
             if sensor is not None
@@ -267,13 +322,43 @@ class GraspRig:
         )
         # Filtered per-pair sensors: finger <-> brick force only. The unfiltered
         # net_forces_w above sums EVERY contact on the finger body, so during the
-        # descend it is dominated by the desk press and cannot be read as a grip
+        # descend it is dominated by any desk press and cannot be read as a grip
         # force. The two instruments are kept separate and labelled separately.
         self.brick_pair = (
             (env.scene["finger_left_brick"], env.scene["finger_right_brick"])
             if sensor is not None
             else None
         )
+
+    # -- driving, always through the action pipeline ---------------------------
+    def drive(self, q, gripper: float, steps: int = 1) -> None:
+        """Command an absolute joint target for ``steps`` control steps.
+
+        ``self.trim`` biases the command to cancel the arm's open-loop droop; see
+        ``core.global_ik.JointTrim`` for what that droop actually is (effort-limit
+        saturation on link_004_joint and link_007_joint, NOT missing gravity
+        compensation -- the actuator does apply G(q) and Task D3 part 9 confirmed it
+        was active). The bias is joint space only, so this still drives the action
+        pipeline and maker_arm_rs's clamp.
+        """
+        q = torch.as_tensor(q, dtype=torch.float64).reshape(6).cpu()
+        action = torch.zeros(1, 7, device=self.device)
+        action[0, 6] = gripper
+        for _ in range(steps):
+            command = torch.clamp(self.trim.command(q), self.q_lower, self.q_upper)
+            action[0, :6] = command.to(device=self.device, dtype=torch.float32)
+            self.env.step(action)
+            self.trim.update(q, self.q_arm())
+
+    def hold(self, steps: int, gripper: float) -> None:
+        """Hold wherever the arm currently is, for ``steps`` control steps."""
+        self.drive(self.q_arm(), gripper, steps)
+
+    def q_arm(self) -> torch.Tensor:
+        return self.robot.data.joint_pos[0, self.arm_joint_ids].double().cpu()
+
+    def home_q(self) -> torch.Tensor:
+        return self.robot.data.default_joint_pos[0, self.arm_joint_ids].double().cpu()
 
     # -- frames ---------------------------------------------------------------
     def tool_quat(self):
@@ -297,199 +382,63 @@ class GraspRig:
     def brick_pos(self, index: int):
         return self.env.scene[f"brick_{index}"].data.root_pos_w[0]
 
-    def desired_quat(self, brick_index: int):
-        """Tool axis GRASP_TILT_DEG off world -z toward +x, jaws square across the brick.
+    def jaw_heading_target(self, brick_index: int) -> float:
+        """World heading the jaw axis must take to be square across the brick.
 
-        A jaw is symmetric under a half turn, so the target heading is folded to
-        whichever of ``yaw`` / ``yaw + pi`` the wrist is already nearer -- joint6
-        only spans +-2.0944 rad and the far representative can be unreachable.
+        A jaw is symmetric under a half turn, so the target is folded to whichever of
+        ``yaw`` / ``yaw + pi`` the wrist is already nearer -- ``link_007_joint`` only spans
+        +-2.7 rad and the far representative can be unreachable.
 
-        The tilt is the arm-specific part. The OpenYAM port asked for the tool exactly
-        on world -z; this arm cannot hold that over the scatter band at hover height
-        (measured minimum 18.42 deg at the band's outer corners, ``frames.GRASP_TILT_DEG``),
-        and demanding it jams link_005_joint against its stop. What the grasp actually
-        needs is the jaw axis square to the brick -- which is unchanged here -- plus
-        the tool pointed down enough to reach the brick between the jaws.
-
-        Built identically to ``oracle_runtime.OracleRig.desired_quat``, deliberately:
-        this script is the oracle's rehearsal, so if the two disagreed about grasp
-        attitude the oracle would fail in a way that looks like an oracle bug. Both
-        assemble the frame in canonical tool coordinates (x = jaw axis, z = tool axis)
-        and convert to the ``grasp_center`` body frame with ``canonical_to_body``.
+        This replaces the quaternion ``desired_quat`` the differential IK needed. The solver
+        constrains the jaw heading directly, so the attitude is now three scalars (tilt
+        magnitude, lean azimuth, jaw heading) rather than a rotation matrix that has to be
+        assembled and re-orthogonalised. ``oracle_runtime`` must build its target the same
+        way, through the same ``core.global_ik``, so the check and the oracle cannot drift
+        apart -- this task has already paid once for exactly that.
         """
         brick_quat = self.env.scene[f"brick_{brick_index}"].data.root_quat_w[0].unsqueeze(0)
         long_axis = math_utils.quat_apply(brick_quat, self.ex)[0]
         want = math.atan2(long_axis[1].item(), long_axis[0].item()) + math.pi / 2
-        want += math.pi * round(_wrap_to_pi(self.jaw_yaw() - want) / math.pi)
-        c, s = math.cos(want), math.sin(want)
-        # A rotation matrix's columns are the world-frame images of the CANONICAL axes,
-        # so build it from the axes as columns via torch.stack(dim=1):
-        #   canon x -> (c, s, 0)                     the jaw closing direction
-        #   canon z -> (sin tilt, 0, -cos tilt)      the tool axis, leaning toward +x
-        #   canon y -> z x x, normalized             keeps the frame right-handed
-        # then re-orthogonalize x against the tilted z (a no-op at tilt = 0, which is
-        # why this reduces exactly to the OpenYAM closed form when the tilt is zero).
-        tilt = GRASP_TILT_RAD
-        axis_x = torch.tensor([c, s, 0.0], device=self.device)
-        axis_z = torch.tensor([math.sin(tilt), 0.0, -math.cos(tilt)], device=self.device)
-        axis_y = torch.cross(axis_z, axis_x, dim=-1)
-        axis_y = axis_y / axis_y.norm()
-        axis_x = torch.cross(axis_y, axis_z, dim=-1)
-        rot = torch.stack([axis_x, axis_y, axis_z], dim=1)
-        rot = canonical_to_body(rot, self.canon_in_body)
-        return math_utils.quat_from_matrix(rot.unsqueeze(0))
+        return want + math.pi * round(wrap_to_pi(self.jaw_yaw() - want) / math.pi)
 
-    def rot_error(self, quat_des):
-        """World-frame axis-angle rotation taking the current tool frame to ``quat_des``.
+    def grasp_center_for(self, pick_point, tilt: float) -> tuple[float, float, float]:
+        """The `grasp_center` position that puts the PICK point at ``pick_point``.
 
-        ``apply_delta_pose`` pre-multiplies the commanded rotation onto the
-        measured orientation, so the delta this action term expects is expressed
-        in the world frame, not the tool frame.
+        ``pick_point = grasp_center + R @ PICK_OFFSET`` and ``PICK_OFFSET`` lies on the tool
+        axis, so ``R @ (0, 0, pz) = -pz * a`` with ``a`` the world tool axis. The attitude is
+        commanded, not measured, so ``a`` is known before the solve.
         """
-        err = math_utils.quat_mul(quat_des, math_utils.quat_conjugate(self.tool_quat()))
-        return math_utils.axis_angle_from_quat(err)[0]
+        axis = tool_axis_world(tilt, LEAN_AZIMUTH)
+        point = torch.as_tensor(pick_point, dtype=torch.float64).reshape(3).cpu()
+        return tuple(float(v) for v in point + PICK_OFFSET[2] * axis)
 
-    # -- actuation ------------------------------------------------------------
-    def step(self, delta_pos, delta_rot, gripper: float):
-        action = torch.zeros(1, self.action_dim, device=self.device)
-        action[0, 0:3] = delta_pos
-        action[0, 3:6] = delta_rot
-        action[0, 6] = gripper
-        self.env.step(action)
-
-    def hold(self, steps: int, gripper: float):
-        """Send a zero position/rotation delta for ``steps`` steps.
-
-        This does NOT hold the arm's pose -- ``hold_pose`` does. Use this only where
-        the arm's pose is not what is being measured (the gripper-direction probe).
-        """
-        zero = torch.zeros(3, device=self.device)
-        for _ in range(steps):
-            self.step(zero, zero, gripper)
-
-    def capture_pose(self):
-        """``(pick point, tool quaternion)`` right now, to hand to ``hold_pose``."""
-        return (self.pick_point()[0].clone(), self.tool_quat()[0].clone())
-
-    def base_swing_pose(self, brick_pos):
-        """The current pose, yawed about the base until it faces ``brick_pos``.
-
-        The approach's first move, and it exists because of how the differential IK
-        fails without it. Isaac Lab's DLS controller is a greedy local solver with no
-        joint-limit avoidance, and a null-space term is unavailable on this arm (6
-        joints against a 6-DOF task leaves the null space generically empty). Asked to
-        go straight from home to a hover pose over a brick 20-50 deg round the scatter
-        band, it spends link_005_joint's 0.30 rad of travel rather than turning the
-        base, pins that joint against its stop by step 90, and then moves 0.1-0.4 mm
-        per 30 steps for the rest of the phase -- measured, Task D3, over 600 steps.
-        The hover target itself is reachable with 0.349 rad of margin on every joint,
-        so it is the path that fails, not the goal.
-
-        A pure rotation about the base's vertical axis is exactly what joint 1 does, so
-        commanding one -- the pick point swept along its own radius, the attitude yawed
-        by the same angle -- is a motion whose most direct solution IS joint 1, and the
-        Jacobian says so. That gets the base turned before the Cartesian servo has to
-        find the rest.
-
-        It is commanded through the delta-pose action space like every other moving
-        phase, NOT by writing joint targets: the dataset's action stream is the post-IK
-        joint-position target (mdp/recorders.py), so a motion produced outside the
-        action pipeline would not replay from the recorded actions.
-        """
-        origin = self.env.scene.env_origins[0]
-        here = self.pick_point()[0] - origin
-        there = brick_pos - origin
-        delta = _wrap_to_pi(
-            math.atan2(there[1].item(), there[0].item())
-            - math.atan2(here[1].item(), here[0].item())
+    def target_for(
+        self, pick_point, jaw_heading: float, tilt: float = GRASP_TILT_RAD
+    ) -> GraspTarget:
+        return GraspTarget(
+            position=self.grasp_center_for(pick_point, tilt),
+            tilt=tilt,
+            jaw_heading=jaw_heading,
+            lean_azimuth=LEAN_AZIMUTH,
         )
-        c, s = math.cos(delta), math.sin(delta)
-        yaw = torch.tensor([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], device=self.device)
-        target = origin + yaw @ here
-        # World-frame pre-multiply, matching how apply_delta_pose composes rotations.
-        quat = math_utils.quat_mul(math_utils.quat_from_matrix(yaw.unsqueeze(0)), self.tool_quat())
-        return target, quat, delta
 
-    def hold_pose(self, steps: int, gripper: float, reference=None):
-        """Hold a pose closed-loop for exactly ``steps`` steps, jaws at ``gripper``.
+    def lowest_jaw_corner(self) -> float:
+        """World z of the lowest corner of the jaw-plate collision box (desk top is 0).
 
-        The difference from ``hold`` is load-bearing. A zero delta through
-        ``DifferentialIKController`` in relative mode does not mean "stay where you
-        are": ``process_actions`` re-references the desired pose from the *measured*
-        pose every control step, so a steady-state tracking error is never corrected
-        -- it is adopted as the next setpoint, and the pose ratchets away under
-        gravity without bound. Measured on this arm (Task D3) at roughly 0.003 rad
-        per step, which over the 240-step settle walked the tool angle from the
-        pinned 23.85 deg to 71.69 deg and handed the hover servo a 280 mm starting
-        error it had no budget left to close.
-
-        Holding against a reference captured ONCE feeds that error back instead of
-        forgetting it. Same servo law as ``servo`` -- P on position, ``AttitudeHold``
-        on attitude -- but with no convergence exit, because the job is to stay put
-        for a fixed number of steps rather than to arrive.
-
-        ``reference`` is a ``capture_pose()`` pair, defaulting to the pose at the
-        moment of the call.
+        The gate that the pick offset is actually pinned by. The axial tip is NOT the
+        lowest point: the plate box spans 82.5 mm across the tool axis, so any tool tilt
+        drops its far corner well below the tip -- 0.0625 * sin(tilt) of it.
         """
-        target, quat_des = self.capture_pose() if reference is None else reference
-        attitude = AttitudeHold(
-            rot_scale=self.scale_rot, gain=SERVO_GAIN_ROT, give_up_error=float("inf")
+        origin = self.robot.data.body_pos_w[0, self.tool]
+        world = origin.unsqueeze(0) + math_utils.quat_apply(
+            self.tool_quat().expand(JAW_PLATE_CORNERS.shape[0], -1),
+            JAW_PLATE_CORNERS.to(self.device, dtype=origin.dtype),
         )
-        attitude.capture(quat_des)
-        zero_rot_command = torch.zeros(3, device=self.device)
-        for _ in range(steps):
-            pos_err = target - self.pick_point()[0]
-            self.step(
-                torch.clamp(SERVO_GAIN_POS * pos_err / self.scale_pos, -1.0, 1.0),
-                attitude.advance(self.tool_quat()[0], zero_rot_command),
-                gripper,
-            )
+        return float(world[:, 2].min() - self.env.scene.env_origins[0, 2])
 
-    def hold_home_joints(self, steps: int):
-        """Step ``steps`` control steps with every joint target pinned at the home pose.
-
-        The settle's job is for the arm to change nothing for 240 control steps while the
-        bricks come to rest, and on this arm NO hold driven through the IK-Rel action can
-        do that -- not even the closed-loop ``hold_pose``. The action term's authority is
-        ``IK_SCALE[0:3]`` = 2 mm per control step, while the arm's own sag away from the
-        home pose runs at about 4.5 mm per control step over the first 20 steps (measured,
-        Task D3). A servo that cannot command as fast as the arm falls cannot converge:
-        measured, ``hold_pose`` drifts 111 mm and then runs ``link_005_joint`` into its
-        URDF stop at step 153 and ``link_004_joint`` at step 173, after which the arm is
-        frozen and every later phase is servoing a dead mechanism.
-
-        So this phase alone is held in JOINT space, at ``robot.data.default_joint_pos``
-        (which is ``robots.frames.HOME_JOINT_POS``), and the IK-Rel action term takes over
-        for the grasp phases with the arm exactly where the home pose says it should be.
-        Bypassing the action term is sound precisely here and nowhere else: the settle is a
-        measurement phase about the BRICKS, it commands no arm motion, and it contributes
-        no action to any dataset.
-
-        ``steps`` is counted in control steps and expanded by ``cfg.decimation``, so a
-        given ``--settle_steps`` covers the same simulated time as the other phases.
-        """
-        robot, scene, sim = self.robot, self.env.scene, self.env.sim
-        home = robot.data.default_joint_pos.clone()
-        dt = sim.get_physics_dt()
-        for _ in range(steps * self.env.cfg.decimation):
-            robot.set_joint_position_target(home)
-            scene.write_data_to_sim()
-            sim.step(render=False)
-            scene.update(dt)
-
+    # -- telemetry ------------------------------------------------------------
     def finger_joints(self) -> list[float]:
         return self.robot.data.joint_pos[0, self.finger_ids].tolist()
-
-    def joint_saturated(self) -> list[bool]:
-        """Which arm joints hit ``effort_limit`` this step.
-
-        ``computed_torque`` is the PD+feedforward demand before the actuator's
-        effort clamp; ``applied_torque`` is what actually reached the sim. They
-        differ iff effort_limit bound (see actuators/mit_mode.py's docstring).
-        """
-        computed = self.robot.data.computed_torque[0, self.arm_joint_ids]
-        applied = self.robot.data.applied_torque[0, self.arm_joint_ids]
-        return ((computed - applied).abs() > SATURATION_EPS).tolist()
 
     def joint_margins(self) -> list[float]:
         """Each arm joint's distance (rad) to its nearer URDF stop, motor-id order.
@@ -502,74 +451,16 @@ class GraspRig:
         hi = self.robot.data.joint_pos_limits[0, self.arm_joint_ids, 1]
         return torch.minimum(q - lo, hi - q).tolist()
 
-    def servo(
-        self,
-        target,
-        quat_des,
-        max_steps: int,
-        gripper: float,
-        stop_pos: float | None,
-        stall_steps: int = 0,
-    ):
-        """P-servo the pick point to ``target`` and the tool to ``quat_des``.
+    def joint_tracking_error(self, q_des) -> float:
+        """Worst joint's distance from the commanded target (rad)."""
+        q_des = torch.as_tensor(q_des, dtype=torch.float64).reshape(6).cpu()
+        return float(torch.max(torch.abs(self.q_arm() - q_des)))
 
-        ``stall_steps`` > 0 also stops once the pick point has moved less than
-        ``STALL_EPS`` per step for that many consecutive steps. The descend phase
-        needs this: its target is deliberately below the desk, so the position
-        error never converges -- the plates land on the desk and the servo would
-        otherwise spend the rest of its budget leaning on it.
-
-        Returns (steps_used, final position error, final rotation error, stalled,
-        per-joint torque-saturation fraction over the steps actually taken).
-        """
-        previous = self.pick_point()[0].clone()
-        quiet = 0
-        pos_norm = (target - previous).norm().item()
-        rot_norm = self.rot_error(quat_des).norm().item()
-        sat_counts = [0] * len(self.arm_joint_ids)
-        # One hold per phase, holding this phase's target attitude. A zero
-        # rotation command each step makes it a pure servo to quat_des: the
-        # reference only ever moves by command, so it stays put. give_up is
-        # disabled because this driver legitimately starts a phase tens of
-        # degrees off target -- far above the teleop-tuned default threshold --
-        # and has its own step budget and stall detection to end a phase that is
-        # going nowhere. See AttitudeHold's "Giving up" docstring section.
-        attitude = AttitudeHold(
-            rot_scale=self.scale_rot, gain=SERVO_GAIN_ROT, give_up_error=float("inf")
-        )
-        attitude.capture(quat_des[0])
-        zero_rot_command = torch.zeros(3, device=self.device)
-        for index in range(max_steps):
-            pos_err = target - self.pick_point()[0]
-            self.step(
-                torch.clamp(SERVO_GAIN_POS * pos_err / self.scale_pos, -1.0, 1.0),
-                attitude.advance(self.tool_quat()[0], zero_rot_command),
-                gripper,
-            )
-            for joint, saturated in enumerate(self.joint_saturated()):
-                sat_counts[joint] += int(saturated)
-            # One post-step read of each error, reused by every branch below.
-            now = self.pick_point()[0]
-            pos_norm = (target - now).norm().item()
-            rot_norm = self.rot_error(quat_des).norm().item()
-            steps_taken = index + 1
-            sat_frac = [count / steps_taken for count in sat_counts]
-            if stop_pos is not None and pos_norm < stop_pos and rot_norm < ROT_CONVERGED:
-                return steps_taken, pos_norm, rot_norm, False, sat_frac
-            if stall_steps:
-                quiet = quiet + 1 if (now - previous).norm().item() < STALL_EPS else 0
-                if quiet >= stall_steps:
-                    return steps_taken, pos_norm, rot_norm, True, sat_frac
-            previous = now.clone()
-        return max_steps, pos_norm, rot_norm, False, sat_frac
-
-    # -- telemetry ------------------------------------------------------------
     def finger_total_forces(self) -> tuple[float, float]:
         """Total contact force on each finger body, from EVERY contact.
 
-        During the descend this is the desk press, not a grip force -- the plates
-        are deliberately driven onto the desk. Use ``finger_brick_forces`` for the
-        grip.
+        During the descend this includes any desk press, not just a grip force. Use
+        ``finger_brick_forces`` for the grip.
         """
         if self.sensor is None:
             return (float("nan"), float("nan"))
@@ -614,22 +505,58 @@ class GraspRig:
             ),
         }
 
-    def brick_in_tool_frame(self, index: int):
+    def brick_offsets(self, index: int) -> dict:
+        """The brick relative to `grasp_center`, on the axes that actually gate the grasp.
+
+        Resolved and NAMED rather than returned as a raw body-frame triple. In this frame
+        the jaws slide along body **y** (``frames.JAW_AXIS_BODY``; the URDF's
+        ``gripper_left_joint`` axis is ``(0, 1, 0)`` and ``gripper_right_joint`` is its
+        negative), so the component the jaw closure must cover is [1], and [0] is the
+        plate's lateral direction. Task D3 part 6 read [0] as the jaw axis and reported the
+        wrong mechanism for a failure as a result; naming them is the fix.
+        """
         origin = self.robot.data.body_pos_w[0, self.tool]
-        return math_utils.quat_apply_inverse(
+        body = math_utils.quat_apply_inverse(
             self.tool_quat(), (self.brick_pos(index) - origin).unsqueeze(0)
         )[0]
+        return {
+            "jaw": body[1].item(),
+            "lateral": body[0].item(),
+            # Reported as distance ALONG the tool axis (TOOL_AXIS_BODY is body -z), so it
+            # compares directly against the plate span.
+            "tool": -body[2].item(),
+        }
 
 
 def _margin_str(margins: list[float]) -> str:
-    """``min=j4:0.00`` -- the tightest arm joint and how far it is from its stop."""
-    k = min(range(len(margins)), key=lambda i: margins[i])
-    return f"j{k + 1}:{margins[k]:.2f}"
+    """``j4:+0.00`` -- the tightest arm joint and how far it is from its stop."""
+    index = min(range(len(margins)), key=lambda i: margins[i])
+    return f"j{index + 1}:{margins[index]:+.2f}"
 
 
-def _saturation_str(sat_frac: list[float]) -> str:
-    """``j1:0% j2:12% ...`` -- ARM_JOINT_NAMES in motor-id order (1-6)."""
-    return " ".join(f"j{i + 1}:{frac * 100:.0f}%" for i, frac in enumerate(sat_frac))
+def _offset_str(offsets: dict) -> str:
+    return (
+        f"jaw={offsets['jaw'] * 1000:+.1f}mm(budget+-{JAW_CLOSURE_BUDGET * 1000:.1f}) "
+        f"lateral={offsets['lateral'] * 1000:+.1f}mm(plate "
+        f"{JAW_PLATE_LATERAL[0] * 1000:+.1f}..{JAW_PLATE_LATERAL[1] * 1000:+.1f}) "
+        f"tool={offsets['tool'] * 1000:+.1f}mm(plate "
+        f"{-JAW_PLATE_BEHIND_GRASP_CENTER * 1000:+.1f}..{JAW_TIP_BEYOND_GRASP_CENTER * 1000:+.1f})"
+    )
+
+
+def _path_str(label: str, path, points) -> str:
+    steps = [step.step for step in path[1:]]
+    worst = max(range(len(steps)), key=lambda i: steps[i]) if steps else 0
+    cartesian = (
+        float(torch.linalg.norm(points[worst + 1] - points[worst])) if len(points) > 1 else 0.0
+    )
+    return (
+        f"PATH {label}: {len(path)} waypoints, continuous  "
+        f"max_joint_step={max(steps) if steps else 0.0:.4f}rad "
+        f"(waypoint {worst + 1}, cartesian step {cartesian * 1000:.1f}mm, cap "
+        f"{MAX_WAYPOINT_STEP:.2f})  worst_margin={min(s.margin for s in path):.3f}rad  "
+        f"worst_pos_resid={max(s.position_error for s in path) * 1e6:.2f}um"
+    )
 
 
 def check_rest_stability(rig, num_bricks: int, steps: int) -> dict:
@@ -642,19 +569,23 @@ def check_rest_stability(rig, num_bricks: int, steps: int) -> dict:
     spec's rest-stability gate is actually about is whether a settled brick then
     stays put instead of jittering or sinking, so the tail is the honest window.
 
-    The arm is held with ``hold_home_joints``, not ``hold`` and not ``hold_pose``;
-    that method's docstring has the measurements ruling the other two out. The arm's
-    own drift is reported on the same second-half window as the bricks', so "the
-    settle does not move the arm" is a logged number rather than an inference.
+    On the joint-position action space this hold goes through the action pipeline like
+    every other phase. It could not before: the IK-Rel term re-references from the measured
+    pose each control step, so a zero delta ratchets gravity sag into the setpoint at about
+    0.9 mm/step, and the settle had to bypass the action term entirely to stand still. That
+    whole exception is gone. The arm's own drift is still reported on the same second-half
+    window as the bricks', so "the settle does not move the arm" stays a logged number.
     """
     half = steps // 2
+    home = rig.home_q()
+    rig.trim.reset()
     arm_start = rig.pick_point()[0].clone()
     angle_start = rig.tool_angle_deg()
-    rig.hold_home_joints(half)
+    rig.drive(home, GRIPPER_OPEN_ACTION, half)
     mid = torch.stack([rig.brick_pos(i).clone() for i in range(num_bricks)])
     arm_mid = rig.pick_point()[0].clone()
     angle_mid = rig.tool_angle_deg()
-    rig.hold_home_joints(steps - half)
+    rig.drive(home, GRIPPER_OPEN_ACTION, steps - half)
     end = torch.stack([rig.brick_pos(i).clone() for i in range(num_bricks)])
     tail = max(steps - half, 1)
     arm_drift = (rig.pick_point()[0] - arm_mid).norm().item() / tail
@@ -713,81 +644,135 @@ def grasp_one(rig, brick_index: int, label: str, num_bricks: int) -> bool:
     others_start = torch.stack(
         [rig.brick_pos(i).clone() for i in range(num_bricks) if i != brick_index]
     )
-    # Turn the base to face the brick before asking for anything else -- see
-    # GraspRig.base_swing_pose for the measurement that makes this its own phase.
-    align_target, align_quat, align_delta = rig.base_swing_pose(brick_start)
-    steps, perr, rerr, _, sat = rig.servo(
-        align_target, align_quat, MAX_PHASE_STEPS, GRIPPER_OPEN_ACTION, ALIGN_STOP_POS
-    )
+    heading = rig.jaw_heading_target(brick_index)
+    brick_xyz = brick_start.double().cpu()
+    hover_pick = brick_xyz + torch.tensor([0.0, 0.0, HOVER_HEIGHT], dtype=torch.float64)
+
+    # -- solve the hover pose globally, from a spread of seeds ----------------
+    hover_target = rig.target_for(hover_pick, heading)
+    hover = rig.ik.solve(hover_target, seed=rig.q_arm(), restarts=HOVER_RESTARTS)
+    if hover is None:
+        # Not a grasp failure: the SHIPPING 6-DOF task (position + tilt magnitude + world
+        # +x lean + jaw heading) genuinely has no solution at some band corners, measured
+        # in Task D3 part 8 and mapped in part 9. Printed with its own token so the gate's
+        # failures can be separated into "the arm could not do it" and "the task as posed
+        # has no answer here", which are different problems with different owners --
+        # the second is a layout question (spec section 5 item 5), i.e. Task D4's lever.
+        print(
+            f"PHASE hover [{label}]: UNREACHABLE_TASK at "
+            f"brick=({float(brick_xyz[0]):.4f}, {float(brick_xyz[1]):.4f}) "
+            f"radius={math.hypot(float(brick_xyz[0]), float(brick_xyz[1])):.4f}m "
+            f"azimuth={math.degrees(math.atan2(float(brick_xyz[1]), float(brick_xyz[0]))):+.1f}deg "
+            f"jaw_heading={math.degrees(heading):+.1f}deg after {HOVER_RESTARTS} restarts",
+            flush=True,
+        )
+        return False
     print(
-        f"PHASE align [{label}]: steps={steps} swing={math.degrees(align_delta):+.2f}deg "
-        f"pos_err={perr * 1000:.2f}mm rot_err={math.degrees(rerr):.2f}deg "
-        f"tool_angle={rig.tool_angle_deg():.2f}deg torque_sat=({_saturation_str(sat)}) "
+        f"SOLVE hover [{label}]: margin={hover.margin:.3f}rad "
+        f"pos_resid={hover.position_error * 1e6:.2f}um "
+        f"tilt_resid={math.degrees(hover.tilt_error):.3f}deg "
+        f"head_resid={math.degrees(hover.heading_error):.3f}deg "
+        f"azim_resid={math.degrees(hover.azimuth_error):.3f}deg "
+        f"jaw_heading={math.degrees(heading):+.1f}deg",
+        flush=True,
+    )
+
+    # -- approach + hover: joint-space interpolation, continuous by construction --
+    start = rig.q_arm()
+    path = [start + (hover.q - start) * t for t in torch.linspace(0.0, 1.0, APPROACH_WAYPOINTS)]
+    heights = [float(rig.ik.fk(q)[0][2]) for q in path]
+    approach_step = max(float(torch.max(torch.abs(b - a))) for a, b in itertools.pairwise(path))
+    for q in path:
+        rig.drive(q, GRIPPER_OPEN_ACTION, 2)
+    rig.drive(hover.q, GRIPPER_OPEN_ACTION, SETTLE_AT_WAYPOINT)
+    pos_err = (rig.pick_point()[0].double().cpu() - hover_pick).norm().item()
+    print(
+        f"PHASE hover [{label}]: {APPROACH_WAYPOINTS} joint-space waypoints "
+        f"max_joint_step={approach_step:.4f}rad "
+        f"min_grasp_center_height={min(heights) * 1000:.1f}mm "
+        f"pos_err={pos_err * 1000:.2f}mm tool_angle={rig.tool_angle_deg():.2f}deg "
+        f"joint_track_err={rig.joint_tracking_error(hover.q):.4f}rad "
         f"min_margin={_margin_str(rig.joint_margins())}",
         flush=True,
     )
 
-    # After the swing, not before: the half-turn fold reads the CURRENT jaw heading.
-    quat_des = rig.desired_quat(brick_index)
-
-    hover_target = brick_start.clone()
-    hover_target[2] += HOVER_HEIGHT
-    steps, perr, rerr, _, sat = rig.servo(
-        hover_target, quat_des, MAX_PHASE_STEPS, GRIPPER_OPEN_ACTION, 0.005
+    # -- descend: straight Cartesian line, every waypoint solved globally ------
+    descend_pick = brick_xyz + torch.tensor([0.0, 0.0, DESCEND_CLEARANCE], dtype=torch.float64)
+    points = [
+        hover_pick + (descend_pick - hover_pick) * t
+        for t in torch.linspace(0.0, 1.0, CARTESIAN_WAYPOINTS)
+    ]
+    tilts = torch.linspace(
+        GRASP_TILT_RAD, DESCEND_TILT_RAD, CARTESIAN_WAYPOINTS, dtype=torch.float64
     )
-    print(
-        f"PHASE hover [{label}]: steps={steps} pos_err={perr * 1000:.2f}mm "
-        f"rot_err={math.degrees(rerr):.2f}deg tool_angle={rig.tool_angle_deg():.2f}deg "
-        f"torque_sat=({_saturation_str(sat)}) min_margin={_margin_str(rig.joint_margins())}",
-        flush=True,
+    chain = rig.ik.solve_path(
+        [rig.target_for(p, heading, float(t)) for p, t in zip(points, tilts, strict=True)],
+        seed=hover.q,
     )
-
-    clearance = DESCEND_CLEARANCE if args.descend_clearance is None else args.descend_clearance
-    descend_target = brick_start.clone()
-    descend_target[2] += clearance
-    steps, perr, rerr, stalled, sat = rig.servo(
-        descend_target, quat_des, MAX_PHASE_STEPS, GRIPPER_OPEN_ACTION, 0.0008, stall_steps=12
-    )
-    tool_brick = rig.brick_in_tool_frame(brick_index)
+    if chain is None:
+        print(f"PHASE descend [{label}]: NO CONTINUOUS SOLUTION along the descend", flush=True)
+        return False
+    print(_path_str("descend", chain, points), flush=True)
+    for step in chain:
+        rig.drive(step.q, GRIPPER_OPEN_ACTION, WAYPOINT_STEPS)
+    rig.drive(chain[-1].q, GRIPPER_OPEN_ACTION, SETTLE_AT_WAYPOINT)
     desk_left, desk_right = rig.finger_total_forces()
+    pos_err = (rig.pick_point()[0].double().cpu() - descend_pick).norm().item()
     print(
-        f"PHASE descend [{label}]: steps={steps} stalled={stalled} pos_err={perr * 1000:.2f}mm "
-        f"rot_err={math.degrees(rerr):.2f}deg tool_angle={rig.tool_angle_deg():.2f}deg "
-        f"brick_in_tool=({tool_brick[0].item():+.4f},{tool_brick[1].item():+.4f},"
-        f"{tool_brick[2].item():.4f}) finger_total_force={desk_left:.2f}/{desk_right:.2f}N"
-        " (mostly the desk press -- the plates are driven onto the desk on purpose) "
-        f"torque_sat=({_saturation_str(sat)}) min_margin={_margin_str(rig.joint_margins())}",
+        f"PHASE descend [{label}]: pos_err={pos_err * 1000:.2f}mm "
+        f"tool_angle={rig.tool_angle_deg():.2f}deg {_offset_str(rig.brick_offsets(brick_index))} "
+        f"finger_total_force={desk_left:.2f}/{desk_right:.2f}N "
+        f"lowest_jaw_corner={rig.lowest_jaw_corner() * 1000:+.1f}mm "
+        f"joint_track_err={rig.joint_tracking_error(chain[-1].q):.4f}rad "
+        f"min_margin={_margin_str(rig.joint_margins())}",
         flush=True,
     )
 
-    # Held closed-loop against the pose the descend ended at: the jaws must close
-    # around the brick where the descend left them, and 45 steps of zero delta is
-    # long enough for the ratchet in ``hold_pose``'s docstring to drag the plates
-    # off the brick before they ever touch it.
-    close_reference = rig.capture_pose()
+    # -- close: hold the descend solution, jaws in ----------------------------
     peak = [0.0, 0.0]
     for _ in range(CLOSE_STEPS):
-        rig.hold_pose(1, GRIPPER_CLOSE_ACTION, close_reference)
+        rig.drive(chain[-1].q, GRIPPER_CLOSE_ACTION, 1)
         left, right = rig.finger_brick_forces(brick_index)
         peak = [max(peak[0], left), max(peak[1], right)]
     joints = rig.finger_joints()
-    tool_brick = rig.brick_in_tool_frame(brick_index)
     print(
         f"PHASE close [{label}]: finger_joints=({joints[0]:+.5f},{joints[1]:+.5f}) "
         f"peak_brick_force={peak[0]:.2f}/{peak[1]:.2f}N "
-        f"brick_in_tool=({tool_brick[0].item():+.4f},{tool_brick[1].item():+.4f},"
-        f"{tool_brick[2].item():.4f}) tool_angle={rig.tool_angle_deg():.2f}deg",
+        f"{_offset_str(rig.brick_offsets(brick_index))}",
         flush=True,
     )
 
-    lift_target = rig.pick_point()[0].clone()
-    lift_target[2] += LIFT_HEIGHT
-    steps, perr, rerr, _, _ = rig.servo(
-        lift_target, quat_des, MAX_PHASE_STEPS, GRIPPER_CLOSE_ACTION, 0.002
+    # -- lift: straight Cartesian line up -------------------------------------
+    # Anchored on the descend chain's OWN final pick point, not the measured one: the lift
+    # waypoints are seeded from chain[-1].q, so anchoring on a pose the arm may not have
+    # reached makes waypoint 0 unreachable inside the continuity cap and reports a spurious
+    # "no continuous solution". Measured, Task D3 part 8: that failed all three trials.
+    lift_points = [
+        descend_pick + torch.tensor([0.0, 0.0, LIFT_HEIGHT], dtype=torch.float64) * t
+        for t in torch.linspace(0.0, 1.0, CARTESIAN_WAYPOINTS)
+    ]
+    # The tilt is interpolated BACK to the hover tilt as the tool rises, mirroring the
+    # descend. Holding the descend tilt all the way up does not work and is not a solver
+    # limitation: frames.GRASP_TILT_DEG's own comment records that the arm can only be level
+    # AT the brick, and needs 10-18 deg of tilt (by radius) at hover height. Measured, with
+    # a level lift: "NO CONTINUOUS SOLUTION along the lift" on the very first trial.
+    lift_tilts = torch.linspace(
+        DESCEND_TILT_RAD, GRASP_TILT_RAD, CARTESIAN_WAYPOINTS, dtype=torch.float64
     )
-    # Closed-loop again: the pinch evidence below is read after this settle, so the
-    # arm must actually be holding the brick up rather than sinking with it.
-    rig.hold_pose(30, GRIPPER_CLOSE_ACTION)
+    lift = rig.ik.solve_path(
+        [
+            rig.target_for(p, heading, float(t))
+            for p, t in zip(lift_points, lift_tilts, strict=True)
+        ],
+        seed=chain[-1].q,
+    )
+    if lift is None:
+        print(f"PHASE lift [{label}]: NO CONTINUOUS SOLUTION along the lift", flush=True)
+        return False
+    print(_path_str("lift", lift, lift_points), flush=True)
+    for step in lift:
+        rig.drive(step.q, GRIPPER_CLOSE_ACTION, WAYPOINT_STEPS)
+    rig.drive(lift[-1].q, GRIPPER_CLOSE_ACTION, SETTLE_AT_WAYPOINT)
 
     brick_end = rig.brick_pos(brick_index)
     rise = (brick_end[2] - brick_start[2]).item()
@@ -803,25 +788,14 @@ def grasp_one(rig, brick_index: int, label: str, num_bricks: int) -> bool:
     disturbance = (others_end - others_start).norm(dim=-1).max().item()
     verdict = "CARRIED" if ok else ("ENTRAINED" if lifted else "DROPPED")
     print(
-        f"PHASE lift [{label}]: steps={steps} pos_err={perr * 1000:.2f}mm "
-        f"rise={rise * 1000:+.2f}mm xy_error={xy_error * 1000:.2f}mm "
+        f"PHASE lift [{label}]: rise={rise * 1000:+.2f}mm xy_error={xy_error * 1000:.2f}mm "
         f"grip_force={pinch['left']:.2f}/{pinch['right']:.2f}N "
         f"jaw_stall={pinch['stall'] * 1000:.3f}mm asymmetry={pinch['asymmetry']:.3f} "
-        f"pinch_ok={pinch['ok']} "
+        f"pinch_ok={pinch['ok']} min_margin={_margin_str(rig.joint_margins())} "
         f"max_other_brick_moved={disturbance * 1000:.2f}mm -> {verdict}",
         flush=True,
     )
     return ok
-
-
-# Parking spots for the bricks the x-sweep is not picking: on the desk (which
-# spans x in [-0.15, 0.75], y in [-0.45, 0.45]), beyond the shelf and well clear
-# of the arm. Parking them off the desk edge instead would leave them free-falling
-# for the rest of the run, which silently makes the neighbour-disturbance figure
-# meaningless.
-PARK_X = 0.66
-PARK_Y0 = -0.40
-PARK_Y_SPACING = 0.04
 
 
 def isolate_brick(rig, keep: int, num_bricks: int, position) -> None:
@@ -846,16 +820,14 @@ def run() -> bool:
     # --device (AppLauncher's flag) selects the Kit app's GPU but never reaches
     # SimulationCfg.device, which the cfg class leaves at "cuda:0" -- hence
     # passing it to parse_env_cfg above. The cfg is rebuilt through the
-    # constructor, which discards that, so re-apply it here. This line used to
-    # hard-code "cuda:0", i.e. --device was accepted and silently ignored.
+    # constructor, which discards that, so re-apply it here.
     env_cfg.sim.device = args.device
     env_cfg.scene.num_envs = 1
     if args.contact_sensor:
         # Contact reporting only -- it adds a read-out, not a force. Requires the
         # spawn flag, which the registered cfg leaves off.
         env_cfg.scene.robot.spawn.activate_contact_sensors = True
-        # Unfiltered, every robot body: total force per body. During the
-        # descend this is the desk press.
+        # Unfiltered, every robot body: total force per body.
         env_cfg.scene.contact = ContactSensorCfg(
             prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=1
         )
@@ -881,10 +853,7 @@ def run() -> bool:
     num_bricks = env.cfg.num_bricks
 
     # Provenance for every number below: which maker_arm_rs profile this run actually
-    # loaded. Gains and torque caps come from the Rust SDK (core.profile, no fallback), and
-    # that SDK is installed into the Isaac venv separately from the one uv manages -- so a
-    # run can execute against a different profile than the repo's pin implies. Print the
-    # caps so the log says which, instead of leaving it to be inferred from the pin.
+    # loaded. Gains and torque caps come from the Rust SDK (core.profile, no fallback).
     print(
         "PROFILE_GAINS "
         + json.dumps(
@@ -893,6 +862,13 @@ def run() -> bool:
                 for name, g in _profile.arm_gains(_profile.load_profile()).items()
             }
         ),
+        flush=True,
+    )
+    print(
+        f"GEOMETRY pick_offset_z={PICK_OFFSET[2]:+.4f} descend_clearance={DESCEND_CLEARANCE:+.4f} "
+        f"grasp_tilt={math.degrees(GRASP_TILT_RAD):.1f}deg "
+        f"descend_tilt={math.degrees(DESCEND_TILT_RAD):.1f}deg "
+        f"lean_azimuth={LEAN_AZIMUTH:.3f}rad",
         flush=True,
     )
 
@@ -927,11 +903,8 @@ def run() -> bool:
         #
         # These are kinematic constants of the arm, so a static two-point difference is the
         # right instrument. Holding env steps after the nudge is not: measured on this arm
-        # (Task D3), holding the IK-Rel action at a zero delta lets the pose drift further
-        # than the nudge itself -- 0.054 rad of jaw yaw over 5 steps with NO nudge at all,
-        # and the tool angle wandering from the pinned 23.6 deg to 43 deg and on to 66 deg.
-        # That drift INVERTED the measured base sign (+0.77 held vs. an exact -1.00 static),
-        # so the held reading is not a noisier version of the right answer, it is the wrong
+        # (Task D3), a held reading INVERTED the measured base sign (+0.77 held vs. an exact
+        # -1.00 static), so it is not a noisier version of the right answer, it is the wrong
         # answer. See the Task D3 report.
         #
         # Each measurement restarts from the pinned home joint state rather than from
@@ -950,7 +923,7 @@ def run() -> bool:
             nudged[0, joint_id] += delta
             robot.write_joint_state_to_sim(nudged, torch.zeros_like(nudged))
             robot.update(0.0)
-            return _wrap_to_pi(rig.jaw_yaw() - y0) / delta
+            return float(wrap_to_pi(rig.jaw_yaw() - y0)) / delta
 
         d_roll = d_yaw_per_joint(roll_id)
         d_base = d_yaw_per_joint(base_id)
@@ -981,9 +954,10 @@ def run() -> bool:
         results = []
         for value in (float(v) for v in args.x_sweep.split(",")):
             env.reset(seed=args.seed)
-            rig.hold(20, GRIPPER_OPEN_ACTION)
+            rig.trim.reset()
+            rig.drive(rig.home_q(), GRIPPER_OPEN_ACTION, 20)
             isolate_brick(rig, 0, num_bricks, [value, 0.0, layout.BRICK_SIZE[2] / 2])
-            rig.hold(40, GRIPPER_OPEN_ACTION)
+            rig.drive(rig.home_q(), GRIPPER_OPEN_ACTION, 40)
             results.append((value, grasp_one(rig, 0, f"x={value:.3f}", num_bricks)))
         env.close()
         carried = [f"{x:.3f}" for x, ok in results if ok]

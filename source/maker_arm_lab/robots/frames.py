@@ -101,8 +101,40 @@ HOME_JOINT_POS: dict[str, float] = {
 
 # Where a desk-resting brick sits between the jaws, in grasp_center coordinates (m), and the
 # extra descend depth (m) that lets the jaw tips reach it.
-# INITIAL: at grasp_center itself, no extra depth; measured by scripted_grasp_check (Task D3).
-PICK_OFFSET_MEASURED: tuple[float, float, float] = (0.0, 0.0, 0.0)
+#
+# Measured by scripts/scripted_grasp_check.py on 2026-09-06 (Task D3 step 4), on the
+# global-IK path. The jaw plates are the whole story here, so their collision box (from the
+# vendored STLs, expressed relative to grasp_center) is worth restating:
+#
+#     x  -0.0625 .. +0.0205   across the plate face
+#     y  -0.0303 .. +0.0302   along jaw travel (plus the jaws' own +-0.0524 of slide)
+#     z  -0.0342 .. +0.0664   along the tool axis: 34.2 mm PAST grasp_center, 66.4 mm back
+#
+# So a desk-resting brick is necessarily gripped near the plate TIP, not at grasp_center:
+# the tip has to clear the desk, which puts grasp_center at least 34.2 mm up, while the
+# brick centre sits at 4.8 mm. -0.030 m leaves the brick 29.4 mm along the tool axis with
+# 4.8 mm of tip margin, and the plates clear of the desk (0.00/0.00 N of plate contact,
+# against 46-110 N at shallower offsets). Swept over -0.038..-0.010 m; outside a narrow
+# window the grasp fails in two distinct ways, and both are visible in the telemetry:
+# too shallow puts the brick at the tip and the closing jaw skates over it, too deep jams
+# the plates on the desk so the arm stalls short and the realised offset is not the
+# commanded one.
+#
+# IMPORTANT, and the reason this number could not be measured before: at GRASP_TILT_DEG the
+# plates foul the desk at EVERY offset. The plate box is 82.5 mm long in x, so a 20 deg tilt
+# drops its far corner 0.0625 * sin(20 deg) = 21.4 mm below the axial tip -- computed over
+# the whole swept range (/tmp/d3_pick_offset.py), the lowest corner sits 13.3 to 37.8 mm
+# BELOW the desk at every offset from -0.040 to -0.014. The number above is therefore
+# measured with a LEVEL descend (scripted_grasp_check.py --descend_tilt_deg 0.0), which is
+# available precisely because GRASP_TILT_DEG's own comment records that the tilt is a cost
+# of the APPROACH only and that the arm is level to within 0.42 deg at the brick at every
+# radius. Making the level descend the default is a behaviour change and is NOT taken here.
+PICK_OFFSET_MEASURED: tuple[float, float, float] = (0.0, 0.0, -0.030)
+# Zero, and not for want of measuring. On the differential-IK path the descend was driven
+# into the desk until it stalled, and this term was the extra depth that took the jaw tips
+# down to the brick. The global-IK path commands the descend to a POSITION instead, so the
+# depth is entirely expressed by PICK_OFFSET_MEASURED above and a second additive term would
+# just be degenerate with it. Every measurement above was taken with this at 0.0.
 DESCEND_CLEARANCE_MEASURED: float = 0.0
 
 
