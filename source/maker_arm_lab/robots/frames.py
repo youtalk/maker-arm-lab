@@ -34,8 +34,12 @@ GRIPPER_OPEN_POS = 0.0524125
 WRIST_ROLL_SIGN = -1.0
 BASE_YAW_SIGN = 1.0
 
-# Home pose, URDF joint coordinates. Tool axis within 30 deg of world -z, grasp_center about
-# 0.25 m above the desk over the scatter zone.
+# Home pose, URDF joint coordinates. Tool axis within 30 deg of world -z, grasp_center over
+# the scatter zone at the achievable height of roughly 0.16-0.19 m above the desk -- the
+# spec's original ~0.25 m target is geometrically unreachable at this tool-axis and
+# joint-margin constraint; see scripts/find_home_pose.py's module docstring for the sweep
+# that established the ceiling and the reasoning for lowering the target instead of either
+# constraint.
 # Pinned by scripts/find_home_pose.py on 2026-09-05: grasp_center at (0.2745, 0.0375, 0.1628),
 # tool axis 23.57 deg off -z, min joint margin 0.30 rad.
 HOME_JOINT_POS: dict[str, float] = {
