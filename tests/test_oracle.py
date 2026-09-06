@@ -6,7 +6,7 @@ import random
 import pytest
 import torch
 
-from maker_arm_lab.core import layout, oracle
+from maker_arm_lab.core import global_ik, layout, oracle
 
 
 def _snapshot(brick_xy=(0.20, 0.05), stowed=(), brick_yaw=0.0):
@@ -103,11 +103,24 @@ def test_release_targets_track_the_permuted_bin():
     assert extend.target_pos[1].item() == pytest.approx(0.20)
     assert extend.target_pos[2].item() == pytest.approx(oracle.RELEASE_Z)
     assert extend.tilt_rad == pytest.approx(oracle.RELEASE_TILT_RAD)
-    # OpenYAM's measured release floor: no collision-free open-gripper pose
-    # below z ~= 0.24 (OpenYAM's M1 Task 9); carried over here, not yet
-    # re-measured for the Maker Arm -- the constant may be re-measured upward
-    # by Task D4 but never below this.
-    assert oracle.RELEASE_Z >= 0.24
+
+
+def test_release_height_clears_the_rim_at_the_release_tilt():
+    """RELEASE_Z's floor, re-derived for THIS arm by Task D4.
+
+    Replaces the carried-over "no collision-free open-gripper pose below z ~= 0.24"
+    (OpenYAM's M1 Task 9), which bounded OpenYAM's gripper against OpenYAM's bins.
+
+    Written as the derivation rather than as a number ON PURPOSE: the floor is a function of
+    RELEASE_TILT_RAD, because tilting the tool sinks the jaw plate's far corner
+    JAW_FACE_FAR * sin(tilt) below the tool tip -- the same geometry
+    global_ik.descend_tilt_ceiling applies against the desk, applied here against the bin
+    rim. D4 raised the tilt from 0.70 to 1.40 rad, which raised this floor from 0.235 to
+    0.257 m, so an edit of EITHER constant is now checked against the other.
+    """
+    bin_rim_z = layout._BIN_FLOOR_TOP_Z + layout.BIN_INTERIOR[2]
+    plate_dip = global_ik.JAW_FACE_FAR * math.sin(oracle.RELEASE_TILT_RAD)
+    assert oracle.RELEASE_Z > bin_rim_z + plate_dip
 
 
 def test_raise_targets_clearance_height_not_release_height():

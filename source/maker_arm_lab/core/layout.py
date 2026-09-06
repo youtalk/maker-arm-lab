@@ -26,10 +26,19 @@ DESK_POS = (0.30, 0.0, -0.02)  # top surface at z=0
 
 # Brick scatter zone on the desk, in front of the arm.
 #
-# Carried over from the OpenYAM LegoSort layout (openyam-lab M1 Task 10). The
-# Maker Arm's reach and elbow geometry differ; `scripts/release_envelope_check.py`
-# (Task D4) re-validates every bin position and the scatter band on this arm and
-# is the authority for changing these numbers.
+# Carried over from the OpenYAM LegoSort layout (openyam-lab M1 Task 10) and CONFIRMED
+# UNCHANGED on this arm. Task D4 (`scripts/release_envelope_check.py`) ran on 2026-09-06:
+# a driven pick-and-place into every bin at the nominal layout and at all four bin-jitter
+# corners, gated on EXTEND convergence and on the brick landing in its bin, 40/40. No layout
+# number had to move; the one constant that did was `core.oracle.RELEASE_TILT_RAD`, which is
+# not a layout number (see its comment for the 117-160 mm reach shortfall that forced it).
+#
+# READ WHAT THAT DOES AND DOES NOT COVER, because the distinction decides who owns which
+# number. D4 picks from ONE FIXED POSITION, (0.20, 0.0), deliberately: holding the pick leg
+# constant is what makes the bins the only thing varying between corners. So D4 is the
+# authority on the BIN and SHELF positions and on the whole release leg, and it is NOT an
+# independent re-measurement of the scatter band -- SCATTER_MAX_RADIUS below still rests on
+# Task D3's sweep alone.
 SCATTER_X = (0.13, 0.29)
 SCATTER_Y = (-0.18, 0.18)
 SPAWN_Z = 0.02
@@ -99,8 +108,16 @@ MIN_SEPARATION = 0.06
 #
 # Spec section 5 item 5 permits this ("the Maker Arm's reach ... may require moving the bins
 # and the scatter band. The oracle state machine is not modified; only layout numbers are").
-# `scripts/release_envelope_check.py` (Task D4) re-validates it with its own reach sweep, and
-# should sweep TRACKING, not just IK, or it will re-derive the bound that was not binding.
+#
+# Task D4 (`scripts/release_envelope_check.py`) ran on 2026-09-06 and DID NOT re-derive this
+# number, so do not read it as twice-confirmed. D4 is a release-envelope probe: it picks from
+# one fixed position by design (see SCATTER_X above), so it exercises this radius at exactly
+# one point. It did honour the warning this comment used to carry forward -- every gate it
+# reads is a driven servo's residual, never a solver's report -- but a bound sampled at one
+# azimuth is not a sweep. D3's own caveat therefore still stands unreduced: 0.280 is the
+# largest radius that tracked clean at every azimuth MEASURED, which is not the largest that
+# would track clean at every azimuth. Whoever re-measures it must drive real descends across
+# the band, not query the solver.
 SCATTER_MAX_RADIUS = 0.280
 
 # BIN-CLEARANCE bound: the largest brick x at which the arm can descend to the desk with
@@ -125,17 +142,26 @@ SCATTER_MAX_RADIUS = 0.280
 # derivation from bin geometry and the tests that pin it, and would conflate two bounds that
 # move independently.
 #
-# Carried over from the OpenYAM LegoSort layout (openyam-lab M1 Task 10) and NOT re-measured
-# on this arm. `scripts/release_envelope_check.py` (Task D4) re-validates every bin position
-# and the scatter band and is the authority for changing it -- and must sweep TRACKING, not
-# just IK feasibility, or it will re-derive the bound that was never binding (see
-# SCATTER_MAX_RADIUS).
+# Carried over from the OpenYAM LegoSort layout (openyam-lab M1 Task 10) and still NOT
+# re-measured on this arm. Task D4 (`scripts/release_envelope_check.py`) confirmed the bin
+# positions this is derived FROM (2026-09-06, 40/40 driven trials across the jitter corners),
+# which pins the value it evaluates to -- but D4 never descends over the scatter band, so the
+# forearm-fouling question this constant answers has not itself been re-measured here. It
+# remains inert at the default layout anyway, being slacker than SCATTER_MAX_RADIUS.
 #
 # THIS IS WHY SCATTER_X's UPPER BOUND IS 0.29. Do not widen one without the
 # other -- test_scatter_zone_is_pickable ties them together.
 TOP_DOWN_X_LIMIT = 0.29
 
 # Shelf pedestal on the desk; bins sit on its top face.
+#
+# VALIDATED ON THIS ARM, unchanged, by Task D4 (`scripts/release_envelope_check.py`,
+# 2026-09-06): with the bins here and on their top face, the oracle reaches and releases into
+# every bin at every corner of the run-level jitter. The shelf height is load-bearing for
+# that, not cosmetic -- it sets the bin rim at `_BIN_FLOOR_TOP_Z + BIN_INTERIOR[2]` = 0.195,
+# which is the floor `core.oracle.RELEASE_Z` has to clear, and this arm's reach ceiling at
+# the release attitude is not far above it. Raising the shelf raises that floor without
+# raising the ceiling.
 SHELF_SIZE = (0.10, 0.54, 0.15)
 SHELF_POS = (0.44, 0.0, 0.075)
 
@@ -147,9 +173,10 @@ _BIN_FLOOR_TOP_Z = 0.155  # shelf top 0.15 + floor slab 0.005
 
 X_LIMIT_MARGIN = 0.10
 # Margin between the bins' robot-facing wall and TOP_DOWN_X_LIMIT. Carried over
-# from the OpenYAM layout along with TOP_DOWN_X_LIMIT (see above); the same
-# `scripts/release_envelope_check.py` sweep re-validates it on this arm. The
-# limit moves with the bins.
+# from the OpenYAM layout along with TOP_DOWN_X_LIMIT (see above), and inherited
+# unchanged: Task D4 confirmed the bin positions but never descends over the
+# scatter band, so it could not re-measure this margin. The limit moves with the
+# bins.
 
 _MIN_SLOT_GAP = 0.11  # outer bin width 0.10 + 10 mm clearance
 

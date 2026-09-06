@@ -708,7 +708,7 @@ class OracleRig:
         # one jams
         # link_005_joint against its stop. So 0.0 is read here as "as level as this arm
         # gets", which is frames.GRASP_TILT_RAD. RELEASE is unaffected: its
-        # oracle.RELEASE_TILT_RAD of 0.70 rad is already well past the floor.
+        # oracle.RELEASE_TILT_RAD of 1.40 rad is already far past the floor.
         # scripts/scripted_grasp_check.py builds the identical frame; the two must agree
         # or the oracle fails where the scripted rehearsal passes.
         tilt_rad = max(tilt_rad, GRASP_TILT_RAD)

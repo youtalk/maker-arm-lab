@@ -4,19 +4,13 @@ Torch + stdlib only -- NO isaaclab imports. The GPU binding that turns Goals
 into IK-Rel actions lives in tasks/manager_based/lego_sort/oracle_runtime.py;
 this module owns WHAT to do next, not how to servo there.
 
-Release constants: TCP (0.42, y_bin, 0.30), tool tilt from above the rim --
-the open gripper spans 92.9 mm vs the 90 mm bin interior, and no
-collision-free pose exists below z ~= 0.24. Carried over unchanged from
-OpenYAM's LegoSort oracle (OpenYAM's M1 Task 9); RELEASE_TILT_RAD itself is
-OpenYAM's Task 8 number, not Task 9's original ~23.6 deg (0.41 rad) estimate:
-running RAISE/EXTEND for real on OpenYAM's GPU rig (its OracleRig had never
-executed those phases before that task) found 0.41 left joint4 pinned on its
--1.5708 stop with a 3-12 deg rotation residual that never closed, across the
-whole bin-jitter envelope OpenYAM's release-envelope probe exercised -- see
-RELEASE_TILT_RAD's own comment for the measurement and the fix. All of these
-numbers came from OpenYAM's arm and bin geometry; Task D4
-(`scripts/release_envelope_check.py`) is what re-validates the release
-envelope for the Maker Arm.
+Release constants: TCP (bin_x - 0.02, y_bin, 0.30), tool tilted from above the
+rim. RELEASE_Z, RELEASE_X_SETBACK and the bin geometry they are measured
+against were carried over from OpenYAM's LegoSort oracle and are CONFIRMED on
+the Maker Arm by Task D4 (`scripts/release_envelope_check.py`), unchanged.
+RELEASE_TILT_RAD is the one that had to move: OpenYAM's 0.70 rad put the
+release pose 117-160 mm above this arm's reach ceiling, and D4 re-derived it at
+1.40 rad. See its own comment for the measurement.
 """
 
 import enum
@@ -28,25 +22,71 @@ import torch
 
 from . import checker, layout
 
-RELEASE_Z = 0.30
-# Carried over unchanged from OpenYAM's LegoSort oracle; the derivation below
-# is OpenYAM's own measurement, on OpenYAM's arm and layout, not yet
-# re-validated on the Maker Arm -- Task D4 (`scripts/release_envelope_check.py`)
-# is the authority for changing this number here.
+# Height the brick is released from, above the bin interior. Carried over from
+# OpenYAM and CONFIRMED UNCHANGED on the Maker Arm by Task D4
+# (`scripts/release_envelope_check.py`): 40/40 driven pick-and-place trials, every bin at
+# the nominal layout and at all four bin-jitter corners, converged EXTEND and stowed.
 #
-# 0.41 (OpenYAM's M1 Task 9 nominal-layout number) was MEASURED INSUFFICIENT
-# by a later OpenYAM GPU run (Task 8): OracleRig had never executed
-# RAISE/EXTEND for real before that task, and doing so found the release pose
-# left joint4 not just "at" its -1.5708 stop (Task 9's own finding) but
-# PINNED there with a 3-12 deg residual rotation error that never closes,
-# across every pick position and corner of the bin-jitter envelope tried.
-# 0.70 (more tilt, same fix direction Task 9's own notes call out -- "more
-# tilt or higher z near the reach ceiling") gave joint4 real, positive margin
-# (0.23-0.45 rad measured at the nominal layout's four release poses,
-# OpenYAM's task-8-report.md) instead of zero, and both EXTEND's own
-# convergence and the RETREAT leg leaving that pose (see RETREAT's tilt
-# below) needed that margin to work at all.
-RELEASE_TILT_RAD = 0.70
+# It survives because it sits near the MIDDLE of the band RELEASE_TILT_RAD opens, and the
+# two ends of that band pull in opposite directions (both measured, see below):
+#
+#   floor    0.257 m -- the jaw plate's far corner hangs JAW_FACE_FAR * sin(tilt) = 61.6 mm
+#                       below the tool tip at 1.40 rad, and it has to clear the bin rim at
+#                       layout._BIN_FLOOR_TOP_Z + BIN_INTERIOR[2] = 0.195.
+#   ceiling  ~0.345 m -- the arm's own reach at the release attitude, at the FARTHEST
+#                       release target the jitter can produce (bin_x 0.46, y +-0.23, so
+#                       radius 0.497 m). Extrapolated one bin past the sampled table below;
+#                       what CONFIRMS the pose is reachable is the driven gate, not this.
+#
+# So do not move this without re-reading RELEASE_TILT_RAD: lowering it fouls the rim,
+# raising it leaves the envelope, and changing the tilt moves both bounds at once.
+RELEASE_Z = 0.30
+
+# Tool-axis tilt off world -z held through RAISE, EXTEND, RELEASE and RETREAT.
+#
+# MEASURED ON THIS ARM by Task D4 (`scripts/release_envelope_check.py`), 2026-09-06.
+# OpenYAM's 0.70 rad was carried in and is REFUTED HERE: it does not merely cost margin on
+# the Maker Arm, it puts the release pose OUTSIDE the arm's envelope altogether.
+#
+# What 0.70 did, driven for real at the nominal layout: EXTEND ran its full 300-step budget
+# and ended 116.4-160.2 mm short of the release target, at all four bins. The failure has
+# none of the usual signatures -- no joint within 0.19 rad of a stop, nothing clamped, the
+# commanded joint targets within 0.007 rad of the measured joints, attitude converged to
+# 0.13-0.40 deg. The arm simply stops: on two of the four trials the pick point at step 300
+# is bit-identical to the pick point at step 200.
+#
+# The cause is the reach ceiling AT THIS ATTITUDE, and it is a strong function of the tilt.
+# Sweeping the vendored URDF's FK over random joint configurations, keeping poses whose tool
+# axis is within 3 deg of the exact axis `desired_quat` commands -- (sin t, 0, -cos t), the
+# lean azimuth is pinned to +x -- and with every joint at least 0.15 rad from its stops, the
+# highest the PICK POINT can go (m) is:
+#
+#     radius   t=0.70  t=0.90  t=1.00  t=1.10  t=1.20  t=1.40
+#      0.42     0.171   0.243   0.276   0.307   0.338   0.400
+#      0.46     0.138   0.216   0.254   0.284   0.316   0.383
+#      0.48     0.125   0.190   0.239   0.266   0.308   0.358
+#
+# The farthest release target the bin jitter can produce is radius 0.497 m, where 0.70 rad
+# tops out around 0.12 m against a RELEASE_Z of 0.30 -- which is the 160 mm the live run
+# measured, so the sweep and the arm agree. More tilt buys height because at full extension
+# the arm is nearly straight and a tool aligned with the forearm costs the wrist far less
+# travel than a near-vertical one; 1.20 rad only just reaches 0.30 there, and 1.40 rad clears
+# it by roughly 45 mm.
+#
+# So the tilt is pushed up until the ceiling clears RELEASE_Z with real margin, and then
+# stopped. What stops it is NOT the jaw plate: that floor tops out at 0.195 + JAW_FACE_FAR =
+# 0.257 m even at a horizontal tool, always under RELEASE_Z. It is the attitude frame.
+# `desired_quat` builds it from axis_z = (sin t, 0, -cos t) and axis_x = (cos w, sin w, 0)
+# for jaw heading w, and those two become PARALLEL at t = pi/2, w = 0 -- the Gram-Schmidt
+# cross product goes to zero and the commanded attitude is undefined. 1.40 rad keeps 0.17 rad
+# (9.8 deg) away from that, which the driven gate confirms is enough; a value chosen closer
+# to pi/2 for more reach would be trading a measured margin for an unmeasured singularity.
+#
+# Confirmed driven, 2026-09-06: 40/40 trials (5 layouts x 4 bins x 2), EXTEND converging in
+# 203-222 steps of its 300-step budget with 1.5-7.9 mm of residual against an 8 mm stop, the
+# tightest joint -- link_006_joint on every one of the 40 -- 0.78-1.28 rad from its stop, and
+# every brick landing 15.7-42.3 mm from its bin's interior center.
+RELEASE_TILT_RAD = 1.40
 RELEASE_X_SETBACK = 0.02
 RETREAT_POINT = (0.26, 0.0, 0.28)
 MAX_GRASP_RETRIES = 2
