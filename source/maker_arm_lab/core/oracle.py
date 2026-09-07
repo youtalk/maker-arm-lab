@@ -717,8 +717,8 @@ class EnvOracle:
             # release pose is. Carried over unchanged, and CONFIRMED ON THIS
             # ARM by Task D5 (`scripts/oracle_check.py`): RETREAT is the leg
             # nothing had driven before -- release_envelope_check.py stops at
-            # RELEASE -- and it converged on RETREAT_POINT in every one of 15
-            # legs, 94-147 steps of its 300, 0.7-2.5 mm of residual against a
+            # RELEASE -- and it converged on RETREAT_POINT in every one of 41
+            # legs, 91-147 steps of its 300, 0.7-2.5 mm of residual against a
             # 10 mm stop, with the tightest joint 0.58-0.61 rad from its stop.
             # D4's prediction that RETREAT_POINT was ALSO out of reach at the
             # old 0.70 rad tilt (its sweep put the ceiling at radius 0.26 at
