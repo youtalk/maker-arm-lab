@@ -225,3 +225,21 @@ class LegoSortIKRelVisionEnvCfg(LegoSortIKRelEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         _add_cameras(self)
+
+
+@configclass
+class LegoSortJointPosVisionEnvCfg(LegoSortEnvCfg):
+    """Joint-position action space + camera observations (the datagen base).
+
+    The same two camera streams as above, on ``LegoSortEnvCfg``'s own joint-position action
+    space rather than on the IK-relative one. That is the space the scripted oracle drives
+    since Task D5 moved it onto ``core.global_ik`` -- the solver emits joint targets, which
+    the IK-Rel term would read as Cartesian deltas -- and it is the space the dataset's
+    recorded action stream was already in (``mdp.recorders.JointTargetRecorder``). It reaches
+    the registry through ``datagen.LegoSortDatagenEnvCfg`` (``MakerArm-LegoSort-Datagen-v0``)
+    rather than under a task id of its own: the spec fixes the id list at five (section 2.3).
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        _add_cameras(self)

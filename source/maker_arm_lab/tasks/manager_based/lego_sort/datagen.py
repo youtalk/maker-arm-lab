@@ -1,4 +1,4 @@
-"""Data-generation env: vision + IK-Rel + domain randomization + recorders.
+"""Data-generation env: vision + joint-position actions + domain randomization + recorders.
 
 One PROCESS = one generation run = one draw of the run-level axes (bin layout,
 color permutation, camera pose, lighting, floor color) passed in through the
@@ -24,7 +24,7 @@ from maker_arm_lab.robots import ARM_JOINT_REGEX
 
 from . import mdp
 from .mdp.recorders import DatagenRecorderManagerCfg
-from .vision import LegoSortIKRelVisionEnvCfg
+from .vision import LegoSortJointPosVisionEnvCfg
 
 
 def _quat_from_rpy_deg(rpy_deg):
@@ -89,21 +89,20 @@ def sample_run_draw(rng):
 
 
 @configclass
-class LegoSortDatagenEnvCfg(LegoSortIKRelVisionEnvCfg):
+class LegoSortDatagenEnvCfg(LegoSortJointPosVisionEnvCfg):
     """Registered as MakerArm-LegoSort-Datagen-v0.
 
-    D5 PREREQUISITE -- THIS ACTION SPACE IS HALF OF A CHANGE THAT MUST BE MADE AS ONE.
+    THE ACTION SPACE HERE AND THE ORACLE'S SOLVER ARE ONE CHOICE, NOT TWO.
 
-    This inherits the IK-Rel action space, whose term reads its input as CARTESIAN DELTAS.
-    Task D3 established that the differential IK behind it never closed the jaws on a brick
-    in six rounds, and replaced it with `core.global_ik` in
-    scripts/scripted_grasp_check.py, which then took the gate to 10/10. The oracle that
-    drives datagen (tasks.manager_based.lego_sort.oracle_runtime) has NOT moved yet.
-
-    When D5 moves it, this cfg must move with it: the global solver emits JOINT TARGETS, so
-    an oracle ported to it while this still exposes IK-Rel would hand joint angles to a term
-    that interprets them as Cartesian deltas -- silently, with no error, producing a dataset
-    of nonsense. See oracle_runtime's module docstring for the other half.
+    This inherits the JOINT-POSITION action space, whose term reads its input as absolute
+    joint targets and passes them through maker_arm_rs's clamp. Task D5 moved it here from
+    the IK-Rel space in the same change that moved the oracle that drives datagen
+    (tasks.manager_based.lego_sort.oracle_runtime) onto `core.global_ik`, because the global
+    solver emits JOINT TARGETS while the IK-Rel term reads its input as CARTESIAN DELTAS:
+    changing either one alone would have fed joint angles to a term interpreting them as
+    deltas -- silently, with no error, producing a dataset of nonsense. Anything that moves
+    one of the two has to move the other. `OracleRig._check_action_space` is the runtime
+    guard on this invariant.
     """
 
     # Run-level draws (one per generation run, sampled by scripts/generate_batch.py)
@@ -133,18 +132,15 @@ class LegoSortDatagenEnvCfg(LegoSortIKRelVisionEnvCfg):
         super().__post_init__()
         # 6-brick oracle episode budget: 180 s (5400 control steps at 30 Hz).
         # Carried over from openyam-lab, where it was MEASURED in Task 8's
-        # oracle_check.py GPU runs (OracleRig had never executed before that
-        # task): per-brick cost with the release-envelope fixes those runs
-        # also required (RAISE's intermediate climb+tilt, per-phase watchdog
-        # reset) came in at 580-750 control steps, so 6 bricks plus the
-        # one-time 240-step SETTLE totals 3720-4740 steps -- against the
-        # prior 120 s (3600-step) budget, which was tight enough that a
-        # 6-brick episode timed out mid-RETREAT on more than one seed. 180 s
-        # is straightforward headroom over that measurement, not a tight fit
-        # to it -- but it has not been re-measured on this arm:
-        # scripts/scripted_grasp_check.py (Task D3) and
-        # scripts/release_envelope_check.py (Task D4) are what would surface
-        # an insufficient budget once the oracle runs end-to-end here.
+        # oracle_check.py GPU runs at 580-750 control steps per brick, and
+        # RE-MEASURED ON THIS ARM by Task D5's own scripts/oracle_check.py, the
+        # first thing to run a whole episode here: 4316-4436 control steps for a
+        # six-brick sort, every one of six episodes terminating on `success`
+        # rather than on this time_out, so the budget holds with roughly 1000
+        # steps of headroom. The per-brick figure is comparable (about 650-750
+        # including the one-time 240-step SETTLE) even though the control model
+        # underneath changed completely -- the oracle now walks planned
+        # global-IK paths instead of servoing IK-Rel deltas.
         self.episode_length_s = 180.0
 
         # Lighting / floor: run-level, via the global prims' spawn cfgs.

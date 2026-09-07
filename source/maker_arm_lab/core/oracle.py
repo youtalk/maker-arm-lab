@@ -1,8 +1,9 @@
 """Scripted pick-and-place oracle: per-env phase sequencing (spec section 5.4).
 
 Torch + stdlib only -- NO isaaclab imports. The GPU binding that turns Goals
-into IK-Rel actions lives in tasks/manager_based/lego_sort/oracle_runtime.py;
-this module owns WHAT to do next, not how to servo there.
+into joint targets lives in tasks/manager_based/lego_sort/oracle_runtime.py,
+which plans each Goal as a `core.global_ik` path; this module owns WHAT to do
+next, not how to get there.
 
 Release constants: TCP (bin_x - 0.02, y_bin, 0.30), tool tilted from above the
 rim. RELEASE_Z, RELEASE_X_SETBACK and the bin geometry they are measured
@@ -57,9 +58,10 @@ RELEASE_Z = 0.30
 #
 # The cause is the reach ceiling AT THIS ATTITUDE, and it is a strong function of the tilt.
 # Sweeping the vendored URDF's FK over random joint configurations, keeping poses whose tool
-# axis is within 3 deg of the exact axis `desired_quat` commands -- (sin t, 0, -cos t), the
-# lean azimuth is pinned to +x -- and with every joint at least 0.15 rad from its stops, the
-# highest the PICK POINT can go (m) is:
+# axis is within 3 deg of the exact axis the runtime commands -- (sin t, 0, -cos t), the lean
+# azimuth pinned to +x, which is what `global_ik.tool_axis_world` builds today and what
+# `desired_quat` built before Task D5, identically -- and with every joint at least 0.15 rad
+# from its stops, the highest the PICK POINT can go (m) is:
 #
 #     radius   t=0.70  t=0.90  t=1.00  t=1.10  t=1.20  t=1.40
 #      0.42     0.171   0.243   0.276   0.307   0.338   0.400
@@ -76,11 +78,14 @@ RELEASE_Z = 0.30
 # So the tilt is pushed up until the ceiling clears RELEASE_Z with real margin, and then
 # stopped. What stops it is NOT the jaw plate: that floor tops out at 0.195 + JAW_FACE_FAR =
 # 0.257 m even at a horizontal tool, always under RELEASE_Z. It is the attitude frame.
-# `desired_quat` builds it from axis_z = (sin t, 0, -cos t) and axis_x = (cos w, sin w, 0)
-# for jaw heading w, and those two become PARALLEL at t = pi/2, w = 0 -- the Gram-Schmidt
-# cross product goes to zero and the commanded attitude is undefined. 1.40 rad keeps 0.17 rad
-# (9.8 deg) away from that, which the driven gate confirms is enough; a value chosen closer
-# to pi/2 for more reach would be trading a measured margin for an unmeasured singularity.
+# The tool axis is (sin t, 0, -cos t) and the jaw axis is constrained to the horizontal
+# heading w, and those two directions become PARALLEL at t = pi/2, w = 0 -- there is then no
+# jaw axis perpendicular to the tool with heading w, and the commanded attitude is undefined.
+# That was a Gram-Schmidt cross product going to zero when `oracle_runtime.desired_quat`
+# assembled the frame; since Task D5 it is `core.global_ik`'s jaw-heading residual row going
+# singular. Same pose, same bound. 1.40 rad keeps 0.17 rad (9.8 deg) away from it, which the
+# driven gate confirms is enough; a value chosen closer to pi/2 for more reach would be
+# trading a measured margin for an unmeasured singularity.
 #
 # Confirmed driven, 2026-09-06: 40/40 trials (5 layouts x 4 bins x 2), EXTEND converging in
 # 203-222 steps of its 300-step budget with 1.5-7.9 mm of residual against an 8 mm stop, the
@@ -94,9 +99,13 @@ MAX_GRASP_RETRIES = 2
 # Phase budgets, in 30 Hz control steps. HOVER/EXTEND cover the longest legs
 # OpenYAM measured (HOME -> bin took 67-226 steps in OpenYAM's Task 9);
 # DESCEND relies on its stall detector, CLOSE is OpenYAM's measured 45-step
-# jaw stroke + margin. Carried over unchanged; Task D5
-# (`scripts/oracle_check.py`) is what re-validates these budgets on the
-# Maker Arm's own step timings.
+# jaw stroke + margin. Carried over unchanged, and RE-VALIDATED ON THIS ARM by
+# Task D5 (`scripts/oracle_check.py`, 6 six-brick episodes on the global-IK
+# planner): every leg that could be planned finished inside its budget with
+# room -- HOVER 101-180, DESCEND 83-105, LIFT 109, EXTEND 105-179, RETREAT
+# 94-147 -- so DEFAULT_MAX_STEPS' 300 is not tight anywhere. The one phase that
+# spends its whole budget is RAISE, and it does so without moving; see
+# RAISE_MAX_STEPS below.
 SETTLE_STEPS = 240
 CLOSE_STEPS = 45
 DEFAULT_MAX_STEPS = 300
@@ -104,10 +113,28 @@ DESCEND_STALL_STEPS = 12
 LIFT_HEIGHT = 0.10
 
 # RAISE's own target height and budget -- OpenYAM MEASURED this (Task 8), not
-# the RELEASE_Z a first reading of "raise" suggests. Carried over unchanged
-# from OpenYAM's arm and layout, along with the reasoning below; Task D4
-# (`scripts/release_envelope_check.py`) and Task D5 (`scripts/oracle_check.py`)
-# are what re-validate it on the Maker Arm. Climbing straight to RELEASE_Z
+# the RELEASE_Z a first reading of "raise" suggests.
+#
+# ON THIS ARM RAISE IS LARGELY INERT, MEASURED BY TASK D5, AND THAT IS NOT A
+# TUNING PROBLEM. Holding the pick point over the BRICK's own xy at
+# RAISE_CLEARANCE_Z with the tool at RELEASE_TILT_RAD is unreachable at every IK
+# branch for the inner half of the scatter band: a free 48-restart solve of that
+# exact pose finds nothing at (0.13, 0.00), (0.15, 0.05) or (0.18, -0.15), while
+# (0.22, 0.00) and (0.28, 0.00) solve with 0.21-0.51 rad of margin
+# (/tmp/d5_raise_map.py sweeping tilt x height; the hole is the tilt at close
+# radius, and at (0.18, -0.15) the height 0.22 is out of reach at EVERY tilt).
+# Live, that shows up as 7 of 18 RAISE legs with no plan: the arm holds its LIFT
+# pose for the full 60 steps and EXTEND then does the whole translate + climb +
+# tilt itself, converging to 0.4-2.0 mm in 105-179 of its own 300. So the phase
+# costs 60 idle steps on those bricks and nothing else -- 6 six-brick episodes
+# all sorted and exported with it -- and RAISE_CLEARANCE_Z is deliberately NOT
+# lowered to make it plannable, because the height that would (about 0.16 m, from
+# the same sweep) is below the bin rim it exists to clear, and the rim clearance
+# is already delivered by EXTEND's own straight Cartesian leg, which rises
+# monotonically and is past 0.195 m well before it reaches the bin faces.
+#
+# The rest of this comment is OpenYAM's, carried over unchanged with its arm and
+# layout, and it is what the constants were chosen for. Climbing straight to RELEASE_Z
 # (0.30, near the reach ceiling) while holding a fixed attitude and NOT
 # translating ran joint4 (tilt=0.0, the original design) or joint6
 # (tilt=RELEASE_TILT_RAD applied all at once, from a pick whose desk yaw
@@ -128,6 +155,13 @@ LIFT_HEIGHT = 0.10
 # on "budget" -- report() advances to EXTEND regardless of RAISE's outcome --
 # before OracleRig's watchdog's 30-consecutive-near-limit trip fires and
 # abandons the episode instead.
+#
+# That budget sizing still holds on this arm, for a different reason worth
+# stating: an unreachable RAISE is now not driven at all (the planner finds no
+# path and the arm holds), so it ends on "budget" with every joint stationary and
+# the watchdog, which trips on joint-limit proximity, cannot fire during it. When
+# RAISE IS reachable it walks its planned leg and converges in about 36 steps, at
+# 1.6-8.3 mm against RAISE_STOP_POS -- so 60 is not tight from that side either.
 RAISE_CLEARANCE_Z = 0.22
 RAISE_STOP_POS = 0.02
 RAISE_MAX_STEPS = 60
@@ -256,8 +290,8 @@ class Goal:
     phase: Phase
     target_pos: torch.Tensor | None
     # Brick long-axis heading; None = hold the current attitude. The runtime
-    # squares the jaws across this axis (``desired_quat`` folds against
-    # ``yaw + pi/2`` for the actual closing axis).
+    # squares the jaws across this axis (it folds ``yaw + pi/2``, the actual
+    # closing axis, and hands that to its solver as the jaw heading).
     yaw: float | None
     tilt_rad: float  # tool-axis tilt toward +x (0 = straight down)
     gripper: float  # +1 open / -1 close (raw binary action)
@@ -523,7 +557,7 @@ class EnvOracle:
 
         ``yaw`` here is the brick's long-axis heading (``Goal.yaw``); the
         runtime squares the jaws to it and commands the CLOSING axis at
-        ``yaw + pi/2`` (``oracle_runtime.desired_quat``). The parallel jaws
+        ``yaw + pi/2`` (``oracle_runtime._plan_leg``). The parallel jaws
         open far wider than the sabotage radius, so an offset along the
         closing axis is swept back into the grip -- the sabotage must
         therefore stay ON the jaw line (``yaw``, not ``yaw + pi/2``),
@@ -680,9 +714,16 @@ class EnvOracle:
             # converged cleanly instead; releveling is deferred to the next
             # brick's HOVER (goal.yaw is set there), which starts from
             # RETREAT_POINT -- a far friendlier pose for that change than the
-            # release pose is. Carried over unchanged; Task D5
-            # (`scripts/oracle_check.py`) is what re-validates this on the
-            # Maker Arm.
+            # release pose is. Carried over unchanged, and CONFIRMED ON THIS
+            # ARM by Task D5 (`scripts/oracle_check.py`): RETREAT is the leg
+            # nothing had driven before -- release_envelope_check.py stops at
+            # RELEASE -- and it converged on RETREAT_POINT in every one of 15
+            # legs, 94-147 steps of its 300, 0.7-2.5 mm of residual against a
+            # 10 mm stop, with the tightest joint 0.58-0.61 rad from its stop.
+            # D4's prediction that RETREAT_POINT was ALSO out of reach at the
+            # old 0.70 rad tilt (its sweep put the ceiling at radius 0.26 at
+            # 0.242 m, under the 0.28 m target) is consistent with this: at
+            # 1.40 rad the same point is reached with room to spare.
             target = torch.tensor(RETREAT_POINT)
             target[0] += self.draw.via_dx
             target[1] += self.draw.via_dy

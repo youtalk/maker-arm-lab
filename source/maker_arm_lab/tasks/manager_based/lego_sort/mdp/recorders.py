@@ -1,13 +1,20 @@
 """Recorder terms for scripted-oracle data generation (spec section 5.4 item 4).
 
-The dataset's action stream is the post-IK joint-position target -- what a
+The dataset's action stream is the applied joint-position target -- what a
 joint-position policy must output and what the real robot's CAN interface
-consumes -- not the task-space IK-Rel command the oracle drives. The raw
-7-dim IK-Rel action is still recorded (prebuilt "actions" term): its column 6
-is the binary gripper command, which the conversion combines with the 6 arm
-joint targets, i.e. ``joint_targets[:, :6]`` of the 8-column buffer written by
+consumes -- and it is POST-CLAMP, which the raw action is not. The raw 7-dim
+action is still recorded (prebuilt "actions" term): its column 6 is the binary
+gripper command, which the conversion combines with the 6 arm joint targets,
+i.e. ``joint_targets[:, :6]`` of the 8-column buffer written by
 ``JointTargetRecorder`` (6 arm joints + 2 mimic-linked gripper jaws --
 ``obs/joint_pos_abs`` from ``JointStateRecorder`` is the same 8 columns).
+
+Since Task D5 the datagen env is on the JOINT-POSITION action space (see
+``datagen.LegoSortDatagenEnvCfg``), so the raw action's first six columns are
+now the oracle's pre-clamp joint targets rather than the task-space IK-Rel
+command they were when this stack was ported. Nothing here changed for it: both
+clamped action terms expose the same ``clamped`` flag with the same semantics
+(Task C6), and ``joint_targets`` was always read off the articulation.
 """
 
 from __future__ import annotations

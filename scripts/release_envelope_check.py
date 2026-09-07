@@ -16,7 +16,7 @@ poses where the arm then stops 12-50 mm short. A probe that asked "can the
 solver find a pose for this bin" would answer yes everywhere and re-derive a
 bound that was never binding -- the error that cost Task D3 several rounds (see
 `core.layout.SCATTER_MAX_RADIUS`'s comment). Every gate below is therefore read
-off a driven servo's residual, never off a solver's report.
+off the residual the driven arm actually leaves, never off a solver's report.
 
 Two independent bounds coexist and a layout move has to respect BOTH:
 
@@ -40,8 +40,8 @@ Which brick lands in which bin is controlled by teleporting (isolate_brick,
 ported from scripts/scripted_grasp_check.py), not by relying on
 ``EnvOracle._next_brick``'s scatter-order scan -- this probe is about the
 RELEASE leg's reachable envelope, not the pick leg's brick-selection order
-(exercised by scripted_grasp_check.py, and end to end by scripts/oracle_check.py
-once Task D5 lands it). ``num_bricks=NUM_BRICKS=4`` (one per color) makes brick
+(exercised by scripted_grasp_check.py, and end to end by scripts/oracle_check.py,
+Task D5). ``num_bricks=NUM_BRICKS=4`` (one per color) makes brick
 index == color index == target bin, so ``isolate_brick(keep=color)`` pins the
 trial to exactly the bin under test. The pick itself still runs for real
 through OracleRig's SETTLE..LIFT phases (not faked), so the release leg the
@@ -113,13 +113,11 @@ simulation_app = app_launcher.app
 # isaaclab (and friends) are only importable once AppLauncher has launched Kit; the
 # deferral is deliberate, as in smoke_usd.py.
 import gymnasium as gym
-import isaaclab.utils.math as math_utils
 import torch
 from isaaclab.managers import DatasetExportMode
 
 import maker_arm_lab.tasks  # noqa: F401 -- registers MakerArm-* envs
 from maker_arm_lab.core import layout, oracle
-from maker_arm_lab.robots.frames import TOOL_AXIS_BODY
 from maker_arm_lab.tasks.manager_based.lego_sort import mdp
 from maker_arm_lab.tasks.manager_based.lego_sort.datagen import LegoSortDatagenEnvCfg
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import (
@@ -214,14 +212,13 @@ def isolate_brick(env, keep: int, num_bricks: int, position) -> None:
 def _tool_tilt_deg(rig, i: int) -> float:
     """Tool-axis tilt off world -z, deg -- 0 is a level (straight-down) tool.
 
-    Uses ``TOOL_AXIS_BODY`` rather than body +z: on this arm the tool points
-    along grasp_center's -z (frames.TOOL_AXIS_BODY), so measuring +z would
-    report 180 deg minus the real tilt. Same expression as
-    ``scripted_grasp_check.GraspRig.tool_angle_deg``.
+    ``OracleRig.tool_tilt`` since Task D5, which is the expression this file used to carry
+    locally (and the same one as ``scripted_grasp_check.GraspRig.tool_angle_deg``): it
+    measures against ``frames.TOOL_AXIS_BODY``, because on this arm the tool points along
+    grasp_center's -z and measuring body +z would report 180 deg minus the real tilt. Kept as
+    a named local so the telemetry below still reads in degrees.
     """
-    tool_axis = torch.tensor(TOOL_AXIS_BODY, device=rig.device)
-    axis = math_utils.quat_apply(rig.tool_quat(i), tool_axis)
-    return math.degrees(math.acos(max(-1.0, min(1.0, (-axis[2]).item()))))
+    return math.degrees(rig.tool_tilt(i))
 
 
 def _tightest_joint_margin(rig, i: int) -> tuple[float, str]:
@@ -246,37 +243,28 @@ def _tightest_joint_margin(rig, i: int) -> tuple[float, str]:
     return margin[tightest].item(), rig.robot.joint_names[rig.arm_ids[tightest]]
 
 
-def phase_telemetry(rig, i: int, prev_goal, quat_ref_before, steps_used: int) -> dict:
+def phase_telemetry(rig, i: int, prev_goal, attitude_ref, steps_used: int) -> dict:
     """Read-only reconstruction of what OracleRig._phase_result computed
     internally for ``prev_goal``'s ending step, from OUTSIDE the class.
 
-    Safe and exact, not approximate: ``OracleRig.step()`` only ever calls
-    ``AttitudeHold.advance()`` with a literal zero steering command (never a
-    P-servo rotation command), and a zero ``rot_command`` makes
-    ``AttitudeHold.advance``'s ``advanced == reference`` every step (see
-    ``core.attitude_hold.AttitudeHold.advance``'s anti-windup branch: the
-    quaternion multiply by ``quat_from_axis_angle(0)`` is the identity). So the
-    hold's reference never moves during a phase, and ``quat_ref_before`` --
-    ``rig.holds[i].reference`` captured the instant ``prev_goal`` was entered
-    -- is bit-identical to what ``_phase_result`` read at the transition step.
-    ``rig.pick_point``/``rig.tool_quat``/``rig._brick_pos``/``rig.pinch_evidence``
-    are all read-only (checked against oracle_runtime.py's source). Nothing
-    here mutates rig state -- unlike ``rig.desired_quat``, which has a
-    documented ``commanded_yaw[i]`` side effect and must never be called from
-    a probe like this one.
+    Safe and exact, not approximate: ``rig.pick_point`` / ``rig.attitude_error`` /
+    ``rig.tool_tilt`` / ``rig._brick_pos`` / ``rig.pinch_evidence`` are all read-only, and
+    nothing here mutates rig state.
+
+    Task D5 changed how ``rot_err`` is obtained, not what it means, and not how it is
+    captured. It used to be the axis-angle between the tool and the ``AttitudeHold``
+    reference captured at phase ENTRY; the oracle no longer servos rotation at all
+    (``core.global_ik`` constrains tilt, lean azimuth and jaw heading as scalars), so it is
+    now the larger of the tilt error and the modulo-pi jaw-heading error against
+    ``rig.attitude_reference(i)`` -- still captured at entry, because ``_enter_phase`` plans
+    the next leg (and so re-commands the attitude) before a caller watching goal transitions
+    can see the phase end.
     """
     info: dict = {"phase": prev_goal.phase.name, "steps": steps_used}
     if prev_goal.target_pos is not None:
         pos_err = (prev_goal.target_pos.to(rig.device) - rig.pick_point(i)).norm().item()
-        rot_err = (
-            math_utils.axis_angle_from_quat(
-                math_utils.quat_mul(quat_ref_before, math_utils.quat_conjugate(rig.tool_quat(i)))
-            )
-            .norm()
-            .item()
-        )
         info["pos_err_mm"] = pos_err * 1000.0
-        info["rot_err_deg"] = math.degrees(rot_err)
+        info["rot_err_deg"] = math.degrees(rig.attitude_error(i, attitude_ref))
     if prev_goal.phase == oracle.Phase.LIFT:
         brick = rig.oracles[i].target_brick
         brick_end = rig._brick_pos(i, brick)
@@ -339,7 +327,7 @@ def run_to_release(rig, label: str, i: int = 0, max_steps: int = 3000) -> dict:
     """
     telemetry: dict = {}
     prev_goal = rig.goals[i]
-    quat_ref_before = rig.holds[i].reference.clone() if prev_goal is not None else None
+    attitude_ref = rig.attitude_reference(i)
     steps_in_phase = 0
     for _ in range(max_steps):
         result = rig.step()
@@ -348,12 +336,12 @@ def run_to_release(rig, label: str, i: int = 0, max_steps: int = 3000) -> dict:
         if new_goal is not prev_goal:
             ended_phase = prev_goal.phase if prev_goal is not None else None
             if prev_goal is not None:
-                info = phase_telemetry(rig, i, prev_goal, quat_ref_before, steps_in_phase)
+                info = phase_telemetry(rig, i, prev_goal, attitude_ref, steps_in_phase)
                 telemetry[ended_phase.name] = info
                 print(_format_phase_line(label, info), flush=True)
             steps_in_phase = 0
             prev_goal = new_goal
-            quat_ref_before = rig.holds[i].reference.clone() if new_goal is not None else None
+            attitude_ref = rig.attitude_reference(i)
             if ended_phase == oracle.Phase.RELEASE:
                 telemetry["abandoned"] = False
                 telemetry["timed_out"] = False
@@ -375,10 +363,19 @@ def run_to_release(rig, label: str, i: int = 0, max_steps: int = 3000) -> dict:
     return telemetry
 
 
-def settle_and_check_stowed(env, brick: int, bl: layout.BinLayout) -> tuple[bool, float]:
+def settle_and_check_stowed(env, rig, brick: int, bl: layout.BinLayout) -> tuple[bool, float]:
     """30 raw open-gripper steps post-RELEASE, then read ``per_brick_stowed``
-    and the landing offset from that bin's interior center (3-D norm, mm)."""
+    and the landing offset from that bin's interior center (3-D norm, mm).
+
+    The arm channel repeats the joint target the oracle last commanded, so the arm stands
+    still over the bin while the brick falls. It CANNOT be zeros any more: on the
+    joint-position action space Task D5 moved the datagen env to, a zero arm action commands
+    every joint to fold to zero rather than asking the arm to hold. (Under the IK-Rel term
+    zeros meant "no delta", which was itself not a hold -- it ratcheted gravity sag into the
+    setpoint at ~0.9 mm/step -- but it did not command a fold.)
+    """
     action = torch.zeros(1, env.action_manager.total_action_dim, device=env.device)
+    action[0, :6] = rig.q_cmd[0].to(device=env.device, dtype=torch.float32)
     action[0, -1] = GRIPPER_OPEN_ACTION
     for _ in range(SETTLE_AFTER_RELEASE_STEPS):
         env.step(action)
@@ -430,7 +427,7 @@ def run_layout(bl: layout.BinLayout, layout_idx: int) -> list[dict]:
                 )
                 stowed, landing_offset_mm = (False, None)
                 if not release_telemetry["abandoned"] and not release_telemetry["timed_out"]:
-                    stowed, landing_offset_mm = settle_and_check_stowed(env, color, bl)
+                    stowed, landing_offset_mm = settle_and_check_stowed(env, rig, color, bl)
 
                 record = {
                     "layout": layout_idx,

@@ -1,46 +1,63 @@
-"""GPU binding of the core oracle: per-env servo loops over the IK-Rel action.
+"""GPU binding of the core oracle: per-env global-IK plans driven as joint targets.
 
-Adapted from scripts/scripted_grasp_check.py: same P-servo, same AttitudeHold
-usage, same pinch-evidence gate. Differences: N envs stepped together (one
-env.step per control step, per-env phase state), goals come from
-core.oracle.EnvOracle, and noise comes from EpisodeDraw.
+`core.oracle` is isaaclab-free by design and only says WHAT to do next (a Goal). This
+module owns HOW: it turns that Goal into a joint-space plan through `core.global_ik`,
+commands one waypoint of that plan per control step onto the env's joint-position action
+term, reads the frames (the tool body (`grasp_center`) pose, brick poses, the filtered
+finger<->brick contact sensors) the oracle's SceneSnapshot needs, and applies the two
+measured constants core.oracle deliberately leaves to the runtime
+(DESCEND_CLEARANCE_MEASURED, PICK_OFFSET_MEASURED).
 
-core.oracle is isaaclab-free by design and only says WHAT to do next (a Goal).
-This module owns HOW: it turns that Goal into a 7-element IK-Rel action every
-control step, reads the frames (the tool body (`grasp_center`) pose, brick poses, the
-filtered finger<->brick contact sensors) the oracle's SceneSnapshot needs, and
-applies the two measured constants core.oracle deliberately leaves to the
-runtime (DESCEND_CLEARANCE_MEASURED, PICK_OFFSET_MEASURED).
+WHY A PLANNER AND NOT A SERVO -- this module used to servo `Goal.target_pos` through the
+IK-Rel action term's differential IK, and Task D5 moved it onto `core.global_ik` together
+with `MakerArm-LegoSort-Datagen-v0`'s action space (datagen.LegoSortDatagenEnvCfg). Two
+reasons, and neither of them is "the differential IK never works" -- Task D4 drove this same
+class through a full pick and place at a fixed easy pose, closing the jaws 40/40 with
+`pinch_ok=True`:
 
-Frame convention: every position this class hands to core.oracle (SceneSnapshot
-fields, Goal.target_pos) and every position it reads back for the P-servo
-(``pick_point``) is env-origin-subtracted -- SceneSnapshot's own docstring
-("world frame, env-origin subtracted"). That is what makes a servo error
-(target - measured) identical to the same subtraction done in raw world
-coordinates: the per-env origin cancels in the difference either way, so
-picking the origin-local convention throughout is free, and it is required for
-the goals core.oracle builds from constants that are the same for every env
-(bin centers, RETREAT_POINT) to mean the same physical pose in every env.
+  1. ACTION-SPACE CONSISTENCY. The dataset's recorded action stream is the post-IK
+     joint-position target (`mdp.recorders.JointTargetRecorder`), so the oracle now emits
+     exactly what a policy must output, with no solver between the demonstration and the
+     label. The global solver emits JOINT TARGETS and the IK-Rel term reads its input as
+     CARTESIAN DELTAS, so the module and the env cfg had to move as one change.
+  2. BAND-WIDE PERFORMANCE. Over the randomised scatter band Task D3 measured the
+     differential IK spending `link_005_joint`'s margin instead of turning the base, after
+     which the arm is jammed and every later phase servos a dead mechanism; its grasp gate
+     never passed until the check script moved to `core.global_ik`, which then took it to
+     10/10. A global solve has no such failure mode: it solves the pose in one shot and
+     returns the branch furthest from the stops.
 
-D5 PREREQUISITE -- THIS MODULE STILL USES THE SOLVER D3 MEASURED AS BROKEN.
+The recipe here is the one `scripts/scripted_grasp_check.py` validated, applied to every
+phase rather than to the pick alone:
 
-`desired_quat` below builds a rotation matrix and this class servos it through the
-IK-Rel differential IK. Task D3 replaced exactly that pairing in
-scripts/scripted_grasp_check.py with `core.global_ik`, because over six rounds the
-differential IK never once closed the jaws on a brick; the global solver then took the
-same gate to 10/10. `core.global_ik` currently has ZERO importers under source/ -- the
-physics proof does not yet reach the path that generates the dataset.
+  * the free-space repositioning leg (HOVER) is a GLOBAL solve of the endpoint plus a
+    joint-space interpolation to it -- that is what turns the base, because the branch is
+    chosen by joint margin rather than walked into;
+  * every leg that approaches or carries (DESCEND/LIFT/RAISE/EXTEND/RETREAT) is a Cartesian
+    waypoint path through `GlobalIK.solve_path`, whose continuity constraint is the guard
+    against an IK branch flip mid-carry;
+  * the descend runs `core.global_ik`'s tilt ladder near level, per ruling D3-10: at
+    GRASP_TILT_RAD the jaw plates foul the desk at every pick offset, and each rung carries
+    its own pick offset;
+  * a `core.global_ik.JointTrim` per env biases the command against the arm's open-loop
+    droop, which is effort-limit saturation on `link_004_joint`/`link_007_joint` and not
+    missing gravity compensation (Task D3 part 9).
 
-Moving this module onto `core.global_ik` is Task D5's work, deliberately not done in D3.
-When it happens, TWO THINGS MUST MOVE TOGETHER:
+There is no attitude servo any more. `core.attitude_hold.AttitudeHold` existed because the
+IK-Rel term re-bases the desired orientation on the measured one every step, so a zero
+rotation delta does not hold an attitude; the solver constrains tilt, lean azimuth and jaw
+heading directly, so the attitude is a property of the joint vector being commanded. For the
+same reason a hold phase now genuinely holds: it keeps commanding the same joint target,
+where a zero IK-Rel delta ratcheted gravity sag into the setpoint at ~0.9 mm/step.
 
-  1. this module, to build its target as three scalars (tilt magnitude, lean azimuth, jaw
-     heading) and solve globally, the way `GraspRig.jaw_heading_target` documents; and
-  2. `MakerArm-LegoSort-Datagen-v0` (see datagen.LegoSortDatagenEnvCfg), because the
-     global solver emits JOINT TARGETS while the IK-Rel action term reads its input as
-     CARTESIAN DELTAS. Changing one without the other silently misinterprets every action.
-
-Doing (1) alone is worse than doing neither.
+Frame convention: every position this class hands to core.oracle (SceneSnapshot fields,
+Goal.target_pos) and every position it reads back for planning (``pick_point``) is
+env-origin-subtracted -- SceneSnapshot's own docstring ("world frame, env-origin
+subtracted"). That is what makes a leg error (target - measured) identical to the same
+subtraction done in raw world coordinates: the per-env origin cancels in the difference
+either way, so picking the origin-local convention throughout is free, and it is required
+for the goals core.oracle builds from constants that are the same for every env (bin
+centers, RETREAT_POINT) to mean the same physical pose in every env.
 """
 
 import math
@@ -51,22 +68,31 @@ import torch
 
 from maker_arm_lab.core import layout, oracle
 from maker_arm_lab.core.action_scale import IK_SCALE
-from maker_arm_lab.core.attitude_hold import AttitudeHold
 from maker_arm_lab.core.checker import (
     PINCH_MAX_ASYMMETRY,
     PINCH_MIN_FORCE,
     PINCH_MIN_STALL,
 )
+from maker_arm_lab.core.global_ik import (
+    ARM_DOF,
+    GlobalIK,
+    GraspTarget,
+    JointTrim,
+    descend_pick_offset,
+    descend_tilt_ladder,
+    fold_to_half_turn,
+    tool_axis_world,
+)
 from maker_arm_lab.robots.frames import (
-    ARM_JOINT_REGEX,
+    ARM_JOINT_NAMES,
     BASE_YAW_SIGN,
-    CANON_IN_BODY,
     DESCEND_CLEARANCE_MEASURED,
     GRASP_TILT_RAD,
     GRIPPER_CLOSED_POS,
     GRIPPER_JOINT_NAMES,
     JAW_AXIS_BODY,
     PICK_OFFSET_MEASURED,
+    TOOL_AXIS_BODY,
     TOOL_BODY,
     WRIST_ROLL_INDEX,
     WRIST_ROLL_SIGN,
@@ -74,107 +100,212 @@ from maker_arm_lab.robots.frames import (
 
 from .mdp.recorders import PHASE_TO_INT
 
-# --- Servo gains and thresholds, carried over unchanged from OpenYAM's
-# scripts/scripted_grasp_check.py (OpenYAM's M1 Task 10/11 validated code). See
-# that script's module docstring for the full measurement-backed derivation on
-# OpenYAM's arm; only the headline numbers are repeated here. Not yet
-# re-validated on the Maker Arm -- this milestone's own
-# scripts/scripted_grasp_check.py (Task D3) is what re-measures them.
-SERVO_GAIN_POS = 0.8
-SERVO_GAIN_ROT = 1.0
-# Per-step pick-point motion below which a stall-gated phase (DESCEND) is
-# treated as blocked -- full deflection delivers ~1.7 mm/step, so this is far
-# below any real motion and above solver noise.
+# --- The grasp attitude ------------------------------------------------------
+# The tool leans toward world +x. Task D3 part 8 measured that this shipping convention is
+# also the one to keep: freeing the lean azimuth covers band corners it cannot reach but
+# GRASPS WORSE (4/9 against 8/9), because a redundancy resolved for joint margin picks poses
+# that are bad for the grasp. Stated here rather than imported because
+# `scripts/scripted_grasp_check.py` states its own; both cite core.global_ik, which carries
+# the measurement.
+LEAN_AZIMUTH = 0.0
+
+BRICK_HALF_HEIGHT = layout.BRICK_SIZE[2] / 2
+# Ruling D3-10 / D3-11 candidate 2: the descend is near level, and rather than one fixed
+# tilt the runtime tries the ladder in order and takes the smallest tilt whose descend path
+# actually solves. Every rung is inside the jaw-plate fouling window by construction
+# (core.global_ik.descend_tilt_ladder), so buying path feasibility with tilt can never buy
+# it by putting the plates into the desk.
+DESCEND_TILT_LADDER = descend_tilt_ladder(BRICK_HALF_HEIGHT)
+
+# Restart spread for the one solve per pick attempt that has no previous waypoint to seed
+# from (the HOVER endpoint). core.global_ik's own default: it is the number that decides
+# which BRANCH the approach lands on, and Task D3 measured that a spread of this size is
+# what makes the solver turn the base instead of walking a joint into its stop.
+# `scripts/scripted_grasp_check.py` uses 64 for the same solve because THERE the same call
+# also decides whether a brick is reported UNREACHABLE, and calling a pose infeasible
+# because the search was thin would blame the layout for the solver's own weakness. The
+# oracle renders no such verdict -- a hover it cannot solve fails the pick and retries -- and
+# 24 costs about a third of the wall clock, paid once per pick attempt in every generated
+# episode.
+HOVER_RESTARTS = 24
+
+# --- Leg resolution ----------------------------------------------------------
+# How finely a leg is cut into waypoints, and how many control steps each waypoint is
+# commanded for. 3 mm at 2 steps is ~1.5 mm per control step, the pace the IK-Rel servo
+# actually achieved on the same legs (D4 measured EXTEND converging in 203-222 steps over
+# ~0.3 m), so the phase budgets in core.oracle -- which are NOT modified, spec section 5
+# item 5 -- still fit. The tilt and joint entries are the same idea for legs that rotate the
+# tool or move in joint space: RAISE applies the whole of RELEASE_TILT_RAD, and a leg cut
+# for position alone would exceed core.global_ik's continuity cap on the rotation.
+WAYPOINT_STEP_M = 0.003
+WAYPOINT_TILT_STEP_RAD = 0.03
+WAYPOINT_JOINT_STEP_RAD = 0.02
+WAYPOINT_HOLD_STEPS = 2
+# Fraction of a phase's own step budget the walk may consume, leaving the rest for the arm
+# to close the tracking error the walk leaves behind (the trim's time constant is ~33 steps;
+# see core.global_ik.JointTrim).
+WALK_BUDGET_FRACTION = 0.6
+
+# Jaw-heading offsets a CARRY leg may end at when the held heading gives no walkable path,
+# tried in this order (see `OracleRig._plan_carry` for the measurement and for why moving the
+# heading with a brick in the jaws costs nothing). The held heading is always first, so a leg
+# that solves as commanded is bit-for-bit unaffected by this ladder; the widest rung is 60
+# deg because the measured failures needed up to 60 deg and none needed more.
+HEADING_RELAXATION_RAD = (
+    0.0,
+    *(sign * math.radians(deg) for deg in (10.0, 20.0, 30.0, 45.0, 60.0) for sign in (-1.0, 1.0)),
+)
+
+# Largest joint jump a leg may take when the Cartesian path fails and the fallback solves
+# the endpoint directly. That fallback is seeded from the current pose, so it normally stays
+# on the same branch; this rejects the case where it does not, because a branch flip with a
+# brick in the jaws flings the brick. A whole leg legitimately moves the base and shoulder by
+# a few tenths of a radian (D4: EXTEND's base swing to the outer bins is under 0.5 rad); an
+# elbow or wrist inversion is a multiple of that.
+MAX_LEG_JOINT_JUMP = 1.5
+
+# Per-step motion of the pick point below which a stall-gated phase (DESCEND) is treated as
+# blocked. A walked waypoint delivers ~1.5 mm/step, so this is far below any real motion and
+# above solver noise. Carried over unchanged from the servo version, where full deflection
+# delivered ~1.7 mm/step.
 STALL_EPS = 5e-5
-# Rotation error (rad) below which a servo phase counts as converged.
+
+# Attitude error (rad) at which a phase's attitude counts as arrived. NOT a phase-end gate
+# any more, and that is a deliberate change: the servo version gated convergence on a
+# rotation channel steered independently of the position channel, which could lag it
+# arbitrarily, while under the global solver the attitude and the position come out of the
+# SAME joint vector -- arriving at the commanded joint target in position IS arriving in
+# attitude, up to joint tracking error. It is kept as the threshold the check scripts report
+# `rot_err` against (`scripts/release_envelope_check.py`'s `extend_ok`), where it still says
+# whether the arm held the attitude it was asked for.
 ROT_CONVERGED = 0.02
 
-# Pinch evidence (gated after LIFT, in free air, so the readings are pure
-# finger<->brick and not the desk press): a real pinch stalls the jaws short of
-# GRIPPER_CLOSED_POS and puts equal, non-trivial filtered force on both
-# fingers; entrainment (brick merely cammed in the jaw pocket) rises and
-# centers identically but does neither.
+# Pinch evidence (gated after LIFT, in free air, so the readings are pure finger<->brick and
+# not the desk press): a real pinch stalls the jaws short of GRIPPER_CLOSED_POS and puts
+# equal, non-trivial filtered force on both fingers; entrainment (brick merely cammed in the
+# jaw pocket) rises and centers identically but does neither.
 #
-# All three thresholds are imported from core.checker above, and THIS REPO is
-# now their authority -- not OpenYAM's script, which an earlier version of this
-# comment pointed at. PINCH_MIN_STALL in particular is no longer OpenYAM's
-# 0.0087 m nor the 0.003 m this module used to define locally: it is derived
-# from THIS brick as min(BRICK_SIZE)/2 = 0.0048 m, and core.checker carries the
-# derivation. PINCH_MIN_FORCE was validated against Task D3's 10/10 gate on
-# this arm and closed; PINCH_MAX_ASYMMETRY remains inherited from OpenYAM.
-# Read core.checker for which is which -- the distinction is recorded there.
+# All three thresholds are imported from core.checker above, and THIS REPO is now their
+# authority -- not OpenYAM's script. PINCH_MIN_STALL in particular is no longer OpenYAM's
+# 0.0087 m nor the 0.003 m this module used to define locally: it is derived from THIS brick
+# as min(BRICK_SIZE)/2 = 0.0048 m, and core.checker carries the derivation. PINCH_MIN_FORCE
+# was validated against Task D3's 10/10 gate on this arm and closed; PINCH_MAX_ASYMMETRY
+# remains inherited from OpenYAM. Read core.checker for which is which.
 LIFT_MIN_RISE = 0.05  # m
 LIFT_MAX_XY_ERROR = 0.03  # m
 
-# Idle action for an env whose oracle has nothing left to do this step (DONE or
-# ABANDON): zero position/rotation delta, jaws open, same as OpenYAM's
-# scripted_grasp_check.py's `hold(..., GRIPPER_OPEN_ACTION)` convention.
+# Idle action for an env whose oracle has nothing left to do this step (DONE or ABANDON):
+# jaws open, arm holding its last commanded joint target. The arm channel is NOT zeroed --
+# on the joint-position action space a zero arm action commands every joint to fold to zero,
+# it does not ask the arm to stand still.
 GRIPPER_OPEN_ACTION = 1.0
 
-# Consecutive watchdog-flagged control steps before an env is abandoned. 30
-# steps at 30 Hz is 1 s -- comfortably longer than the transient joint-limit
-# contact a converging servo can produce, short enough not to burn an episode's
-# budget on a genuinely runaway env. Carried over unchanged from OpenYAM; the
-# reasoning and the numbers below are OpenYAM's own measurements, on OpenYAM's
-# arm, not yet re-validated on the Maker Arm.
+# Per-step joint jitter (rad) that one raw unit of `EpisodeDraw.action_noise_std` buys.
+# core.oracle calibrates its noise in the raw units of the action space this module used to
+# drive, where a raw unit was IK_SCALE metres of tool motion in one control step; the joint
+# targets that replaced it are in radians, so a literal reading of "raw units" would inflate
+# the disturbance by two orders of magnitude. This converts through the tool instead, at the
+# Jacobian column magnitude Task D3 part 7 measured on this arm (0.23-0.27 m/rad), so the
+# per-step disturbance keeps the PHYSICAL size the noise draw was tuned at -- 0.1 mm of tool
+# motion per step at the default std of 0.05, times core.oracle's induction boost.
+JACOBIAN_M_PER_RAD = 0.25
+JOINT_NOISE_PER_RAW_UNIT = IK_SCALE[0] / JACOBIAN_M_PER_RAD
+
+# Consecutive watchdog-flagged control steps before an env is abandoned. 30 steps at 30 Hz
+# is 1 s -- comfortably longer than the transient joint-limit contact a converging arm can
+# produce, short enough not to burn an episode's budget on a genuinely runaway env. Carried
+# over unchanged from OpenYAM; the reasoning below is OpenYAM's own measurements, on
+# OpenYAM's arm, not yet re-validated on the Maker Arm.
 #
-# Since OpenYAM's Task 8, the strike counter resets to 0 on every phase entry
-# (see _enter_phase below), not just once per episode. Two consequences worth
-# knowing before retuning either this or a phase's own step budget:
+# Since OpenYAM's Task 8, the strike counter resets to 0 on every phase entry (see
+# _enter_phase below), not just once per episode. Two consequences worth knowing before
+# retuning either this or a phase's own step budget:
 #
-# * core.oracle.RAISE_MAX_STEPS (60) depends on this value: RAISE is only
-#   guaranteed to exit on "budget" -- not get abandoned by the watchdog mid-
-#   phase -- if RAISE_MAX_STEPS <= WATCHDOG_TRIP_STRIKES + first_contact_step,
-#   where first_contact_step (measured 30-40 control steps into RAISE, on
-#   OpenYAM's Task 8 GPU runs) is how soon a genuine reach-ceiling contact
-#   starts flagging "near" a joint limit. Raising WATCHDOG_TRIP_STRIKES
-#   without re-checking this bound is safe (more margin); lowering it, or
-#   raising RAISE_MAX_STEPS, is not -- re-run
-#   scripts/release_envelope_check.py's full sweep before doing either.
-# * core.oracle.REOPEN (hold_steps=20) and RELEASE (hold_steps=20) both run
-#   fewer control steps than this threshold, so with a per-phase reset
-#   neither phase can EVER trip the watchdog on its own, regardless of how
-#   close to a joint limit the arm is throughout -- a real gap versus
-#   OpenYAM's pre-Task-8 persistent counter, not just a smaller window.
-#   Measured (OpenYAM's Task 8, 40 release-envelope trials + 2 full 6-brick
-#   episodes) this is latent, not exercised: RELEASE runs with joint4_margin
-#   0.08-0.45 rad, comfortably clear of the 0.05 rad guard band, in every
-#   case tried on OpenYAM's arm. Left undefended deliberately rather than
-#   given special-cased carry-over, because REOPEN/RELEASE are pure-hold
-#   phases (Goal.target_pos is None) -- they never themselves command motion
-#   toward a limit, only inherit whatever pose the PRECEDING active phase
-#   converged to -- and the alternative (carrying strikes over for hold
-#   phases only, resetting for active ones) is more state to keep consistent
-#   for a case measurement shows is not currently live there. Revisit if a
-#   future release pose runs RELEASE genuinely near a limit on the Maker Arm.
+# * core.oracle.RAISE_MAX_STEPS (60) depends on this value: RAISE is only guaranteed to exit
+#   on "budget" -- not get abandoned by the watchdog mid-phase -- if RAISE_MAX_STEPS <=
+#   WATCHDOG_TRIP_STRIKES + first_contact_step, where first_contact_step (measured 30-40
+#   control steps into RAISE, on OpenYAM's Task 8 GPU runs) is how soon a genuine
+#   reach-ceiling contact starts flagging "near" a joint limit. Raising
+#   WATCHDOG_TRIP_STRIKES without re-checking this bound is safe (more margin); lowering it,
+#   or raising RAISE_MAX_STEPS, is not.
+# * core.oracle.REOPEN (hold_steps=20) and RELEASE (hold_steps=20) both run fewer control
+#   steps than this threshold, so with a per-phase reset neither phase can EVER trip the
+#   watchdog on its own, regardless of how close to a joint limit the arm is throughout -- a
+#   real gap versus OpenYAM's pre-Task-8 persistent counter, not just a smaller window.
+#   Measured (OpenYAM's Task 8) this is latent, not exercised. Left undefended deliberately
+#   rather than given special-cased carry-over, because REOPEN/RELEASE are pure-hold phases
+#   (Goal.target_pos is None) -- they never themselves command motion toward a limit, only
+#   hold whatever joint target the PRECEDING active phase left -- and the alternative
+#   (carrying strikes over for hold phases only, resetting for active ones) is more state to
+#   keep consistent for a case measurement shows is not currently live there.
 WATCHDOG_TRIP_STRIKES = 30
 
 
-def canonical_to_body(rot_canon: torch.Tensor, canon_in_body: torch.Tensor) -> torch.Tensor:
-    """World rotation of the tool BODY given the desired world rotation of the canonical
-    tool frame (columns: jaw axis, y, tool axis) and CANON_IN_BODY = C, whose rows are the
-    canonical axes (jaw axis, y, tool axis) expressed in body coordinates -- so C[i] is
-    canonical axis i written in body coordinates.
+def grasp_center_for(pick, tilt: float, heading: float, offset_z: float) -> tuple:
+    """The `grasp_center` position that puts the pick point at ``pick``.
 
-    R_world_canon's column i is canonical axis i in world coordinates, which is the body
-    rotation applied to that same axis expressed in body coordinates:
-    R_world_canon[:, i] = R_world_body @ C[i] for every i, i.e.
-    R_world_canon = R_world_body @ C^T. Right-multiplying both sides by C (C is a proper
-    rotation, so C^T @ C = I) gives R_world_body = R_world_canon @ C -- a plain
-    right-multiply by C, no transpose.
+    ``pick = grasp_center + R @ (ox, 0, oz)``, so
+    ``grasp_center = pick - ox * (body x in world) - oz * (body z in world)``. Body z maps to
+    the negated tool axis, which the commanded attitude gives exactly. Body x is the
+    plate-face direction: it is ``body y x body z``, and since body y is the jaw axis at
+    world heading ``heading``, body x points at ``heading - 90 deg`` in the horizontal plane,
+    exactly at zero tilt and to within the tilt otherwise. At the near-level descend tilts
+    that approximation is worth ``|ox| * sin(tilt)``, which is 0.0 on this arm because
+    ``PICK_OFFSET_MEASURED[0]`` is 0.0 (robots.frames records why that is a measurement and
+    not an unset default).
+
+    Module-level, and not a method, because it is pure geometry: the inverse of
+    ``OracleRig.pick_point``, and a sign error in it would put the jaws a tool-length off the
+    brick in a way only a GPU run could see. Same derivation as
+    ``scripted_grasp_check.GraspRig.grasp_center_for``, which is where it was measured.
     """
-    return rot_canon @ canon_in_body
+    axis = tool_axis_world(tilt, LEAN_AZIMUTH)
+    face = torch.tensor([math.sin(heading), -math.cos(heading), 0.0], dtype=torch.float64)
+    point = torch.as_tensor(pick, dtype=torch.float64).reshape(3)
+    return tuple(float(v) for v in point + offset_z * axis - PICK_OFFSET_MEASURED[0] * face)
+
+
+def leg_resolution(
+    max_steps: int,
+    gain_scale: float,
+    distance: float = 0.0,
+    tilt_change: float = 0.0,
+    heading_change: float = 0.0,
+    joint_change: float = 0.0,
+) -> tuple[int, int]:
+    """How many waypoints a leg gets, and how many control steps each is commanded for.
+
+    Resolution comes from the geometry (position, tilt, joint travel); pace comes from the
+    phase's own budget. ``EpisodeDraw.gain_scale`` -- the per-episode approach-speed draw,
+    which used to scale the servo's proportional gain -- cuts the leg finer, and the walk is
+    then held to ``WALK_BUDGET_FRACTION`` of the phase's ``max_steps``, so a slow draw cannot
+    spend a budget core.oracle sized for a faster one. A leg still too long for its budget is
+    cut COARSER rather than truncated: the arm has to reach the end of the leg, and a
+    truncated plan would leave every later phase starting from the wrong pose.
+    """
+    count = max(
+        2,
+        math.ceil(distance / (WAYPOINT_STEP_M * gain_scale)),
+        math.ceil(tilt_change / (WAYPOINT_TILT_STEP_RAD * gain_scale)),
+        math.ceil(heading_change / (WAYPOINT_TILT_STEP_RAD * gain_scale)),
+        math.ceil(joint_change / (WAYPOINT_JOINT_STEP_RAD * gain_scale)),
+    )
+    budget = max(2, int(WALK_BUDGET_FRACTION * max_steps))
+    count = min(count, budget)
+    return count, max(1, min(WAYPOINT_HOLD_STEPS, budget // count))
 
 
 class OracleRig:
-    """Per-env GPU binding of ``core.oracle.EnvOracle`` onto batched IK-Rel actions.
+    """Per-env GPU binding of ``core.oracle.EnvOracle`` onto batched joint-position actions.
 
-    One ``core.oracle.EnvOracle`` and one single-env ``AttitudeHold`` per env
-    (``give_up_error=float("inf")``: as in OpenYAM's scripted_grasp_check.py
-    servo, a phase legitimately starts tens of degrees off target and this
-    driver has its own phase budgets -- see ``core.attitude_hold``'s "Giving
-    up" docstring section). ``step()`` advances every env by one control step;
-    ``rearm()`` re-seeds the envs a caller has just reset.
+    One ``core.oracle.EnvOracle`` and one ``core.global_ik.JointTrim`` per env; one shared
+    ``core.global_ik.GlobalIK``, which keeps no state between solves. ``step()`` advances
+    every env by one control step; ``rearm()`` re-seeds the envs a caller has just reset.
+
+    A phase that commands motion is PLANNED once, at phase entry, into a list of joint
+    waypoints, which ``step()`` then walks. Solving is therefore paid per phase and not per
+    control step: a seeded waypoint solve is a couple of milliseconds and the one global
+    HOVER solve a few hundred, against roughly fifty phase entries in a six-brick episode.
     """
 
     def __init__(
@@ -196,112 +327,211 @@ class OracleRig:
         self.num_bricks = env.cfg.num_bricks
         self.tool = self.robot.find_bodies(TOOL_BODY)[0][0]
         self.finger_ids = self.robot.find_joints(list(GRIPPER_JOINT_NAMES))[0]
-        self.arm_ids = self.robot.find_joints([ARM_JOINT_REGEX])[0]
-        action_dim = env.action_manager.total_action_dim
-        if action_dim != 7:
-            raise RuntimeError(f"expected a 7-element IK-Rel action, got {action_dim}")
-        self.pick_offset = torch.tensor(PICK_OFFSET_MEASURED, device=self.device)
+        # URDF order (link_002_joint .. link_007_joint), preserved rather than accepted from
+        # the articulation, because every joint vector crossing this boundary -- the solver's
+        # `q`, the joint limits, WRIST_ROLL_INDEX, the action term's own columns -- is in
+        # that order, and a permutation between them would be silent.
+        self.arm_ids = self.robot.find_joints(list(ARM_JOINT_NAMES), preserve_order=True)[0]
+        self._check_action_space(env)
         self.ex = torch.tensor([1.0, 0.0, 0.0], device=self.device)
         self.jaw_axis = torch.tensor(JAW_AXIS_BODY, device=self.device)
-        self.canon_in_body = torch.tensor(CANON_IN_BODY, device=self.device)
-        self.scale_pos = torch.tensor(IK_SCALE[0:3], device=self.device)
-        self.scale_rot = torch.tensor(IK_SCALE[3:6], device=self.device)
-        # Joint limits read once: identical for every env (same robot asset
-        # replicated), so env 0's row is every env's row.
+        self.tool_axis = torch.tensor(TOOL_AXIS_BODY, device=self.device)
+        self.tool_axis_body = torch.tensor(TOOL_AXIS_BODY, dtype=torch.float64)
+        self.ik = GlobalIK()
+        # Joint limits read once: identical for every env (same robot asset replicated), so
+        # env 0's row is every env's row. The articulation's, not the URDF's, so the command
+        # clamp and the watchdog agree with what the simulator will accept.
         self.limits = self.robot.data.joint_pos_limits[0, self.arm_ids].clone()  # (6,2)
-        # Plain CPU floats, read once: desired_quat's fold needs them on every
-        # phase entry and a per-call .tolist() would be a device sync.
+        self.q_lower = self.limits[:, 0].double().cpu()
+        self.q_upper = self.limits[:, 1].double().cpu()
+        # Plain CPU floats, read once: the jaw-heading fold needs them on every phase entry
+        # and a per-call .tolist() would be a device sync.
         self.wrist_roll_limits = tuple(self.limits[WRIST_ROLL_INDEX].tolist())
         self.left_brick = env.scene["finger_left_brick"]
         self.right_brick = env.scene["finger_right_brick"]
 
         self.oracles: list[oracle.EnvOracle | None] = [None] * self.num_envs
-        self.holds: list[AttitudeHold | None] = [None] * self.num_envs
         self.goals: list[oracle.Goal | None] = [None] * self.num_envs
-        # Last explicit jaw-heading target per env (the `want` angle from
-        # desired_quat), reused whenever a goal's yaw is None so a held phase
-        # (CLOSE/LIFT/RAISE/...) keeps the heading DESCEND last commanded
-        # instead of re-deriving one -- there is no brick reference once the
-        # brick has left the desk.
+        self.trims = [JointTrim() for _ in range(self.num_envs)]
+        # The joint target being commanded right now, float64 CPU, URDF order. This is the
+        # arm's setpoint between waypoints and through every hold phase.
+        self.q_cmd = [torch.zeros(ARM_DOF, dtype=torch.float64) for _ in range(self.num_envs)]
+        # Remaining waypoints of the current phase's plan, and the dwell schedule walking it.
+        self.plans: list[list[torch.Tensor]] = [[] for _ in range(self.num_envs)]
+        self.dwell = [WAYPOINT_HOLD_STEPS] * self.num_envs
+        self.dwell_left = [1] * self.num_envs
+        # Where a desk-resting brick sits in `grasp_center` coordinates. Per env because the
+        # descend ladder picks its own offset per rung (the offset balancing desk clearance
+        # against tip margin moves with tilt), and that choice then has to survive into the
+        # LIFT/EXTEND legs, which read `pick_point` in the same frame.
+        if PICK_OFFSET_MEASURED[1] != 0.0:
+            # `_grasp_center_for` inverts the offset along the tool axis and the plate-face
+            # direction only; a jaw-axis component would need the jaw axis too. It is 0.0 by
+            # measurement (robots.frames), so this guards a future edit, not a live case.
+            raise NotImplementedError(
+                "PICK_OFFSET_MEASURED has a jaw-axis component; _grasp_center_for inverts "
+                "only its tool-axis and plate-face components"
+            )
+        self.pick_offset = torch.tensor(PICK_OFFSET_MEASURED, device=self.device).repeat(
+            self.num_envs, 1
+        )
+        # Last explicit jaw-heading target per env (the folded closing-axis heading), reused
+        # whenever a goal's yaw is None so a held phase (CLOSE/LIFT/RAISE/...) keeps the
+        # heading DESCEND last commanded -- there is no brick reference once the brick has
+        # left the desk. `commanded_tilt` is the same for the tool-axis tilt.
         self.commanded_yaw = [0.0] * self.num_envs
-        # Brick pose at the HOVER this pick attempt started from (env-origin
-        # subtracted), for the LIFT rise/xy gate -- mirrors grasp_one's
-        # `brick_start` in OpenYAM's scripted_grasp_check.py.
+        self.commanded_tilt = [GRASP_TILT_RAD] * self.num_envs
+        # Brick pose at the HOVER this pick attempt started from (env-origin subtracted), for
+        # the LIFT rise/xy gate -- mirrors grasp_one's `brick_start` in
+        # scripts/scripted_grasp_check.py.
         self.brick_start: list[torch.Tensor | None] = [None] * self.num_envs
         # Pick point one step ago, for DESCEND's stall detector.
         self.previous_pick_point: list[torch.Tensor | None] = [None] * self.num_envs
         self.steps_in_phase = [0] * self.num_envs
         self.quiet = [0] * self.num_envs
-        # Post-convergence settle, LIFT only (Goal.hold_steps > 0 with a
-        # target_pos set): OpenYAM's scripted_grasp_check.py reads pinch/rise after
-        # `rig.hold(30, GRIPPER_CLOSE_ACTION)`, not at the instant the position
-        # servo converges, so the contact forces have settled. `holding[i]`
-        # marks that this env has converged/stalled/budgeted-out and is now
-        # coasting the extra `goal.hold_steps` steps before the gate is read;
-        # `pending_outcome` is the outcome the servo actually ended on.
+        # Post-arrival settle, LIFT only (Goal.hold_steps > 0 with a target_pos set):
+        # scripts/scripted_grasp_check.py reads pinch/rise after a hold, not at the instant
+        # the arm arrives, so the contact forces have settled. `holding[i]` marks that this
+        # env has arrived/stalled/budgeted-out and is now coasting the extra
+        # `goal.hold_steps` steps before the gate is read; `pending_outcome` is the outcome
+        # the leg actually ended on.
         self.holding = [False] * self.num_envs
         self.hold_counter = [0] * self.num_envs
         self.pending_outcome: list[str | None] = [None] * self.num_envs
         self.watchdog_strikes = [0] * self.num_envs
         self.abandoned = torch.zeros(self.num_envs, dtype=torch.bool)
-        self.stats = [{"retries": 0, "sorted": 0, "abandon": None} for _ in range(self.num_envs)]
+        self.stats = [self._fresh_stats() for _ in range(self.num_envs)]
         self.rearm(list(range(self.num_envs)))
+
+    @staticmethod
+    def _fresh_stats() -> dict:
+        return {"retries": 0, "sorted": 0, "abandon": None, "unplanned_legs": 0}
+
+    def _check_action_space(self, env) -> None:
+        """Fail loudly unless this env exposes the 7-element joint-position action.
+
+        What this rig emits is six ABSOLUTE joint targets plus a binary gripper. Fed to the
+        IK-Rel term instead, those six numbers would be read as Cartesian deltas -- silently,
+        with no error, producing a dataset of nonsense. That is exactly why
+        `MakerArm-LegoSort-Datagen-v0` moved to the joint-position action space in the same
+        change as this module (see datagen.LegoSortDatagenEnvCfg), so it is worth a check
+        rather than a comment.
+        """
+        action_dim = env.action_manager.total_action_dim
+        if action_dim != 7:
+            raise RuntimeError(f"expected a 7-element joint-position action, got {action_dim}")
+        term = env.action_manager.get_term("arm_action")
+        names = list(getattr(term, "_joint_names", []))
+        if names != list(ARM_JOINT_NAMES):
+            raise RuntimeError(
+                "the arm action term does not drive the six arm joints in URDF order "
+                f"({list(ARM_JOINT_NAMES)}); got {names}. The joint targets this rig emits "
+                "are ordered, so a permutation here would silently drive the wrong joints."
+            )
 
     # -- control loop ----------------------------------------------------
 
     def step(self) -> dict:
         """One control step for the whole batch. Returns ``{"dones", "abandoned"}``."""
         action = torch.zeros(self.num_envs, 7, device=self.device)
-        zero_rot_command = torch.zeros(3, device=self.device)
+        planned: list[torch.Tensor] = []
         for i in range(self.num_envs):
             goal = self.goals[i]
             if goal is None:
-                # DONE/ABANDON envs coast: zero deltas, jaws open.
+                # DONE/ABANDON envs coast: jaws open, arm holding its last joint target.
                 action[i, 6] = GRIPPER_OPEN_ACTION
-                continue
-            action[i, 6] = goal.gripper
-            if goal.target_pos is not None:
-                err = goal.target_pos.to(self.device) - self.pick_point(i)
-                gain = SERVO_GAIN_POS * self.oracles[i].draw.gain_scale
-                delta = torch.clamp(gain * err / self.scale_pos, -1.0, 1.0)
-                noise_std = self.oracles[i].draw.action_noise_std * self.oracles[i].noise_factor()
-                delta = delta + noise_std * torch.randn(3, device=self.device)
-                action[i, 0:3] = torch.clamp(delta, -1.0, 1.0)
             else:
-                # Hold phases (SETTLE/CLOSE/REOPEN/RELEASE) command no
-                # translation -- except CLOSE for a noise-induced first
-                # attempt, which has no servo error for the noise term above
-                # to ride on but still needs the boosted noise noise_factor()
-                # promises for CLOSE (see its docstring). Gated strictly on
-                # factor > 1.0: noise_factor() is 1.0 whenever induction is
-                # disabled, for uninduced picks, and for every other hold
-                # phase (SETTLE/REOPEN/RELEASE), so action[i, 0:3] then stays
-                # at its zero-initialized default and no torch.randn call is
-                # made at all -- bit-for-bit identical to before this fix,
-                # including the torch RNG stream.
-                factor = self.oracles[i].noise_factor()
-                if factor > 1.0:
-                    delta = (
-                        self.oracles[i].draw.action_noise_std
-                        * factor
-                        * torch.randn(3, device=self.device)
-                    )
-                    action[i, 0:3] = torch.clamp(delta, -1.0, 1.0)
-            # Pure-hold goals (target_pos is None) and LIFT's post-convergence
-            # settle (self.holding[i]) send a hard zero rotation delta --
-            # action[i, 3:6] stays at its zero-initialized default, never
-            # touching AttitudeHold -- exactly what OpenYAM's scripted_grasp_check.py's
-            # `hold()` does (scripted_grasp_check.py:289-292 sends delta_rot=zero
-            # directly, bypassing AttitudeHold entirely). Servoing rotation
-            # through those steps would actively correct the tool's attitude
-            # while CLOSE clamps the jaws onto the brick with the plates still
-            # resting on the desk, and during LIFT's settle coast -- exactly
-            # the legs OpenYAM measured with rotation left alone.
-            if goal.target_pos is not None and not self.holding[i]:
-                action[i, 3:6] = self.holds[i].advance(self.tool_quat(i), zero_rot_command)
-        # Cycle-state stash for CyclePhaseRecorder/CycleBrickRecorder: pre-step
-        # values (the recorders fire inside env.step()), refreshed in place.
-        # NOT `target_brick or -1` -- brick 0 is falsy and must survive.
+                action[i, 6] = goal.gripper
+                self._advance_plan(i)
+            target = self.q_cmd[i]
+            planned.append(target)
+            command = self.trims[i].command(target) + self._command_noise(i)
+            action[i, :6] = torch.clamp(command, self.q_lower, self.q_upper).to(
+                device=self.device, dtype=torch.float32
+            )
+        self._stash_cycle_state()
+        _, _, terminated, truncated, _ = self.env.step(action)
+        # Isaac Lab's ManagerBasedRLEnv.step() resets terminated|truncated envs to their NEXT
+        # episode's initial state before returning, so for those envs every read below
+        # (joint_pos, brick_pos, pick_point, ...) would be post-reset noise unrelated to the
+        # goal still sitting in self.goals[i]. dones is computed here, before the trim update
+        # and _advance_phases/_run_watchdog, precisely so all three can skip those envs for
+        # this step; their stats/goal freeze at the completed episode's values and stay
+        # readable via episode_stats() until the caller calls rearm().
+        dones = (terminated | truncated).cpu()
+        self._update_trims(planned, dones)
+        self._abandon_nan_envs(dones)
+        self._advance_phases(dones)
+        self._run_watchdog(dones)
+        return {"dones": dones, "abandoned": self.abandoned.clone()}
+
+    def _advance_plan(self, i: int) -> None:
+        """Move the commanded joint target one control step along this phase's plan."""
+        plan = self.plans[i]
+        if not plan:
+            return
+        self.dwell_left[i] -= 1
+        if self.dwell_left[i] > 0:
+            return
+        self.q_cmd[i] = plan.pop(0)
+        self.dwell_left[i] = self.dwell[i]
+
+    def _command_noise(self, i: int) -> torch.Tensor | float:
+        """Per-step joint jitter for this env's episode draw (spec section 5.4 item 2).
+
+        Applied to the COMMAND and not to the plan, so the disturbance reaches the arm and
+        the recorded action exactly as the servo version's action noise did, without the
+        trim integrating against it (see ``_update_trims``). Hold phases command no noise
+        unless ``noise_factor()`` boosts it -- CLOSE for a noise-induced first attempt, which
+        has no motion for the noise to ride on but still needs the boost its docstring
+        promises. Gated strictly on factor > 1.0 so that with induction disabled, and for
+        every uninduced pick, no RNG is drawn on those phases at all.
+        """
+        orc = self.oracles[i]
+        goal = self.goals[i]
+        if orc is None or goal is None:
+            return 0.0
+        factor = orc.noise_factor()
+        if goal.target_pos is None and factor <= 1.0:
+            return 0.0
+        std = orc.draw.action_noise_std * factor * JOINT_NOISE_PER_RAW_UNIT
+        if std <= 0.0:
+            return 0.0
+        return std * torch.randn(ARM_DOF, dtype=torch.float64)
+
+    def _update_trims(self, planned: list[torch.Tensor], dones: torch.Tensor) -> None:
+        """Fold this step's joint tracking error into each env's trim.
+
+        The trim closes the arm's open-loop droop -- effort-limit saturation on
+        `link_004_joint` and `link_007_joint`, about 40 mm of `grasp_center` at the home pose
+        (Task D3 part 9) -- which nothing else does now that no task-space servo re-references
+        from the measured pose every step. It integrates against ``planned`` and not against
+        the command actually sent, so it neither chases its own bias nor the per-step noise.
+        """
+        measured = self.robot.data.joint_pos[:, self.arm_ids].double().cpu()
+        saturated = self._joint_saturated()
+        for i in range(self.num_envs):
+            if dones[i]:
+                continue  # post-auto-reset state this step; rearm() resets the trim
+            self.trims[i].update(planned[i], measured[i], saturated=saturated[i])
+
+    def _joint_saturated(self) -> torch.Tensor:
+        """(N, 6) bool: is each arm actuator's effort limit binding this step?
+
+        ``computed_torque`` is the PD+feed-forward demand before the clamp and
+        ``applied_torque`` is what reached the sim, so they differ exactly when the effort
+        limit bound (see actuators/mit_mode.py). Feeds ``JointTrim``'s anti-windup.
+        """
+        computed = self.robot.data.computed_torque[:, self.arm_ids]
+        applied = self.robot.data.applied_torque[:, self.arm_ids]
+        return ((computed - applied).abs() > 1e-6).cpu()
+
+    def _stash_cycle_state(self) -> None:
+        """Pre-step phase/brick for CyclePhaseRecorder/CycleBrickRecorder.
+
+        Those recorders fire inside env.step(), so the stash is refreshed in place before it.
+        NOT ``target_brick or -1`` -- brick 0 is falsy and must survive.
+        """
         if not hasattr(self.env, "oracle_cycle_phase"):
             self.env.oracle_cycle_phase = torch.full(
                 (self.num_envs,), -1, dtype=torch.int8, device=self.device
@@ -320,20 +550,6 @@ class OracleRig:
             self.env.oracle_cycle_phase[i] = phase_int
             brick_i = orc_i.target_brick if orc_i is not None else None
             self.env.oracle_cycle_brick[i] = brick_i if brick_i is not None else -1
-        _, _, terminated, truncated, _ = self.env.step(action)
-        # Isaac Lab's ManagerBasedRLEnv.step() resets terminated|truncated envs
-        # to their NEXT episode's initial state before returning, so for those
-        # envs every read below (joint_pos, brick_pos, pick_point, ...) would
-        # be post-reset noise unrelated to the goal still sitting in
-        # self.goals[i]. dones is computed here, before _advance_phases/
-        # _run_watchdog, precisely so both can skip those envs for this step;
-        # their stats/goal freeze at the completed episode's values and stay
-        # readable via episode_stats() until the caller calls rearm().
-        dones = (terminated | truncated).cpu()
-        self._abandon_nan_envs(dones)
-        self._advance_phases(dones)
-        self._run_watchdog(dones)
-        return {"dones": dones, "abandoned": self.abandoned.clone()}
 
     def _advance_phases(self, dones: torch.Tensor) -> None:
         """Per env: check the current goal's end condition and transition on end."""
@@ -348,9 +564,9 @@ class OracleRig:
             if result is None:
                 continue
             if goal.phase == oracle.Phase.RETREAT:
-                # Mirrors EnvOracle.report()'s RETREAT branch, which is where
-                # the brick is actually marked sorted -- tracked here too
-                # because that set is private to EnvOracle.
+                # Mirrors EnvOracle.report()'s RETREAT branch, which is where the brick is
+                # actually marked sorted -- tracked here too because that set is private to
+                # EnvOracle.
                 self.stats[i]["sorted"] += 1
             orc = self.oracles[i]
             scene = self.snapshot(i)
@@ -366,13 +582,10 @@ class OracleRig:
             return oracle.PhaseResult(outcome="budget")
 
         if self.holding[i]:
-            # Post-convergence settle (LIFT): the servo already ended this
-            # phase: keep coasting (still commanding the same converged
-            # target, so the residual delta is ~0) for goal.hold_steps more
-            # steps -- matches OpenYAM's scripted_grasp_check.py's `rig.hold(30, ...)` before it
-            # reads pinch/rise, so the gate below sees settled contact forces
-            # rather than the instant the position error first dipped under
-            # stop_pos.
+            # Post-arrival settle (LIFT): the leg already ended this phase; keep commanding
+            # the same joint target for goal.hold_steps more steps, so the gate below sees
+            # settled contact forces rather than the instant the position error first dipped
+            # under stop_pos.
             self.hold_counter[i] += 1
             if self.hold_counter[i] < goal.hold_steps:
                 return None
@@ -383,10 +596,12 @@ class OracleRig:
             return oracle.PhaseResult(outcome=outcome)
 
         pos_err = (goal.target_pos.to(self.device) - self.pick_point(i)).norm().item()
-        rot_err = self._rot_error(i).norm().item()
-        converged = (
-            goal.stop_pos is not None and pos_err < goal.stop_pos and rot_err < ROT_CONVERGED
-        )
+        # Arrival means the whole planned leg was walked AND the arm is inside the phase's
+        # own position tolerance. Requiring the plan to be exhausted is what makes
+        # "converged" mean "walked the leg and arrived" rather than "passed within tolerance
+        # while still moving": the stop tolerances run up to 20 mm (RAISE) against a leg that
+        # walks ~1.5 mm per step, so several phases would otherwise end mid-leg.
+        converged = goal.stop_pos is not None and not self.plans[i] and pos_err < goal.stop_pos
         stalled = False
         if goal.stall_steps:
             now = self.pick_point(i)
@@ -408,7 +623,7 @@ class OracleRig:
         return oracle.PhaseResult(outcome=outcome)
 
     def _lift_result(self, i: int, outcome: str) -> oracle.PhaseResult:
-        """LIFT end: pinch evidence + rise/xy, exactly OpenYAM's gate (grasp_one)."""
+        """LIFT end: pinch evidence + rise/xy, exactly the check script's gate (grasp_one)."""
         brick = self.oracles[i].target_brick
         brick_end = self._brick_pos(i, brick)
         rise = (brick_end[2] - self.brick_start[i][2]).item()
@@ -420,25 +635,20 @@ class OracleRig:
     def _enter_phase(
         self, i: int, scene: oracle.SceneSnapshot, ending_phase: oracle.Phase | None = None
     ) -> None:
-        """Fetch the next goal, re-capture the hold to it, zero the per-phase counters."""
+        """Fetch the next goal, plan the leg it asks for, zero the per-phase counters."""
         orc = self.oracles[i]
         goal = orc.next_goal(scene)
         self.goals[i] = goal
         self.steps_in_phase[i] = 0
         self.quiet[i] = 0
         self.holding[i] = False
-        # Per-phase, not per-episode: OpenYAM measured (its Task 8) that RAISE's
-        # climb legitimately nears joint4's limit (see core.oracle.RAISE_MAX_STEPS's
-        # comment), and EXTEND's own approach then starts from that same
-        # physical pose -- common, and not itself evidence of a stuck env. A
-        # persistent counter double-counts the same joint-limit contact across
-        # both phases and can trip before EITHER phase's own budget would.
-        # Resetting here mirrors steps_in_phase/quiet/holding just above, but
-        # is NOT a strict improvement -- see WATCHDOG_TRIP_STRIKES's comment
-        # for the margin dependency this creates for RAISE_MAX_STEPS, and for
-        # the REOPEN/RELEASE gap (both run fewer steps than
-        # WATCHDOG_TRIP_STRIKES, so a per-phase reset means neither can ever
-        # trip the watchdog on its own) this trades in for it.
+        # Per-phase, not per-episode: OpenYAM measured (its Task 8) that RAISE's climb
+        # legitimately nears a joint limit and that EXTEND's own approach then starts from
+        # that same physical pose -- common, and not itself evidence of a stuck env. A
+        # persistent counter double-counts the same joint-limit contact across both phases
+        # and can trip before EITHER phase's own budget would. See WATCHDOG_TRIP_STRIKES's
+        # comment for the margin dependency this creates for RAISE_MAX_STEPS, and for the
+        # REOPEN/RELEASE gap it trades in for it.
         self.watchdog_strikes[i] = 0
         if goal is None:
             if orc.phase == oracle.Phase.ABANDON:
@@ -451,69 +661,349 @@ class OracleRig:
                     )
             return
         if goal.phase == oracle.Phase.REOPEN:
-            # EnvOracle.retries_used resets to 0 at the next brick's HOVER
-            # (core/oracle.py), so it cannot be read live for an episode
-            # total -- accumulate it here, once per REOPEN entry, the same
-            # treatment "sorted" gets for the same reason.
+            # EnvOracle.retries_used resets to 0 at the next brick's HOVER (core/oracle.py),
+            # so it cannot be read live for an episode total -- accumulate it here, once per
+            # REOPEN entry, the same treatment "sorted" gets for the same reason.
             self.stats[i]["retries"] += 1
         if goal.phase == oracle.Phase.HOVER:
-            # Fresh brick target selected inside next_goal(); capture its
-            # start pose for the LIFT rise/xy gate (grasp_one's brick_start).
-            # Recomputed via _brick_pos rather than read off `scene` (CPU --
-            # see snapshot()) so it stays on self.device, matching
-            # brick_end/pick_point in _lift_result.
+            # Fresh brick target selected inside next_goal(); capture its start pose for the
+            # LIFT rise/xy gate (grasp_one's brick_start). Recomputed via _brick_pos rather
+            # than read off `scene` (CPU -- see snapshot()) so it stays on self.device,
+            # matching brick_end/pick_point in _lift_result.
             self.brick_start[i] = self._brick_pos(i, orc.target_brick)
         if goal.phase == oracle.Phase.DESCEND:
             # core.oracle deliberately leaves this to the runtime (it owns the
-            # maker_arm_lab.robots import) -- the core target is the brick's
-            # resting z.
+            # maker_arm_lab.robots import) -- the core target is the brick's resting z. It is
+            # 0.0 on the global-IK path, where the descend commands a POSITION and the whole
+            # depth is expressed by the pick offset; see robots.frames.
             goal.target_pos[2] = goal.target_pos[2] + DESCEND_CLEARANCE_MEASURED
-        # A review of OpenYAM's Task 6 (its own review finding I4) asked
-        # whether commanded_yaw[i] -- frozen at whatever half-turn DESCEND's
-        # fold picked, relative to the wrist heading AT THE DESK -- could be
-        # the FAR representative by the time RAISE/EXTEND swing the wrist
-        # toward a bin at y=+-0.21, running the wrist roll (+-2.0944 rad) onto
-        # its stop. A one-time re-fold at RAISE entry (re-picking whichever of
-        # commanded_yaw[i]/+-pi is nearer the CURRENT jaw_yaw) was tried and
-        # instrumented (log the delta whenever it is non-zero) against every
-        # case OpenYAM's Task 8 exercises: two full 6-brick episodes (12
-        # picks) and the specific isolated pose whose recovery had been
-        # credited to it. The fold never fired once -- by the time RAISE is
-        # entered, LIFT has already actively servoed rotation to convergence
-        # (its own telemetry: rot_err ~0.1 deg), so jaw_yaw(i) is already
-        # within the near half-turn of commanded_yaw[i] by construction, not
-        # by chance. Removed rather than kept dead: it carried a real
-        # mid-carry 180-degree wrist-flip hazard (re-folding after the wrist
-        # has swung partway across the +-pi/2 boundary would grab the OTHER
-        # representative while a brick is in the jaw) for a branch that
-        # OpenYAM's measurement shows never executes there.
-        #
-        # The wrist-roll-onto-its-stop scenario OpenYAM's I4 asked about IS
-        # real -- OpenYAM's Task 9 batch probes reproduced it there -- but not
-        # in RAISE/EXTEND, and not as a stale held heading. It happens on the
-        # FRESH fold at the next brick's HOVER, whose starting wrist pose
-        # RETREAT deliberately leaves 1.5 rad round; core.oracle.fold_jaw_heading
-        # (called below) is the fix, and carries the measurement (on OpenYAM's
-        # arm). A re-fold here would still be wrong for the same wrist-flip
-        # reason.
-        self.holds[i].capture(self.desired_quat(i, goal.yaw, goal.tilt_rad, goal.yaw_hold_xy))
+        self._plan_leg(i, goal)
         if goal.stall_steps:
             self.previous_pick_point[i] = self.pick_point(i).clone()
 
-    def _abandon_nan_envs(self, dones: torch.Tensor) -> None:
-        """Abandon any env whose robot articulation OR brick rotation state has
-        gone NaN (physics divergence: seen live as a flood of USD
-        OrthogonalizeBasis warnings followed by a NaN jaw heading crashing
-        fold_jaw_heading -- either from a NaN robot joint/tool pose directly,
-        or from a NaN brick root_quat_w flowing into goal.yaw via
-        _brick_headings/scene.brick_yaw with the robot state itself still
-        clean). Abandoning routes the episode to the export filter's discard
-        pile, exactly like a watchdog trip, instead of killing the whole batch
-        process.
+    # -- planning ------------------------------------------------------------
 
-        Batched into one `.cpu()` transfer for the whole env-and-brick check
-        (mirrors `_brick_headings`'s reasoning) instead of two `bool(...)`
-        device syncs per env.
+    def _plan_leg(self, i: int, goal: oracle.Goal) -> None:
+        """Turn ``goal`` into the joint waypoints ``step()`` will walk.
+
+        A jaw is symmetric under a half turn, so an explicit ``goal.yaw`` is folded to one of
+        ``yaw``/``yaw + pi`` by ``oracle.fold_jaw_heading`` -- which picks on the wrist
+        roll's REMAINING TRAVEL over every waypoint in ``goal.yaw_hold_xy``, not on raw
+        proximity to the current wrist heading. Note what the fold does and does not decide
+        HERE: ``core.global_ik``'s heading residual is folded modulo pi, so the solver treats
+        both representatives as one constraint and picks the wrist branch itself, by joint
+        margin. The fold still decides which representative this class RECORDS as commanded
+        (and so what ``attitude_error`` measures against), and it stays the place to look if
+        a leg ever runs the wrist roll onto its stop: it is the only machinery here that
+        reasons about the whole excursion a heading is held across, which the solver, seeing
+        one waypoint at a time, does not.
+
+        ``goal.yaw`` is None for every phase after DESCEND -- there is no brick reference
+        once the brick has left the desk -- and those legs start from the heading last
+        commanded and may end at a relaxed one; see ``_plan_carry``.
+        """
+        self.plans[i] = []
+        self.dwell[i] = WAYPOINT_HOLD_STEPS
+        self.dwell_left[i] = 1
+        if goal.yaw is not None:
+            self.commanded_yaw[i] = oracle.fold_jaw_heading(
+                goal.yaw + math.pi / 2,
+                self.jaw_yaw(i),
+                self.wrist_roll(i),
+                self.wrist_roll_limits,
+                base_yaw_range=self._base_yaw_range(i, goal.yaw_hold_xy),
+                roll_sign=WRIST_ROLL_SIGN,
+                base_sign=BASE_YAW_SIGN,
+            )
+        if goal.target_pos is None:
+            return  # hold phase: keep commanding the joint target the last leg left
+        start = self.q_cmd[i]
+        pick_from, tilt_from = self._commanded_pick_pose(i, start)
+        pick_to = goal.target_pos.double().cpu()
+        heading = self.commanded_yaw[i]
+        if goal.phase == oracle.Phase.DESCEND:
+            plan = self._plan_descend(i, goal, start, pick_from, tilt_from, pick_to, heading)
+        elif goal.phase == oracle.Phase.HOVER:
+            plan = self._plan_hover(i, goal, start, pick_to, heading)
+        else:
+            # GRASP_TILT_RAD is the FLOOR, not an offset. core.oracle is the ported,
+            # arm-agnostic state machine and is not modified (spec section 5 item 5), so it
+            # still asks for tilt_rad=0.0 on the carrying phases, meaning "hold the tool
+            # level". This arm cannot hold a level tool over the scatter band -- measured
+            # minimum 18.42 deg at the band's outer corners at hover height, Task D3 -- and
+            # demanding one jams link_005_joint against its stop. So 0.0 is read here as "as
+            # level as this arm gets", which is frames.GRASP_TILT_RAD. RELEASE is unaffected:
+            # its oracle.RELEASE_TILT_RAD of 1.40 rad is far past the floor. The DESCEND
+            # branch above is the exception, and the reason the floor is not applied
+            # everywhere: at the grasp tilt the jaw plates foul the desk at every pick offset
+            # (ruling D3-10), so the descend runs the near-level ladder instead.
+            tilt_to = max(goal.tilt_rad, GRASP_TILT_RAD)
+            plan, heading = self._plan_carry(
+                i, goal, start, pick_from, tilt_from, pick_to, tilt_to, heading
+            )
+            if plan is not None:
+                self.commanded_tilt[i] = tilt_to
+                self.commanded_yaw[i] = heading
+        if plan is None:
+            # No plan: the arm holds where it is and the phase ends on its own budget (or, for
+            # DESCEND, on the stall detector). Honest rather than silent -- the pick then
+            # fails its LIFT gate and core.oracle's retry/abandon ladder takes over -- and
+            # counted, because a run where this is common has a reach problem, not a grasp
+            # problem.
+            self.stats[i]["unplanned_legs"] += 1
+            return
+        self.plans[i] = plan
+
+    def _plan_carry(
+        self, i, goal, start, pick_from, tilt_from, pick_to, tilt_to, heading
+    ) -> tuple[list[torch.Tensor] | None, float]:
+        """A leg with the brick in the jaws (LIFT/RAISE/EXTEND/RETREAT), and the one place
+        the jaw heading is allowed to move.
+
+        Returns the plan and the heading it ends at.
+
+        WHY THE HEADING LADDER, measured rather than assumed. `core.oracle` sets
+        ``Goal.yaw`` only at HOVER and DESCEND -- where the jaws must be square across the
+        brick, which is the grasp -- and leaves it None from CLOSE to RETREAT, meaning "no
+        brick reference any more, hold what you have". Holding it EXACTLY is over-constrained
+        for the solver in a way the differential-IK servo never was, because the servo could
+        sit partway to an attitude it could not reach while the solver refuses the whole leg:
+        the brick's own desk orientation fixes the jaw heading modulo pi, and for some
+        orientations there is no CONTINUOUS path from the pick to the release attitude at that
+        heading. Measured on this arm (CPU sweep over the shipping EXTEND leg): a brick at
+        (0.16, 0.13) carried to either outer bin has no walkable leg at a held heading of
+        +-90 deg -- the break is at a waypoint that is itself REACHABLE, so it is a branch
+        change the continuity cap rightly refuses, not a reach limit -- while the same leg
+        solves at every heading tested from -60 to +60 deg. Live, an unplanned EXTEND meant
+        the arm stood still for its whole 300-step budget and then opened the jaws over the
+        scatter band. Three of seven six-brick episodes lost a brick that way; the mechanism
+        was traced end to end on one of them (EXTEND 300 steps, 471 mm short, tool never
+        tilted off the grasp attitude, brick found on the desk under the leg's start), and
+        the other two carry the same signature -- a brick that never entered a bin and no
+        stow ever lost.
+
+        Rotating the wrist while a brick is gripped rotates the BRICK, which costs nothing --
+        the release drops it into a bin at whatever yaw it is holding, and nothing downstream
+        reads brick yaw. So the ladder tries the held heading first and then widening
+        offsets, and the first that yields a continuous path wins. The heading is swept ALONG
+        the leg like the tilt, never stepped: a heading offset applied at the first waypoint
+        would demand the whole wrist rotation inside one continuity step.
+
+        The ladder is NOT screened by an endpoint solve first, and that was measured rather
+        than assumed: a failed `solve_path` stops at the first unwalkable waypoint, so it
+        already costs about what one restart-spread solve costs, and adding a spread per rung
+        made the same two-episode gate run 6.0 -> 8.1 minutes. The obvious optimisation is a
+        pessimisation here; do not re-add it without timing it.
+        """
+        for offset in HEADING_RELAXATION_RAD:
+            plan = self._plan_cartesian(
+                i, goal, start, pick_from, tilt_from, pick_to, tilt_to, heading, heading + offset
+            )
+            if plan is not None:
+                return plan, heading + offset
+        # Last resort: solve the endpoint and interpolate in joint space, at the held heading.
+        return self._plan_direct(i, goal, start, pick_to, tilt_to, heading), heading
+
+    def _plan_hover(self, i, goal, start, pick_to, heading) -> list[torch.Tensor] | None:
+        """The approach: solve the endpoint GLOBALLY, then interpolate in joint space.
+
+        This is the one solve per pick attempt that CHOOSES a branch rather than following
+        one, and it is what makes the arm turn its base for a base-shaped motion instead of
+        spending a wrist joint on it. The path itself is joint-space and therefore continuous
+        by construction; the jaws are open and the arm is above the desk for all of it.
+        """
+        self.pick_offset[i] = torch.tensor(PICK_OFFSET_MEASURED, device=self.device)
+        target = self._target_for(pick_to, GRASP_TILT_RAD, heading, PICK_OFFSET_MEASURED[2])
+        solution = self.ik.solve(target, seed=start, restarts=HOVER_RESTARTS)
+        if solution is None:
+            return None
+        self.commanded_tilt[i] = GRASP_TILT_RAD
+        return self._interpolate(i, goal, start, solution.q)
+
+    def _plan_descend(
+        self, i, goal, start, pick_from, tilt_from, pick_to, heading
+    ) -> list[torch.Tensor] | None:
+        """The descend: the tilt ladder, smallest tilt first, each rung with its own offset.
+
+        Level where level solves, otherwise the least tilt this brick admits (ruling D3-11
+        candidate 2). The rung's pick offset becomes this env's, so ``pick_point`` -- which
+        the DESCEND tolerance, the LIFT gate and every later leg's target are expressed in --
+        names the point the jaws will actually close on.
+        """
+        for rung in DESCEND_TILT_LADDER:
+            geometry = descend_pick_offset(rung, BRICK_HALF_HEIGHT)
+            if geometry is None:
+                continue
+            offset_z = geometry[0]
+            plan = self._plan_cartesian(
+                i, goal, start, pick_from, tilt_from, pick_to, rung, heading, offset_z=offset_z
+            )
+            if plan is not None:
+                self.pick_offset[i] = torch.tensor(
+                    (PICK_OFFSET_MEASURED[0], PICK_OFFSET_MEASURED[1], offset_z),
+                    device=self.device,
+                )
+                self.commanded_tilt[i] = rung
+                return plan
+        return None
+
+    def _plan_cartesian(
+        self,
+        i,
+        goal,
+        start,
+        pick_from,
+        tilt_from,
+        pick_to,
+        tilt_to,
+        heading_from,
+        heading_to=None,
+        offset_z=None,
+    ) -> list[torch.Tensor] | None:
+        """A straight Cartesian leg for the pick point, with the tilt (and, on a carry leg,
+        the jaw heading) swept along it.
+
+        ``GlobalIK.solve_path``'s continuity constraint is what makes this safe to walk with
+        a brick in the jaws: a solver jumping to another IK branch mid-leg fails the path
+        outright instead of commanding a lurch through the scene.
+        """
+        if heading_to is None:
+            heading_to = heading_from
+        if offset_z is None:
+            offset_z = float(self.pick_offset[i, 2].item())
+        count, dwell = self._leg_resolution(
+            i,
+            goal,
+            distance=float((pick_to - pick_from).norm()),
+            tilt_change=abs(tilt_to - tilt_from),
+            heading_change=abs(heading_to - heading_from),
+        )
+        targets = [
+            self._target_for(
+                pick_from + (pick_to - pick_from) * t,
+                float(tilt_from + (tilt_to - tilt_from) * float(t)),
+                float(heading_from + (heading_to - heading_from) * float(t)),
+                offset_z,
+            )
+            for t in torch.linspace(0.0, 1.0, count, dtype=torch.float64)
+        ]
+        chain = self.ik.solve_path(targets, seed=start)
+        if chain is None:
+            return None
+        self.dwell[i] = dwell
+        return [step.q for step in chain]
+
+    def _plan_direct(self, i, goal, start, pick_to, tilt_to, heading) -> list[torch.Tensor] | None:
+        """Fallback for a leg with no continuous Cartesian solution: solve the endpoint.
+
+        Seeded from the current pose and rejected outright if it lands further than
+        ``MAX_LEG_JOINT_JUMP`` away, so this cannot answer a failed carry with a branch flip.
+        The path is then joint-space, which gives up the straight-line guarantee on the tool
+        -- acceptable in a fallback, where the alternative is not moving at all.
+        """
+        target = self._target_for(pick_to, tilt_to, heading, float(self.pick_offset[i, 2].item()))
+        solution = self.ik.solve(
+            target, seed=start, restarts=0, q_prev=start, max_step=MAX_LEG_JOINT_JUMP
+        )
+        if solution is None:
+            return None
+        return self._interpolate(i, goal, start, solution.q)
+
+    def _interpolate(self, i, goal, start, end) -> list[torch.Tensor]:
+        """Joint-space waypoints from ``start`` to ``end``, cut to this phase's budget."""
+        count, dwell = self._leg_resolution(
+            i, goal, joint_change=float(torch.max(torch.abs(end - start)))
+        )
+        self.dwell[i] = dwell
+        return [start + (end - start) * t for t in torch.linspace(0.0, 1.0, count).double()]
+
+    def _leg_resolution(self, i: int, goal: oracle.Goal, **geometry: float) -> tuple[int, int]:
+        """``leg_resolution`` for this env's episode draw and this phase's budget."""
+        return leg_resolution(goal.max_steps, self.oracles[i].draw.gain_scale, **geometry)
+
+    def _target_for(self, pick, tilt: float, heading: float, offset_z: float) -> GraspTarget:
+        """The six-scalar grasp task that puts the PICK point at ``pick``."""
+        return GraspTarget(
+            position=grasp_center_for(pick, tilt, heading, offset_z),
+            tilt=tilt,
+            jaw_heading=heading,
+            lean_azimuth=LEAN_AZIMUTH,
+        )
+
+    def _commanded_pick_pose(self, i: int, q: torch.Tensor) -> tuple[torch.Tensor, float]:
+        """The pick point and tool tilt that the joint target ``q`` asks for.
+
+        A leg is planned from the COMMANDED pose, not the measured one, so that the command
+        stream stays continuous: the arm lags its target by whatever the trim has not yet
+        closed, and starting each leg from the measured pose would command a step backwards
+        every time.
+        """
+        position, rotation = self.ik.fk(q)
+        offset = self.pick_offset[i].double().cpu()
+        tool = rotation @ self.tool_axis_body
+        tilt = float(torch.arccos(torch.clamp(-tool[2], -1.0, 1.0)))
+        return position + rotation @ offset, tilt
+
+    # -- episode lifecycle -------------------------------------------------
+
+    def rearm(self, env_ids: list[int]) -> None:
+        """Re-seed the envs in ``env_ids`` after their caller has reset them."""
+        for i in env_ids:
+            draw = oracle.sample_episode_draw(self.rng, self.noise)
+            self.oracles[i] = oracle.EnvOracle(
+                self.bl, self.num_bricks, draw, induction=self.induction, rng=self.rng
+            )
+            self.commanded_yaw[i] = self.jaw_yaw(i)
+            self.commanded_tilt[i] = self.tool_tilt(i)
+            self.pick_offset[i] = torch.tensor(PICK_OFFSET_MEASURED, device=self.device)
+            # The reset pose is the first thing commanded, so SETTLE holds the arm where the
+            # reset left it (start-pose randomisation included) instead of driving it
+            # anywhere. The trim starts clean: its accumulated bias belongs to the previous
+            # episode's poses.
+            self.q_cmd[i] = self.q_arm(i)
+            self.trims[i].reset()
+            self.plans[i] = []
+            self.dwell[i] = WAYPOINT_HOLD_STEPS
+            self.dwell_left[i] = 1
+            self.brick_start[i] = None
+            self.previous_pick_point[i] = None
+            self.steps_in_phase[i] = 0
+            self.quiet[i] = 0
+            self.holding[i] = False
+            self.watchdog_strikes[i] = 0
+            self.abandoned[i] = False
+            self.stats[i] = self._fresh_stats()
+            self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE
+
+    def episode_stats(self, env_id: int) -> dict:
+        """Retries, bricks sorted, abandon reason, unplanned legs, induced counters.
+
+        Retries/sorted/abandon read from ``self.stats`` (not ``EnvOracle.retries_used``,
+        which resets to 0 at every new brick's HOVER -- see ``_enter_phase``'s REOPEN
+        branch), so those stay episode-totals. ``induced_offset``/``induced_noise`` read from
+        the ``EnvOracle`` object instead, because they ARE already episode-cumulative there.
+        Both sources rely on the same lifetime guarantee: the just-finished env's
+        ``EnvOracle`` and ``self.stats`` entry both survive, and stay readable, until the
+        caller calls ``rearm()`` on it.
+        """
+        orc = self.oracles[env_id]
+        return {
+            **self.stats[env_id],
+            "induced_offset": orc.induced_offset,
+            "induced_noise": orc.induced_noise,
+        }
+
+    def _abandon_nan_envs(self, dones: torch.Tensor) -> None:
+        """Abandon any env whose robot articulation OR brick rotation state has gone NaN
+        (physics divergence: seen live as a flood of USD OrthogonalizeBasis warnings followed
+        by a NaN jaw heading crashing fold_jaw_heading -- either from a NaN robot joint/tool
+        pose directly, or from a NaN brick root_quat_w flowing into goal.yaw via
+        _brick_headings/scene.brick_yaw with the robot state itself still clean). Abandoning
+        routes the episode to the export filter's discard pile, exactly like a watchdog trip,
+        instead of killing the whole batch process.
+
+        Batched into one `.cpu()` transfer for the whole env-and-brick check (mirrors
+        `_brick_headings`'s reasoning) instead of two `bool(...)` device syncs per env.
         """
         joint_nan = torch.isnan(self.robot.data.joint_pos[:, self.arm_ids]).any(dim=1)
         tool_nan = torch.isnan(self.robot.data.body_quat_w[:, self.tool]).any(dim=1)
@@ -548,58 +1038,52 @@ class OracleRig:
                 if self.stats[i]["abandon"] is None:
                     self.stats[i]["abandon"] = "watchdog"
 
-    # -- episode lifecycle -------------------------------------------------
-
-    def rearm(self, env_ids: list[int]) -> None:
-        """Re-seed the envs in ``env_ids`` after their caller has reset them."""
-        for i in env_ids:
-            draw = oracle.sample_episode_draw(self.rng, self.noise)
-            self.oracles[i] = oracle.EnvOracle(
-                self.bl, self.num_bricks, draw, induction=self.induction, rng=self.rng
-            )
-            self.holds[i] = AttitudeHold(
-                rot_scale=self.scale_rot, gain=SERVO_GAIN_ROT, give_up_error=float("inf")
-            )
-            self.commanded_yaw[i] = self.jaw_yaw(i)
-            self.holds[i].capture(self.tool_quat(i))
-            self.brick_start[i] = None
-            self.previous_pick_point[i] = None
-            self.steps_in_phase[i] = 0
-            self.quiet[i] = 0
-            self.holding[i] = False
-            self.watchdog_strikes[i] = 0
-            self.abandoned[i] = False
-            self.stats[i] = {"retries": 0, "sorted": 0, "abandon": None}
-            self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE
-
-    def episode_stats(self, env_id: int) -> dict:
-        """Retries used, bricks sorted, abandon reason, induced counters -- for the metadata sidecar.
-
-        Retries/sorted/abandon read from ``self.stats`` (not
-        ``EnvOracle.retries_used``, which resets to 0 at every new brick's HOVER
-        -- see ``_enter_phase``'s REOPEN branch), so those stay episode-totals.
-        ``induced_offset``/``induced_noise`` read from the ``EnvOracle`` object
-        instead, because they ARE already episode-cumulative there (see
-        ``EnvOracle``'s own counters). Both sources rely on the same lifetime
-        guarantee: the just-finished env's ``EnvOracle`` and ``self.stats``
-        entry both survive, and stay readable, until the caller calls
-        ``rearm()`` on it.
-        """
-        orc = self.oracles[env_id]
-        return {
-            **self.stats[env_id],
-            "induced_offset": orc.induced_offset,
-            "induced_noise": orc.induced_noise,
-        }
-
     # -- frames --------------------------------------------------------------
     #
-    # Every position below is env-origin subtracted (see the module docstring):
-    # it is what `SceneSnapshot` documents and what makes `pick_point` directly
-    # comparable to `Goal.target_pos`, whatever env produced it.
+    # Every position below is env-origin subtracted (see the module docstring): it is what
+    # `SceneSnapshot` documents and what makes `pick_point` directly comparable to
+    # `Goal.target_pos`, whatever env produced it.
+
+    def q_arm(self, i: int) -> torch.Tensor:
+        """This env's six arm joint positions, float64 CPU, URDF order."""
+        return self.robot.data.joint_pos[i, self.arm_ids].double().cpu()
 
     def tool_quat(self, i: int) -> torch.Tensor:
         return self.robot.data.body_quat_w[i, self.tool]
+
+    def tool_tilt(self, i: int) -> float:
+        """Measured tool-axis tilt off world -z, rad. 0 is a level (straight-down) tool."""
+        axis = math_utils.quat_apply(self.tool_quat(i), self.tool_axis)
+        return math.acos(max(-1.0, min(1.0, -axis[2].item())))
+
+    def attitude_reference(self, i: int) -> tuple[float, float]:
+        """The (tool tilt, jaw heading) this env is currently commanding, rad.
+
+        CAPTURE THIS AT PHASE ENTRY if you mean to grade a phase at its END. A caller
+        watching ``goals[i]`` for a transition only sees the change after ``_enter_phase``
+        has already planned the NEXT leg, and planning sets these -- so reading them at that
+        moment reads the SUCCESSOR's commanded attitude, not the ended phase's. The check
+        scripts capture at entry for exactly this reason (it is the same discipline the
+        ``AttitudeHold`` reference needed before Task D5).
+        """
+        return (self.commanded_tilt[i], self.commanded_yaw[i])
+
+    def attitude_error(self, i: int, reference: tuple[float, float] | None = None) -> float:
+        """How far the measured tool attitude is from the commanded one, rad.
+
+        The larger of the tilt error and the jaw-heading error, the heading folded modulo pi
+        because a jaw is symmetric under a half turn (the same fold ``core.global_ik`` puts
+        on its own heading residual). Two scalars rather than one rotation angle because the
+        commanded attitude IS two scalars plus a pinned lean azimuth -- there is no commanded
+        quaternion left to difference against.
+
+        ``reference`` defaults to what is commanded right now; pass an ``attitude_reference``
+        captured earlier to grade against what was commanded then.
+        """
+        tilt_ref, yaw_ref = reference if reference is not None else self.attitude_reference(i)
+        tilt_error = abs(self.tool_tilt(i) - tilt_ref)
+        heading_error = abs(float(fold_to_half_turn(self.jaw_yaw(i) - yaw_ref)))
+        return max(tilt_error, heading_error)
 
     def pick_point(self, i: int) -> torch.Tensor:
         """Env-local position of the point on the tool axis a desk-resting brick occupies."""
@@ -607,11 +1091,11 @@ class OracleRig:
         return (
             self.robot.data.body_pos_w[i, self.tool]
             - origin
-            + math_utils.quat_apply(self.tool_quat(i), self.pick_offset)
+            + math_utils.quat_apply(self.tool_quat(i), self.pick_offset[i])
         )
 
     def jaw_yaw(self, i: int) -> float:
-        """World heading of the jaw closing axis (JAW_AXIS_BODY in the tool frame), projected flat."""
+        """World heading of the jaw closing axis (JAW_AXIS_BODY in the tool frame), flat."""
         v = math_utils.quat_apply(self.tool_quat(i), self.jaw_axis)
         return math.atan2(v[1].item(), v[0].item())
 
@@ -619,11 +1103,11 @@ class OracleRig:
         return self.env.scene[f"brick_{brick}"].data.root_pos_w[i] - self.env.scene.env_origins[i]
 
     def _brick_headings(self, i: int) -> torch.Tensor:
-        """(B,) CPU: every brick's long-axis heading, as ``desired_quat`` folds against.
+        """(B,) CPU: every brick's long-axis heading, as the jaw-heading fold folds against.
 
-        Batched into one ``quat_apply`` plus one ``.cpu()`` transfer for the
-        whole env instead of a per-brick ``.item()`` sync, since ``snapshot()``
-        needs this on CPU anyway (see its docstring).
+        Batched into one ``quat_apply`` plus one ``.cpu()`` transfer for the whole env
+        instead of a per-brick ``.item()`` sync, since ``snapshot()`` needs this on CPU
+        anyway (see its docstring).
         """
         quats = torch.stack(
             [self.env.scene[f"brick_{b}"].data.root_quat_w[i] for b in range(self.num_bricks)]
@@ -640,13 +1124,12 @@ class OracleRig:
     ) -> tuple[float, float]:
         """Signed joint1 excursion, relative to now, over ``hold_xy``.
 
-        Each waypoint's joint1 is approximated by its horizontal bearing, which
-        OpenYAM's arm's joint1 tracked directly: MEASURED, on OpenYAM's arm,
-        ``atan2(pick_y, pick_x) - joint1 = 0.006 +- 0.097 rad`` over a full
-        13437-step instrumented run there. Not yet re-validated on the Maker
-        Arm. 0.0 is always in the range because the arm is at the current pick
-        point now. Empty ``hold_xy`` (every phase that does not command a yaw)
-        collapses to no swing.
+        Each waypoint's joint1 is approximated by its horizontal bearing, which OpenYAM's
+        arm's joint1 tracked directly: MEASURED, on OpenYAM's arm,
+        ``atan2(pick_y, pick_x) - joint1 = 0.006 +- 0.097 rad`` over a full 13437-step
+        instrumented run there. Not yet re-validated on the Maker Arm. 0.0 is always in the
+        range because the arm is at the current pick point now. Empty ``hold_xy`` (every
+        phase that does not command a yaw) collapses to no swing.
         """
         if not hold_xy:
             return (0.0, 0.0)
@@ -655,87 +1138,13 @@ class OracleRig:
         swings = [0.0] + [oracle.wrap_to_pi(math.atan2(y, x) - here) for x, y in hold_xy]
         return (min(swings), max(swings))
 
-    def desired_quat(
-        self,
-        i: int,
-        yaw: float | None,
-        tilt_rad: float,
-        hold_xy: tuple[tuple[float, float], ...] = (),
-    ) -> torch.Tensor:
-        """Tool z-axis tilted ``max(tilt_rad, GRASP_TILT_RAD)`` toward +x; jaws squared
-        to ``yaw`` (or held).
-
-        Ported from OpenYAM's ``GraspRig.desired_quat`` (scripts/scripted_grasp_check.py)
-        and generalized from a fixed tool-axis-straight-down (tilt=0) to an arbitrary
-        tilt, so EXTEND/RELEASE can angle the tool toward the bin rim
-        (``oracle.RELEASE_TILT_RAD``) while every other phase keeps OpenYAM's
-        script's geometry exactly -- at tilt=0 the Gram-Schmidt step below is a
-        no-op and reduces to the script's closed-form ``axis_y = (s, -c, 0)``.
-        The result is assembled in the oracle's canonical tool frame (x = jaw
-        axis, z = tool axis) and then converted into the ``grasp_center`` body
-        frame by ``canonical_to_body`` before it is returned.
-
-        A jaw is symmetric under a half turn, so an explicit ``yaw`` is folded
-        to one of ``yaw``/``yaw + pi`` by ``oracle.fold_jaw_heading`` -- which
-        picks on the wrist roll's REMAINING TRAVEL over every waypoint in
-        ``hold_xy`` (``Goal.yaw_hold_xy``), not on raw proximity to the current
-        wrist heading. See that function for the measurement (on OpenYAM's
-        arm) and for the two watchdog abandons proximity alone caused there.
-        ``yaw=None`` (every phase after DESCEND: there is no brick reference
-        once it has left the desk) instead holds the heading last commanded --
-        ``tilt_rad`` is never None and is always applied, so RETREAT can also
-        relevel while still holding that heading.
-        """
-        if yaw is not None:
-            want = oracle.fold_jaw_heading(
-                yaw + math.pi / 2,
-                self.jaw_yaw(i),
-                self.wrist_roll(i),
-                self.wrist_roll_limits,
-                base_yaw_range=self._base_yaw_range(i, hold_xy),
-                roll_sign=WRIST_ROLL_SIGN,
-                base_sign=BASE_YAW_SIGN,
-            )
-            self.commanded_yaw[i] = want
-        else:
-            want = self.commanded_yaw[i]
-        c, s = math.cos(want), math.sin(want)
-        # GRASP_TILT_RAD is the FLOOR, not an offset. core.oracle is the ported,
-        # arm-agnostic state machine and is not modified (spec section 5 item 5), so it
-        # still asks for tilt_rad=0.0 on every grasp phase, meaning "hold the tool level".
-        # This arm cannot hold a level tool over the scatter band -- measured minimum
-        # 18.42 deg at the band's outer corners at hover height, Task D3 -- and demanding
-        # one jams
-        # link_005_joint against its stop. So 0.0 is read here as "as level as this arm
-        # gets", which is frames.GRASP_TILT_RAD. RELEASE is unaffected: its
-        # oracle.RELEASE_TILT_RAD of 1.40 rad is already far past the floor.
-        # scripts/scripted_grasp_check.py builds the identical frame; the two must agree
-        # or the oracle fails where the scripted rehearsal passes.
-        tilt_rad = max(tilt_rad, GRASP_TILT_RAD)
-        axis_x = torch.tensor([c, s, 0.0], device=self.device)
-        axis_z = torch.tensor([math.sin(tilt_rad), 0.0, -math.cos(tilt_rad)], device=self.device)
-        axis_y = torch.cross(axis_z, axis_x, dim=-1)
-        axis_y = axis_y / axis_y.norm()
-        axis_x = torch.cross(axis_y, axis_z, dim=-1)  # re-orthogonalize; a no-op at tilt=0
-        rot = torch.stack([axis_x, axis_y, axis_z], dim=1)
-        rot = canonical_to_body(rot, self.canon_in_body)
-        return math_utils.quat_from_matrix(rot)
-
-    def _rot_error(self, i: int) -> torch.Tensor:
-        """World-frame axis-angle rotation taking the tool body (`grasp_center`) to this
-        phase's held reference."""
-        quat_des = self.holds[i].reference
-        err = math_utils.quat_mul(quat_des, math_utils.quat_conjugate(self.tool_quat(i)))
-        return math_utils.axis_angle_from_quat(err)
-
     def snapshot(self, i: int) -> oracle.SceneSnapshot:
         """Built on CPU: ``EnvOracle`` (core.oracle, deliberately isaaclab/device-free)
         compares this against ``layout.bin_interior_centers()``/``bin_half_extents()``
-        inside ``checker.bricks_at_rest_in_bins`` -- plain CPU tensors -- so a
-        CUDA snapshot raises at the first mixed-device comparison (the first
-        HOVER-entry brick lookup). Position/attitude servoing still reads
-        ``pick_point``/``_brick_pos``/``tool_quat`` directly (self.device) --
-        only the values handed to ``core.oracle`` move to CPU here.
+        inside ``checker.bricks_at_rest_in_bins`` -- plain CPU tensors -- so a CUDA snapshot
+        raises at the first mixed-device comparison (the first HOVER-entry brick lookup).
+        Position/attitude reads still go through ``pick_point``/``_brick_pos``/``tool_quat``
+        directly (self.device) -- only the values handed to ``core.oracle`` move to CPU here.
         """
         brick_pos = torch.stack([self._brick_pos(i, b) for b in range(self.num_bricks)]).cpu()
         brick_lin_vel = torch.stack(
@@ -751,9 +1160,9 @@ class OracleRig:
     def pinch_evidence(self, i: int, brick: int) -> dict:
         """Is the brick pinched between the jaws, or merely entrained in the pocket?
 
-        ``force_matrix_w`` is (num_envs, num_bodies, num_filters, 3); each
-        sensor prim is a single finger body and the filters are the bricks in
-        scene order, so ``[i, 0, brick]`` isolates this env's this brick.
+        ``force_matrix_w`` is (num_envs, num_bodies, num_filters, 3); each sensor prim is a
+        single finger body and the filters are the bricks in scene order, so ``[i, 0, brick]``
+        isolates this env's this brick.
         """
         left = self.left_brick.data.force_matrix_w[i, 0, brick].norm().item()
         right = self.right_brick.data.force_matrix_w[i, 0, brick].norm().item()

@@ -485,12 +485,13 @@ class GraspRig:
         magnitude, lean azimuth, jaw heading) rather than a rotation matrix that has to be
         assembled and re-orthogonalised.
 
-        THE ORACLE DOES NOT YET DO THIS, and stating otherwise would be false at HEAD.
-        ``oracle_runtime`` still builds a quaternion in its own ``desired_quat`` and drives
-        the differential IK -- the solver this task measured as never once closing the jaws
-        on a brick. Moving it onto ``core.global_ik`` is Task D5's work and is marked in
-        ``oracle_runtime`` and ``LegoSortDatagenEnvCfg``; until then the check and the oracle
-        ARE drifted apart, and this task has already paid once for exactly that.
+        THE ORACLE DOES THIS TOO, since Task D5. ``oracle_runtime`` no longer assembles a
+        quaternion for an attitude servo: it folds through ``core.oracle.fold_jaw_heading``
+        (which also weighs the wrist's remaining travel over the whole excursion the heading
+        is held across) and hands the result to ``core.global_ik`` as
+        ``GraspTarget.jaw_heading``. The check script and the datagen oracle are now on the
+        same solver and the same action space; keep them that way, because this task has
+        already paid once for their drifting apart.
         """
         brick_quat = self.env.scene[f"brick_{brick_index}"].data.root_quat_w[0].unsqueeze(0)
         long_axis = math_utils.quat_apply(brick_quat, self.ex)[0]

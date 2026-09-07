@@ -1,8 +1,16 @@
-"""The one piece of oracle_runtime that is pure math: composing the oracle's canonical tool
-frame (x = jaw axis, z = tool axis) with the arm's body frame. Loaded by file path with an
-isaaclab stand-in, like test_mit_mode_actuator.py."""
+"""The pieces of oracle_runtime that are pure math: the pick-offset inversion the planner
+solves its IK targets from, and the leg resolution it cuts its waypoints with. Loaded by
+file path with an isaaclab stand-in, like test_mit_mode_actuator.py.
+
+This file used to pin ``canonical_to_body``, which composed the oracle's canonical tool
+frame with the arm's body frame for the quaternion the differential-IK attitude servo held.
+Task D5 replaced that servo with ``core.global_ik``, which constrains tilt, lean azimuth and
+jaw heading as three scalars and needs no rotation matrix assembled, so both the function and
+its tests are gone rather than kept dead. What replaced them is below.
+"""
 
 import importlib.util
+import math
 import sys
 import types
 from pathlib import Path
@@ -10,6 +18,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from maker_arm_lab.core.global_ik import tool_axis_world
 from maker_arm_lab.robots import frames
 
 _PATH = (
@@ -24,20 +33,12 @@ def _load():
     pkg = types.ModuleType("_lego_sort_stub")
     pkg.__path__ = [str(_PATH.parent)]
     stubs = {**mods, "_lego_sort_stub": pkg}
-    # oracle_runtime imports `.mdp.recorders` and `.variants` relatively; give it light stand-ins.
+    # oracle_runtime imports `.mdp.recorders` relatively; give it a light stand-in.
     rec = types.ModuleType("_lego_sort_stub.mdp.recorders")
     rec.PHASE_TO_INT = {}
     mdp = types.ModuleType("_lego_sort_stub.mdp")
     mdp.__path__ = []
-    var = types.ModuleType("_lego_sort_stub.variants")
-    var.IK_SCALE = (0.002, 0.002, 0.002, 0.01, 0.01, 0.01)
-    stubs.update(
-        {
-            "_lego_sort_stub.mdp": mdp,
-            "_lego_sort_stub.mdp.recorders": rec,
-            "_lego_sort_stub.variants": var,
-        }
-    )
+    stubs.update({"_lego_sort_stub.mdp": mdp, "_lego_sort_stub.mdp.recorders": rec})
     sys.modules.update(stubs)
     try:
         spec = importlib.util.spec_from_file_location("_lego_sort_stub.oracle_runtime", _PATH)
@@ -54,70 +55,115 @@ def _load():
 _rt = _load()
 
 
-def test_canonical_to_body_identity_when_frames_coincide():
-    rot = torch.eye(3)
-    assert torch.allclose(_rt.canonical_to_body(rot, torch.eye(3)), rot)
+def _tool_frame(tilt: float, heading: float) -> torch.Tensor:
+    """The `grasp_center` body rotation the solver's three scalars pin down.
 
-
-def test_canonical_to_body_maps_maker_arm_axes():
-    canon = torch.tensor(frames.CANON_IN_BODY)
-    # Canonical frame with tool axis straight down and jaw axis along world +x.
-    rot_canon = torch.stack(
-        [
-            torch.tensor([1.0, 0.0, 0.0]),
-            torch.tensor([0.0, -1.0, 0.0]),
-            torch.tensor([0.0, 0.0, -1.0]),
-        ],
-        dim=1,
-    )
-    rot_body = _rt.canonical_to_body(rot_canon, canon)
-    # Body y (the jaw axis) must land on world +x; body -z (the tool axis) on world -z.
-    assert torch.allclose(
-        rot_body @ torch.tensor(frames.JAW_AXIS_BODY), torch.tensor([1.0, 0.0, 0.0]), atol=1e-6
-    )
-    assert torch.allclose(
-        rot_body @ torch.tensor(frames.TOOL_AXIS_BODY), torch.tensor([0.0, 0.0, -1.0]), atol=1e-6
-    )
-    assert torch.det(rot_body) == pytest.approx(1.0)
-
-
-def test_canonical_to_body_recovers_body_rotation_for_a_nonsymmetric_frame():
-    """Regression for a transpose bug: with a symmetric involutive C (this arm's actual
-    CANON_IN_BODY, C == C.T), `rot_canon @ C` and `rot_canon @ C.T` are indistinguishable, so
-    the tests above cannot catch the formula being transposed. A cyclic permutation matrix is
-    a proper rotation (det +1) that is NOT symmetric, so it tells the two formulas apart.
-
-    Ground truth is built independently of `canonical_to_body`, the way the derivation does:
-    pick an arbitrary body rotation ``R_body``, and for a ``canon_in_body`` whose row i is
-    canonical axis i in body coordinates, place ``R_body @ canon_in_body[i]`` in column i of
-    ``rot_canon`` (canonical axis i expressed in world coordinates). `canonical_to_body` must
-    then recover ``R_body`` from ``rot_canon`` and ``canon_in_body`` alone.
+    Built independently of the code under test, from the constraints
+    ``core.global_ik.GlobalIK._residual_batch`` actually imposes: the tool axis is
+    ``tool_axis_world(tilt, lean_azimuth)``, and the jaw axis is the unit vector
+    perpendicular to it whose horizontal heading is ``heading``. Columns are body x, y, z.
     """
-    # Cyclic permutation of the axes: proper rotation (det +1), not symmetric (C != C.T).
-    canon_in_body = torch.tensor(
-        [
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-            [1.0, 0.0, 0.0],
-        ]
-    )
-    assert torch.det(canon_in_body) == pytest.approx(1.0)
-    assert not torch.allclose(canon_in_body, canon_in_body.T)
+    body_z = -tool_axis_world(tilt, _rt.LEAN_AZIMUTH)  # TOOL_AXIS_BODY is body -z
+    flat = torch.tensor([math.cos(heading), math.sin(heading), 0.0], dtype=torch.float64)
+    body_y = flat - body_z * (flat @ body_z)
+    body_y = body_y / body_y.norm()
+    body_x = torch.linalg.cross(body_y, body_z)
+    return torch.stack([body_x, body_y, body_z], dim=1)
 
-    # An arbitrary proper rotation standing in for the true (unknown) body attitude: 90 degrees
-    # about world z. Also not symmetric, so it is a real check, not another coincidence.
-    body_rotation = torch.tensor(
-        [
-            [0.0, -1.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ]
-    )
 
-    rot_canon = torch.stack(
-        [body_rotation @ canon_in_body[i] for i in range(3)],
-        dim=1,
-    )
+@pytest.mark.parametrize("tilt", [0.0, math.radians(0.5), frames.GRASP_TILT_RAD, 1.40])
+@pytest.mark.parametrize("heading", [0.0, 0.9, -2.3])
+def test_grasp_center_for_inverts_the_pick_offset(tilt, heading):
+    """`grasp_center_for` must be the exact inverse of `OracleRig.pick_point`'s offset.
 
-    recovered = _rt.canonical_to_body(rot_canon, canon_in_body)
-    assert torch.allclose(recovered, body_rotation, atol=1e-6)
+    That is the whole contract: the planner solves IK for `grasp_center`, but every target
+    core.oracle hands it -- the brick, the bin, RETREAT_POINT -- is expressed at the PICK
+    point. A sign error here would put the jaws a tool length off the brick, and only a GPU
+    run would see it.
+    """
+    pick = torch.tensor([0.24, -0.06, 0.11], dtype=torch.float64)
+    offset = torch.tensor(frames.PICK_OFFSET_MEASURED, dtype=torch.float64)
+    center = torch.tensor(
+        _rt.grasp_center_for(pick, tilt, heading, float(offset[2])), dtype=torch.float64
+    )
+    assert torch.allclose(center + _tool_frame(tilt, heading) @ offset, pick, atol=1e-12)
+
+
+def test_grasp_center_sits_above_the_pick_point():
+    """The jaws reach PAST grasp_center along the tool axis, so for a near-level tool the
+    frame is the higher of the two -- the direction robots.frames.PICK_OFFSET_MEASURED's
+    negative z encodes."""
+    pick = torch.tensor([0.24, 0.0, 0.0048], dtype=torch.float64)
+    center = _rt.grasp_center_for(pick, math.radians(0.5), 0.0, frames.PICK_OFFSET_MEASURED[2])
+    assert center[2] > float(pick[2]) + 0.03
+
+
+def test_leg_resolution_cuts_by_geometry():
+    """A leg is cut fine enough for core.global_ik's continuity cap: a 0.12 m leg at the 3 mm
+    nominal spacing is 40 waypoints, well inside DEFAULT_MAX_STEPS' walk budget."""
+    count, dwell = _rt.leg_resolution(max_steps=300, gain_scale=1.0, distance=0.12)
+    assert count == 40
+    assert dwell == _rt.WAYPOINT_HOLD_STEPS
+
+
+def test_leg_resolution_never_exceeds_the_phase_budget():
+    """RAISE is the binding case: 60 steps of budget against a leg that applies the whole of
+    RELEASE_TILT_RAD. The walk must fit inside WALK_BUDGET_FRACTION of that budget -- a
+    truncated plan would leave EXTEND starting from a pose RAISE never reached."""
+    count, dwell = _rt.leg_resolution(
+        max_steps=60, gain_scale=1.0, distance=0.10, tilt_change=1.40 - frames.GRASP_TILT_RAD
+    )
+    assert count * dwell <= int(_rt.WALK_BUDGET_FRACTION * 60)
+
+
+def test_leg_resolution_slows_the_walk_for_a_low_gain_draw():
+    """``EpisodeDraw.gain_scale`` used to scale the servo's gain; on the planner it cuts the
+    leg finer, so a slow draw walks the same leg in more waypoints."""
+    fast, _ = _rt.leg_resolution(max_steps=300, gain_scale=1.0, distance=0.12)
+    slow, _ = _rt.leg_resolution(max_steps=300, gain_scale=0.7, distance=0.12)
+    assert slow > fast
+
+
+def test_leg_resolution_has_a_floor_of_two_waypoints():
+    """A leg with no geometry at all (a re-plan onto the pose already commanded) still has a
+    start and an end, so the walk is never empty and `step()` always has a waypoint to pop."""
+    count, dwell = _rt.leg_resolution(max_steps=20, gain_scale=1.0)
+    assert count == 2
+    assert dwell >= 1
+
+
+def test_heading_relaxation_tries_the_held_heading_first():
+    """The ladder's first rung must be no relaxation at all.
+
+    That is what makes it inert on every leg that solves as commanded: a carry leg only ever
+    moves the jaw heading when holding it yields no walkable path (``_plan_carry``).
+    """
+    assert _rt.HEADING_RELAXATION_RAD[0] == 0.0
+
+
+def test_heading_relaxation_widens_symmetrically_and_stops_at_60_degrees():
+    """Both signs at each width, widening, and bounded: the measured failures needed up to
+    60 deg of relaxation and none needed more, so the ladder is not open-ended."""
+    offsets = _rt.HEADING_RELAXATION_RAD[1:]
+    assert [round(math.degrees(o), 3) for o in offsets] == [
+        -10.0,
+        10.0,
+        -20.0,
+        20.0,
+        -30.0,
+        30.0,
+        -45.0,
+        45.0,
+        -60.0,
+        60.0,
+    ]
+
+
+def test_leg_resolution_counts_a_heading_sweep_like_a_tilt_sweep():
+    """A carry leg that relaxes the heading rotates the wrist along the leg, and a leg cut
+    for position alone would put that rotation over core.global_ik's continuity cap."""
+    plain, _ = _rt.leg_resolution(max_steps=300, gain_scale=1.0, distance=0.01)
+    swept, _ = _rt.leg_resolution(
+        max_steps=300, gain_scale=1.0, distance=0.01, heading_change=math.radians(60.0)
+    )
+    assert swept > plain
