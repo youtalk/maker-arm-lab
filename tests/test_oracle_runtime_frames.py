@@ -9,8 +9,10 @@ jaw heading as three scalars and needs no rotation matrix assembled, so both the
 its tests are gone rather than kept dead. What replaced them is below.
 """
 
+import collections
 import importlib.util
 import math
+import random
 import sys
 import types
 from pathlib import Path
@@ -19,6 +21,7 @@ import pytest
 import torch
 
 from maker_arm_lab.assets import urdf_prep
+from maker_arm_lab.core import layout, oracle
 from maker_arm_lab.core.global_ik import JointTrim, tool_axis_world
 from maker_arm_lab.robots import frames
 
@@ -28,17 +31,40 @@ _PATH = (
 )
 
 
+def _quat_apply(quat, vec):
+    """``isaaclab.utils.math.quat_apply`` for the stub: rotate ``vec`` by wxyz ``quat``.
+
+    The standard form, not an approximation -- the tests below drive it with identity
+    quaternions, where it is the identity, but writing the real thing means a stub that
+    silently rotates nothing cannot be mistaken for one that works.
+    """
+    q = quat.reshape(-1, 4)
+    v = vec.reshape(-1, 3)
+    if q.shape[0] == 1 and v.shape[0] > 1:
+        q = q.expand(v.shape[0], 4)
+    if v.shape[0] == 1 and q.shape[0] > 1:
+        v = v.expand(q.shape[0], 3)
+    w, xyz = q[:, :1], q[:, 1:]
+    t = 2.0 * torch.linalg.cross(xyz, v, dim=-1)
+    return (v + w * t + torch.linalg.cross(xyz, t, dim=-1)).reshape(vec.shape)
+
+
 def _load():
     names = ["isaaclab", "isaaclab.utils", "isaaclab.utils.math"]
     mods = {n: types.ModuleType(n) for n in names}
+    mods["isaaclab.utils.math"].quat_apply = _quat_apply
     pkg = types.ModuleType("_lego_sort_stub")
     pkg.__path__ = [str(_PATH.parent)]
     stubs = {**mods, "_lego_sort_stub": pkg}
-    # oracle_runtime imports `.mdp.recorders` relatively; give it a light stand-in.
+    # oracle_runtime imports `.mdp` and `.mdp.recorders` relatively; give them stand-ins.
+    # PHASE_TO_INT is a defaultdict rather than the real schema: the tests here care that
+    # `step()` stashes SOMETHING per phase, not what the integers are (mdp/recorders.py owns
+    # that, and tests/test_recorders.py pins it).
     rec = types.ModuleType("_lego_sort_stub.mdp.recorders")
-    rec.PHASE_TO_INT = {}
+    rec.PHASE_TO_INT = collections.defaultdict(lambda: -1)
     mdp = types.ModuleType("_lego_sort_stub.mdp")
     mdp.__path__ = []
+    mdp.per_brick_stowed = lambda env: env.stowed
     stubs.update({"_lego_sort_stub.mdp": mdp, "_lego_sort_stub.mdp.recorders": rec})
     sys.modules.update(stubs)
     try:
@@ -198,3 +224,162 @@ def test_the_command_path_can_leave_the_joint_box_so_the_clamp_flag_can_fire():
     command = trim.command(at_stop)
     assert float(torch.max(command - at_stop)) == pytest.approx(trim.limit)
     assert any(float(command[i]) > hi for i, (_, hi) in enumerate(limits))
+
+
+# --------------------------------------------------------------------------------------
+# A stub env, so `OracleRig.step()` itself can be exercised without Isaac Sim.
+#
+# It exists for one reason: the tests above pin PREMISES (the trim can leave the joint box,
+# the geometry inverts), and a premise is necessary but not sufficient. What the dataset's
+# clamp fraction actually depends on is the WIRING -- that `step()` hands the action term a
+# command it has not already clamped -- and no test that stops short of calling `step()` can
+# see that. Task D5's review demonstrated the gap by reintroducing the pre-clamp and watching
+# the whole suite stay green.
+# --------------------------------------------------------------------------------------
+
+_ARM = list(frames.ARM_JOINT_NAMES)
+_GRIPPER = list(frames.GRIPPER_JOINT_NAMES)
+_JOINTS = _ARM + _GRIPPER
+
+
+class _StubArticulation:
+    """Just the ``data`` fields and name lookups ``OracleRig`` reads."""
+
+    def __init__(self, num_envs: int):
+        limits = urdf_prep.arm_joint_limits()
+        self.joint_names = _JOINTS
+        self.data = types.SimpleNamespace(
+            joint_pos=torch.zeros(num_envs, len(_JOINTS)),
+            joint_vel=torch.zeros(num_envs, len(_JOINTS)),
+            joint_pos_limits=torch.tensor(
+                [[[lo, hi] for lo, hi in limits] + [[0.0, 0.06]] * len(_GRIPPER)] * num_envs
+            ),
+            body_pos_w=torch.tensor([[[0.25, 0.0, 0.2]]] * num_envs),
+            body_quat_w=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]] * num_envs),
+            computed_torque=torch.zeros(num_envs, len(_JOINTS)),
+            applied_torque=torch.zeros(num_envs, len(_JOINTS)),
+        )
+
+    def find_bodies(self, name):
+        return ([0], [name])
+
+    def find_joints(self, names, preserve_order=False):
+        return ([self.joint_names.index(n) for n in names], list(names))
+
+
+class _StubScene:
+    def __init__(self, num_envs: int, num_bricks: int):
+        self.env_origins = torch.zeros(num_envs, 3)
+        self._robot = _StubArticulation(num_envs)
+        contact = types.SimpleNamespace(
+            data=types.SimpleNamespace(force_matrix_w=torch.zeros(num_envs, 1, num_bricks, 3))
+        )
+        self._items = {"robot": self._robot}
+        for side in ("left", "right"):
+            self._items[f"finger_{side}_brick"] = contact
+        for b in range(num_bricks):
+            self._items[f"brick_{b}"] = types.SimpleNamespace(
+                data=types.SimpleNamespace(
+                    root_pos_w=torch.tensor([[0.2 + 0.01 * b, 0.0, 0.005]] * num_envs),
+                    root_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]] * num_envs),
+                    root_lin_vel_w=torch.zeros(num_envs, 3),
+                )
+            )
+
+    def __getitem__(self, key):
+        return self._items[key]
+
+
+class _StubEnv:
+    """Captures the action ``OracleRig.step()`` emits, and nothing else moves."""
+
+    def __init__(self, num_envs: int = 1, num_bricks: int = 4):
+        self.device = "cpu"
+        self.num_envs = num_envs
+        self.cfg = types.SimpleNamespace(num_bricks=num_bricks)
+        self.scene = _StubScene(num_envs, num_bricks)
+        term = types.SimpleNamespace(
+            _joint_names=_ARM, clamped=torch.zeros(num_envs, dtype=torch.bool)
+        )
+        self.action_manager = types.SimpleNamespace(total_action_dim=7, get_term=lambda name: term)
+        self.stowed = torch.zeros(num_envs, num_bricks, dtype=torch.bool)
+        self.success = torch.zeros(num_envs, dtype=torch.bool)
+        self.termination_manager = types.SimpleNamespace(
+            active_terms=["success", "time_out"], get_term=lambda name: self.success
+        )
+        self.terminated = torch.zeros(num_envs, dtype=torch.bool)
+        self.last_action = None
+
+    def step(self, action):
+        self.last_action = action.clone()
+        return (None, None, self.terminated.clone(), torch.zeros_like(self.terminated), None)
+
+
+def _stub_rig(num_envs: int = 1, num_bricks: int = 4):
+    env = _StubEnv(num_envs, num_bricks)
+    rig = _rt.OracleRig(
+        env,
+        layout.DEFAULT_BIN_LAYOUT,
+        oracle.OracleNoise(),
+        random.Random(0),
+    )
+    return env, rig
+
+
+def test_step_hands_the_action_term_a_command_it_has_not_clamped():
+    """`OracleRig.step()` must pass its command through UNCLAMPED, so the action term's own
+    clamp is the one that acts and, crucially, RECORDS (`obs/clamped`).
+
+    This is the wiring test, and it is the one that goes red if the pre-clamp comes back.
+    The rig used to clamp to the articulation's joint limits, and `core.profile.sim_profile`
+    hands the Rust clamp those same bounds, so `ClampedJointPositionAction.clamped` could not
+    fire on oracle-generated actions at all -- making the spec's clamp-fraction criterion
+    (section 4.3) unable to fail. The premise that the command CAN leave the joint box is
+    pinned separately above; this pins that `step()` does not undo it.
+    """
+    env, rig = _stub_rig()
+    upper = rig.limits[:, 1].double()
+    at_stop = upper.clone()
+    rig.q_cmd[0] = at_stop
+    # Wind the trim against a persistent tracking error, as a leg the arm lags does.
+    for _ in range(500):
+        rig.trims[0].update(at_stop, at_stop - 0.2)
+    expected = rig.trims[0].command(at_stop)
+
+    rig.step()
+
+    sent = env.last_action[0, :6].double()
+    assert torch.allclose(sent, expected, atol=1e-5)
+    assert bool((sent > upper + 0.3).all()), "the rig clamped its own command"
+
+
+def test_episode_stats_freeze_when_the_episode_ends_not_when_they_are_read():
+    """The outcome fields must describe the episode that ENDED, not the env's state now.
+
+    `succeeded` and `bricks_delivered` come from env state the next `env.step()` overwrites
+    for the whole batch, rearmed or not -- so with more than one env the natural pattern
+    (finish env A, keep stepping so env B can finish, then read A) silently reported A's NEXT
+    episode. `oracle_check.py` never saw it because it runs one env and reads immediately.
+    """
+    env, rig = _stub_rig(num_envs=2)
+    env.stowed[:] = True
+    env.success[:] = True
+    env.terminated[0] = True
+
+    rig.step()  # env 0 finishes here; env 1 keeps going
+
+    # The world moves on, as it does while the rest of the batch runs.
+    env.stowed[:] = False
+    env.success[:] = False
+    env.terminated[0] = False
+    rig.step()
+    rig.step()
+
+    stats = rig.episode_stats(0)
+    assert stats["succeeded"] is True
+    assert stats["bricks_delivered"] == rig.num_bricks
+    # env 1 never finished, so its fields are the live ones and follow the world.
+    assert rig.episode_stats(1)["succeeded"] is False
+    # ... and rearming env 0 releases the snapshot.
+    rig.rearm([0])
+    assert rig.episode_stats(0)["succeeded"] is False

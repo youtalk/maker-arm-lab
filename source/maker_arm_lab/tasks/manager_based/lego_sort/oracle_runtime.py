@@ -406,6 +406,11 @@ class OracleRig:
         self._stowed_sample = torch.zeros(
             self.num_envs, self.num_bricks, dtype=torch.bool, device=self.device
         )
+        # Per-env outcome, frozen the step an episode ends. The two fields in it are read
+        # from state the ENV owns and overwrites on the next step -- for every env in the
+        # batch, whether or not that env was rearmed -- so unlike the counters in
+        # `self.stats` they cannot simply be read later. See `episode_stats`.
+        self._outcome: list[dict | None] = [None] * self.num_envs
         self.abandoned = torch.zeros(self.num_envs, dtype=torch.bool)
         self.stats = [self._fresh_stats() for _ in range(self.num_envs)]
         self.rearm(list(range(self.num_envs)))
@@ -499,7 +504,31 @@ class OracleRig:
         self._abandon_nan_envs(dones)
         self._advance_phases(dones)
         self._run_watchdog(dones)
+        self._freeze_outcomes(dones)
         return {"dones": dones, "abandoned": self.abandoned.clone()}
+
+    def _freeze_outcomes(self, dones: torch.Tensor) -> None:
+        """Snapshot the outcome of every env that just finished, before the env moves on.
+
+        Last thing in ``step()``, so a watchdog abandon raised earlier in this same step is
+        included. Both fields it captures are perishable in a way ``self.stats``'s counters
+        are not: the success term and the brick sample are recomputed by the very next
+        ``env.step()`` for the whole batch, regardless of which envs have been rearmed. With
+        one env and an immediate read that is invisible; with a batch, the natural pattern --
+        finish env A, keep stepping so env B can finish, then read A -- would have reported
+        A's NEXT episode.
+        """
+        for i in range(self.num_envs):
+            if self._outcome[i] is not None:
+                continue
+            if dones[i] or self.abandoned[i]:
+                self._outcome[i] = self._episode_outcome(i)
+
+    def _episode_outcome(self, i: int) -> dict:
+        """How the episode went, read from the env's own state (see ``episode_stats``)."""
+        succeeded = self._succeeded(i)
+        delivered = self.num_bricks if succeeded else int(self._stowed_sample[i].sum().item())
+        return {"bricks_delivered": delivered, "succeeded": succeeded}
 
     def _advance_plan(self, i: int) -> None:
         """Move the commanded joint target one control step along this phase's plan."""
@@ -1040,6 +1069,7 @@ class OracleRig:
             self.watchdog_strikes[i] = 0
             self.unplanned[i] = False
             self.abandoned[i] = False
+            self._outcome[i] = None
             self.stats[i] = self._fresh_stats()
             self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE
 
@@ -1049,9 +1079,17 @@ class OracleRig:
         Counters from ``self.stats`` (not ``EnvOracle.retries_used``, which resets to 0 at
         every new brick's HOVER -- see ``_enter_phase``'s REOPEN branch), so those stay
         episode-totals. ``induced_offset``/``induced_noise`` read from the ``EnvOracle``
-        object instead, because they ARE already episode-cumulative there. Both rely on the
-        same lifetime guarantee: the just-finished env's ``EnvOracle`` and ``self.stats``
-        entry survive, and stay readable, until the caller calls ``rearm()`` on it.
+        object instead, because they ARE already episode-cumulative there.
+
+        EVERY field here is readable until the caller calls ``rearm()`` on that env, and for
+        two of them that took work rather than luck. The counters and the ``EnvOracle`` are
+        plain Python state this class owns, so they simply survive. ``succeeded`` and
+        ``bricks_delivered`` are not: they come from the env's success term and from a sample
+        of the bricks, and the next ``env.step()`` overwrites both for the WHOLE batch,
+        rearmed or not. So they are frozen the step the episode ends (``_freeze_outcomes``)
+        and served from that snapshot afterwards. Without it the batch pattern -- finish env
+        A, keep stepping so env B can finish, then read A -- would have reported A's next
+        episode under A's finished one's counters.
 
         THREE FIELDS DESCRIBE HOW THE EPISODE WENT AND THEY ARE NOT THE SAME NUMBER. Reach
         for the right one:
@@ -1070,12 +1108,12 @@ class OracleRig:
           dropped in transit. Never a delivery count.
         """
         orc = self.oracles[env_id]
-        succeeded = self._succeeded(env_id)
-        delivered = self.num_bricks if succeeded else int(self._stowed_sample[env_id].sum().item())
+        outcome = self._outcome[env_id]
+        if outcome is None:  # still running: the live values are this episode's own
+            outcome = self._episode_outcome(env_id)
         return {
             **self.stats[env_id],
-            "bricks_delivered": delivered,
-            "succeeded": succeeded,
+            **outcome,
             "induced_offset": orc.induced_offset,
             "induced_noise": orc.induced_noise,
         }
