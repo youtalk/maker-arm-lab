@@ -636,6 +636,15 @@ def _order_oracle(num_bricks=6, seed=0, randomize=True, rng=None):
     )
 
 
+def _stow(scene, brick):
+    """Teleport ``brick`` into its color's bin, in place: RETREAT marks a brick sorted only
+    when the scene shows it stowed (the MS2 re-pick rule), so a clean cycle has to land."""
+    bl = layout.DEFAULT_BIN_LAYOUT
+    slot = bl.slot_colors.index(brick % len(layout.BRICK_COLOR_ORDER))
+    scene.brick_pos[brick] = layout.bin_interior_centers(bl)[slot]
+    scene.brick_lin_vel[brick] = 0.0
+
+
 def _run_pick(orc, scene):
     """One clean pick->place cycle from HOVER; returns the brick it targeted."""
     if orc.next_goal(scene) is None:  # HOVER's entry selects the target
@@ -645,8 +654,10 @@ def _run_pick(orc, scene):
     _run_phase(orc, scene, outcome="stalled")  # DESCEND
     _run_phase(orc, scene)  # CLOSE
     _run_phase(orc, scene, pinch_ok=True, lifted=True)  # LIFT
-    for _ in range(4):  # RAISE, EXTEND, RELEASE, RETREAT
+    for _ in range(3):  # RAISE, EXTEND, RELEASE
         _run_phase(orc, scene)
+    _stow(scene, brick)
+    _run_phase(orc, scene)  # RETREAT sees the brick stowed
     return brick
 
 
@@ -679,8 +690,9 @@ def test_pick_order_is_recorded_with_the_knob_off_too():
 def test_randomized_pick_order_varies_and_leaves_the_fixed_schedule():
     """The point of the knob: neither the brick order nor the color order it implies may
     stay predictable across episodes."""
-    scene = _desk_snapshot(6)
-    orders = [tuple(_run_episode(_order_oracle(seed=seed), scene)) for seed in range(20)]
+    orders = [
+        tuple(_run_episode(_order_oracle(seed=seed), _desk_snapshot(6))) for seed in range(20)
+    ]
     assert len(set(orders)) >= 10
     assert sum(order == (0, 1, 2, 3, 4, 5) for order in orders) <= 1
     colors = {tuple(b % len(layout.BRICK_COLOR_ORDER) for b in order) for order in orders}
@@ -689,8 +701,7 @@ def test_randomized_pick_order_varies_and_leaves_the_fixed_schedule():
 
 def test_randomized_pick_order_eventually_chooses_every_reachable_brick_first():
     """Uniform over the candidates: over many episodes every brick is the FIRST pick."""
-    scene = _desk_snapshot(6)
-    firsts = {_run_episode(_order_oracle(seed=seed), scene)[0] for seed in range(60)}
+    firsts = {_run_episode(_order_oracle(seed=seed), _desk_snapshot(6))[0] for seed in range(60)}
     assert firsts == set(range(6))
 
 
@@ -722,12 +733,11 @@ def test_randomized_pick_order_keeps_a_retry_on_the_same_brick():
 
 def test_randomized_pick_order_is_reproducible_from_the_seed():
     """A shard's order has to be re-derivable from its recorded seeds."""
-    scene = _desk_snapshot(6)
-    assert _run_episode(_order_oracle(seed=17), scene) == _run_episode(
-        _order_oracle(seed=17), scene
+    assert _run_episode(_order_oracle(seed=17), _desk_snapshot(6)) == _run_episode(
+        _order_oracle(seed=17), _desk_snapshot(6)
     )
-    assert _run_episode(_order_oracle(seed=17), scene) != _run_episode(
-        _order_oracle(seed=18), scene
+    assert _run_episode(_order_oracle(seed=17), _desk_snapshot(6)) != _run_episode(
+        _order_oracle(seed=18), _desk_snapshot(6)
     )
 
 
@@ -751,3 +761,56 @@ def test_randomize_pick_order_without_an_rng_is_refused():
             num_bricks=6,
             draw=oracle.sample_episode_draw(random.Random(0), noise),
         )
+
+
+def _full_cycle_to_retreat(orc, scene):
+    _run_phase(orc, scene)  # SETTLE
+    _run_phase(orc, scene)  # HOVER
+    _run_phase(orc, scene, outcome="stalled")  # DESCEND
+    _run_phase(orc, scene)  # CLOSE
+    _run_phase(orc, scene, pinch_ok=True, lifted=True)  # LIFT
+    _run_phase(orc, scene)  # RAISE
+    _run_phase(orc, scene)  # EXTEND
+    _run_phase(orc, scene)  # RELEASE
+
+
+def test_a_brick_lost_on_the_desk_is_picked_again_after_retreat():
+    """RETREAT used to mark its brick sorted unconditionally, so a brick that never reached
+    the bin -- MEASURED on GPU (2026-09-07): an EXTEND with no plan, RELEASE opening over
+    the scatter band, the brick flat on the desk at radius 0.20 m -- was written off, the
+    oracle went DONE with a brick on the desk, and the episode idled ~1500 control steps to
+    its time_out. A brick still inside the top-down band is a brick to pick again.
+    """
+    orc = _oracle()
+    _full_cycle_to_retreat(orc, _snapshot())
+    # RETREAT ends with the brick back on the desk, inside the band.
+    dropped = _snapshot(brick_xy=(0.19, -0.04))
+    _run_phase(orc, dropped)  # RETREAT
+    hover = orc.next_goal(dropped)
+    assert hover is not None and hover.phase == oracle.Phase.HOVER
+    assert orc.target_brick == 0
+    assert orc.retries_used == 0
+    assert hover.target_pos[0].item() == pytest.approx(0.19, abs=0.03)
+    assert hover.target_pos[1].item() == pytest.approx(-0.04, abs=0.02)
+
+
+def test_a_brick_lost_out_of_reach_abandons_at_once_instead_of_idling():
+    orc = _oracle()
+    _full_cycle_to_retreat(orc, _snapshot())
+    beyond = layout.top_down_x_limit(layout.DEFAULT_BIN_LAYOUT) + 0.02
+    lost = _snapshot(brick_xy=(beyond, 0.0))
+    _run_phase(orc, lost)  # RETREAT
+    assert orc.next_goal(lost) is None
+    assert orc.phase == oracle.Phase.ABANDON
+
+
+def test_a_stowed_brick_stays_sorted_even_if_it_is_later_jostled():
+    """`_sorted` still exists for the brick that DID arrive: a later delivery can knock it
+    so it is momentarily not at rest, and that must not un-sort it."""
+    orc = _oracle()
+    _full_cycle_to_retreat(orc, _snapshot())
+    _run_phase(orc, _snapshot(stowed=(0,)))  # RETREAT, brick in its bin
+    moving = _snapshot(stowed=(0,))
+    moving.brick_lin_vel[0, 0] = 0.5  # jostled: not at rest this instant
+    assert orc.next_goal(moving) is None
+    assert orc.phase == oracle.Phase.DONE

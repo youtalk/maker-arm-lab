@@ -876,6 +876,16 @@ class EnvOracle:
         elif self.phase == Phase.RELEASE:
             self.phase = Phase.RETREAT
         elif self.phase == Phase.RETREAT:
-            self._sorted.add(self.target_brick)
+            # Sorted means ARRIVED, not attempted. A brick that is not in its bin when the
+            # arm has retreated was dropped somewhere -- MEASURED on GPU (2026-09-07): an
+            # EXTEND with no plan, RELEASE opening over the scatter band, the brick flat on
+            # the desk -- and writing it off here left the oracle DONE with a brick on the
+            # desk, idling ~1500 control steps to the episode's time_out. Left unsorted, it
+            # is picked again by HOVER's selection if it still lies inside the top-down
+            # band, and the episode is abandoned at once ("no reachable brick") if not.
+            # `_sorted` still records the bricks that did arrive, so a later delivery that
+            # jostles one -- momentarily not at rest -- cannot un-sort it.
+            if self.target_brick in self._stowed(scene):
+                self._sorted.add(self.target_brick)
             self.target_brick = None
             self.phase = Phase.HOVER  # HOVER's entry selects the next brick
