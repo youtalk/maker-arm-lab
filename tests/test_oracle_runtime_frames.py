@@ -519,3 +519,98 @@ def test_raise_is_kept_when_extend_plans_from_where_it_ends():
     assert len(rig.plans[0]) > 0
     assert rig.stats[0]["raise_vetoed"] == 0
     assert rig.stats[0]["unplanned_legs"] == 0
+
+
+# --------------------------------------------------------------------------------------
+# HOVER height ladder: the drawn hover height is a via pose, not a grasp parameter, and
+# at the band's edges it is what makes a pick unplannable. Same instrumented batch as above.
+# --------------------------------------------------------------------------------------
+
+
+def _hover_goal(target, yaw):
+    return oracle.Goal(
+        oracle.Phase.HOVER,
+        torch.tensor(target),
+        yaw,
+        0.0,
+        1.0,
+        0.005,
+        0,
+        oracle.DEFAULT_MAX_STEPS,
+        0,
+    )
+
+
+def _pick_setup(rig, q_before_hover, brick_xy, brick_index=0):
+    rig.q_cmd[0] = torch.tensor(q_before_hover, dtype=torch.float64)
+    rig.commanded_tilt[0] = frames.GRASP_TILT_RAD
+    rig.oracles[0].draw = oracle.EpisodeDraw(0.12, 0.0, 0.0, 0.0, 1.0, 0.05, 0.0, 0.0)
+    rig.oracles[0].target_brick = brick_index
+    rig.oracles[0].phase = oracle.Phase.HOVER
+    brick = rig.env.scene[f"brick_{brick_index}"]
+    brick.data.root_pos_w[0] = torch.tensor([brick_xy[0], brick_xy[1], 0.0048])
+    rig.brick_start[0] = rig._brick_pos(0, brick_index)
+    rig.oracles[0]._brick_start = rig.brick_start[0].clone()
+
+
+def test_hover_is_lowered_when_the_drawn_height_has_no_ik_solution():
+    """Env 11, brick 1: a band-edge pick (radius 0.274 m, azimuth +40 deg) whose HOVER had
+    no solution at the drawn 0.138 m hover height at any restart count, so DESCEND, CLOSE
+    and LIFT all ran unplanned, three attempts over, and the episode was abandoned on
+    `grasp_retries_exhausted`. At 0.10 m above the brick the same hover solves with 0.34 rad
+    of joint margin and the descend that follows plans on its first rung.
+    """
+    _env, rig = _stub_rig(num_envs=1, num_bricks=6)
+    _pick_setup(rig, [0.143, -0.55, 0.957, -0.401, -0.141, -1.321], (0.2133, 0.177), 1)
+    yaw = math.radians(428.2) - math.pi / 2
+    goal = _hover_goal([0.2133, 0.177, 0.0048 + 0.1334], yaw)
+
+    rig._plan_leg(0, goal)
+
+    assert not rig.unplanned[0]
+    assert rig.stats[0]["hover_lowered"] == 1
+    assert float(goal.target_pos[2]) == pytest.approx(0.0048 + 0.10)
+    # The lowered hover is what the plan actually walks to, so HOVER can still converge.
+    end_pick, _ = rig._commanded_pick_pose(0, rig.plans[0][-1])
+    assert float(end_pick[2]) == pytest.approx(float(goal.target_pos[2]), abs=1e-3)
+    # And DESCEND plans from there.
+    rig.q_cmd[0] = rig.plans[0][-1]
+    descend = rig.oracles[0].descend_goal(yaw)
+    rig._plan_leg(0, descend)
+    assert not rig.unplanned[0]
+
+
+def test_hover_is_lowered_when_no_descend_can_follow_it():
+    """Env 5, brick 5: a near pick (radius 0.146 m) whose HOVER solved at the drawn height
+    but on a branch with the wrist 0.18 rad from its stop, from which the descend ladder had
+    no continuous path -- three times, then abandoned. The ladder must look one leg ahead:
+    a hover DESCEND cannot follow is not a hover.
+    """
+    _env, rig = _stub_rig(num_envs=1, num_bricks=6)
+    _pick_setup(rig, [-0.658, -1.163, 1.503, -1.451, 0.212, 2.513], (0.1365, 0.0521), 5)
+    yaw = math.radians(-89.9) - math.pi / 2
+    goal = _hover_goal([0.1365, 0.0521, 0.0048 + 0.1237], yaw)
+
+    rig._plan_leg(0, goal)
+
+    assert not rig.unplanned[0]
+    assert rig.stats[0]["hover_lowered"] == 1
+    assert float(goal.target_pos[2]) < 0.0048 + 0.1237
+    rig.q_cmd[0] = rig.plans[0][-1]
+    rig._plan_leg(0, rig.oracles[0].descend_goal(yaw))
+    assert not rig.unplanned[0]
+
+
+def test_hover_keeps_the_drawn_height_when_it_plans():
+    """A mid-band pick from the home pose: the ladder's first rung IS the drawn height, so a
+    pick that never needed lowering is bit-for-bit unaffected."""
+    _env, rig = _stub_rig(num_envs=1, num_bricks=6)
+    home = [frames.HOME_JOINT_POS[n] for n in frames.ARM_JOINT_NAMES]
+    _pick_setup(rig, home, (0.22, 0.04), 1)
+    goal = _hover_goal([0.22, 0.04, 0.0048 + 0.12], 0.3)
+
+    rig._plan_leg(0, goal)
+
+    assert not rig.unplanned[0]
+    assert rig.stats[0]["hover_lowered"] == 0
+    assert float(goal.target_pos[2]) == pytest.approx(0.0048 + 0.12)

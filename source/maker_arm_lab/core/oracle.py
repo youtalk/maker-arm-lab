@@ -629,6 +629,36 @@ class EnvOracle:
             (RETREAT_POINT[0] + self.draw.via_dx, RETREAT_POINT[1] + self.draw.via_dy),
         )
 
+    def descend_goal(self, yaw: float) -> Goal:
+        """The DESCEND leg for the current pick: straight down onto the brick.
+
+        ``yaw`` is the brick's long-axis heading plus the episode's yaw offset -- the same
+        value the HOVER goal carried, which is how the runtime's HOVER-entry lookahead calls
+        this: it plans the descend from a candidate hover pose to decide whether that hover
+        is worth walking to (see ``oracle_runtime.OracleRig._plan_leg``), and hands back the
+        yaw of the HOVER goal it is planning. Public for that caller; ``next_goal`` uses it
+        too, so both ask for the same leg. DESCEND_CLEARANCE_MEASURED is applied by the
+        runtime (it owns the robots import); the core target is the brick's resting z.
+        """
+        target = self._brick_start.clone()
+        target[0] += self.draw.lateral_dx
+        target[1] += self.draw.lateral_dy
+        if self._induced_style == "offset" and self.retries_used == 0:
+            sdx, sdy = self._sabotage_offset(yaw)
+            target[0] += sdx
+            target[1] += sdy
+        return self._goal(
+            Phase.DESCEND,
+            target,
+            yaw,
+            0.0,
+            1.0,
+            0.0008,
+            DESCEND_STALL_STEPS,
+            DEFAULT_MAX_STEPS,
+            hold_xy=self._yaw_hold_xy(target),
+        )
+
     def extend_goal(self) -> Goal:
         """The EXTEND leg for the brick in the jaws: out to its bin's release pose.
 
@@ -708,27 +738,8 @@ class EnvOracle:
                 hold_xy=self._yaw_hold_xy(target),
             )
         if self.phase == Phase.DESCEND:
-            target = self._brick_start.clone()
-            target[0] += self.draw.lateral_dx
-            target[1] += self.draw.lateral_dy
-            # DESCEND_CLEARANCE_MEASURED is applied by the runtime (it owns the
-            # robots import); the core target is the brick's resting z.
             yaw = scene.brick_yaw[self.target_brick].item() + self.draw.yaw_offset
-            if self._induced_style == "offset" and self.retries_used == 0:
-                sdx, sdy = self._sabotage_offset(yaw)
-                target[0] += sdx
-                target[1] += sdy
-            return self._goal(
-                Phase.DESCEND,
-                target,
-                yaw,
-                0.0,
-                1.0,
-                0.0008,
-                DESCEND_STALL_STEPS,
-                DEFAULT_MAX_STEPS,
-                hold_xy=self._yaw_hold_xy(target),
-            )
+            return self.descend_goal(yaw)
         if self.phase == Phase.CLOSE:
             return self._goal(
                 Phase.CLOSE, None, None, 0.0, -1.0, None, 0, CLOSE_STEPS, hold=CLOSE_STEPS

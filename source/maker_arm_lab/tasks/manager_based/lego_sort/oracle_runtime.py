@@ -130,6 +130,26 @@ DESCEND_TILT_LADDER = descend_tilt_ladder(BRICK_HALF_HEIGHT)
 # episode.
 HOVER_RESTARTS = 24
 
+# Hover heights above the brick (m) the HOVER leg falls back to, in order, when the drawn
+# height gives no pick: no IK solution for the hover itself, or a hover pose from which the
+# descend ladder has no continuous path. The drawn height is always tried first, so a pick
+# that plans at it is bit-for-bit unaffected.
+#
+# MEASURED on GPU (2026-09-07, instrumented 12-env batch): both grasp-retry abandons of the
+# batch were picks the arm could not plan at the DRAWN height and retried three times
+# against the same target -- a band-edge brick (radius 0.274 m, azimuth +40 deg) with no
+# hover solution at 0.138 m at any restart count, and a near brick (radius 0.146 m) whose
+# hover solved at 0.129 m only on a branch with the wrist 0.18 rad from its stop, from which
+# no descend rung was walkable. Replayed on CPU with the runtime's own planner, both plan at
+# 0.10 m (hover margin 0.34 rad and 0.28 rad; descend on the first rung) and at every lower
+# rung. The hover height is a via pose and a dataset-diversity draw
+# (`core.oracle.OracleNoise.hover_height`), not a grasp parameter: the descend commands the
+# brick's own z whatever the hover was, so lowering it costs the dataset a little variety
+# on the affected picks and nothing else. The floor of 0.06 m keeps the jaw plates -- which
+# hang JAW_FACE_FAR * sin(GRASP_TILT_RAD) = 21 mm below the tool tip at the hover tilt --
+# well clear of neighbouring bricks (MIN_SEPARATION 0.06 m).
+HOVER_HEIGHT_LADDER_M = (0.10, 0.08, 0.06)
+
 # --- Leg resolution ----------------------------------------------------------
 # How finely a leg is cut into waypoints, and how many control steps each waypoint is
 # commanded for. 3 mm at 2 steps is ~1.5 mm per control step, the pace the IK-Rel servo
@@ -437,6 +457,9 @@ class OracleRig:
             # from where they end (see `_plan_leg`). Each is also counted in
             # `unplanned_legs`, since that is how the phase then ends.
             "raise_vetoed": 0,
+            # HOVER legs that had to take a lower rung of HOVER_HEIGHT_LADDER_M than the
+            # episode's drawn hover height, because the drawn one gave no pick.
+            "hover_lowered": 0,
         }
 
     def _check_action_space(self, env) -> None:
@@ -806,7 +829,7 @@ class OracleRig:
         if goal.phase == oracle.Phase.DESCEND:
             plan = self._plan_descend(i, goal, start, pick_from, tilt_from, pick_to, heading)
         elif goal.phase == oracle.Phase.HOVER:
-            plan = self._plan_hover(i, goal, start, pick_to, heading)
+            plan = self._plan_hover_ladder(i, goal, start, pick_to, heading)
         else:
             # GRASP_TILT_RAD is the FLOOR, not an offset. core.oracle is the ported,
             # arm-agnostic state machine and is not modified (spec section 5 item 5), so it
@@ -953,6 +976,52 @@ class OracleRig:
             heading,
         )
         self.dwell[i] = dwell
+        return plan is not None
+
+    def _plan_hover_ladder(self, i, goal, start, pick_to, heading) -> list[torch.Tensor] | None:
+        """HOVER at the drawn height, or failing that at each rung of HOVER_HEIGHT_LADDER_M.
+
+        A rung counts only if the hover solves AND the descend ladder can be planned from
+        the pose it ends at -- the same lookahead `_plan_leg` runs for RAISE, and for the
+        same reason: a leg that strands the next one is not a leg. When a lower rung is
+        taken, ``goal.target_pos[2]`` is moved down to it, because `_phase_result` grades
+        HOVER's arrival against the goal and a hover walked to 0.10 m can never converge on a
+        target at 0.13 m.
+        """
+        brick_z = float(self.brick_start[i][2].item())
+        drawn = float(pick_to[2])
+        heights = [drawn] + [brick_z + h for h in HOVER_HEIGHT_LADDER_M if brick_z + h < drawn]
+        for rung, z in enumerate(heights):
+            target = pick_to.clone()
+            target[2] = z
+            plan = self._plan_hover(i, goal, start, target, heading)
+            if plan is None or not self._descend_plannable_from(i, plan[-1], goal, heading):
+                continue
+            if rung > 0:
+                self.stats[i]["hover_lowered"] += 1
+                goal.target_pos[2] = z
+            return plan
+        return None
+
+    def _descend_plannable_from(self, i: int, q: torch.Tensor, hover: oracle.Goal, heading) -> bool:
+        """Would the DESCEND leg plan if the arm were commanded to ``q`` after ``hover``?
+
+        A dry run of what `_plan_leg` will do at DESCEND entry: the same goal
+        (`EnvOracle.descend_goal`, at the yaw the HOVER goal carries, with the runtime's
+        DESCEND_CLEARANCE_MEASURED applied as `_enter_phase` applies it), the same tilt
+        ladder. Nothing it computes is kept: the plan is dropped and the per-env state the
+        ladder writes -- pick offset, commanded tilt, waypoint dwell -- is restored.
+        """
+        goal = self.oracles[i].descend_goal(hover.yaw)
+        goal.target_pos[2] = goal.target_pos[2] + DESCEND_CLEARANCE_MEASURED
+        pick_offset = self.pick_offset[i].clone()
+        tilt, dwell = self.commanded_tilt[i], self.dwell[i]
+        pick_from, tilt_from = self._commanded_pick_pose(i, q)
+        plan = self._plan_descend(
+            i, goal, q, pick_from, tilt_from, goal.target_pos.double().cpu(), heading
+        )
+        self.pick_offset[i] = pick_offset
+        self.commanded_tilt[i], self.dwell[i] = tilt, dwell
         return plan is not None
 
     def _plan_hover(self, i, goal, start, pick_to, heading) -> list[torch.Tensor] | None:
