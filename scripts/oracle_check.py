@@ -439,7 +439,9 @@ def run() -> bool:
             outcomes.append(success)
             print(
                 f"TRIAL {trial}: done={done} abandoned={abandoned} exported_count={exported} "
-                f"sorted={stats['sorted']} retries={stats['retries']} "
+                f"delivered={stats['bricks_delivered']}/{args.num_bricks} "
+                f"succeeded={stats['succeeded']} "
+                f"sort_attempts={stats['sort_attempts']} retries={stats['retries']} "
                 f"unplanned_legs={stats['unplanned_legs']} "
                 f"direct_legs={stats['direct_legs']} "
                 f"abandon_reason={stats['abandon']} "

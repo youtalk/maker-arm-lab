@@ -98,6 +98,7 @@ from maker_arm_lab.robots.frames import (
     WRIST_ROLL_SIGN,
 )
 
+from . import mdp
 from .mdp.recorders import PHASE_TO_INT
 
 # --- The grasp attitude ------------------------------------------------------
@@ -400,6 +401,11 @@ class OracleRig:
         # Set when a leg could not be planned at all, so `_phase_result` can end the phase at
         # once rather than let the arm hold still until the budget expires.
         self.unplanned = [False] * self.num_envs
+        # (N, B) bool: which bricks were at rest in their own colour's bin at the start of the
+        # most recent control step. Refreshed in `step()`; read by `episode_stats`.
+        self._stowed_sample = torch.zeros(
+            self.num_envs, self.num_bricks, dtype=torch.bool, device=self.device
+        )
         self.abandoned = torch.zeros(self.num_envs, dtype=torch.bool)
         self.stats = [self._fresh_stats() for _ in range(self.num_envs)]
         self.rearm(list(range(self.num_envs)))
@@ -408,13 +414,12 @@ class OracleRig:
     def _fresh_stats() -> dict:
         return {
             "retries": 0,
-            # The oracle's own count of picks it CARRIED OUT, incremented when a brick's
-            # RETREAT ends. It is an intent counter, not a delivery counter: a brick dropped
-            # in transit is counted here too. What actually decides whether an episode is a
-            # success -- and therefore whether it is exported -- is
-            # `mdp.terminations.all_bricks_stowed`, read off the bricks' own poses, so the two
-            # can and do disagree. Do not use this as a label.
-            "sorted": 0,
+            # Pick-and-place cycles the oracle carried through to the end of RETREAT. An
+            # ATTEMPT count, which is why it is not called anything like "sorted": a brick
+            # dropped in transit completes its RETREAT and is counted here exactly like a
+            # delivered one. `bricks_delivered` below is the count read off the bricks
+            # themselves, and it is the one a consumer wants.
+            "sort_attempts": 0,
             "abandon": None,
             "unplanned_legs": 0,
             # Legs that fell through the Cartesian planner to `_plan_direct`, whose path is
@@ -476,6 +481,11 @@ class OracleRig:
             # pre-clamp that happened silently, with nothing recording it.
             action[i, :6] = command.to(device=self.device, dtype=torch.float32)
         self._stash_cycle_state()
+        # Ground truth for `episode_stats`, sampled BEFORE the step because env.step()
+        # auto-resets a finished env before it returns -- reading brick poses afterwards
+        # describes the NEXT episode's scatter. Device-side and never synced here; the one
+        # host read is in episode_stats.
+        self._stowed_sample = mdp.per_brick_stowed(self.env)
         _, _, terminated, truncated, _ = self.env.step(action)
         # Isaac Lab's ManagerBasedRLEnv.step() resets terminated|truncated envs to their NEXT
         # episode's initial state before returning, so for those envs every read below
@@ -593,7 +603,7 @@ class OracleRig:
                 # Mirrors EnvOracle.report()'s RETREAT branch, which is where the brick is
                 # actually marked sorted -- tracked here too because that set is private to
                 # EnvOracle.
-                self.stats[i]["sorted"] += 1
+                self.stats[i]["sort_attempts"] += 1
             orc = self.oracles[i]
             scene = self.snapshot(i)
             orc.report(result, scene)
@@ -701,7 +711,7 @@ class OracleRig:
         if goal.phase == oracle.Phase.REOPEN:
             # EnvOracle.retries_used resets to 0 at the next brick's HOVER (core/oracle.py),
             # so it cannot be read live for an episode total -- accumulate it here, once per
-            # REOPEN entry, the same treatment "sorted" gets for the same reason.
+            # REOPEN entry, the same treatment "sort_attempts" gets for the same reason.
             self.stats[i]["retries"] += 1
         if goal.phase == oracle.Phase.HOVER:
             # Fresh brick target selected inside next_goal(); capture its start pose for the
@@ -794,7 +804,7 @@ class OracleRig:
             # * on a CARRY leg (LIFT/RAISE/EXTEND/RETREAT) there is NO gate and NO ladder:
             #   core.oracle sequences straight on, so an unplanned EXTEND means RELEASE opens
             #   the jaws wherever the arm is standing and the brick is not delivered. RETREAT
-            #   then counts it in `stats["sorted"]` regardless (see `_fresh_stats`). That
+            #   then counts it in `stats["sort_attempts"]` regardless (see `_fresh_stats`). That
             #   episode does not reach the dataset -- `all_bricks_stowed` grades the bricks'
             #   own poses, so it never fires, the episode ends on its time_out and
             #   EXPORT_SUCCEEDED_ONLY drops it (measured twice: /tmp/oracle3.log trial 0 and
@@ -1034,22 +1044,54 @@ class OracleRig:
             self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE
 
     def episode_stats(self, env_id: int) -> dict:
-        """Retries, bricks sorted, abandon reason, unplanned legs, induced counters.
+        """Everything a metadata sidecar needs about the finished episode.
 
-        Retries/sorted/abandon read from ``self.stats`` (not ``EnvOracle.retries_used``,
-        which resets to 0 at every new brick's HOVER -- see ``_enter_phase``'s REOPEN
-        branch), so those stay episode-totals. ``induced_offset``/``induced_noise`` read from
-        the ``EnvOracle`` object instead, because they ARE already episode-cumulative there.
-        Both sources rely on the same lifetime guarantee: the just-finished env's
-        ``EnvOracle`` and ``self.stats`` entry both survive, and stay readable, until the
-        caller calls ``rearm()`` on it.
+        Counters from ``self.stats`` (not ``EnvOracle.retries_used``, which resets to 0 at
+        every new brick's HOVER -- see ``_enter_phase``'s REOPEN branch), so those stay
+        episode-totals. ``induced_offset``/``induced_noise`` read from the ``EnvOracle``
+        object instead, because they ARE already episode-cumulative there. Both rely on the
+        same lifetime guarantee: the just-finished env's ``EnvOracle`` and ``self.stats``
+        entry survive, and stay readable, until the caller calls ``rearm()`` on it.
+
+        THREE FIELDS DESCRIBE HOW THE EPISODE WENT AND THEY ARE NOT THE SAME NUMBER. Reach
+        for the right one:
+
+        * ``succeeded`` -- what the recorder's export filter itself gates on
+          (``termination_manager``'s ``success`` term, i.e. ``mdp.all_bricks_stowed``). This
+          is the LABEL. Like the recorder's own read it is the terminating step's value, so
+          read it before stepping the env again.
+        * ``bricks_delivered`` -- how many bricks were at rest in their own colour's bin.
+          Partial credit, for the episodes that did not succeed. The sample it comes from is
+          one control step stale by construction (see ``step()``), so on a SUCCESSFUL episode
+          -- where the last brick often lands on the very step that ends it -- it is taken
+          from ``succeeded`` instead, which is not a substitution but the predicate's own
+          meaning: ``all_bricks_stowed`` IS "every brick is in its bin".
+        * ``sort_attempts`` -- pick-and-place cycles the ORACLE completed. Counts a brick it
+          dropped in transit. Never a delivery count.
         """
         orc = self.oracles[env_id]
+        succeeded = self._succeeded(env_id)
+        delivered = self.num_bricks if succeeded else int(self._stowed_sample[env_id].sum().item())
         return {
             **self.stats[env_id],
+            "bricks_delivered": delivered,
+            "succeeded": succeeded,
             "induced_offset": orc.induced_offset,
             "induced_noise": orc.induced_noise,
         }
+
+    def _succeeded(self, env_id: int) -> bool | None:
+        """The env's own ``success`` termination for the step that ended the episode.
+
+        The same tensor ``RecorderManager.record_pre_reset`` grades an episode from, and it
+        is not recomputed by the reset, so it survives long enough for a caller that reads it
+        before stepping again. ``None`` when the env has no ``success`` term at all, rather
+        than a fabricated False -- a cfg without one is not a failed episode.
+        """
+        manager = getattr(self.env, "termination_manager", None)
+        if manager is None or "success" not in manager.active_terms:
+            return None
+        return bool(manager.get_term("success")[env_id].item())
 
     def _abandon_nan_envs(self, dones: torch.Tensor) -> None:
         """Abandon any env whose robot articulation OR brick rotation state has gone NaN
