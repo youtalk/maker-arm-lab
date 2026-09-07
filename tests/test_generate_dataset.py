@@ -2,6 +2,7 @@ import importlib.util
 import itertools
 import json
 import re
+import subprocess
 import threading
 from pathlib import Path
 
@@ -539,3 +540,187 @@ def test_main_emits_campaign_fail_on_keyboard_interrupt(monkeypatch, capsys, tmp
         gd.main(["--out_dir", str(tmp_path / "w"), "--dataset_root", str(tmp_path / "d")])
 
     assert "CAMPAIGN_FAIL" in capsys.readouterr().out
+
+
+# --- Ruling D7-1: --resume checks itself against the dataset -------------------------------
+
+
+def _write_ledger(path: Path, records: list[dict]) -> None:
+    path.write_text(
+        json.dumps({"total_successes": sum(r["exported"] for r in records), "runs": records})
+    )
+
+
+def _ledger_record(run_index: int, exported: int, converted_total: int | None) -> dict:
+    return {
+        "run_index": run_index,
+        "seeds": {"run_seed": run_index, "layout_seed": 500 + run_index},
+        "permutation": [0, 1, 2, 3],
+        "exported": exported,
+        "attempts": 50,
+        "shard": f"shard_{run_index:03d}.hdf5",
+        "converted": converted_total is not None,
+        "converted_total": converted_total,
+        "deleted": True,
+    }
+
+
+def _write_dataset(root: Path, total_episodes: int) -> None:
+    """The only part of a LeRobotDataset this module reads: meta/info.json's episode count."""
+    (root / "meta").mkdir(parents=True, exist_ok=True)
+    (root / "meta" / "info.json").write_text(
+        json.dumps({"codebase_version": "v3.0", "total_episodes": total_episodes})
+    )
+
+
+def _never_called(*_args, **_kwargs):
+    raise AssertionError("the campaign must refuse before generating anything")
+
+
+def test_the_ledger_records_the_converters_own_episode_total(tmp_path):
+    """Resume can only check itself against the dataset if it knows what the dataset held when
+    the last run was banked. The converter already reports it (`CONVERT_OK ... total=<n>`), and
+    its own number is the one to keep: with --split_cycles a demo becomes several episodes, so
+    summing `exported` would not equal the dataset's episode count."""
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=40)
+
+    def fake_batch(run_index, permutation, shard_path):
+        _hdf5_path(shard_path).write_bytes(b"x")
+        return {"exported": 45, "attempts": 50, "meta": {}, "stats": {}}
+
+    def fake_convert(shard_path):
+        return {"episodes": 45, "total": 45}
+
+    gd.run_campaign(cfg, fake_batch, fake_convert)
+
+    ledger = json.loads((tmp_path / "ledger.json").read_text())
+    assert [r["converted_total"] for r in ledger["runs"]] == [45]
+
+
+def test_resume_refuses_when_the_dataset_holds_episodes_the_ledger_never_recorded(tmp_path):
+    """The crash window this guards: the converter committed episodes and the supervisor was
+    killed before Ledger.append recorded them. Resuming would regenerate that run index and
+    convert it again, appending a second batch to the same dataset root -- and since a
+    regenerated run is a fresh draw rather than a replay, the duplicates would not even be
+    byte-identical to spot by eye."""
+    _write_ledger(tmp_path / "ledger.json", [_ledger_record(0, 45, 45)])
+    _write_dataset(tmp_path / "ds", total_episodes=90)
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=200)
+
+    with pytest.raises(gd.ResumeMismatch, match="90"):
+        gd.run_campaign(cfg, _never_called, _never_called)
+
+
+def test_resume_refuses_when_the_dataset_lost_episodes_the_ledger_recorded(tmp_path):
+    """The mismatch is checked in both directions. A dataset that shrank -- moved, truncated,
+    or pointed at the wrong --dataset_root -- is just as wrong as one that grew, and silently
+    topping it up to the target would bank a campaign against the wrong data."""
+    _write_ledger(tmp_path / "ledger.json", [_ledger_record(0, 45, 45)])
+    _write_dataset(tmp_path / "ds", total_episodes=12)
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=200)
+
+    with pytest.raises(gd.ResumeMismatch):
+        gd.run_campaign(cfg, _never_called, _never_called)
+
+
+def test_resume_refuses_when_the_dataset_is_gone(tmp_path):
+    """A ledger claiming converted runs against a dataset root that does not exist."""
+    _write_ledger(tmp_path / "ledger.json", [_ledger_record(0, 45, 45)])
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=200)
+
+    with pytest.raises(gd.ResumeMismatch):
+        gd.run_campaign(cfg, _never_called, _never_called)
+
+
+def test_resume_refuses_even_when_the_ledger_has_already_reached_the_target(tmp_path):
+    """The early return on `total_successes >= target` must not short-circuit the check.
+    Reporting a campaign complete over a dataset known to disagree with its own ledger is the
+    worst of the outcomes here: nothing downstream would ever look again."""
+    _write_ledger(tmp_path / "ledger.json", [_ledger_record(0, 45, 45)])
+    _write_dataset(tmp_path / "ds", total_episodes=90)
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=10)
+
+    with pytest.raises(gd.ResumeMismatch):
+        gd.run_campaign(cfg, _never_called, _never_called)
+
+
+def test_resume_proceeds_when_the_dataset_agrees_with_the_ledger(tmp_path):
+    _write_ledger(tmp_path / "ledger.json", [_ledger_record(0, 45, 45)])
+    _write_dataset(tmp_path / "ds", total_episodes=45)
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=80)
+    calls = []
+
+    def fake_batch(run_index, permutation, shard_path):
+        calls.append(run_index)
+        _hdf5_path(shard_path).write_bytes(b"x")
+        return {"exported": 45, "attempts": 50, "meta": {}, "stats": {}}
+
+    total = gd.run_campaign(cfg, fake_batch, lambda p: {"episodes": 45, "total": 90})
+
+    assert calls == [1]  # resumed at the next index, nothing regenerated
+    assert total == 90
+
+
+def test_main_turns_a_resume_mismatch_into_campaign_fail(monkeypatch, capsys, tmp_path):
+    """An operator-facing refusal, not a traceback: exit 1 with the token, like BatchFailed.
+    subprocess.run is stubbed to fail loudly rather than merely being expected not to fire --
+    without the check this test would otherwise pass for the wrong reason, by reaching a real
+    isaaclab.sh that happens to exit non-zero."""
+    _write_ledger(tmp_path / "ledger.json", [_ledger_record(0, 45, 45)])
+    _write_dataset(tmp_path / "ds", total_episodes=90)
+    monkeypatch.setattr(gd.subprocess, "run", _never_called)
+
+    code = gd.main(["--out_dir", str(tmp_path), "--dataset_root", str(tmp_path / "ds"), "--resume"])
+
+    assert code == 1
+    assert "CAMPAIGN_FAIL" in capsys.readouterr().out
+
+
+# --- Rulings D7-2 / D7-3: the child's deadline, and the supervisor's timeout over it --------
+
+
+def test_batch_command_passes_the_childs_wall_clock_deadline(tmp_path):
+    """--max_wall_minutes is passed explicitly on every run. generate_batch.py's own default is
+    90, which is under the measured wall clock of a 50-attempt run at 12 envs -- leaving it
+    unset would silently truncate the very run the acceptance gate is evaluated on."""
+    cmd = gd._batch_command(_cmd_cfg(tmp_path), 0, (0, 1, 2, 3), tmp_path / "shard_000")
+
+    assert cmd[cmd.index("--max_wall_minutes") + 1] == str(gd.BATCH_WALL_MINUTES)
+
+
+def test_the_subprocess_timeout_is_derived_from_the_childs_own_deadline(monkeypatch, tmp_path):
+    """A wedged child is the one failure mode that produces no token and no log line, so the
+    supervisor cannot wait on it forever. The timeout is derived from the deadline the child
+    was actually given rather than hard-coded, so the two cannot drift apart, and sits above it
+    by the startup-plus-shard-flush grace that happens outside the child's own timed loop."""
+    cfg = _cmd_cfg(tmp_path, max_wall_minutes=42.0)
+    cfg.out_dir.mkdir(parents=True, exist_ok=True)
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, "BATCH_OK exported=1 attempts=1\n", "")
+
+    monkeypatch.setattr(gd.subprocess, "run", fake_run)
+    gd._make_real_run_batch(cfg)(0, (0, 1, 2, 3), cfg.out_dir / "shard_000")
+
+    assert seen["timeout"] == (42.0 + gd.BATCH_TIMEOUT_GRACE_MINUTES) * 60.0
+    assert seen["timeout"] > 42.0 * 60.0
+
+
+def test_a_wedged_child_still_leaves_its_log_behind(monkeypatch, tmp_path):
+    """The run whose log you most want is the one that hung. subprocess.run buffers the child's
+    output and run_batch writes it only on return, so a timeout would otherwise discard exactly
+    that output -- and a wedge leaves no BATCH_FAIL token to read instead."""
+    cfg = _cmd_cfg(tmp_path)
+    cfg.out_dir.mkdir(parents=True, exist_ok=True)
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"], output="last line\n", stderr="!")
+
+    monkeypatch.setattr(gd.subprocess, "run", fake_run)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        gd._make_real_run_batch(cfg)(3, (0, 1, 2, 3), cfg.out_dir / "shard_003")
+
+    assert (cfg.out_dir / "run_3.log").read_text() == "last line\n!"

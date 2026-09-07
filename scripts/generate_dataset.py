@@ -24,7 +24,10 @@ inferred from the final CAMPAIGN_OK line, which a supervisor killed mid-campaign
 never prints -- on this host background jobs are liable to be swept, and a chain
 that dies in the middle must not be indistinguishable from one that never started.
 --resume rebuilds state from the ledger alone, so a campaign interrupted anywhere
-loses at most the runs that were in flight. Symmetrically, every exit path from
+loses at most the runs that were in flight, and refuses to start at all when the
+ledger and the dataset disagree about the episode count. Every batch subprocess
+carries a timeout derived from its own deadline, so a wedged child stops the
+campaign instead of hanging it. Symmetrically, every exit path from
 main() prints exactly one of CAMPAIGN_OK / CAMPAIGN_FAIL, so a tokenless log means
 the process is still alive rather than that it failed quietly.
 
@@ -46,6 +49,35 @@ from pathlib import Path
 
 class BatchFailed(RuntimeError):
     """Raised when a subprocess's stdout lacks the expected contract token."""
+
+
+class ResumeMismatch(RuntimeError):
+    """Raised when a resumed campaign's ledger disagrees with the dataset on disk."""
+
+
+# The wall-clock ceiling handed to every generate_batch.py run as --max_wall_minutes. Passed
+# explicitly on every run rather than left to that script's own 90.0 default, which is under a
+# 50-attempt run at 12 envs and would truncate the run the acceptance gate is read from.
+#
+# Sized from D6's measured throughput at --num_envs 12, cameras included. The worst measured
+# wall_sec_per_episode with cameras was 138.3 s (D6 run 1; the four runs span 122.9-138.3 s,
+# and the closest-matched pair reads 126.1 s with cameras against 126.8 s without, so at 12
+# envs cameras cost about nothing -- D5's 1-env 3.9-vs-2.9 min/episode camera ratio does not
+# reproduce here). A run overshoots --attempts by up to num_envs - 1, because the driver tests
+# the attempt count once per control step and the last envs conclude together, so the worst
+# case is 50 + 11 = 61 episodes: 61 x 138.3 s = 141 min. 180 leaves ~28 % headroom over that,
+# and also covers the pessimistic cross-check in which D5's camera ratio did hold at 12 envs
+# (61 x 122.9 s x 1.34 = 167 min). This is a backstop against a pathological run, not a
+# throughput target: too tight silently truncates a good run, while too loose costs nothing
+# that _batch_timeout_seconds below does not already bound.
+BATCH_WALL_MINUTES = 180.0
+
+# How far past its own deadline a generate_batch.py run may go before the supervisor stops
+# waiting. The child's --max_wall_minutes bounds its episode loop only; Isaac Lab's Kit
+# bootstrap (1-2 min) happens before that loop starts and the shard flush after it ends (D6
+# wrote 1.61 GB for 7 demos, so a 50-attempt shard is several GB), and neither is inside the
+# deadline the child enforces on itself.
+BATCH_TIMEOUT_GRACE_MINUTES = 15.0
 
 
 def permutation_schedule(seed: int) -> Iterator[tuple]:
@@ -127,6 +159,9 @@ class CampaignCfg:
     num_envs: int = 12
     seed: int = 0
     isaaclab_path: Path = field(default_factory=lambda: Path("."))
+    # Forwarded to generate_batch.py as --max_wall_minutes, and the basis for the supervisor's
+    # own timeout over that subprocess (_batch_timeout_seconds).
+    max_wall_minutes: float = BATCH_WALL_MINUTES
     # Demonstration-distribution width. Both default to None = generate_batch.py's
     # own defaults (noise_scale 1.0, start_pose_offset_rad 0.05). They are reachable
     # from the campaign because these two knobs are the only ones that widen the state
@@ -160,6 +195,20 @@ class Ledger:
     @property
     def total_successes(self) -> int:
         return sum(r["exported"] for r in self.runs)
+
+    @property
+    def last_converted_total(self) -> int | None:
+        """The dataset episode count the converter itself last reported, or None.
+
+        None means the check in check_resume_consistency cannot run: either nothing has been
+        converted yet, or the ledger predates this field. Runs that exported nothing are
+        skipped -- they never called the converter, so they carry no total.
+        """
+        for record in reversed(self.runs):
+            total = record.get("converted_total")
+            if total is not None:
+                return total
+        return None
 
     @classmethod
     def load(cls, path: Path) -> "Ledger":
@@ -196,6 +245,67 @@ def _shard_hdf5_path(shard_path: Path) -> Path:
     path, which is only ever used to build --shard_name and is never itself created on disk.
     """
     return shard_path.with_name(shard_path.name + ".hdf5")
+
+
+def _dataset_total_episodes(dataset_root: Path) -> int | None:
+    """The dataset's own episode count, read from the one file of it this module needs.
+
+    Returns None when the dataset does not exist yet -- which is the normal state before the
+    first convert, and a mismatch only once the ledger says otherwise.
+    """
+    info = dataset_root / "meta" / "info.json"
+    if not info.exists():
+        return None
+    return json.loads(info.read_text())["total_episodes"]
+
+
+def check_resume_consistency(cfg: CampaignCfg, ledger: Ledger) -> None:
+    """Refuse to resume a campaign whose ledger and dataset disagree about the episode count.
+
+    The window this guards is real rather than theoretical, and on this host it is expected
+    rather than unlikely: background jobs get swept, so the supervisor can be killed between
+    convert_to_lerobot.py committing a run's episodes to the LeRobotDataset and Ledger.append
+    recording that it did. Resume regenerates every un-ledgered run index (see run_campaign),
+    so it would convert that run a second time and append a duplicate batch to the same
+    dataset root -- and because a regenerated run replays the seeds but not the physics, the
+    duplicates would not even be byte-identical to spot by eye.
+
+    Comparing the converter's own reported total against the dataset's own count closes it.
+    Both numbers are the same quantity from the same source (convert_to_lerobot.py prints
+    `CONVERT_OK episodes=<n> total=<total>` straight from dataset.meta.total_episodes), which
+    is why this is exact rather than approximate, and why it survives --split_cycles -- there
+    one demo becomes several episodes, so summing the ledger's `exported` counts would not
+    equal the dataset's episode count while this does.
+
+    Refuses rather than repairs: rolling a LeRobotDataset back to a given episode count is not
+    something this module can do safely, and the two honest recoveries -- restore the dataset,
+    or start a fresh --dataset_root -- are choices for whoever knows which run was lost.
+    """
+    expected = ledger.last_converted_total
+    if expected is None:
+        return
+    actual = _dataset_total_episodes(cfg.dataset_root)
+    if actual == expected:
+        return
+
+    if actual is None:
+        found = "it does not exist"
+        cause = "the dataset was moved or deleted, or --dataset_root points somewhere else"
+    elif actual > expected:
+        found = f"it now holds {actual}"
+        cause = (
+            "a convert committed episodes that never reached the ledger -- the supervisor was "
+            "killed between the two. Resuming would regenerate that run index and convert it "
+            "again, duplicating them"
+        )
+    else:
+        found = f"it now holds only {actual}"
+        cause = "the dataset lost episodes the ledger recorded, so resuming would under-count"
+    raise ResumeMismatch(
+        f"{ledger.path} last recorded the converter reporting {expected} episodes in "
+        f"{cfg.dataset_root}, but {found}: {cause}. Restore the dataset to {expected} "
+        f"episodes, or start a fresh --dataset_root, before resuming."
+    )
 
 
 # numpy's np.random.seed (Isaac Lab's configure_seed) requires 0 <= seed < 2**32.
@@ -274,11 +384,17 @@ def run_campaign(
     reproducing: the derived seeds are replayed, but GPU physics does not repeat bit for bit
     across processes, so a regenerated run is a fresh draw that may export a different count.
     Nothing here depends on it repeating -- the ledger records what each run actually exported,
-    and the target is a running total, not a per-run expectation.
+    and the target is a running total, not a per-run expectation. What resume does NOT tolerate
+    is a run that converted without being ledgered, since regenerating that index would convert
+    it twice; check_resume_consistency refuses the resume outright in that case.
     """
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     ledger_path = cfg.out_dir / "ledger.json"
     ledger = Ledger.load(ledger_path)
+    # Before the early return, not after: reporting a campaign complete over a dataset known to
+    # disagree with its own ledger is the worst outcome available, because nothing downstream
+    # would ever look again.
+    check_resume_consistency(cfg, ledger)
 
     if ledger.total_successes >= cfg.target:
         return ledger.total_successes
@@ -291,8 +407,12 @@ def run_campaign(
     def finalize(pending: tuple[int, tuple, Path, dict, Future | None]) -> None:
         p_run_index, p_permutation, p_shard_path, p_batch_result, p_future = pending
         converted = False
+        converted_total = None
         if p_future is not None:
-            p_future.result()  # blocks until convert finishes; re-raises its exception here
+            # Blocks until convert finishes; re-raises its exception here. Its reported total is
+            # kept, not discarded: it is what check_resume_consistency compares against on the
+            # next resume.
+            converted_total = p_future.result().get("total")
             converted = True
         deleted = False
         if p_shard_path.exists():
@@ -311,6 +431,7 @@ def run_campaign(
                 "attempts": p_batch_result["attempts"],
                 "shard": p_shard_path.name,
                 "converted": converted,
+                "converted_total": converted_total,
                 "deleted": deleted,
             }
         )
@@ -390,6 +511,11 @@ def _batch_command(
         str(layout_seed),
         "--permutation",
         ",".join(str(p) for p in permutation),
+        # Always explicit. generate_batch.py's own default is 90 minutes, under a 50-attempt
+        # run at 12 envs; a truncated run still prints BATCH_OK, so leaving it to the default
+        # would quietly shorten the very run the acceptance gate reads.
+        "--max_wall_minutes",
+        str(cfg.max_wall_minutes),
     ]
     if cfg.noise_scale is not None:
         cmd += ["--noise_scale", str(cfg.noise_scale)]
@@ -427,6 +553,20 @@ def _convert_command(cfg: CampaignCfg, shard_path: Path) -> list[str]:
     return cmd
 
 
+def _batch_timeout_seconds(cfg: CampaignCfg) -> float:
+    """How long to wait on a generate_batch.py subprocess before giving up on it.
+
+    Derived from the deadline the child was actually handed rather than hard-coded, so the two
+    cannot drift apart. A child that exits without its BATCH_OK token is loud -- the supervisor
+    raises BatchFailed and the campaign stops with CAMPAIGN_FAIL -- but a WEDGED child produces
+    no token and no log line at all, and would otherwise block the supervisor forever. That is
+    a demonstrated failure mode here, not a hypothetical one: release_envelope_check.py's
+    single-process layout loop wedges after its second gym.make, burning 100 % of a core with
+    no GPU work and no I/O.
+    """
+    return (cfg.max_wall_minutes + BATCH_TIMEOUT_GRACE_MINUTES) * 60.0
+
+
 def _isaaclab_batch_env(cfg: CampaignCfg) -> dict[str, str]:
     """Environment for the generate_batch.py subprocess (isaaclab.sh -p ...).
 
@@ -451,16 +591,27 @@ def _isaaclab_batch_env(cfg: CampaignCfg) -> dict[str, str]:
 
 
 def _make_real_run_batch(cfg: CampaignCfg) -> Callable[[int, tuple, Path], dict]:
+    def write_log(run_index: int, stdout: str | None, stderr: str | None) -> None:
+        (cfg.out_dir / f"run_{run_index}.log").write_text((stdout or "") + (stderr or ""))
+
     def run_batch(run_index: int, permutation: tuple, shard_path: Path) -> dict:
         cmd = _batch_command(cfg, run_index, permutation, shard_path)
-        result = subprocess.run(
-            cmd,
-            env=_isaaclab_batch_env(cfg),
-            capture_output=True,
-            text=True,
-            check=False,  # a non-zero exit still yields stdout to parse for BATCH_FAIL
-        )
-        (cfg.out_dir / f"run_{run_index}.log").write_text(result.stdout + result.stderr)
+        try:
+            result = subprocess.run(
+                cmd,
+                env=_isaaclab_batch_env(cfg),
+                capture_output=True,
+                text=True,
+                check=False,  # a non-zero exit still yields stdout to parse for BATCH_FAIL
+                timeout=_batch_timeout_seconds(cfg),
+            )
+        except subprocess.TimeoutExpired as exc:
+            # The run whose log is most worth having is the one that hung, and a wedge leaves no
+            # BATCH_FAIL token to read instead. subprocess.run buffers the child's output and
+            # kills it before raising, so this is the only chance to keep what it did say.
+            write_log(run_index, exc.stdout, exc.stderr)
+            raise
+        write_log(run_index, result.stdout, result.stderr)
         return parse_batch_output(result.stdout)
 
     return run_batch
@@ -485,6 +636,7 @@ def _build_cfg(args: argparse.Namespace) -> CampaignCfg:
         num_envs=args.num_envs,
         seed=args.seed,
         isaaclab_path=args.isaaclab_path,
+        max_wall_minutes=args.max_wall_minutes,
         noise_scale=args.noise_scale,
         start_pose_offset_rad=args.start_pose_offset_rad,
         induce_prob=args.induce_prob,
@@ -505,6 +657,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--attempts_per_run", type=int, default=50)
     parser.add_argument("--num_envs", type=int, default=12)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--max_wall_minutes",
+        type=float,
+        default=BATCH_WALL_MINUTES,
+        help=(
+            "wall-clock ceiling for each generate_batch.py run, forwarded as its own "
+            "--max_wall_minutes; the supervisor's timeout over that subprocess is derived "
+            "from it"
+        ),
+    )
     parser.add_argument(
         "--noise_scale",
         type=float,
@@ -582,7 +744,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         total = run_campaign(cfg, run_batch, run_convert)
-    except BatchFailed as exc:
+    except (BatchFailed, ResumeMismatch) as exc:
         print(f"CAMPAIGN_FAIL: {exc}", file=sys.stderr, flush=True)
         print("CAMPAIGN_FAIL", flush=True)
         return 1
