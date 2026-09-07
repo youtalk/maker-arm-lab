@@ -131,11 +131,18 @@ LIFT_HEIGHT = 0.10
 # wrong move: about 0.16 m does it, which is BELOW the bin rim
 # (layout._BIN_FLOOR_TOP_Z + BIN_INTERIOR[2] = 0.195) that this phase exists to
 # clear. That would satisfy the solver by deleting the phase's purpose. The
-# residue is handled where it belongs instead -- the runtime advances straight to
+# residue is handled where it belongs instead: the runtime advances straight to
 # EXTEND on a leg it cannot plan, rather than holding still for the budget (see
-# oracle_runtime's `_phase_result`) -- and the rim clearance is in any case
-# delivered by EXTEND's own straight Cartesian leg, which rises monotonically and
-# is past 0.195 m well before it reaches the bin faces.
+# oracle_runtime's `_phase_result`).
+#
+# The rim is then cleared by EXTEND itself WHEN EXTEND PLANS STRAIGHT -- its
+# Cartesian leg interpolates the pick point from the lift height to RELEASE_Z, so
+# it rises monotonically and is past 0.195 m well before it reaches the bin faces.
+# That is a property of the Cartesian planner and NOT of the joint-space fallback
+# underneath it (`oracle_runtime._plan_direct`), which reaches the same endpoint by
+# interpolating joints and makes no promise about the path between. The fallback is
+# counted per episode (`episode_stats()["direct_legs"]`) precisely so this
+# distinction is observable rather than assumed.
 #
 # The rest of this comment is OpenYAM's, carried over unchanged with its arm and
 # layout, and it is what the constants were chosen for. Climbing straight to RELEASE_Z

@@ -61,6 +61,14 @@ parser.add_argument("--trials", type=int, default=2)
 parser.add_argument("--num_bricks", type=int, default=6)
 parser.add_argument("--noise", type=str, choices=("on", "off"), default="on")
 parser.add_argument(
+    "--clamp_probe",
+    action="store_true",
+    help="Step the env once with a deliberately out-of-range arm target, check that the "
+    "action term's `clamped` flag fires, and exit without running any trial. Validates the "
+    "instrument that the shard's `obs/clamped` -- and the spec's clamp-fraction criterion -- "
+    "are read from.",
+)
+parser.add_argument(
     "--with_cameras",
     action="store_true",
     help="cameras=True in the env cfg, plus an HDF5 shard inspection at the end "
@@ -89,7 +97,10 @@ import maker_arm_lab.tasks  # noqa: F401 -- registers MakerArm-* envs
 from maker_arm_lab.core import layout, oracle
 from maker_arm_lab.tasks.manager_based.lego_sort import mdp
 from maker_arm_lab.tasks.manager_based.lego_sort.datagen import LegoSortDatagenEnvCfg
-from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
+from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import (
+    GRIPPER_OPEN_ACTION,
+    OracleRig,
+)
 
 # Safety cap on control steps per episode -- comfortably above the 180 s / 30 Hz = 5400-step
 # time_out budget datagen.py sets, so a genuinely stuck env raises here instead of looping
@@ -296,6 +307,14 @@ def run_episode(
     raise RuntimeError(f"env {i} did not finish within {max_steps} control steps")
 
 
+# What the images must be, and what the clamp fraction must stay under (spec section 4.3:
+# "A healthy dataset reads ~ 0; a non-zero fraction means the oracle demands targets the real
+# arm would refuse"). Both are GATED here, not merely printed: the brief states them as
+# expectations of this script, and a check that only prints what it found cannot fail.
+EXPECTED_IMAGE_SHAPE = (224, 224, 3)
+MAX_CLAMP_FRACTION = 0.01
+
+
 def _inspect_shard(export_dir: str) -> bool:
     """The recorded shard's HDF5 layout, re-checked against a real run."""
     import h5py
@@ -314,17 +333,53 @@ def _inspect_shard(export_dir: str) -> bool:
             grp = f["data"][name]
             num_samples = int(grp.attrs.get("num_samples", 0))
             success = bool(grp.attrs.get("success", False))
-            has_wrist = "obs/images/wrist_rgb" in grp
-            has_overhead = "obs/images/overhead_rgb" in grp
-            clamped = grp["obs/clamped"][:].mean() if "obs/clamped" in grp else float("nan")
+            shapes = {}
+            for stream in ("wrist_rgb", "overhead_rgb"):
+                key = f"obs/images/{stream}"
+                shapes[stream] = tuple(grp[key].shape) if key in grp else None
+            want = (num_samples, *EXPECTED_IMAGE_SHAPE)
+            images_ok = all(shape == want for shape in shapes.values())
+            clamped = float(grp["obs/clamped"][:].mean()) if "obs/clamped" in grp else float("nan")
+            clamp_ok = clamped <= MAX_CLAMP_FRACTION
             print(
                 f"SHARD {name}: num_samples={num_samples} success={success} "
-                f"wrist_rgb={has_wrist} overhead_rgb={has_overhead} "
-                f"clamped_mean={clamped:.4f}",
+                f"wrist_rgb={shapes['wrist_rgb']} overhead_rgb={shapes['overhead_rgb']} "
+                f"(want {want}) images_ok={images_ok} "
+                f"clamped_mean={clamped:.4f} (max {MAX_CLAMP_FRACTION}) clamp_ok={clamp_ok}",
                 flush=True,
             )
-            ok = ok and num_samples > 0 and success and has_wrist and has_overhead
+            ok = ok and num_samples > 0 and success and images_ok and clamp_ok
     return ok
+
+
+def clamp_probe(env) -> bool:
+    """Does the action term's `clamped` flag actually fire on an out-of-range target?
+
+    The shard's `obs/clamped` is only worth reading if it CAN read non-zero, and this repo
+    has already shipped one arrangement where it could not: `OracleRig` used to clamp its
+    command to the articulation's joint limits before handing it over, and
+    `core.profile.sim_profile` gives the Rust clamp those same limits, so the flag was
+    structurally dead on oracle-generated actions and `clamped_mean = 0.0000` was a tautology
+    rather than evidence. Task D5's review caught that; this is the check that would have.
+
+    Commands every arm joint 1.0 rad past its upper stop for a single control step, with the
+    arm otherwise untouched, and reads the flag the recorder reads.
+    """
+    term = env.action_manager.get_term("arm_action")
+    limits = env.scene["robot"].data.joint_pos_limits[0, term._joint_ids]
+    action = torch.zeros(env.num_envs, env.action_manager.total_action_dim, device=env.device)
+    action[:, :6] = limits[:, 1] + 1.0
+    action[:, -1] = GRIPPER_OPEN_ACTION
+    env.step(action)
+    fired = bool(term.clamped.all().item())
+    applied = env.scene["robot"].data.joint_pos_target[0, term._joint_ids]
+    within = bool((applied <= limits[:, 1] + 1e-6).all().item())
+    print(
+        f"CLAMP_PROBE: commanded +1.0 rad past every upper stop -> clamped={fired} "
+        f"targets_within_limits={within}",
+        flush=True,
+    )
+    return fired and within
 
 
 def run() -> bool:
@@ -333,10 +388,22 @@ def run() -> bool:
     cfg.scene.num_envs = 1
     export_dir = tempfile.mkdtemp(prefix="oracle_check_")
     cfg.recorders.dataset_export_dir_path = export_dir
-    cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_SUCCEEDED_ONLY
+    cfg.recorders.dataset_export_mode = (
+        DatasetExportMode.EXPORT_NONE
+        if args.clamp_probe
+        else DatasetExportMode.EXPORT_SUCCEEDED_ONLY
+    )
     cfg.recorders.dataset_filename = "dataset"
 
     env = gym.make(args.task, cfg=cfg).unwrapped
+    if args.clamp_probe:
+        # Its own invocation, and no trial: the probe steps the env, which the recorder would
+        # otherwise fold into an episode.
+        try:
+            env.reset(seed=args.seed)
+            return clamp_probe(env)
+        finally:
+            env.close()
     bl = cfg._bin_layout()
     noise = oracle.OracleNoise() if args.noise == "on" else NOISE_OFF
     rng = random.Random(args.seed)
@@ -374,6 +441,7 @@ def run() -> bool:
                 f"TRIAL {trial}: done={done} abandoned={abandoned} exported_count={exported} "
                 f"sorted={stats['sorted']} retries={stats['retries']} "
                 f"unplanned_legs={stats['unplanned_legs']} "
+                f"direct_legs={stats['direct_legs']} "
                 f"abandon_reason={stats['abandon']} "
                 f"terminated_by={_termination_reason(env, 0)} "
                 f"-> {'SUCCESS' if success else 'FAIL'}",

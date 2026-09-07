@@ -342,8 +342,6 @@ class OracleRig:
         # env 0's row is every env's row. The articulation's, not the URDF's, so the command
         # clamp and the watchdog agree with what the simulator will accept.
         self.limits = self.robot.data.joint_pos_limits[0, self.arm_ids].clone()  # (6,2)
-        self.q_lower = self.limits[:, 0].double().cpu()
-        self.q_upper = self.limits[:, 1].double().cpu()
         # Plain CPU floats, read once: the jaw-heading fold needs them on every phase entry
         # and a per-call .tolist() would be a device sync.
         self.wrist_roll_limits = tuple(self.limits[WRIST_ROLL_INDEX].tolist())
@@ -408,7 +406,24 @@ class OracleRig:
 
     @staticmethod
     def _fresh_stats() -> dict:
-        return {"retries": 0, "sorted": 0, "abandon": None, "unplanned_legs": 0}
+        return {
+            "retries": 0,
+            # The oracle's own count of picks it CARRIED OUT, incremented when a brick's
+            # RETREAT ends. It is an intent counter, not a delivery counter: a brick dropped
+            # in transit is counted here too. What actually decides whether an episode is a
+            # success -- and therefore whether it is exported -- is
+            # `mdp.terminations.all_bricks_stowed`, read off the bricks' own poses, so the two
+            # can and do disagree. Do not use this as a label.
+            "sorted": 0,
+            "abandon": None,
+            "unplanned_legs": 0,
+            # Legs that fell through the Cartesian planner to `_plan_direct`, whose path is
+            # joint-space and so gives up the straight-line guarantee on the tool. Counted
+            # because comments elsewhere (core.oracle's RAISE_CLEARANCE_Z) reason about what a
+            # straight EXTEND leg clears, and that reasoning holds only for the legs that
+            # actually plan straight.
+            "direct_legs": 0,
+        }
 
     def _check_action_space(self, env) -> None:
         """Fail loudly unless this env exposes the 7-element joint-position action.
@@ -449,9 +464,17 @@ class OracleRig:
             target = self.q_cmd[i]
             planned.append(target)
             command = self.trims[i].command(target) + self._command_noise(i)
-            action[i, :6] = torch.clamp(command, self.q_lower, self.q_upper).to(
-                device=self.device, dtype=torch.float32
-            )
+            # NOT clamped to the joint limits here, deliberately. The action term clamps the
+            # target through maker_arm_rs and RECORDS that it did
+            # (`mdp.actions.ClampedJointPositionAction.clamped` -> `obs/clamped`), and
+            # `core.profile.sim_profile` gives that clamp the same URDF bounds this rig would
+            # have used -- so a pre-clamp here changes nothing about what the arm is
+            # commanded and everything about what the dataset can tell you. It made the
+            # spec's clamp-fraction criterion (section 4.3: "a non-zero fraction means the
+            # oracle demands targets the real arm would refuse") unable to fail: the trim's
+            # bias and the per-step noise can both push a target past a stop, and with a
+            # pre-clamp that happened silently, with nothing recording it.
+            action[i, :6] = command.to(device=self.device, dtype=torch.float32)
         self._stash_cycle_state()
         _, _, terminated, truncated, _ = self.env.step(action)
         # Isaac Lab's ManagerBasedRLEnv.step() resets terminated|truncated envs to their NEXT
@@ -762,10 +785,24 @@ class OracleRig:
                 self.commanded_yaw[i] = heading
         if plan is None:
             # No plan: the phase ends on the next step (see `_phase_result`) rather than the
-            # arm holding still until its budget expires. Honest rather than silent -- the
-            # pick then fails its LIFT gate and core.oracle's retry/abandon ladder takes over
-            # -- and counted, because a run where this is common has a reach problem, not a
-            # grasp problem.
+            # arm holding still until its budget expires. WHAT CATCHES IT DEPENDS ON THE
+            # PHASE, and only one of the two is a ladder:
+            #
+            # * before CLOSE (HOVER/DESCEND), the pick simply does not happen, LIFT's
+            #   pinch/rise gate fails, and core.oracle's retry -> retry -> ABANDON ladder
+            #   takes over. Nothing is lost.
+            # * on a CARRY leg (LIFT/RAISE/EXTEND/RETREAT) there is NO gate and NO ladder:
+            #   core.oracle sequences straight on, so an unplanned EXTEND means RELEASE opens
+            #   the jaws wherever the arm is standing and the brick is not delivered. RETREAT
+            #   then counts it in `stats["sorted"]` regardless (see `_fresh_stats`). That
+            #   episode does not reach the dataset -- `all_bricks_stowed` grades the bricks'
+            #   own poses, so it never fires, the episode ends on its time_out and
+            #   EXPORT_SUCCEEDED_ONLY drops it (measured twice: /tmp/oracle3.log trial 0 and
+            #   /tmp/oracle2_sink.log trial 0, both `sorted=6` with a brick on the desk and
+            #   `exported_count=0`) -- but it is a lost episode, not a recovered one.
+            #
+            # Counted either way, because a run where this is common has a reach problem, not
+            # a grasp problem.
             self.stats[i]["unplanned_legs"] += 1
             self.unplanned[i] = True
             return
@@ -819,7 +856,10 @@ class OracleRig:
             if plan is not None:
                 return plan, heading + offset
         # Last resort: solve the endpoint and interpolate in joint space, at the held heading.
-        return self._plan_direct(i, goal, start, pick_to, tilt_to, heading), heading
+        plan = self._plan_direct(i, goal, start, pick_to, tilt_to, heading)
+        if plan is not None:
+            self.stats[i]["direct_legs"] += 1
+        return plan, heading
 
     def _plan_hover(self, i, goal, start, pick_to, heading) -> list[torch.Tensor] | None:
         """The approach: solve the endpoint GLOBALLY, then interpolate in joint space.

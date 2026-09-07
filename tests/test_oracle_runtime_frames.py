@@ -18,7 +18,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from maker_arm_lab.core.global_ik import tool_axis_world
+from maker_arm_lab.assets import urdf_prep
+from maker_arm_lab.core.global_ik import JointTrim, tool_axis_world
 from maker_arm_lab.robots import frames
 
 _PATH = (
@@ -167,3 +168,33 @@ def test_leg_resolution_counts_a_heading_sweep_like_a_tilt_sweep():
         max_steps=300, gain_scale=1.0, distance=0.01, heading_change=math.radians(60.0)
     )
     assert swept > plain
+
+
+def test_the_command_path_can_leave_the_joint_box_so_the_clamp_flag_can_fire():
+    """`OracleRig.step` must NOT clamp its command to the joint limits, and this is the
+    property that makes the dataset's clamp fraction a real criterion.
+
+    The action term clamps the target through maker_arm_rs and RECORDS that it did
+    (`obs/clamped`), and `core.profile.sim_profile` hands that clamp the same URDF bounds the
+    rig would have used -- so clamping first changes nothing about what the arm is commanded
+    and everything about what the dataset can tell you. Task D5 shipped exactly that mistake:
+    with a pre-clamp, `ClampedJointPositionAction.clamped` could not fire on oracle-generated
+    actions at all, and a measured `clamped_mean = 0.0000` over 4194 samples was a tautology
+    rather than evidence of health.
+
+    What this pins is the premise the flag needs: the command path CAN leave the joint box.
+    `JointTrim`'s bias has 0.35 rad of authority and winds up against a persistent tracking
+    error -- exactly what a leg the arm cannot follow produces -- so a waypoint at a stop plus
+    a wound-up trim is outside the box. `tests/test_profile.py` pins the other half, that the
+    clamp flags such a target; `scripts/oracle_check.py --clamp_probe` observes the whole
+    chain firing on GPU.
+    """
+    limits = urdf_prep.arm_joint_limits()
+    at_stop = torch.tensor([hi for _, hi in limits], dtype=torch.float64)
+    trim = JointTrim()
+    # A leg the arm lags by 0.2 rad, held long enough for the integrator to reach its clamp.
+    for _ in range(500):
+        trim.update(at_stop, at_stop - 0.2)
+    command = trim.command(at_stop)
+    assert float(torch.max(command - at_stop)) == pytest.approx(trim.limit)
+    assert any(float(command[i]) > hi for i, (_, hi) in enumerate(limits))
