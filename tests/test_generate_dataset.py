@@ -784,7 +784,9 @@ def test_resume_refuses_when_a_run_started_and_never_reached_the_ledger(tmp_path
     has nothing to work with. The marker is what makes that run visible at all."""
     cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=200)
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
-    (tmp_path / "run_0.started").write_text("{}")
+    (tmp_path / "run_0.started").write_text(
+        json.dumps({"run_index": 0, "phase": gd.MARKER_PHASE_CONVERTED})
+    )
 
     with pytest.raises(gd.ResumeMismatch, match="run 0"):
         gd.run_campaign(cfg, _never_called, _never_called)
@@ -798,7 +800,9 @@ def test_a_bare_reinvocation_after_an_interrupted_first_run_still_refuses(
     re-invocation would regenerate run 0's identical seeds and shard name over whatever the
     killed run had already committed. No --resume is passed here on purpose."""
     (tmp_path / "work").mkdir()
-    (tmp_path / "work" / "run_0.started").write_text("{}")
+    (tmp_path / "work" / "run_0.started").write_text(
+        json.dumps({"run_index": 0, "phase": gd.MARKER_PHASE_CONVERTED})
+    )
     monkeypatch.setattr(gd.subprocess, "run", _never_called)
 
     code = gd.main(["--out_dir", str(tmp_path / "work"), "--dataset_root", str(tmp_path / "ds")])
@@ -825,3 +829,119 @@ def test_a_batch_failure_clears_its_own_marker(tmp_path):
 
     assert seen == [True]  # it was marked started
     assert list(tmp_path.glob("run_*.started")) == []  # and unmarked again
+
+
+# --- Ruling D7-5: the marker carries its phase ---------------------------------------------
+
+
+def _marker(tmp_path: Path, run_index: int) -> dict:
+    return json.loads((tmp_path / f"run_{run_index}.started").read_text())
+
+
+def test_a_marker_reads_generating_while_its_batch_runs(tmp_path):
+    """The phase a run is in decides whether resuming through it is safe, so it has to be on
+    disk from the first write -- before anything the child could commit."""
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=40)
+    seen = []
+
+    def fake_batch(run_index, permutation, shard_path):
+        seen.append(_marker(tmp_path, run_index)["phase"])
+        _hdf5_path(shard_path).write_bytes(b"x")
+        return {"exported": 45, "attempts": 50, "meta": {}, "stats": {}}
+
+    gd.run_campaign(cfg, fake_batch, lambda p: {"episodes": 45, "total": 45})
+
+    assert seen == [gd.MARKER_PHASE_GENERATING]
+
+
+def test_a_marker_leaves_generating_before_its_convert_can_commit_anything(tmp_path):
+    """The window that decides this: a run's convert is submitted to the background executor
+    and then runs for the whole of the NEXT run's batch -- hours -- before finalize() collects
+    it. If the marker only left `generating` once that result was collected, it would read
+    `generating` throughout the entire period its convert was committing episodes, and a resume
+    would auto-clear a run that had committed. The phase must turn unsafe before the submit,
+    which is why there is a `converting` phase at all."""
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=40)
+    seen = []
+
+    def fake_batch(run_index, permutation, shard_path):
+        _hdf5_path(shard_path).write_bytes(b"x")
+        return {"exported": 45, "attempts": 50, "meta": {}, "stats": {}}
+
+    def fake_convert(shard_path):
+        seen.append(_marker(tmp_path, 0)["phase"])
+        return {"episodes": 45, "total": 45}
+
+    gd.run_campaign(cfg, fake_batch, fake_convert)
+
+    assert seen == [gd.MARKER_PHASE_CONVERTING]
+
+
+def test_a_marker_reads_converted_at_the_moment_of_the_ledger_append(monkeypatch, tmp_path):
+    """Brackets the transition on its other side: `converted` is written after the convert
+    returns and before the append, so this fails if the write moves later (the append would see
+    `converting`) just as the test above fails if it moves earlier."""
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=40)
+    seen = []
+    original_append = gd.Ledger.append
+
+    def spy(self, record):
+        seen.append(_marker(tmp_path, record["run_index"])["phase"])
+        original_append(self, record)
+
+    monkeypatch.setattr(gd.Ledger, "append", spy)
+
+    def fake_batch(run_index, permutation, shard_path):
+        _hdf5_path(shard_path).write_bytes(b"x")
+        return {"exported": 45, "attempts": 50, "meta": {}, "stats": {}}
+
+    gd.run_campaign(cfg, fake_batch, lambda p: {"episodes": 45, "total": 45})
+
+    assert seen == [gd.MARKER_PHASE_CONVERTED]
+
+
+def test_resume_regenerates_through_a_generating_marker_without_asking(capsys, tmp_path):
+    """The benign case, and the likeliest one: swept during the ~2.3 h batch, before any
+    convert was submitted. That run committed nothing, so refusing here would train an operator
+    to clear markers unread -- which is how a guard stops working."""
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=40)
+    cfg.out_dir.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "run_0.started").write_text(
+        json.dumps({"run_index": 0, "phase": gd.MARKER_PHASE_GENERATING})
+    )
+    calls = []
+
+    def fake_batch(run_index, permutation, shard_path):
+        calls.append(run_index)
+        _hdf5_path(shard_path).write_bytes(b"x")
+        return {"exported": 45, "attempts": 50, "meta": {}, "stats": {}}
+
+    gd.run_campaign(cfg, fake_batch, lambda p: {"episodes": 45, "total": 45})
+
+    assert calls == [0]  # regenerated, not refused
+    assert list(tmp_path.glob("run_*.started")) == []
+    assert "run 0" in capsys.readouterr().out  # and said so rather than doing it silently
+
+
+@pytest.mark.parametrize("phase", ["converting", "converted"])
+def test_resume_still_refuses_a_marker_whose_convert_may_have_committed(phase, tmp_path):
+    """Both unsafe phases keep refusing. This ruling narrows when the guard fires, never what
+    it does when it does fire."""
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=200)
+    cfg.out_dir.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "run_0.started").write_text(json.dumps({"run_index": 0, "phase": phase}))
+
+    with pytest.raises(gd.ResumeMismatch, match="run 0"):
+        gd.run_campaign(cfg, _never_called, _never_called)
+
+
+def test_resume_refuses_a_marker_it_cannot_read(tmp_path):
+    """Fails closed. A marker truncated by the kill it is recording, or written by an older
+    version, says nothing about whether that run converted -- and 'unreadable' must not be the
+    one input that unlocks the auto-clear path."""
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=200)
+    cfg.out_dir.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "run_0.started").write_text('{"run_index": 0, "phase": "gener')
+
+    with pytest.raises(gd.ResumeMismatch, match="run 0"):
+        gd.run_campaign(cfg, _never_called, _never_called)

@@ -20,15 +20,16 @@ either, so _isaaclab_batch_env() sets VIRTUAL_ENV itself (derived from
 Each campaign run is one subprocess and one ledger entry: the supervisor launches
 generate_batch.py, parses its BATCH_OK token, and appends that run's record to
 ledger.json before the next run starts, having marked that run started on disk
-beforehand and cleared the marker only once the append succeeds. Nothing about a
+beforehand, tracked its phase through generation and conversion, and cleared the
+marker only once the append succeeds. Nothing about a
 campaign's progress is
 inferred from the final CAMPAIGN_OK line, which a supervisor killed mid-campaign
 never prints -- on this host background jobs are liable to be swept, and a chain
 that dies in the middle must not be indistinguishable from one that never started.
 --resume rebuilds state from the ledger alone, so a campaign interrupted anywhere
-loses at most the runs that were in flight, and refuses to start at all when a run
-started without reaching the ledger or when the ledger and the dataset disagree
-about the episode count. Every batch subprocess
+loses at most the runs that were in flight. It regenerates a run interrupted
+before its convert began, and refuses to start at all when one was interrupted
+after it or when the ledger and the dataset disagree about the episode count. Every batch subprocess
 carries a timeout derived from its own deadline, so a wedged child stops the
 campaign instead of hanging it. Symmetrically, every exit path from
 main() prints exactly one of CAMPAIGN_OK / CAMPAIGN_FAIL, so a tokenless log means
@@ -252,9 +253,56 @@ def _shard_hdf5_path(shard_path: Path) -> Path:
 
 _START_MARKER_SUFFIX = ".started"
 
+# The phases a run passes through, recorded in its start marker so that an interrupted run can
+# be told apart by what it had already done. Only GENERATING is safe to resume through: the
+# convert has not been submitted yet, so nothing of that run can be in the dataset.
+#
+# CONVERTING is a distinct phase rather than an implementation detail. A run's convert is
+# submitted to the background executor and then runs concurrently with the NEXT run's batch --
+# hours -- before finalize() collects its result. A marker that only turned unsafe once that
+# result was collected would still read GENERATING throughout the entire period its convert was
+# committing episodes, which is exactly the window this whole guard exists for.
+MARKER_PHASE_GENERATING = "generating"
+MARKER_PHASE_CONVERTING = "converting"
+MARKER_PHASE_CONVERTED = "converted"
+
 
 def _start_marker_path(cfg: CampaignCfg, run_index: int) -> Path:
     return cfg.out_dir / f"run_{run_index}{_START_MARKER_SUFFIX}"
+
+
+def _write_start_marker(
+    cfg: CampaignCfg, run_index: int, phase: str, permutation: tuple, shard_name: str
+) -> None:
+    """Record a run's phase, replacing any earlier marker for it atomically.
+
+    Written via a temporary file and os.replace because the reader fails closed: a marker
+    truncated by the very kill it is recording would be unreadable, and unreadable means
+    "refuse". Making the write atomic keeps that from happening to a marker that would
+    otherwise have been safe to clear. The temporary name ends in .tmp, so _started_run_indices'
+    "run_*.started" glob cannot pick a half-written one up either.
+    """
+    run_seed, layout_seed = _derive_seeds(cfg, run_index)
+    payload = {
+        "run_index": run_index,
+        "phase": phase,
+        "seeds": {"run_seed": run_seed, "layout_seed": layout_seed},
+        "permutation": list(permutation),
+        "shard": shard_name,
+    }
+    path = _start_marker_path(cfg, run_index)
+    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2))
+    os.replace(tmp_path, path)
+
+
+def _marker_phase(cfg: CampaignCfg, run_index: int) -> str | None:
+    """A marker's recorded phase, or None if it cannot be read as one."""
+    try:
+        phase = json.loads(_start_marker_path(cfg, run_index).read_text()).get("phase")
+    except (OSError, ValueError):
+        return None
+    return phase if isinstance(phase, str) else None
 
 
 def _started_run_indices(cfg: CampaignCfg) -> list[int]:
@@ -283,6 +331,16 @@ def check_no_interrupted_run(cfg: CampaignCfg, ledger: Ledger) -> None:
     written before the batch subprocess starts and removed only once that run's ledger record
     has been appended, so an orphan marker is exactly the window between the two.
 
+    It carries the run's PHASE, and only an unsafe phase refuses. A run swept while still
+    generating had not submitted its convert, so nothing of it can be in the dataset and the
+    campaign regenerates it without asking. That is not a convenience: on this host a sweep
+    during the multi-hour batch is the likeliest interruption by far, and a guard that fires
+    routinely on a benign case teaches whoever meets it to clear markers unread, which is how
+    guards stop working. Narrowing when it fires is what lets the refusal mean what it says.
+
+    An unreadable marker is treated as unsafe. It says nothing about whether that run
+    converted, and "unreadable" must not be the one input that unlocks the automatic path.
+
     Refuses rather than repairing, for the same reason check_resume_consistency does: whether
     the interrupted run committed episodes is a question about the dataset, and a converter
     killed mid-write can leave a dataset whose own metadata under-reports what is in it. The
@@ -292,10 +350,23 @@ def check_no_interrupted_run(cfg: CampaignCfg, ledger: Ledger) -> None:
     orphans = [index for index in _started_run_indices(cfg) if index not in ledgered]
     if not orphans:
         return
-    listed = ", ".join(f"run {index}" for index in orphans)
+
+    phases = {index: _marker_phase(cfg, index) for index in orphans}
+    unsafe = [index for index, phase in phases.items() if phase != MARKER_PHASE_GENERATING]
+    if not unsafe:
+        for index in orphans:
+            _start_marker_path(cfg, index).unlink(missing_ok=True)
+            print(
+                f"run {index}: interrupted before its shard was converted, so nothing of it "
+                f"reached the dataset -- regenerating it",
+                flush=True,
+            )
+        return
+
+    listed = ", ".join(f"run {index} ({phases[index] or 'unreadable'})" for index in unsafe)
     raise ResumeMismatch(
-        f"{listed} started and never reached {cfg.out_dir / 'ledger.json'}: the campaign was "
-        f"interrupted between generating that run and banking it, so whether it committed "
+        f"{listed} reached the converter and never reached {cfg.out_dir / 'ledger.json'}: "
+        f"the campaign was interrupted after that run's convert began, so whether it committed "
         f"episodes to {cfg.dataset_root} is unknown. Compare that dataset's meta/info.json "
         f"total_episodes against the ledger's last converted_total: if they agree the run "
         f"committed nothing and the marker can be deleted, and if they do not the dataset has "
@@ -444,7 +515,9 @@ def run_campaign(
     and the target is a running total, not a per-run expectation. What resume does NOT tolerate
     is a run that converted without being ledgered, since regenerating that index would convert
     it twice; check_no_interrupted_run and check_resume_consistency refuse the resume outright
-    in that case, from the start-marker side and the episode-count side respectively.
+    in that case, from the start-marker side and the episode-count side respectively. A run
+    interrupted BEFORE its convert was submitted committed nothing, and is regenerated without
+    asking -- the marker's phase is what tells the two apart.
     """
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     ledger_path = cfg.out_dir / "ledger.json"
@@ -473,6 +546,12 @@ def run_campaign(
             # next resume.
             converted_total = p_future.result().get("total")
             converted = True
+            # After the convert returned and before the append: the phase now records that this
+            # run's episodes are in the dataset but not yet in the ledger, which is the state a
+            # resume must never regenerate through.
+            _write_start_marker(
+                cfg, p_run_index, MARKER_PHASE_CONVERTED, p_permutation, p_shard_path.name
+            )
         deleted = False
         if p_shard_path.exists():
             p_shard_path.unlink()
@@ -512,20 +591,12 @@ def run_campaign(
             shard_path = cfg.out_dir / f"shard_{run_index:03d}"
             # Written before the subprocess, not after it returns: a marker written afterwards
             # would miss exactly the kill it exists to detect. See check_no_interrupted_run.
-            marker_run_seed, marker_layout_seed = _derive_seeds(cfg, run_index)
-            _start_marker_path(cfg, run_index).write_text(
-                json.dumps(
-                    {
-                        "run_index": run_index,
-                        "seeds": {
-                            "run_seed": marker_run_seed,
-                            "layout_seed": marker_layout_seed,
-                        },
-                        "permutation": list(permutation),
-                        "shard": _shard_hdf5_path(shard_path).name,
-                    },
-                    indent=2,
-                )
+            _write_start_marker(
+                cfg,
+                run_index,
+                MARKER_PHASE_GENERATING,
+                permutation,
+                _shard_hdf5_path(shard_path).name,
             )
 
             # Generation runs here, on this thread, concurrently with `pending`'s convert (if
@@ -562,11 +633,15 @@ def run_campaign(
                 pending = None
 
             shard_hdf5_path = _shard_hdf5_path(shard_path)
-            future = (
-                convert_executor.submit(run_convert, shard_hdf5_path)
-                if batch_result["exported"] > 0
-                else None
-            )
+            future = None
+            if batch_result["exported"] > 0:
+                # Before the submit, not after: the executor thread may start committing
+                # episodes the instant it is handed the job, and from here until finalize()
+                # collects it this run is no longer safe to regenerate blindly.
+                _write_start_marker(
+                    cfg, run_index, MARKER_PHASE_CONVERTING, permutation, shard_hdf5_path.name
+                )
+                future = convert_executor.submit(run_convert, shard_hdf5_path)
             item = (run_index, permutation, shard_hdf5_path, batch_result, future)
             if future is None:
                 finalize(item)  # nothing to convert, nothing to overlap with -- finalize now
