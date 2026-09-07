@@ -4,12 +4,29 @@ Run with:  $ISAACLAB_PATH/isaaclab.sh -p scripts/convert_urdf_to_usd.py
 Prints CONVERT_OK <usd path> or CONVERT_FAIL; exits 0/1 via os._exit (Kit's teardown does
 not reliably preserve exit codes -- see smoke_usd.py).
 
+The USD this writes is a git-ignored build artifact, so changing this script does NOT update
+anyone else's checkout. RE-RUN IT after pulling a change to this file: a stale
+`assets/usd/maker_arm.usd` loads without complaint and then misbehaves physically instead of
+failing. The mimic fix below is exactly such a change -- a checkout that predates it still
+has a USD whose right gripper jaw carries a PhysX mimic constraint and no drive, and whose
+jaws therefore do not track their targets.
+
 What is converted is not the vendored file but the Z-up derived copy written by
 maker_arm_lab.assets.urdf_prep.write_zup_urdf into the build directory (plan refinement 1).
-Mimic joints become independent joints (convert_mimic_joints_to_normal_joints=True): both
-gripper jaws are driven to the same target by the env's BinaryJointPositionAction, matching
-the two-finger structure the oracle's pinch test reasons about. Fixed joints are kept so
-`grasp_center` (and `mount_link`) survive as bodies.
+Mimic joints become independent joints, so both gripper jaws are driven to the same target
+by the env's BinaryJointPositionAction, matching the two-finger structure the oracle's pinch
+test reasons about. That takes `convert_mimic_joints_to_normal_joints=False`, NOT True:
+Isaac Lab's cfg field is the inverse of its own name. `UrdfConverter._get_urdf_import_config`
+passes it straight through as `import_config.set_parse_mimic(...)`, and the URDF importer's
+own tooltip for that switch reads "If false, creates a PhysX Mimic Joint to enforce the mimic
+joint behavior. Otherwise, the joint is treated as a regular joint." Measured on the live
+stage, Task D3: with True, `gripper_right_joint` carried a `PhysxMimicJointAPI:rotY` (gearing
+-1, referenceJointAxis `rotX` -- rotational tokens on a prismatic pair), no
+`PhysicsDriveAPI:linear` at all, limits padded to [-0.0105, 0.0629] and its velocity limit
+raised to 1e6, and it fought the actuator's PD drive instead of tracking it. With False both
+jaws are ordinary driven prismatic joints with identical authored properties.
+
+Fixed joints are kept so `grasp_center` (and `mount_link`) survive as bodies.
 """
 
 import argparse
@@ -42,7 +59,8 @@ def run_conversion() -> bool:
         usd_file_name=out.name,
         fix_base=True,
         merge_fixed_joints=False,
-        convert_mimic_joints_to_normal_joints=True,
+        # False really does mean "convert the mimic to a normal joint" -- see the docstring.
+        convert_mimic_joints_to_normal_joints=False,
         # The converter's cache key hashes the URDF bytes, not the meshes; a re-vendor can
         # change meshes without changing the URDF, so always regenerate.
         force_usd_conversion=True,

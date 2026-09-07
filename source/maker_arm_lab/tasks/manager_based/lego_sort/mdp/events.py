@@ -27,14 +27,26 @@ import isaaclab.utils.math as math_utils
 import torch
 from isaaclab.envs import ManagerBasedEnv
 
+from maker_arm_lab.core import layout
+
 
 def _sample_brick_poses(
     num_bricks: int,
     min_separation: float,
     pose_range: dict[str, tuple[float, float]],
     max_sample_tries: int = 5000,
+    max_radius: float | None = None,
 ) -> list[list[float]]:
-    """Rejection-sample (x, y, z, roll, pitch, yaw) per brick, min_separation apart in xyz."""
+    """Rejection-sample (x, y, z, roll, pitch, yaw) per brick, min_separation apart in xyz.
+
+    ``max_radius`` (``layout.SCATTER_MAX_RADIUS``) clips the scatter box's unreachable
+    corners. It is an INVARIANT, not a preference: unlike ``min_separation``, which the
+    last-try escape below is allowed to violate rather than loop forever, a brick outside
+    it is never emitted. Task D3 measured that the grasp task has no solution at all beyond
+    that radius, at any jaw heading, so such a brick is a permanent failure floor in every
+    dataset generated from the scene rather than a merely awkward draw. On the final try the
+    sample is pulled back along its own radius instead of being accepted as-is.
+    """
     range_list = [
         pose_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]
     ]
@@ -43,9 +55,18 @@ def _sample_brick_poses(
     for _ in range(num_bricks):
         for try_index in range(max_sample_tries):
             sample = [random.uniform(low, high) for low, high in range_list]
+            last_try = try_index == max_sample_tries - 1
+
+            if max_radius is not None and math.hypot(sample[0], sample[1]) > max_radius:
+                if not last_try:
+                    # Resample rather than clamp, so the distribution stays uniform over the
+                    # admissible region instead of piling up on the boundary arc.
+                    continue
+                sample = list(sample)
+                sample[0], sample[1] = layout.clip_to_reach(sample[0], sample[1], max_radius)
 
             # Accept the first brick unconditionally, or on the last try (avoids an infinite loop).
-            if len(pose_list) == 0 or try_index == max_sample_tries - 1:
+            if len(pose_list) == 0 or last_try:
                 pose_list.append(sample)
                 break
 
@@ -64,6 +85,7 @@ def randomize_brick_poses(
     min_separation: float,
     asset_names: list[str],
     max_sample_tries: int = 5000,
+    max_radius: float | None = None,
 ) -> None:
     """Scatter bricks on reset: per-env rejection sampling, min_separation apart, zero velocity."""
     if env_ids is None:
@@ -72,7 +94,7 @@ def randomize_brick_poses(
     # Randomize poses in each environment independently.
     for cur_env in env_ids.tolist():
         pose_list = _sample_brick_poses(
-            len(asset_names), min_separation, pose_range, max_sample_tries
+            len(asset_names), min_separation, pose_range, max_sample_tries, max_radius
         )
 
         for name, pose in zip(asset_names, pose_list):

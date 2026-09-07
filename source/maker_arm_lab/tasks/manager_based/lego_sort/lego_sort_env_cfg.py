@@ -256,6 +256,7 @@ class LegoSortEnvCfg(ManagerBasedRLEnvCfg):
                     "yaw": (-3.14159, 3.14159),
                 },
                 "min_separation": layout.MIN_SEPARATION,
+                "max_radius": layout.SCATTER_MAX_RADIUS,
                 "asset_names": [f"brick_{i}" for i in range(self.num_bricks)],
             },
         )

@@ -25,8 +25,13 @@ def test_arm_gains_follow_the_profile_and_motor_ratings():
     gains = prof.arm_gains(prof.load_profile())
     assert list(gains) == list(urdf_prep.ARM_JOINT_NAMES)
     assert gains["link_002_joint"] == {"kp": 60.0, "kd": 4.0, "tau_max": 4.0, "effort_limit": 14.0}
-    assert gains["link_003_joint"] == {"kp": 150.0, "kd": 4.5, "tau_max": 6.0, "effort_limit": 17.0}
-    assert gains["link_004_joint"]["effort_limit"] == 17.0
+    assert gains["link_003_joint"] == {
+        "kp": 150.0,
+        "kd": 4.5,
+        "tau_max": 12.0,
+        "effort_limit": 17.0,
+    }
+    assert gains["link_004_joint"] == {"kp": 90.0, "kd": 3.0, "tau_max": 10.0, "effort_limit": 17.0}
     assert gains["link_007_joint"] == {"kp": 30.0, "kd": 2.0, "tau_max": 4.0, "effort_limit": 14.0}
 
 

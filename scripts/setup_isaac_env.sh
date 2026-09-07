@@ -114,7 +114,7 @@ fi
 # The sim reads the actuator profile and the command clamp from maker-arm-rs at a pinned
 # commit (spec section 4.6). Built with maturin from a throwaway clone; needs cargo on PATH.
 MAKER_ARM_RS_REPO="https://github.com/youtalk/maker-arm-rs"
-MAKER_ARM_RS_PIN="188723020d327a37f272b3cc449a93da1f935d25"
+MAKER_ARM_RS_PIN="8f511c81f983323a1d33a3a213c18d5341566750"
 if ! command -v cargo >/dev/null 2>&1; then
     echo "FAIL: cargo not found -- install rustup (https://rustup.rs) to build maker_arm_rs." >&2
     exit 1

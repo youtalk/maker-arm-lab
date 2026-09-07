@@ -216,3 +216,110 @@ def test_sample_bin_layout_respects_envelope_and_separation():
             assert abs(y0 - dy) <= 0.02 + 1e-9
         gaps = [b - a for a, b in zip(bl.bin_ys, bl.bin_ys[1:])]
         assert min(gaps) >= 0.11
+
+
+class TestScatterCornerClip:
+    """The clip is a TRACKING bound, not an IK one (Task D3, rulings D3-13 then D3-19).
+
+    D3-13 set it to 0.315 from an IK-feasibility sweep. D3-19 replaced it with 0.280, the
+    largest radius the arm was MEASURED to actually arrive at, after one trial failed
+    identically in four gates at radius 0.3082 -- inside the old clip, with the IK reporting
+    a zero residual and the path reporting continuous. These tests pin the second meaning,
+    which is strictly stronger: everything the tracking bound admits, the IK bound admitted
+    too.
+    """
+
+    def test_the_clip_excludes_the_measured_unreachable_corner(self):
+        """(0.290, +-0.180) solved 0 of 6 jaw headings with 64 restarts each."""
+        corner = math.hypot(layout.SCATTER_X[1], layout.SCATTER_Y[1])
+        assert corner == pytest.approx(0.3413, abs=1e-3)
+        assert layout.SCATTER_MAX_RADIUS < corner
+
+    def test_the_clip_is_inside_the_ik_feasible_bound_on_purpose(self):
+        """It deliberately eats IK-verified band, because IK feasibility was not binding.
+
+        The old 0.315 came from "every fully-covered grid position was inside 0.3199 m".
+        That bound is still true and is no longer the operative one: the arm solves poses it
+        then fails to reach. So this asserts the ORDERING -- the tracking clip sits at or
+        inside the IK bound -- rather than protecting the IK band from being trimmed.
+        """
+        assert layout.SCATTER_MAX_RADIUS <= 0.3199
+        assert layout.SCATTER_MAX_RADIUS < 0.3257
+
+    def test_the_clip_admits_every_measured_trackable_pose(self):
+        """0.280 tracked clean at every azimuth measured (Task D3 part 15)."""
+        assert layout.SCATTER_MAX_RADIUS >= 0.280
+        for az_deg in (-40.0, -25.0, -10.0, 0.0, 10.0, 25.0, 40.0):
+            az = math.radians(az_deg)
+            x, y = 0.280 * math.cos(az), 0.280 * math.sin(az)
+            assert math.hypot(*layout.clip_to_reach(x, y)) == pytest.approx(0.280)
+
+    def test_the_clip_excludes_every_measured_stop_short(self):
+        """Each of these was driven for real and the arm stopped 12-50 mm short."""
+        for radius, az_deg in (
+            (0.290, 0.0),
+            (0.295, -10.0),
+            (0.295, 10.0),
+            (0.3082, -19.8),
+            (0.315, -19.8),
+        ):
+            az = math.radians(az_deg)
+            assert math.hypot(radius * math.cos(az), radius * math.sin(az)) > (
+                layout.SCATTER_MAX_RADIUS
+            )
+
+    def test_the_whole_inner_edge_survives_the_clip(self):
+        """The near edge is untouched: this trims reach, it does not shrink the zone."""
+        for y in (layout.SCATTER_Y[0], 0.0, layout.SCATTER_Y[1]):
+            assert math.hypot(layout.SCATTER_X[0], y) < layout.SCATTER_MAX_RADIUS
+
+    def test_a_box_bound_could_not_do_this_job(self):
+        """Why the constant is a radius and not a tighter SCATTER_X or SCATTER_Y.
+
+        At 0.315 the argument was that only the CORNER was out of reach, so neither box
+        bound separated it. At 0.280 the clip does reach the far edge at y=0, so that exact
+        argument no longer holds -- but the conclusion does, and for a sharper reason: the
+        clip excludes points whose x is well inside any x-trim that would keep the rest of
+        the band, so no single box bound reproduces it.
+        """
+        # Excluded by the radius, yet its x sits inside the clip and its |y| inside the box:
+        # an x-trim at SCATTER_MAX_RADIUS would wrongly keep it.
+        x, y = 0.25, 0.18
+        assert x < layout.SCATTER_MAX_RADIUS
+        assert abs(y) <= layout.SCATTER_Y[1]
+        assert math.hypot(x, y) > layout.SCATTER_MAX_RADIUS
+
+    def test_clip_to_reach_leaves_reachable_points_alone(self):
+        for x, y in ((0.13, 0.0), (0.21, 0.0), (0.27, 0.0), (0.13, 0.18), (0.20, 0.10)):
+            assert layout.clip_to_reach(x, y) == (x, y)
+
+    def test_clip_to_reach_pulls_in_the_far_edge_at_zero_azimuth(self):
+        """New at 0.280 and worth pinning: the cut is no longer corner-only.
+
+        SCATTER_X's upper bound is 0.29, outside the clip, so a brick sampled straight ahead
+        at the far edge is now pulled in. At 0.315 it was left alone.
+        """
+        assert layout.clip_to_reach(layout.SCATTER_X[1], 0.0) == pytest.approx((0.280, 0.0))
+
+    def test_clip_to_reach_pulls_the_bad_corner_in_along_its_radius(self):
+        x, y = layout.clip_to_reach(layout.SCATTER_X[1], layout.SCATTER_Y[1])
+        assert math.hypot(x, y) == pytest.approx(layout.SCATTER_MAX_RADIUS)
+        # Radial: the azimuth is preserved, which is what the base yaw has to cover.
+        assert math.atan2(y, x) == pytest.approx(
+            math.atan2(layout.SCATTER_Y[1], layout.SCATTER_X[1])
+        )
+        # ...and it stays inside the scatter box, so a clipped brick is still on the desk.
+        assert layout.SCATTER_X[0] <= x <= layout.SCATTER_X[1]
+        assert layout.SCATTER_Y[0] <= y <= layout.SCATTER_Y[1]
+
+    def test_clip_to_reach_is_idempotent(self):
+        once = layout.clip_to_reach(layout.SCATTER_X[1], layout.SCATTER_Y[1])
+        assert layout.clip_to_reach(*once) == pytest.approx(once)
+
+    def test_clip_to_reach_handles_the_origin(self):
+        assert layout.clip_to_reach(0.0, 0.0) == (0.0, 0.0)
+
+    def test_every_corner_of_the_scatter_box_is_reachable_after_clipping(self):
+        for x, y in itertools.product(layout.SCATTER_X, layout.SCATTER_Y):
+            cx, cy = layout.clip_to_reach(x, y)
+            assert math.hypot(cx, cy) <= layout.SCATTER_MAX_RADIUS + 1e-12

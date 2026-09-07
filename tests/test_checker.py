@@ -3,6 +3,7 @@
 import pytest
 import torch
 
+from maker_arm_lab.core import checker, layout
 from maker_arm_lab.core.checker import (
     all_bricks_stowed,
     bricks_at_rest_in_bins,
@@ -127,3 +128,35 @@ def test_held_brick_from_forces_below_min_force_is_not_held():
     left = torch.tensor([[0.9, 0.0]])
     right = torch.tensor([[0.9, 0.0]])
     assert held_brick_from_forces(left, right).tolist() == [-1]
+
+
+class TestPinchMinStall:
+    """The pinch stall floor is derived from the brick, not fitted to a trial (D3-12)."""
+
+    def test_it_is_half_the_bricks_smallest_dimension(self):
+        """gap = 2 * stall must be at least the thinnest cross-section the brick has."""
+        assert checker.PINCH_MIN_STALL == pytest.approx(min(layout.BRICK_SIZE) / 2.0)
+        assert checker.PINCH_MIN_STALL == pytest.approx(0.0048)
+
+    def test_a_gap_below_the_floor_cannot_span_the_brick_in_any_orientation(self):
+        """That is the whole argument: below it the plates are inside the brick's own size."""
+        gap_at_floor = 2.0 * checker.PINCH_MIN_STALL
+        assert gap_at_floor == pytest.approx(min(layout.BRICK_SIZE))
+        assert all(gap_at_floor <= dimension + 1e-12 for dimension in layout.BRICK_SIZE)
+
+    def test_it_is_stricter_than_the_inherited_openyam_value(self):
+        """Re-deriving it tightened the gate; it did not loosen it to admit a near miss."""
+        assert checker.PINCH_MIN_STALL > 0.003
+
+    def test_it_admits_an_ideal_grip_on_the_grasped_width(self):
+        """The oracle squares the jaws to BRICK_SIZE[1]; that grip must pass comfortably."""
+        ideal_stall = layout.BRICK_SIZE[1] / 2.0
+        assert ideal_stall > checker.PINCH_MIN_STALL
+        # Contact compliance closes the jaws further than geometry alone. The shipping
+        # arm's 10/10 gate (Task D3 part 16) stalled 7.43-7.71 mm against this 7.9 mm
+        # ideal, so the floor needs to sit below the worst of those. The bound asserted
+        # here stays at the older, WIDER 5.797 mm -- the worst carry seen in the part-10
+        # chatter era -- because a floor that clears the noisier case clears the quiet one
+        # too, and pinning to the tighter number would make this test fail for a future
+        # arm that merely grips a little softer.
+        assert checker.PINCH_MIN_STALL < 0.005797
