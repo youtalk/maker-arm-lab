@@ -399,6 +399,9 @@ class OracleRig:
         self.hold_counter = [0] * self.num_envs
         self.pending_outcome: list[str | None] = [None] * self.num_envs
         self.watchdog_strikes = [0] * self.num_envs
+        # Set when a leg could not be planned at all, so `_phase_result` can end the phase at
+        # once rather than let the arm hold still until the budget expires.
+        self.unplanned = [False] * self.num_envs
         self.abandoned = torch.zeros(self.num_envs, dtype=torch.bool)
         self.stats = [self._fresh_stats() for _ in range(self.num_envs)]
         self.rearm(list(range(self.num_envs)))
@@ -581,6 +584,18 @@ class OracleRig:
                 return None
             return oracle.PhaseResult(outcome="budget")
 
+        if self.unplanned[i]:
+            # This leg could not be planned, so the arm is not going to arrive: end the phase
+            # now. Holding still until the budget expires writes those control steps into the
+            # dataset as a dead segment, which teaches a policy to pause -- openyam-lab's M6
+            # campaign measured a dead tail over 36 % of eval steps and paid to escape it.
+            # For RAISE, which is the leg this actually happens on (core.oracle's
+            # RAISE_CLEARANCE_Z), ending at once also leaves EXTEND starting from the LIFT
+            # pose, which Task D5 measured as the BEST pose to start it from.
+            if goal.phase == oracle.Phase.LIFT:
+                return self._lift_result(i, "unplanned")
+            return oracle.PhaseResult(outcome="unplanned")
+
         if self.holding[i]:
             # Post-arrival settle (LIFT): the leg already ended this phase; keep commanding
             # the same joint target for goal.hold_steps more steps, so the gate below sees
@@ -705,6 +720,7 @@ class OracleRig:
         self.plans[i] = []
         self.dwell[i] = WAYPOINT_HOLD_STEPS
         self.dwell_left[i] = 1
+        self.unplanned[i] = False
         if goal.yaw is not None:
             self.commanded_yaw[i] = oracle.fold_jaw_heading(
                 goal.yaw + math.pi / 2,
@@ -745,12 +761,13 @@ class OracleRig:
                 self.commanded_tilt[i] = tilt_to
                 self.commanded_yaw[i] = heading
         if plan is None:
-            # No plan: the arm holds where it is and the phase ends on its own budget (or, for
-            # DESCEND, on the stall detector). Honest rather than silent -- the pick then
-            # fails its LIFT gate and core.oracle's retry/abandon ladder takes over -- and
-            # counted, because a run where this is common has a reach problem, not a grasp
-            # problem.
+            # No plan: the phase ends on the next step (see `_phase_result`) rather than the
+            # arm holding still until its budget expires. Honest rather than silent -- the
+            # pick then fails its LIFT gate and core.oracle's retry/abandon ladder takes over
+            # -- and counted, because a run where this is common has a reach problem, not a
+            # grasp problem.
             self.stats[i]["unplanned_legs"] += 1
+            self.unplanned[i] = True
             return
         self.plans[i] = plan
 
@@ -971,6 +988,7 @@ class OracleRig:
             self.quiet[i] = 0
             self.holding[i] = False
             self.watchdog_strikes[i] = 0
+            self.unplanned[i] = False
             self.abandoned[i] = False
             self.stats[i] = self._fresh_stats()
             self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE

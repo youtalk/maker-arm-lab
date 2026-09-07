@@ -140,10 +140,15 @@ def test_raise_targets_clearance_height_not_release_height():
     # climb finished; see the RAISE goal's comment in core/oracle.py).
     assert raise_goal.target_pos[2].item() == pytest.approx(oracle.RAISE_CLEARANCE_Z)
     assert raise_goal.target_pos[2].item() != pytest.approx(oracle.RELEASE_Z)
-    # tilt is RELEASE_TILT_RAD from the start, not 0.0: gives joint4 the same
-    # margin during the climb that the final release pose needs (OpenYAM
-    # measured; same comment).
-    assert raise_goal.tilt_rad == pytest.approx(oracle.RELEASE_TILT_RAD)
+    # The climb is tilted from the start, not level: that is what gave the wrist the margin
+    # the release pose needs (OpenYAM measured). But it is NOT the release tilt, and the gap
+    # is load-bearing rather than cosmetic -- Task D5 measured that leaving RAISE at
+    # RELEASE_TILT_RAD puts the arm in a pose from which no continuous EXTEND to ANY bin
+    # exists, driven as a 300-step EXTEND ending 312 mm short at both outer bins. Both bounds
+    # are asserted, so neither reverting to the release tilt nor flattening the climb to level
+    # can pass.
+    assert raise_goal.tilt_rad == pytest.approx(oracle.RAISE_TILT_RAD)
+    assert 0.0 < oracle.RAISE_TILT_RAD < oracle.RELEASE_TILT_RAD
     assert raise_goal.stop_pos == pytest.approx(oracle.RAISE_STOP_POS)
     assert raise_goal.max_steps == oracle.RAISE_MAX_STEPS
 

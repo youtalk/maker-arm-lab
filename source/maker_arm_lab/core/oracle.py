@@ -115,23 +115,27 @@ LIFT_HEIGHT = 0.10
 # RAISE's own target height and budget -- OpenYAM MEASURED this (Task 8), not
 # the RELEASE_Z a first reading of "raise" suggests.
 #
-# ON THIS ARM RAISE IS LARGELY INERT, MEASURED BY TASK D5, AND THAT IS NOT A
-# TUNING PROBLEM. Holding the pick point over the BRICK's own xy at
-# RAISE_CLEARANCE_Z with the tool at RELEASE_TILT_RAD is unreachable at every IK
-# branch for the inner half of the scatter band: a free 48-restart solve of that
-# exact pose finds nothing at (0.13, 0.00), (0.15, 0.05) or (0.18, -0.15), while
-# (0.22, 0.00) and (0.28, 0.00) solve with 0.21-0.51 rad of margin
-# (/tmp/d5_raise_map.py sweeping tilt x height; the hole is the tilt at close
-# radius, and at (0.18, -0.15) the height 0.22 is out of reach at EVERY tilt).
-# Live, that shows up as 7 of 18 RAISE legs with no plan: the arm holds its LIFT
-# pose for the full 60 steps and EXTEND then does the whole translate + climb +
-# tilt itself, converging to 0.4-2.0 mm in 105-179 of its own 300. So the phase
-# costs 60 idle steps on those bricks and nothing else -- 6 six-brick episodes
-# all sorted and exported with it -- and RAISE_CLEARANCE_Z is deliberately NOT
-# lowered to make it plannable, because the height that would (about 0.16 m, from
-# the same sweep) is below the bin rim it exists to clear, and the rim clearance
-# is already delivered by EXTEND's own straight Cartesian leg, which rises
-# monotonically and is past 0.195 m well before it reaches the bin faces.
+# RAISE_CLEARANCE_Z IS DELIBERATELY NOT LOWERED, AND TASK D5 MEASURED WHY BOTH
+# HALVES OF THAT SENTENCE ARE NEEDED. Holding the pick point over the BRICK's own
+# xy at this height is out of reach for part of the scatter band whatever the
+# tool attitude: sweeping the band (32 positions inside SCATTER_MAX_RADIUS x 4
+# jaw headings) against tilts from 30 to 80 deg, the reachable fraction of
+# (position, heading) pairs runs 0 % at 30 deg, 49 % at 40, 68 % at 60, 72 % at
+# 75 and 66 % at the release tilt, and the band's near corners -- (0.13, +-0.18),
+# (0.16, +-0.18) -- are unreachable at every tilt tried (/tmp/d5_raise_tilt.py).
+# So no tilt makes this phase plannable band-wide, and the tilt is a WEAK lever on
+# RAISE itself even though it is a decisive one on the leg after it (see
+# RAISE_TILT_RAD below).
+#
+# Lowering the height is what would make RAISE plannable, and it is exactly the
+# wrong move: about 0.16 m does it, which is BELOW the bin rim
+# (layout._BIN_FLOOR_TOP_Z + BIN_INTERIOR[2] = 0.195) that this phase exists to
+# clear. That would satisfy the solver by deleting the phase's purpose. The
+# residue is handled where it belongs instead -- the runtime advances straight to
+# EXTEND on a leg it cannot plan, rather than holding still for the budget (see
+# oracle_runtime's `_phase_result`) -- and the rim clearance is in any case
+# delivered by EXTEND's own straight Cartesian leg, which rises monotonically and
+# is past 0.195 m well before it reaches the bin faces.
 #
 # The rest of this comment is OpenYAM's, carried over unchanged with its arm and
 # layout, and it is what the constants were chosen for. Climbing straight to RELEASE_Z
@@ -165,6 +169,36 @@ LIFT_HEIGHT = 0.10
 RAISE_CLEARANCE_Z = 0.22
 RAISE_STOP_POS = 0.02
 RAISE_MAX_STEPS = 60
+
+# Tool-axis tilt RAISE climbs at. NOT RELEASE_TILT_RAD, which it used to reuse.
+#
+# MEASURED ON THIS ARM by Task D5, and the measurement is about the leg AFTER this one.
+# RAISE's job is to clear the bin rim; only RELEASE needs the release attitude. Sweeping the
+# raise tilt and then asking whether EXTEND can be planned from the pose RAISE leaves --
+# the release-envelope check's own pick, an identity-yaw brick at (0.20, 0.0), so the jaw
+# heading is pinned near +-90 deg (/tmp/d5_raise_then_extend.py):
+#
+#     raise tilt   EXTEND to y=+-0.21   EXTEND to y=+-0.07
+#      40 deg           OK                   OK
+#      50 deg           OK                   OK
+#      60 deg           OK                   OK
+#      70 deg           FAIL                 OK
+#      80.2 deg         FAIL                 FAIL      <- what RELEASE_TILT_RAD gave
+#      (no RAISE)       OK                   OK
+#
+# At the release tilt RAISE leaves the arm in a pose from which NO continuous EXTEND exists
+# to any bin, at either heading -- driven, that is exactly what
+# scripts/release_envelope_check.py measured under the shipped value: EXTEND ran its full
+# 300-step budget and ended 312-315 mm short at both outer bins, with link_003_joint 0.145 rad
+# from its stop. 60 deg is the largest tested value that keeps every bin plannable, with the
+# cliff at 70; it is also at the practical peak of RAISE's OWN reachability (see
+# RAISE_CLEARANCE_Z's comment above), so nothing is traded for it.
+#
+# What this value is NOT chosen to do is make RAISE plannable band-wide, because no value
+# does: the tilt lever moves RAISE's own coverage of the scatter band only from 66 % to 72 %
+# of (position, heading) pairs across 30-80 deg, and the band corners are out of reach at
+# every tilt. The runtime advances straight to EXTEND on the legs it cannot plan.
+RAISE_TILT_RAD = 1.05
 
 _JOINT_LIMIT_GUARD_RAD = 0.05
 _JOINT_SPEED_MAX = 6.0
@@ -310,7 +344,12 @@ class Goal:
 
 @dataclass
 class PhaseResult:
-    outcome: str  # "converged" | "stalled" | "budget"
+    # "converged" | "stalled" | "budget" | "unplanned". The last is the runtime reporting
+    # that it could not build a path for this leg at all, so the phase ends at once instead
+    # of holding still until its budget expires -- idle frames go into the dataset and teach
+    # a policy to pause. Nothing branches on this field except the runtime's own telemetry;
+    # `report()` below reads only pinch_ok/lifted.
+    outcome: str
     pinch_ok: bool | None = None
     lifted: bool | None = None
 
@@ -683,7 +722,7 @@ class EnvOracle:
                 Phase.RAISE,
                 target,
                 None,
-                RELEASE_TILT_RAD,
+                RAISE_TILT_RAD,
                 -1.0,
                 RAISE_STOP_POS,
                 0,
