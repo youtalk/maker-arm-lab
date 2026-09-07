@@ -151,4 +151,4 @@ For an online run, set `WANDB_ENTITY` explicitly. The wrapper refuses to launch 
 ## Reports
 
 - [`docs/ms1-maker-arm-sim.md`](docs/ms1-maker-arm-sim.md) — MS1: the LegoSort simulation environment on the vendor URDF. Asset pipeline, the measured robot constants, the full validation ladder, the acceptance gate (**failed** on the oracle success rate, 30/50 = 0.600 against a 0.70 bar) with its diagnostic hand-off, and the sim/real divergences and unverified constants the October hardware bring-up needs.
-- [`docs/ma0-bench-prep.md`](docs/ma0-bench-prep.md) — MA0: bench preparation.
+- [`docs/ma0-bench-prep.md`](docs/ma0-bench-prep.md) — MA0: bench preparation. Predates MS1 and was **not** re-verified against it, so read it as the MA0 record rather than as current: where the two disagree about the arm, MS1's measured constants are the later reading.
