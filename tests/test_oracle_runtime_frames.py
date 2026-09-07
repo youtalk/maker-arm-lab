@@ -423,3 +423,99 @@ def test_a_watchdog_abandon_freezes_the_outcome_on_the_step_it_is_raised():
     assert stats["succeeded"] is False
     assert stats["bricks_delivered"] == 2
     assert stats["abandon"] == "watchdog"
+
+
+# --------------------------------------------------------------------------------------
+# RAISE lookahead: a RAISE leg is only worth walking if EXTEND can still be planned from
+# where it ends. The poses below were RECORDED on GPU (2026-09-07, instrumented 12-env
+# datagen batch, run_seed 3081035816): the arm's measured joint vector at the end of LIFT,
+# the RAISE target core.oracle asked for, and the release target EXTEND then aimed at.
+# --------------------------------------------------------------------------------------
+
+
+def _carry_setup(rig, q_lift_end, heading_deg):
+    rig.q_cmd[0] = torch.tensor(q_lift_end, dtype=torch.float64)
+    rig.commanded_yaw[0] = math.radians(heading_deg)
+    rig.commanded_tilt[0] = frames.GRASP_TILT_RAD
+    rig.oracles[0].draw = oracle.EpisodeDraw(0.12, 0.0, 0.0, 0.0, 1.0, 0.05, 0.0, 0.0)
+    rig.oracles[0].target_brick = 0
+    rig.oracles[0].phase = oracle.Phase.RAISE
+
+
+def _raise_goal(target):
+    return oracle.Goal(
+        oracle.Phase.RAISE,
+        torch.tensor(target),
+        None,
+        oracle.RAISE_TILT_RAD,
+        -1.0,
+        oracle.RAISE_STOP_POS,
+        0,
+        oracle.RAISE_MAX_STEPS,
+        0,
+    )
+
+
+def test_raise_is_refused_when_extend_cannot_be_planned_from_where_it_ends():
+    """Env 3, brick 0 of the instrumented batch: a near pick (radius 0.155 m, azimuth -11
+    deg) bound for the far -y bin. RAISE's Cartesian ladder failed and `_plan_direct` walked
+    the arm to a joint-space endpoint 1.25 rad away in base yaw -- legal under
+    MAX_LEG_JOINT_JUMP, but a branch from which EXTEND had no continuous path at any heading
+    rung, so RELEASE opened the jaws over the scatter band and the episode timed out one
+    brick short. From the LIFT pose the same EXTEND plans at the held heading.
+    """
+    _env, rig = _stub_rig(num_envs=1, num_bricks=6)
+    bl = layout.BinLayout(
+        bin_x=0.443315375851723,
+        bin_ys=(
+            -0.22119301103713415,
+            -0.07162949025824511,
+            0.08437825458493829,
+            0.22237051165126664,
+        ),
+        slot_colors=(0, 3, 1, 2),
+    )
+    rig.bl = bl
+    rig.oracles[0].bl = bl
+    _carry_setup(rig, [0.334, -1.08, 1.295, -1.28, -0.113, -0.163], 64.1)
+
+    rig._plan_leg(0, _raise_goal([0.1524, -0.0295, oracle.RAISE_CLEARANCE_Z]))
+
+    assert rig.unplanned[0], "RAISE must be refused: EXTEND is unplannable from its end pose"
+    assert rig.plans[0] == []
+    assert rig.stats[0]["unplanned_legs"] == 1
+    assert rig.stats[0]["raise_vetoed"] == 1
+    # And the veto is what saves the brick: EXTEND from the LIFT pose plans.
+    extend = rig.oracles[0].extend_goal()
+    rig._plan_leg(0, extend)
+    assert not rig.unplanned[0]
+    assert len(rig.plans[0]) > 0
+
+
+def test_raise_is_kept_when_extend_plans_from_where_it_ends():
+    """Env 3, brick 1 of the same batch: a mid-band pick whose RAISE planned on the
+    Cartesian ladder and whose EXTEND then converged live in 171 steps. The lookahead must
+    not veto a RAISE that EXTEND can follow.
+    """
+    _env, rig = _stub_rig(num_envs=1, num_bricks=6)
+    bl = layout.BinLayout(
+        bin_x=0.443315375851723,
+        bin_ys=(
+            -0.22119301103713415,
+            -0.07162949025824511,
+            0.08437825458493829,
+            0.22237051165126664,
+        ),
+        slot_colors=(0, 3, 1, 2),
+    )
+    rig.bl = bl
+    rig.oracles[0].bl = bl
+    _carry_setup(rig, [-0.296, -1.363, 1.462, -1.162, 0.101, 1.804], 210.9)
+    rig.oracles[0].target_brick = 1
+
+    rig._plan_leg(0, _raise_goal([0.2142, 0.0441, oracle.RAISE_CLEARANCE_Z]))
+
+    assert not rig.unplanned[0]
+    assert len(rig.plans[0]) > 0
+    assert rig.stats[0]["raise_vetoed"] == 0
+    assert rig.stats[0]["unplanned_legs"] == 0

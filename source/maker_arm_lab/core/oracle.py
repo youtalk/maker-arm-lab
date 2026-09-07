@@ -629,6 +629,25 @@ class EnvOracle:
             (RETREAT_POINT[0] + self.draw.via_dx, RETREAT_POINT[1] + self.draw.via_dy),
         )
 
+    def extend_goal(self) -> Goal:
+        """The EXTEND leg for the brick in the jaws: out to its bin's release pose.
+
+        Public, and separate from ``next_goal``, because the runtime plans this leg twice:
+        once for real at EXTEND entry, and once as a LOOKAHEAD at RAISE entry, to refuse a
+        RAISE that would leave the arm where no EXTEND can be planned (see
+        ``oracle_runtime.OracleRig._plan_leg``). Both must ask for the same leg.
+        """
+        return self._goal(
+            Phase.EXTEND,
+            self._release_target(self.target_brick),
+            None,
+            RELEASE_TILT_RAD,
+            -1.0,
+            0.008,
+            0,
+            DEFAULT_MAX_STEPS,
+        )
+
     def next_goal(self, scene: SceneSnapshot) -> Goal | None:
         if self.phase in (Phase.DONE, Phase.ABANDON):
             return None
@@ -736,16 +755,7 @@ class EnvOracle:
                 RAISE_MAX_STEPS,
             )
         if self.phase == Phase.EXTEND:
-            return self._goal(
-                Phase.EXTEND,
-                self._release_target(self.target_brick),
-                None,
-                RELEASE_TILT_RAD,
-                -1.0,
-                0.008,
-                0,
-                DEFAULT_MAX_STEPS,
-            )
+            return self.extend_goal()
         if self.phase == Phase.RELEASE:
             return self._goal(
                 Phase.RELEASE, None, None, RELEASE_TILT_RAD, 1.0, None, 0, 20, hold=20

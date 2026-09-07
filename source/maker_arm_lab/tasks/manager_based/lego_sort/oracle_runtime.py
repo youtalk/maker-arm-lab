@@ -433,6 +433,10 @@ class OracleRig:
             # straight EXTEND leg clears, and that reasoning holds only for the legs that
             # actually plan straight.
             "direct_legs": 0,
+            # RAISE legs that planned but were refused because EXTEND could not be planned
+            # from where they end (see `_plan_leg`). Each is also counted in
+            # `unplanned_legs`, since that is how the phase then ends.
+            "raise_vetoed": 0,
         }
 
     def _check_action_space(self, env) -> None:
@@ -816,12 +820,36 @@ class OracleRig:
             # everywhere: at the grasp tilt the jaw plates foul the desk at every pick offset
             # (ruling D3-10), so the descend runs the near-level ladder instead.
             tilt_to = max(goal.tilt_rad, GRASP_TILT_RAD)
-            plan, heading = self._plan_carry(
+            plan, heading, direct = self._plan_carry(
                 i, goal, start, pick_from, tilt_from, pick_to, tilt_to, heading
             )
+            if (
+                plan is not None
+                and goal.phase == oracle.Phase.RAISE
+                and not self._extend_plannable_from(i, plan[-1], heading)
+            ):
+                # LOOKAHEAD. RAISE is the one leg the episode can do without -- the runtime
+                # already advances straight to EXTEND when it cannot be planned, and Task D5
+                # measured the LIFT pose as EXTEND's best start -- so it is only worth
+                # walking if EXTEND can still be planned from where it ends. It cannot
+                # always: MEASURED on GPU (2026-09-07, instrumented 12-env batch), a near
+                # pick (radius ~0.15 m, azimuth ~-11 deg) bound for an outer bin had its
+                # RAISE fall through to `_plan_direct`, which solved the endpoint 1.25 rad
+                # away in base yaw -- inside MAX_LEG_JOINT_JUMP -- on a branch from which
+                # EXTEND had no continuous path at any heading rung and no direct fallback
+                # either. RELEASE then opened the jaws over the scatter band and the episode
+                # timed out one brick short; the same EXTEND planned at once from the LIFT
+                # pose. Both of the first round's failures were this, so the check is made
+                # here, with the runtime's own planner, rather than by tightening the jump
+                # cap by guesswork. Costs one EXTEND plan per walkable RAISE.
+                self.stats[i]["raise_vetoed"] += 1
+                plan = None
+                direct = False
             if plan is not None:
                 self.commanded_tilt[i] = tilt_to
                 self.commanded_yaw[i] = heading
+                if direct:
+                    self.stats[i]["direct_legs"] += 1
         if plan is None:
             # No plan: the phase ends on the next step (see `_phase_result`) rather than the
             # arm holding still until its budget expires. WHAT CATCHES IT DEPENDS ON THE
@@ -849,11 +877,14 @@ class OracleRig:
 
     def _plan_carry(
         self, i, goal, start, pick_from, tilt_from, pick_to, tilt_to, heading
-    ) -> tuple[list[torch.Tensor] | None, float]:
+    ) -> tuple[list[torch.Tensor] | None, float, bool]:
         """A leg with the brick in the jaws (LIFT/RAISE/EXTEND/RETREAT), and the one place
         the jaw heading is allowed to move.
 
-        Returns the plan and the heading it ends at.
+        Returns the plan, the heading it ends at, and whether the plan came from the
+        joint-space fallback (`_plan_direct`). The caller counts that last one into
+        `stats["direct_legs"]`, not this method: `_plan_leg`'s RAISE lookahead plans an
+        EXTEND it never walks, and a leg that is not walked must not be counted.
 
         WHY THE HEADING LADDER, measured rather than assumed. `core.oracle` sets
         ``Goal.yaw`` only at HOVER and DESCEND -- where the jaws must be square across the
@@ -893,12 +924,36 @@ class OracleRig:
                 i, goal, start, pick_from, tilt_from, pick_to, tilt_to, heading, heading + offset
             )
             if plan is not None:
-                return plan, heading + offset
+                return plan, heading + offset, False
         # Last resort: solve the endpoint and interpolate in joint space, at the held heading.
         plan = self._plan_direct(i, goal, start, pick_to, tilt_to, heading)
-        if plan is not None:
-            self.stats[i]["direct_legs"] += 1
-        return plan, heading
+        return plan, heading, plan is not None
+
+    def _extend_plannable_from(self, i: int, q: torch.Tensor, heading: float) -> bool:
+        """Would the EXTEND leg plan if the arm were commanded to ``q`` holding ``heading``?
+
+        A dry run of exactly what `_plan_leg` will do at EXTEND entry -- the same goal
+        (`EnvOracle.extend_goal`), the same heading ladder and the same fallback -- from the
+        pose a candidate RAISE plan ends at. Nothing it computes is kept: the plan is thrown
+        away, `direct_legs` is not touched, and the waypoint dwell `_plan_cartesian` sets as
+        a side effect is restored, so a vetoed RAISE leaves the env exactly as an unplanned
+        one does.
+        """
+        goal = self.oracles[i].extend_goal()
+        pick_from, tilt_from = self._commanded_pick_pose(i, q)
+        dwell = self.dwell[i]
+        plan, _, _ = self._plan_carry(
+            i,
+            goal,
+            q,
+            pick_from,
+            tilt_from,
+            goal.target_pos.double().cpu(),
+            max(goal.tilt_rad, GRASP_TILT_RAD),
+            heading,
+        )
+        self.dwell[i] = dwell
+        return plan is not None
 
     def _plan_hover(self, i, goal, start, pick_to, heading) -> list[torch.Tensor] | None:
         """The approach: solve the endpoint GLOBALLY, then interpolate in joint space.
