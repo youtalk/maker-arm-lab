@@ -28,8 +28,13 @@ def _write_shard(path, demos=2, steps=5):
                 "joint_targets", data=np.arange(steps * 8, dtype=np.float32).reshape(steps, 8)
             )
             state = np.ones((steps, 8), dtype=np.float32) * d
-            state[:, 6] = 0.0524125 * 0.5  # left jaw half open
-            state[:, 7] = 0.0524125 * 0.5
+            # The jaw fractions are deliberately 0.25 / 0.75 rather than 0.5: `actions` is
+            # filled with a constant 0.5, so a gripper_open of 0.5 would coincide with the
+            # RAW action gripper column and a converter that skipped the divide by
+            # GRIPPER_TRAVEL would still pass. The two jaws differ from each other for the
+            # same reason -- reading the right jaw must not produce the left jaw's answer.
+            state[:, 6] = 0.0524125 * 0.25  # left jaw (the reference) a quarter open
+            state[:, 7] = 0.0524125 * 0.75  # right jaw, dropped by the converter
             g.create_dataset("obs/joint_pos_abs", data=state)
             img = np.linspace(0, 255, steps * 224 * 224 * 3).astype(np.uint8)
             img = img.reshape(steps, 224, 224, 3)
@@ -79,6 +84,9 @@ def test_round_trip(tmp_path):
     # action = joint_targets[:6] + raw gripper (0.5)
     assert frame["action"][:6].tolist() == pytest.approx([0, 1, 2, 3, 4, 5], abs=1e-5)
     assert float(frame["action"][6]) == pytest.approx(0.5)
+    # The action's seventh column is the RAW gripper command, and its name says so -- the
+    # state's counterpart is `gripper_open`, a fraction, and the two must not be confused.
+    assert ds.meta.info["features"]["action"]["names"][-1] == "gripper"
     assert frame["observation.images.wrist"].shape[-3:] != ()  # decodes to a tensor
 
 
@@ -94,7 +102,7 @@ def test_state_is_six_joints_plus_gripper_fraction(tmp_path):
     frame = ds[3]
     assert frame["observation.state"].shape == (7,)
     assert frame["observation.state"][:6].tolist() == pytest.approx([1.0] * 6)
-    assert float(frame["observation.state"][6]) == pytest.approx(0.5)
+    assert float(frame["observation.state"][6]) == pytest.approx(0.25)
     assert ds.meta.info["features"]["observation.state"]["names"][-1] == "gripper_open"
     assert ds.meta.info["robot_type"] == "maker_arm"
 

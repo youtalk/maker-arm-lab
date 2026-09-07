@@ -21,8 +21,9 @@ import numpy as np
 class RolloutTrace:
     """Accumulates (step, state, raw action, clamped action) per env, in RAM.
 
-    Deliberately unbuffered-to-disk: 5 envs x 5,400 steps x 22 floats is under
-    3 MB, so a single npz per env at the end beats streaming complexity.
+    Deliberately unbuffered-to-disk: a handful of envs x a few thousand steps x
+    ~20 floats per row is single-digit MB, so a single npz per env at the end
+    beats streaming complexity.
     """
 
     def __init__(self, num_envs: int):

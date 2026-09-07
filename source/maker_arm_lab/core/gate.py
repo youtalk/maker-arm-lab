@@ -163,8 +163,11 @@ class RolloutTracker:
         too near the end of an episode for its settle window to close. Keeping
         the third apart is the point: it is neither a success nor a failure, and
         folding it into either silently biases `grasp_successes / grasp_attempts`
-        -- the hole measured in the wrong-bin counter, where 14 of 90 deposits
-        were structurally ungraded and were nonetheless in the denominator.
+        -- the hole that openyam-lab found in its own wrong-bin counter, where
+        14 of 90 deposits were structurally ungraded and were nonetheless left
+        in the denominator. That is an OPENYAM measurement, carried over as the
+        design rationale for keeping the third counter; nothing here has been
+        measured on the Maker Arm.
 
         Like record_wrong_bin this is deliberately NOT gated on ~done, so an
         attempt opened on an env's terminating step still reaches that env's

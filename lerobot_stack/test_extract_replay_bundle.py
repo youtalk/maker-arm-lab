@@ -37,7 +37,7 @@ def _write_shard(path, demos=2, steps=5, num_bricks=2, record_dim=1):
             g = data.create_group(f"demo_{d}")
             g.attrs["num_samples"] = steps
             g.attrs["success"] = True
-            # raw IK-Rel actions: gripper column (6) is constant per demo and does not
+            # raw pre-clamp actions: gripper column (6) is constant per demo and does not
             # overlap with any joint_targets value, so a column-source swap is detectable.
             g.create_dataset("actions", data=np.full((steps, 7), 0.5 + d, dtype=np.float32))
             g.create_dataset(

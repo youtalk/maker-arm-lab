@@ -209,9 +209,11 @@ def test_grasp_outcome_splits_graded_attempts_into_successes_and_failures():
 def test_a_marginal_pinch_is_a_success_only_at_the_loose_threshold():
     """The threshold-sensitivity read: the two masks disagree on brushing contacts.
 
-    A contact over HELD_MIN_FORCE but under the quality pinch threshold is
-    exactly the population "55 % of gripper cycles grip nothing" is about, so
-    the strict counter must be able to reject an attempt the loose one accepts.
+    A contact over the loose attribution threshold but under the quality pinch
+    threshold is exactly the population a "most gripper cycles grip nothing"
+    reading is about, so the strict counter must be able to reject an attempt
+    the loose one accepts. (openyam-lab put that at 55 % of cycles -- an OPENYAM
+    measurement, quoted for why the pair exists and unmeasured on this arm.)
     Both directions are asserted in one test on purpose: the marginal env alone
     passes against a strict counter wired to a constant zero, and the firm env
     alone passes against one that just reuses `held`.
@@ -235,8 +237,10 @@ def test_ungraded_grasp_attempt_is_reported_unresolved_not_as_a_failure():
     neither observed to hold a brick nor observed not to. Counting it in
     `grasp_attempts` would put an ungradeable attempt in the denominator of
     `grasp_successes / grasp_attempts` and bias the rate down -- exactly the
-    defect measured in wrong_bin_deposits (14 of 90 deposits structurally
-    ungraded, concentrated on the last brick of every successful episode).
+    defect openyam-lab found in its own wrong_bin_deposits (14 of 90 deposits
+    structurally ungraded, concentrated on the last brick of every successful
+    episode). Those are OPENYAM numbers, carried over as the rationale for this
+    counter and unmeasured on the Maker Arm.
     """
     tr = RolloutTracker(num_envs=1, num_bricks=6)
     tr.record_grasp_attempt(torch.tensor([0]))  # graded GRASP_SETTLE_STEPS later
