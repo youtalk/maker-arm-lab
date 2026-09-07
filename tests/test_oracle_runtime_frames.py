@@ -383,3 +383,43 @@ def test_episode_stats_freeze_when_the_episode_ends_not_when_they_are_read():
     # ... and rearming env 0 releases the snapshot.
     rig.rearm([0])
     assert rig.episode_stats(0)["succeeded"] is False
+
+
+def test_a_watchdog_abandon_freezes_the_outcome_on_the_step_it_is_raised():
+    """`_freeze_outcomes` must run AFTER `_run_watchdog`, not before it.
+
+    An env the watchdog gives up on is not `done` -- Isaac Lab never terminated it -- so the
+    only thing that marks its episode over is `abandoned`, and that flag is raised inside
+    `_run_watchdog`, late in the same `step()`. Freezing before the watchdog would miss it
+    for that step and snapshot on the NEXT one instead, capturing a success term and a brick
+    sample that the intervening `env.step()` has already recomputed for the whole batch.
+
+    The ordering was asserted in a comment on `_freeze_outcomes` and pinned by nothing:
+    moving the call earlier left the suite green. `scripts/generate_batch.py` is the first
+    caller to run the batch pattern this protects -- abandon env A, keep stepping so env B
+    can finish, then read A -- so it is pinned here.
+    """
+    env, rig = _stub_rig(num_envs=2)
+    # The stub's zero pose already sits ON two of the URDF's stops (link_003_joint's upper
+    # bound and link_004_joint's lower bound are both 0.0), which is watchdog_trips' own
+    # "near a limit" criterion -- so env 0 trips every step and is abandoned after
+    # WATCHDOG_TRIP_STRIKES of them. Env 1 is moved to mid-range so it keeps running, which
+    # is what makes this the batch pattern rather than a single-env read.
+    joint_pos = env.scene._robot.data.joint_pos
+    joint_pos[1, rig.arm_ids] = rig.limits.mean(dim=1).float()
+    env.stowed[0, :2] = True
+
+    for _ in range(_rt.WATCHDOG_TRIP_STRIKES):
+        rig.step()
+    assert bool(rig.abandoned[0]), "the watchdog did not abandon env 0"
+    assert not bool(rig.abandoned[1])
+
+    # The world moves on, as it does while the rest of the batch runs.
+    env.stowed[:] = True
+    env.success[:] = True
+    rig.step()
+
+    stats = rig.episode_stats(0)
+    assert stats["succeeded"] is False
+    assert stats["bricks_delivered"] == 2
+    assert stats["abandon"] == "watchdog"
