@@ -19,13 +19,16 @@ either, so _isaaclab_batch_env() sets VIRTUAL_ENV itself (derived from
 
 Each campaign run is one subprocess and one ledger entry: the supervisor launches
 generate_batch.py, parses its BATCH_OK token, and appends that run's record to
-ledger.json before the next run starts. Nothing about a campaign's progress is
+ledger.json before the next run starts, having marked that run started on disk
+beforehand and cleared the marker only once the append succeeds. Nothing about a
+campaign's progress is
 inferred from the final CAMPAIGN_OK line, which a supervisor killed mid-campaign
 never prints -- on this host background jobs are liable to be swept, and a chain
 that dies in the middle must not be indistinguishable from one that never started.
 --resume rebuilds state from the ledger alone, so a campaign interrupted anywhere
-loses at most the runs that were in flight, and refuses to start at all when the
-ledger and the dataset disagree about the episode count. Every batch subprocess
+loses at most the runs that were in flight, and refuses to start at all when a run
+started without reaching the ledger or when the ledger and the dataset disagree
+about the episode count. Every batch subprocess
 carries a timeout derived from its own deadline, so a wedged child stops the
 campaign instead of hanging it. Symmetrically, every exit path from
 main() prints exactly one of CAMPAIGN_OK / CAMPAIGN_FAIL, so a tokenless log means
@@ -52,7 +55,7 @@ class BatchFailed(RuntimeError):
 
 
 class ResumeMismatch(RuntimeError):
-    """Raised when a resumed campaign's ledger disagrees with the dataset on disk."""
+    """Raised when the on-disk state of a campaign is not safe to resume from."""
 
 
 # The wall-clock ceiling handed to every generate_batch.py run as --max_wall_minutes. Passed
@@ -247,6 +250,60 @@ def _shard_hdf5_path(shard_path: Path) -> Path:
     return shard_path.with_name(shard_path.name + ".hdf5")
 
 
+_START_MARKER_SUFFIX = ".started"
+
+
+def _start_marker_path(cfg: CampaignCfg, run_index: int) -> Path:
+    return cfg.out_dir / f"run_{run_index}{_START_MARKER_SUFFIX}"
+
+
+def _started_run_indices(cfg: CampaignCfg) -> list[int]:
+    """Run indices with a start marker still on disk, i.e. started and not yet banked."""
+    indices = []
+    for path in cfg.out_dir.glob(f"run_*{_START_MARKER_SUFFIX}"):
+        stem = path.name[len("run_") : -len(_START_MARKER_SUFFIX)]
+        if stem.isdigit():
+            indices.append(int(stem))
+    return sorted(indices)
+
+
+def check_no_interrupted_run(cfg: CampaignCfg, ledger: Ledger) -> None:
+    """Refuse to start when a previous run marked itself started and never reached the ledger.
+
+    check_resume_consistency below compares the converter's reported episode total against the
+    dataset's own count, which needs a ledgered total to compare against -- so it cannot see an
+    interruption during the FIRST run of a fresh --dataset_root. That run is not less exposed
+    than the others; for a two-run campaign it is half of them. It is also worse than
+    symmetric: if the kill lands before the first Ledger.append then ledger.json does not exist
+    either, so main()'s "ledger already exists, pass --resume" refusal does not fire, and a
+    bare re-invocation would regenerate run 0's identical seeds and shard name straight over
+    whatever the killed run had already committed.
+
+    The marker closes that without restructuring the ledger into a two-phase commit: it is
+    written before the batch subprocess starts and removed only once that run's ledger record
+    has been appended, so an orphan marker is exactly the window between the two.
+
+    Refuses rather than repairing, for the same reason check_resume_consistency does: whether
+    the interrupted run committed episodes is a question about the dataset, and a converter
+    killed mid-write can leave a dataset whose own metadata under-reports what is in it. The
+    message says which comparison settles it, and what to do either way.
+    """
+    ledgered = {record["run_index"] for record in ledger.runs}
+    orphans = [index for index in _started_run_indices(cfg) if index not in ledgered]
+    if not orphans:
+        return
+    listed = ", ".join(f"run {index}" for index in orphans)
+    raise ResumeMismatch(
+        f"{listed} started and never reached {cfg.out_dir / 'ledger.json'}: the campaign was "
+        f"interrupted between generating that run and banking it, so whether it committed "
+        f"episodes to {cfg.dataset_root} is unknown. Compare that dataset's meta/info.json "
+        f"total_episodes against the ledger's last converted_total: if they agree the run "
+        f"committed nothing and the marker can be deleted, and if they do not the dataset has "
+        f"to be restored to the ledger's total first. Resuming without settling that would "
+        f"regenerate the run and convert it a second time."
+    )
+
+
 def _dataset_total_episodes(dataset_root: Path) -> int | None:
     """The dataset's own episode count, read from the one file of it this module needs.
 
@@ -386,7 +443,8 @@ def run_campaign(
     Nothing here depends on it repeating -- the ledger records what each run actually exported,
     and the target is a running total, not a per-run expectation. What resume does NOT tolerate
     is a run that converted without being ledgered, since regenerating that index would convert
-    it twice; check_resume_consistency refuses the resume outright in that case.
+    it twice; check_no_interrupted_run and check_resume_consistency refuse the resume outright
+    in that case, from the start-marker side and the episode-count side respectively.
     """
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     ledger_path = cfg.out_dir / "ledger.json"
@@ -394,6 +452,7 @@ def run_campaign(
     # Before the early return, not after: reporting a campaign complete over a dataset known to
     # disagree with its own ledger is the worst outcome available, because nothing downstream
     # would ever look again.
+    check_no_interrupted_run(cfg, ledger)
     check_resume_consistency(cfg, ledger)
 
     if ledger.total_successes >= cfg.target:
@@ -435,6 +494,9 @@ def run_campaign(
                 "deleted": deleted,
             }
         )
+        # Only now, with the run safely in the ledger, may its start marker go: the window this
+        # guards is precisely the one between the convert above and this append.
+        _start_marker_path(cfg, p_run_index).unlink(missing_ok=True)
         print(
             f"run {p_run_index}: perm {_format_permutation(p_permutation)} exported "
             f"{p_batch_result['exported']}/{p_batch_result['attempts']} "
@@ -448,12 +510,34 @@ def run_campaign(
         while committed_total < cfg.target:
             permutation = next(schedule)
             shard_path = cfg.out_dir / f"shard_{run_index:03d}"
+            # Written before the subprocess, not after it returns: a marker written afterwards
+            # would miss exactly the kill it exists to detect. See check_no_interrupted_run.
+            marker_run_seed, marker_layout_seed = _derive_seeds(cfg, run_index)
+            _start_marker_path(cfg, run_index).write_text(
+                json.dumps(
+                    {
+                        "run_index": run_index,
+                        "seeds": {
+                            "run_seed": marker_run_seed,
+                            "layout_seed": marker_layout_seed,
+                        },
+                        "permutation": list(permutation),
+                        "shard": _shard_hdf5_path(shard_path).name,
+                    },
+                    indent=2,
+                )
+            )
 
             # Generation runs here, on this thread, concurrently with `pending`'s convert (if
             # any) running in the background executor thread -- this is the overlap.
             try:
                 batch_result = run_batch(run_index, permutation, shard_path)
             except BaseException:
+                # This run never reached run_convert, so nothing of it can be in the dataset and
+                # its marker has nothing to protect. Dropping it keeps a routine BATCH_FAIL from
+                # demanding manual intervention before the next resume -- which is how a guard
+                # ends up deleted reflexively instead of read.
+                _start_marker_path(cfg, run_index).unlink(missing_ok=True)
                 # See the docstring's crash-safety paragraph: `pending` (the previous run's
                 # already-submitted convert) must still be finalized -- not silently dropped --
                 # before this exception propagates.
@@ -464,7 +548,17 @@ def run_campaign(
             committed_total += batch_result["exported"]
 
             if pending is not None:
-                finalize(pending)  # waits on the (likely already-finished) background convert
+                try:
+                    # Waits on the (likely already-finished) background convert.
+                    finalize(pending)
+                except BaseException:
+                    # This iteration's own run has not reached run_convert either -- the failure
+                    # surfaced before its convert was submitted -- so its marker protects
+                    # nothing and would only make the next resume demand a decision about a run
+                    # that committed nothing. `pending`'s own marker stays put: its convert is
+                    # exactly the one whose outcome is now unknown.
+                    _start_marker_path(cfg, run_index).unlink(missing_ok=True)
+                    raise
                 pending = None
 
             shard_hdf5_path = _shard_hdf5_path(shard_path)

@@ -262,13 +262,23 @@ def test_run_campaign_convert_failure_is_clean_and_resume_regenerates(tmp_path):
     ledger = json.loads((tmp_path / "ledger.json").read_text())
     assert [r["run_index"] for r in ledger["runs"]] == [0]  # only the fully-converted run
     assert ledger["total_successes"] == 45
-
-    # Resume: convert now succeeds. Run 1 (whose convert raised) must be regenerated, not
-    # skipped or resumed mid-convert -- it never reached the ledger, so the schedule replays it.
-    batch_calls.clear()
+    # Run 2 was generated, but the failure surfaced before its convert was ever submitted, so
+    # nothing of it can be in the dataset and it is not marked. Only run 1's outcome is unknown.
+    assert [p.name for p in sorted(tmp_path.glob("run_*.started"))] == ["run_1.started"]
 
     def succeeding_convert(shard_path):
         return {"episodes": 45}
+
+    # Run 1's convert RAISED, so whether it committed episodes before failing is unknown, and
+    # its start marker is still on disk. Resuming over that would re-convert it (ruling D7-4),
+    # so the campaign refuses until an operator settles it.
+    with pytest.raises(gd.ResumeMismatch, match="run 1"):
+        gd.run_campaign(cfg, fake_batch, succeeding_convert)
+
+    # Once settled, run 1 must be regenerated, not skipped or resumed mid-convert -- it never
+    # reached the ledger, so the schedule replays it.
+    (tmp_path / "run_1.started").unlink()
+    batch_calls.clear()
 
     total = gd.run_campaign(cfg, fake_batch, succeeding_convert)
     assert batch_calls[0] == 1  # regenerated from scratch, in schedule order
@@ -724,3 +734,94 @@ def test_a_wedged_child_still_leaves_its_log_behind(monkeypatch, tmp_path):
         gd._make_real_run_batch(cfg)(3, (0, 1, 2, 3), cfg.out_dir / "shard_003")
 
     assert (cfg.out_dir / "run_3.log").read_text() == "last line\n!"
+
+
+# --- Ruling D7-4: the run-0 convert-before-ledger window ------------------------------------
+
+
+def test_a_run_marks_itself_started_before_the_batch_subprocess_runs(tmp_path):
+    """The marker has to be on disk before anything the child could commit, not after the
+    subprocess returns -- a marker written afterwards would miss exactly the kill it exists to
+    detect. Asserted from inside the fake batch, which stands where the child would."""
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=40)
+    seen = []
+
+    def fake_batch(run_index, permutation, shard_path):
+        seen.append((tmp_path / f"run_{run_index}.started").exists())
+        _hdf5_path(shard_path).write_bytes(b"x")
+        return {"exported": 45, "attempts": 50, "meta": {}, "stats": {}}
+
+    gd.run_campaign(cfg, fake_batch, lambda p: {"episodes": 45, "total": 45})
+
+    assert seen == [True]
+    assert list(tmp_path.glob("run_*.started")) == []  # and cleared once banked
+
+
+def test_the_marker_survives_a_failed_ledger_append(monkeypatch, tmp_path):
+    """Clearing is tied to the ledger append succeeding, not to the subprocess exiting: the
+    whole point is the window between those two. If the append is what fails, the run is
+    exactly as un-banked as if the process had been killed there, and the marker must stay."""
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=200)
+
+    def fake_batch(run_index, permutation, shard_path):
+        _hdf5_path(shard_path).write_bytes(b"x")
+        return {"exported": 45, "attempts": 50, "meta": {}, "stats": {}}
+
+    def boom(self, record):
+        raise OSError("ledger write failed")
+
+    monkeypatch.setattr(gd.Ledger, "append", boom)
+
+    with pytest.raises(OSError, match="ledger write failed"):
+        gd.run_campaign(cfg, fake_batch, lambda p: {"episodes": 45, "total": 45})
+
+    assert (tmp_path / "run_0.started").exists()
+
+
+def test_resume_refuses_when_a_run_started_and_never_reached_the_ledger(tmp_path):
+    """The run-0 window: killed between its convert committing episodes and the first
+    Ledger.append, there is no ledger entry to compare a dataset total against, so D7-1's check
+    has nothing to work with. The marker is what makes that run visible at all."""
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=200)
+    cfg.out_dir.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "run_0.started").write_text("{}")
+
+    with pytest.raises(gd.ResumeMismatch, match="run 0"):
+        gd.run_campaign(cfg, _never_called, _never_called)
+
+
+def test_a_bare_reinvocation_after_an_interrupted_first_run_still_refuses(
+    monkeypatch, capsys, tmp_path
+):
+    """Killed before the first append, ledger.json does not exist -- so main()'s
+    `ledger_path.exists() and not --resume` refusal does not fire either, and a bare
+    re-invocation would regenerate run 0's identical seeds and shard name over whatever the
+    killed run had already committed. No --resume is passed here on purpose."""
+    (tmp_path / "work").mkdir()
+    (tmp_path / "work" / "run_0.started").write_text("{}")
+    monkeypatch.setattr(gd.subprocess, "run", _never_called)
+
+    code = gd.main(["--out_dir", str(tmp_path / "work"), "--dataset_root", str(tmp_path / "ds")])
+
+    assert code == 1
+    assert "CAMPAIGN_FAIL" in capsys.readouterr().out
+
+
+def test_a_batch_failure_clears_its_own_marker(tmp_path):
+    """A run whose batch never returned cannot have reached run_convert, so nothing of it can
+    be in the dataset and there is nothing to protect. Leaving a marker there would make every
+    routine BATCH_FAIL demand manual intervention before the next resume -- which is how a
+    guard gets deleted reflexively instead of read."""
+    cfg = gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds", target=200)
+
+    seen = []
+
+    def failing_batch(run_index, permutation, shard_path):
+        seen.append((tmp_path / f"run_{run_index}.started").exists())
+        raise gd.BatchFailed("no BATCH_OK token found")
+
+    with pytest.raises(gd.BatchFailed):
+        gd.run_campaign(cfg, failing_batch, _never_called)
+
+    assert seen == [True]  # it was marked started
+    assert list(tmp_path.glob("run_*.started")) == []  # and unmarked again
