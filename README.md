@@ -64,15 +64,17 @@ uv run pytest tests/test_urdf_validation.py
 
 ## Registered task ids
 
-| Task id | Arm action | Cameras | Used by |
-| --- | --- | --- | --- |
-| `MakerArm-LegoSort-v0` | clamped absolute joint position | — | smoke, the scripted grasp check, policy rollout |
-| `MakerArm-LegoSort-IK-Rel-v0` | task-space delta pose (differential IK) | — | release envelope check |
-| `MakerArm-LegoSort-IK-Rel-Vision-v0` | task-space delta pose | wrist, overhead | oracle check with cameras |
-| `MakerArm-LegoSort-Datagen-v0` | clamped joint position + vision + domain randomisation + recorders | wrist, overhead | `generate_batch.py` |
-| `MakerArm-LegoSort-Eval-v0` | clamped joint position + vision + eval terminations | wrist, overhead | the next milestone's rollout gate |
+The last column is what each script's `--task` default actually selects, read off the scripts rather than off the spec's original assignment — the two diverged when the oracle migrated.
 
-`Datagen-v0` moved from the IK-Rel action space to clamped joint position in MS1, when the oracle moved onto `core/global_ik.py`. The dataset contract is unchanged by that move — the recorded action stream was always the post-IK joint target. See `docs/ms1-maker-arm-sim.md` section 4.3.
+| Task id | Arm action | Cameras | Runs on it today |
+| --- | --- | --- | --- |
+| `MakerArm-LegoSort-v0` | clamped absolute joint position | — | `smoke_lego_sort.py` (default), `scripted_grasp_check.py` (default) |
+| `MakerArm-LegoSort-IK-Rel-v0` | task-space delta pose (differential IK) | — | no check by default; registered, and smoke-tested via `--task` |
+| `MakerArm-LegoSort-IK-Rel-Vision-v0` | task-space delta pose | wrist, overhead | no check by default; registered, and smoke-tested via `--task` |
+| `MakerArm-LegoSort-Datagen-v0` | clamped joint position + vision + domain randomisation + recorders | wrist, overhead | `generate_batch.py`, `release_envelope_check.py`, `oracle_check.py` — all three by default |
+| `MakerArm-LegoSort-Eval-v0` | clamped joint position + vision + eval terminations | wrist, overhead | nothing yet; reserved for the next milestone's rollout gate, smoke-tested via `--task` |
+
+`Datagen-v0` moved from the IK-Rel action space to clamped joint position in MS1, when the oracle moved onto `core/global_ik.py`, and the envelope and oracle checks moved with it — which is why the two IK-Rel ids no longer back a gate even though the spec originally assigned them one. They stay registered and smoke-tested so the differential-IK path remains available and cannot rot unnoticed. The dataset contract is unchanged by the move: the recorded action stream was always the post-IK joint target. See `docs/ms1-maker-arm-sim.md` section 4.3.
 
 ## Checks
 
@@ -146,7 +148,7 @@ STEPS=100 OUT=~/data/maker-arm-ms1/train/smoke JOB_NAME=act-smoke WANDB_ENABLE=f
   bash lerobot_stack/train_act.sh                                    # TRAIN_OK out=<dir> steps=<n>
 ```
 
-For an online run, set `WANDB_ENTITY` explicitly. The wrapper refuses to launch with an empty `WANDB_ENTITY` rather than silently falling through to a default entity.
+For an **online** run — the default, `WANDB_ENABLE=true` with `WANDB_MODE=online` — set `WANDB_ENTITY` explicitly. In that case only, the wrapper refuses to launch with an empty `WANDB_ENTITY` rather than silently falling through to a default entity; with `WANDB_ENABLE=false` or `WANDB_MODE=offline` (as in the smoke above) an empty entity is fine and the guard does not fire.
 
 ## Reports
 

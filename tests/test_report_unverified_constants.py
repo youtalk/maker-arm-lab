@@ -4,7 +4,17 @@
 works from, and it is prose. The ``<NAME>_UNVERIFIED`` flags in ``source/`` are the
 greppable half; nothing otherwise stops a future edit from adding a flagged constant
 without telling the bring-up about it, and the report would then go stale independently
-of the code it describes. This test is that guard: it fails in CI rather than in October.
+of the code it describes. This test is that guard.
+
+WHERE IT ACTUALLY BITES, stated precisely because the honest answer is narrower than the
+obvious one. This assertion runs in ``uv run pytest``, i.e. LOCALLY. It is also what CI
+would run -- but this repository's CI has been red since the ``maker-arm-rs`` dependency
+was introduced: the runner has no credentials for that private repo, so
+``uv sync --group dev`` fails and pytest never starts. Until that is fixed (a deploy key,
+a PAT secret, or making ``maker-arm-rs`` public -- a repository-infrastructure item, not a
+code one), this guard protects whoever runs the suite locally and nobody else. Do not read
+a red PR check as evidence that it fired, or a future green one as evidence it held
+before today.
 
 WHAT IS COVERED, and what deliberately is not. The direction pinned here is source ->
 report: a flag added to ``source/`` whose constant the report does not name fails. The
@@ -67,8 +77,12 @@ def _divergence_section() -> str:
             "was renamed, update _SECTION_HEADING here so this coupling keeps its teeth."
         )
     start = text.index(_SECTION_HEADING)
-    end = text.index("\n## ", start)  # the next top-level section; '### ' cannot match
-    return text[start:end]
+    # The next top-level section; '### ' cannot match, since it is '##' + '#', not '## '.
+    # If 4.3 ever becomes the trailing section there is no such marker, and slicing to the
+    # end of the file is the right answer -- a bare `.index` would raise ValueError from
+    # inside a helper, which is the unreadable-failure family this milestone keeps fixing.
+    end = text.find("\n## ", start)
+    return text[start:] if end == -1 else text[start:end]
 
 
 def test_the_scan_and_the_report_section_are_both_non_empty():
