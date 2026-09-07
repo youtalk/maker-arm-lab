@@ -168,7 +168,22 @@ def resolve_inference_overrides(
     return {}
 
 
-GRIPPER_DIM = 6
+# --------------------------------------------------------------------------------------
+# BCE gripper head -- PORTED BUT INACTIVE IN THIS REPO.
+#
+# openyam-lab trained a variant whose gripper dim is a BCE logit rather than an L1 output,
+# and its trainer (train_act_gripper.py, NOT ported) dropped a gripper_bce.json marker next
+# to the checkpoint. NOTHING IN THIS REPO WRITES THAT FILE: find_gripper_bce_marker()
+# returns None for every checkpoint this milestone trains, squash_gripper_logit() is never
+# reached on a live path, and the "+gbce" policy-id suffix never appears.
+#
+# Kept, not deleted: it is tested, self-contained, and a ported BCE trainer would need no
+# server-side change. Marked, not silent: do not go looking for the producer of the marker
+# file when debugging a gripper problem here -- there is no producer, and the None path is
+# the only one that runs.
+# --------------------------------------------------------------------------------------
+
+GRIPPER_DIM = 6  # the ACTION's gripper column (policy_protocol.STATE_GRIPPER_DIM is the state's)
 
 
 def find_gripper_bce_marker(checkpoint_dir: str) -> dict | None:
@@ -192,7 +207,10 @@ def find_gripper_bce_marker(checkpoint_dir: str) -> dict | None:
 
 
 def squash_gripper_logit(action: np.ndarray, raw_mean: float, raw_std: float) -> np.ndarray:
-    """Turn the unnormalized BCE logit back into a unit gripper action.
+    """Turn the unnormalized BCE logit back into a unit gripper action. INACTIVE here.
+
+    Unreachable in this repo -- see the section marker above; nothing produces the marker
+    file that switches it on.
 
     A BCE-head checkpoint emits dim 6 as a logit, which the checkpoint's own
     unnormalizer then treats as a normalized action: raw = logit * std + mean,

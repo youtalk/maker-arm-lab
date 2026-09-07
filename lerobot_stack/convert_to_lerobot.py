@@ -6,12 +6,14 @@ Observation state: the 6 URDF arm joint angles plus the gripper OPENING FRACTION
 ``<mimic>`` is not honoured by the importer, Task D3), so the left jaw specifically is
 the reference and the right jaw column is dropped.
 
-Action stream: 6 post-IK arm joint targets + the raw binary gripper command
-(spec section 5.4 item 4) -- what the ACT head outputs and the real robot's
-joint-position interface consumes. The seventh action column is a COMMAND (>= 0 opens,
-< 0 closes), not a position: it is deliberately left in its own units rather than
-normalised into the state's, which is why the two features name it differently
-(``gripper`` vs ``gripper_open``). fps follows the 30 Hz control rate.
+Action stream: 6 post-IK arm joint targets + the raw binary gripper command (spec
+section 4.2 -- the same table as the state above; section 5 is an unsubdivided list,
+so the "5.4 item 4" this line carried over from openyam-lab pointed nowhere) -- what
+the ACT head outputs and the real robot's joint-position interface consumes. The
+seventh action column is a COMMAND (>= 0 opens, < 0 closes), not a position: it is
+deliberately left in its own units rather than normalised into the state's, which is
+why the two features name it differently (``gripper`` vs ``gripper_open``). fps
+follows the 30 Hz control rate.
 
 Every exit path prints CONVERT_OK or CONVERT_FAIL on stdout. scripts/generate_dataset.py
 parses that line, and a run that terminates without either reads to it as a HANG rather

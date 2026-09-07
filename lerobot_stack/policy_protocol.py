@@ -34,8 +34,26 @@ OBS_SCHEMA = {
 }
 # Also 7, but a different 7: 6 joint TARGETS + the raw binary gripper command. The two
 # widths coincide on this arm and must still be validated against their own constants.
+#
+# Because they coincide, a shape check can no longer catch an action array handed in where
+# an observation belongs -- openyam-lab's 8-vs-7 made that swap self-revealing and this
+# schema does not. The VALUES still differ structurally, so validate_obs() checks the one
+# thing that does discriminate: the state's gripper column is an opening fraction on [0, 1]
+# and the action's is a command that goes negative to close. That check is one-directional.
+# A state array passed to validate_action() is NOT detectable -- a fraction on [0, 1] is a
+# perfectly legal "open" command -- so an action-side swap fails silently and will surface
+# as a baffling eval result rather than an error. Recorded here because it is a real loss
+# of observability against the openyam-lab original, not an oversight.
 ACTION_SHAPE = (7,)
 ACTION_DTYPE = "float32"
+# Index of the gripper column in BOTH arrays. policy_server.GRIPPER_DIM is the action-side
+# counterpart; the two are deliberately separate constants for two separate contracts that
+# happen to share an index, so neither can be "fixed" into the other.
+STATE_GRIPPER_DIM = 6
+# The fraction is clipped to [0, 1] at conversion, so training data is strictly in range.
+# The tolerance absorbs a client that computes the fraction without clipping (a hair over 1
+# from float division); anything past it is a swap or genuinely out of distribution.
+GRIPPER_FRACTION_TOL = 1e-3
 
 
 def _pack(array: np.ndarray) -> bytes:
@@ -75,11 +93,28 @@ def _check(name: str, array: np.ndarray, sample_shape: tuple, dtype: str, batch_
         raise ValueError(f"{name}: dtype {array.dtype}, want {dtype}")
 
 
+def _check_gripper_fraction(state: np.ndarray) -> None:
+    """Reject a state whose gripper column is not an opening fraction.
+
+    The only check that can tell a (7,) action array from a (7,) state array, now that the
+    two are the same shape and dtype. An empty batch passes vacuously (np.all of nothing is
+    True), which also keeps the error path away from min() on an empty array.
+    """
+    column = state[:, STATE_GRIPPER_DIM]
+    if not np.all((column >= -GRIPPER_FRACTION_TOL) & (column <= 1.0 + GRIPPER_FRACTION_TOL)):
+        raise ValueError(
+            f"state: gripper fraction (column {STATE_GRIPPER_DIM}) spans "
+            f"[{column.min()}, {column.max()}], want [0, 1] -- an action array has a raw "
+            f"gripper COMMAND in that column, not an opening fraction"
+        )
+
+
 def validate_obs(arrays: dict, batch_size: int) -> None:
     if set(arrays) != set(OBS_SCHEMA):
         raise ValueError(f"obs keys {sorted(arrays)}, want {sorted(OBS_SCHEMA)}")
     for name, (sample_shape, dtype) in OBS_SCHEMA.items():
         _check(name, arrays[name], sample_shape, dtype, batch_size)
+    _check_gripper_fraction(arrays["state"])
 
 
 def validate_action(array: np.ndarray, batch_size: int) -> None:

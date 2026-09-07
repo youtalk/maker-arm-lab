@@ -9,6 +9,7 @@ from policy_protocol import (
     ACTION_SHAPE,
     OBS_SCHEMA,
     PROTOCOL_VERSION,
+    STATE_GRIPPER_DIM,
     recv_message,
     send_message,
     validate_action,
@@ -54,6 +55,31 @@ def test_validate_obs_rejects_and_names_the_problem(corrupt):
     obs = _obs()
     corrupt(obs)
     with pytest.raises(ValueError):
+        validate_obs(obs, batch_size=2)
+
+
+def test_validate_obs_accepts_the_whole_gripper_fraction_range():
+    # Guards the discriminating check from being tightened into a false rejection: closed,
+    # fully open and mid-travel are all legal states the sim really produces.
+    obs = _obs(batch=3)
+    obs["state"][:, STATE_GRIPPER_DIM] = [0.0, 1.0, 0.5]
+
+    validate_obs(obs, batch_size=3)
+
+
+def test_validate_obs_rejects_an_action_array_in_the_state_slot():
+    """The swap a shape check cannot catch, now that state and action are both (7,).
+
+    An action array has the same shape AND the same dtype as a state array on this arm, so
+    the gripper column is the only thing left that tells them apart: a raw command goes
+    negative to close, an opening fraction cannot.
+    """
+    obs = _obs()
+    action = np.zeros((2, 7), dtype=np.float32)
+    action[:, STATE_GRIPPER_DIM] = -1.0  # CLOSE, expressible as a command and not a fraction
+    obs["state"] = action
+
+    with pytest.raises(ValueError, match="gripper fraction"):
         validate_obs(obs, batch_size=2)
 
 

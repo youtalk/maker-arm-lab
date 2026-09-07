@@ -214,6 +214,10 @@ def test_blank_streams_rejects_an_unknown_stream_name():
         blank_streams(wrist, wrist, "elbow")
 
 
+# --- BCE gripper head tests. The code under test is PORTED BUT INACTIVE in this repo:
+# nothing here writes a gripper_bce.json, so these exercise a path no live checkpoint takes.
+# See the section marker in policy_server.py. ---
+#
 # Gripper-dim action stats standing in for a checkpoint's own: raw = logit * RAW_STD +
 # RAW_MEAN. These two values are an OPENYAM measurement (its v1 dataset's action mean/std
 # at dim 6), carried over unchanged and UNMEASURED on the Maker Arm. Nothing under test
@@ -317,6 +321,9 @@ def test_bind_announces_readiness_with_the_port_protocol_and_identity(capsys):
             "protocol": PROTOCOL_VERSION,
         }
     finally:
+        # PolicyServer has no public teardown (the serve loop owns its socket for the
+        # process's lifetime), so the test closes the bound socket directly rather than
+        # leaking a bound port into the rest of the session.
         srv._socket.close(0)
 
 
