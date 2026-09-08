@@ -25,6 +25,8 @@
 # measured this policy at 51,599,239 learnable parameters for a 197 MB
 # model.safetensors, so that is ~2 GB of uploads per run. They are already on
 # local disk under "$OUT", which is where any later gate eval reads them from.
+# SAVE_FREQ: MS2 trains 600k steps with a checkpoint every 50k (the selection ladder
+# reads 300k..600k), so the cadence is a knob; 10000 stays the default for smokes.
 # tolerance_s=0.01: carried over unchanged from openyam-lab, where a v3.0
 # dataset's video files concatenated many episodes into single files up to
 # ~5278 s long, and float32's rounding error on timestamps that large (ULP
@@ -60,10 +62,45 @@ trap emit_train_token EXIT
 cd "$(dirname "$0")"
 
 STEPS="${STEPS:-100000}"
-OUT="${OUT:-$HOME/data/maker-arm-ms1/train/act_smoke}"
 JOB_NAME="${JOB_NAME:-act_smoke}"
-DATASET_ROOT="${DATASET_ROOT:-$HOME/data/maker-arm-ms1/dataset}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
+SAVE_FREQ="${SAVE_FREQ:-10000}"
+
+# MS2 hardening (spec section 4): no dataset or output default. MS1's defaults pointed a
+# bare invocation at the 63-episode MS1 dataset, which is exactly the corpus a 600k-step run
+# must never be started on by accident; every real run names both explicitly.
+if [ -z "${DATASET_ROOT:-}" ] || [ -z "${OUT:-}" ]; then
+    echo "train_act.sh: DATASET_ROOT and OUT are required (no defaults since MS2)" >&2
+    exit 1
+fi
+# The dataset must be the whole corpus the campaign was asked for, not the partial one a
+# swept or breaker-stopped campaign leaves behind. LEDGER is the campaign's ledger.json;
+# its "target" (recorded by generate_dataset.py) is compared against the dataset's own
+# meta/info.json total_episodes. A ledger without "target" (MS1's) needs MIN_EPISODES
+# set explicitly instead. Both checks are in python3 (stdlib) because the count is JSON.
+if [ -z "${LEDGER:-}" ]; then
+    echo "train_act.sh: LEDGER=<campaign ledger.json> is required" >&2
+    exit 1
+fi
+python3 - "$LEDGER" "$DATASET_ROOT" "${MIN_EPISODES:-}" <<'PY'
+import json, sys
+ledger_path, dataset_root, min_override = sys.argv[1], sys.argv[2], sys.argv[3]
+ledger = json.load(open(ledger_path))
+if min_override:
+    target = int(min_override)
+elif "target" in ledger:
+    target = int(ledger["target"])
+else:
+    sys.exit(f"train_act.sh: {ledger_path} records no target; set MIN_EPISODES explicitly")
+info = json.load(open(f"{dataset_root}/meta/info.json"))
+episodes = int(info["total_episodes"])
+if episodes < target:
+    sys.exit(
+        f"train_act.sh: {dataset_root} holds {episodes} episodes, below the campaign target "
+        f"{target}; refusing to train on a partial corpus"
+    )
+print(f"train_act.sh: dataset {dataset_root} holds {episodes} episodes (target {target})")
+PY
 WANDB_ENABLE="${WANDB_ENABLE:-true}"
 WANDB_PROJECT="${WANDB_PROJECT:-maker-arm-lab}"
 WANDB_MODE="${WANDB_MODE:-online}"
@@ -108,7 +145,7 @@ fi
     --steps="$STEPS" \
     --batch_size="$BATCH_SIZE" \
     --num_workers=8 \
-    --save_freq=10000 \
+    --save_freq="$SAVE_FREQ" \
     --log_freq=100 \
     --tolerance_s=0.01 \
     "${WANDB_FLAGS[@]}"
