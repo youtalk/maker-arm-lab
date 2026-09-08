@@ -17,6 +17,9 @@ from pathlib import Path
 
 import numpy as np
 
+POLICY_STATE_WIDTH = 7
+"""Width of the dataset's `observation.state`: 6 URDF arm joints + gripper opening fraction."""
+
 
 class RolloutTrace:
     """Accumulates (step, state, raw action, clamped action) per env, in RAM.
@@ -60,14 +63,17 @@ class RolloutTrace:
         for i in range(self.num_envs):
             path = directory / f"{stem}_env{i}_trace.npz"
             # The widths below only shape the file an env that NEVER ran produces
-            # (`_stack`); a populated env keeps whatever the caller appended. 8 is the
-            # articulation's joint count (6 arm + 2 jaws), NOT the (7,) width of the
-            # LeRobot `observation.state` -- an eval script feeding `append()` the
-            # policy-side state instead would need this to follow.
+            # (`_stack`); a populated env keeps whatever the caller appended. 7 is the
+            # width of the LeRobot `observation.state` (6 arm joints + gripper opening
+            # fraction), which is what scripts/eval_policy.py feeds `append()`: the
+            # trace exists to compare a rollout's states against the training
+            # distribution, so it is written in the dataset's coordinates, not the
+            # articulation's 8 (6 arm + 2 jaws). Changed deliberately in MS2 from the
+            # 8 the port inherited; tests/test_trace.py pins it.
             np.savez_compressed(
                 path,
                 step=np.asarray(self._steps[i], dtype=np.int32),
-                state=_stack(self._state[i], 8),
+                state=_stack(self._state[i], POLICY_STATE_WIDTH),
                 action_raw=_stack(self._raw[i], 7),
                 action_clamped=_stack(self._clamped[i], 7),
             )
