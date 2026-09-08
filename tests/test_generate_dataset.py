@@ -945,3 +945,136 @@ def test_resume_refuses_a_marker_it_cannot_read(tmp_path):
 
     with pytest.raises(gd.ResumeMismatch, match="run 0"):
         gd.run_campaign(cfg, _never_called, _never_called)
+
+
+# --- MS2: randomized pick order and the campaign circuit breaker ---------------------------
+
+
+def test_batch_command_omits_randomize_pick_order_by_default(tmp_path):
+    cmd = gd._batch_command(_cmd_cfg(tmp_path), 0, (0, 1, 2, 3), tmp_path / "shard_000")
+    assert "--randomize_pick_order" not in cmd
+
+
+def test_batch_command_forwards_randomize_pick_order(tmp_path):
+    cfg = _cmd_cfg(tmp_path, randomize_pick_order=True)
+    cmd = gd._batch_command(cfg, 0, (0, 1, 2, 3), tmp_path / "shard_000")
+    assert "--randomize_pick_order" in cmd
+
+
+def test_build_cfg_carries_randomize_pick_order_and_the_breaker(tmp_path):
+    base = ["--out_dir", str(tmp_path / "w"), "--dataset_root", str(tmp_path / "d")]
+    cfg = gd._build_cfg(gd._parse_args(base + ["--randomize_pick_order"]))
+    assert cfg.randomize_pick_order is True
+    assert cfg.breaker_min_rate == 0.70 and cfg.breaker_min_runs == 4
+
+    plain = gd._build_cfg(gd._parse_args(base))
+    assert plain.randomize_pick_order is False
+
+    off = gd._build_cfg(gd._parse_args(base + ["--breaker_min_rate", "-1"]))
+    assert off.breaker_min_rate is None
+
+    custom = gd._build_cfg(
+        gd._parse_args(base + ["--breaker_min_rate", "0.5", "--breaker_min_runs", "2"])
+    )
+    assert custom.breaker_min_rate == 0.5 and custom.breaker_min_runs == 2
+
+
+def test_the_ledger_carries_each_runs_meta_and_stats(tmp_path):
+    cfg = gd.CampaignCfg(
+        out_dir=tmp_path, dataset_root=tmp_path / "ds", target=40, attempts_per_run=50, num_envs=8
+    )
+    meta = {"randomize_pick_order": True, "noise_scale": 1.0}
+    stats = {"raise_vetoed": 7, "hover_lowered": 3, "off_schedule_episodes": 41}
+
+    def fake_batch(run_index, permutation, shard_path):
+        _hdf5_path(shard_path).write_bytes(b"x")
+        return {"exported": 42, "attempts": 50, "meta": dict(meta), "stats": dict(stats)}
+
+    gd.run_campaign(cfg, fake_batch, lambda _p: {"episodes": 42, "total": 42})
+    (record,) = json.loads((tmp_path / "ledger.json").read_text())["runs"]
+    assert record["run_meta"] == meta
+    assert record["run_stats"] == stats
+
+
+def _breaker_campaign(tmp_path, rates, min_rate=0.70, min_runs=4, target=10_000):
+    """Drive a campaign whose run k exports ``rates[k] * 50``; returns (calls, ledger runs)."""
+    cfg = gd.CampaignCfg(
+        out_dir=tmp_path,
+        dataset_root=tmp_path / "ds",
+        target=target,
+        attempts_per_run=50,
+        num_envs=8,
+        breaker_min_rate=min_rate,
+        breaker_min_runs=min_runs,
+    )
+    calls = []
+
+    def fake_batch(run_index, permutation, shard_path):
+        calls.append(run_index)
+        _hdf5_path(shard_path).write_bytes(b"x")
+        return {"exported": round(rates[run_index] * 50), "attempts": 50}
+
+    def fake_convert(_shard_path):
+        return {"episodes": 1, "total": 1}
+
+    try:
+        gd.run_campaign(cfg, fake_batch, fake_convert)
+    except gd.CircuitBreakerTripped as exc:
+        return calls, json.loads((tmp_path / "ledger.json").read_text())["runs"], exc
+    return calls, json.loads((tmp_path / "ledger.json").read_text())["runs"], None
+
+
+def test_circuit_breaker_trips_after_four_runs_below_the_floor(tmp_path):
+    """Four runs pooled at 0.60 < 0.70: no fifth run is launched, and every completed run,
+    including the one whose convert was still pending, is in the ledger before the stop."""
+    rates = [0.8, 0.6, 0.5, 0.5, 0.9, 0.9]
+    calls, runs, exc = _breaker_campaign(tmp_path, rates)
+    assert calls == [0, 1, 2, 3]
+    assert [r["run_index"] for r in runs] == [0, 1, 2, 3]
+    assert exc is not None and "0.600" in str(exc) and "4 runs" in str(exc)
+
+
+def test_circuit_breaker_does_not_fire_before_the_minimum_run_count(tmp_path):
+    """Three bad runs are not yet a verdict: the fourth must complete first."""
+    rates = [0.2, 0.2, 0.2, 0.9, 0.9]
+    calls, runs, exc = _breaker_campaign(tmp_path, rates)
+    # Run 3 is launched with three bad runs behind it; the pool after it (0.375) trips.
+    assert calls == [0, 1, 2, 3]
+    assert exc is not None
+    assert [r["run_index"] for r in runs] == [0, 1, 2, 3]
+
+
+def test_circuit_breaker_stays_quiet_at_or_above_the_floor(tmp_path):
+    rates = [0.7, 0.7, 0.7, 0.7, 0.7]
+    calls, _runs, exc = _breaker_campaign(tmp_path, rates, target=5 * 35)
+    assert exc is None
+    assert calls == [0, 1, 2, 3, 4]
+
+
+def test_circuit_breaker_can_be_disabled(tmp_path):
+    rates = [0.1] * 6
+    calls, _runs, exc = _breaker_campaign(tmp_path, rates, min_rate=None, target=6 * 5)
+    assert exc is None
+    assert calls == [0, 1, 2, 3, 4, 5]
+
+
+def test_circuit_breaker_pools_the_resumed_ledger(tmp_path):
+    """A resumed campaign reads the pool from the ledger, so a stopped campaign that is
+    resumed without a fix stops again immediately, before any GPU time."""
+    rates = [0.5, 0.5, 0.5, 0.5]
+    calls, runs, exc = _breaker_campaign(tmp_path, rates)
+    assert exc is not None and calls == [0, 1, 2, 3]
+    _write_dataset(tmp_path / "ds", runs[-1]["converted_total"])  # what a resume checks
+    calls2, _runs2, exc2 = _breaker_campaign(tmp_path, rates + [0.9])
+    assert calls2 == []
+    assert exc2 is not None
+
+
+def test_main_turns_a_tripped_breaker_into_campaign_fail(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(gd, "_make_real_run_batch", lambda cfg: None)
+    monkeypatch.setattr(gd, "_make_real_run_convert", lambda cfg: None)
+    monkeypatch.setattr(gd, "run_campaign", _raise(gd.CircuitBreakerTripped("pooled 0.5")))
+    rc = gd.main(["--out_dir", str(tmp_path / "w"), "--dataset_root", str(tmp_path / "d")])
+    assert rc == 1
+    out = capsys.readouterr()
+    assert "CAMPAIGN_FAIL" in out.out and "pooled 0.5" in out.err
