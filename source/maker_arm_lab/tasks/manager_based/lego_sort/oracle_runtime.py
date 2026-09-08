@@ -1240,6 +1240,12 @@ class OracleRig:
             **outcome,
             "induced_offset": orc.induced_offset,
             "induced_noise": orc.induced_noise,
+            # The brick indices this episode targeted, in order (retries are not repeated
+            # entries). The acceptance discriminator for --randomize_pick_order: run_meta
+            # can only say the flag was set, while a campaign whose episodes all read
+            # [0, 1, 2, 3, 4, 5] here shipped the fixed R,B,Y,G,R,B schedule regardless.
+            # Also readable with the flag off, as the positive record that it WAS fixed.
+            "pick_order": list(orc.pick_order),
         }
 
     def _succeeded(self, env_id: int) -> bool | None:

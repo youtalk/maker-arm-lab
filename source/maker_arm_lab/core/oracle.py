@@ -248,6 +248,20 @@ class OracleNoise:
     gain_scale: tuple[float, float] = (0.7, 1.0)
     action_noise_std: float = 0.05  # raw-action units, translation channels
     via_jitter: float = 0.02  # RETREAT via-point jitter, m
+    # Pick the next target uniformly at random among the not-yet-stowed bricks instead of
+    # taking the lowest index. Off by default, so every MS1 recipe stays byte-identical.
+    #
+    # ``_next_brick`` scans indices in order and brick color is ``index % 4``, so every
+    # demonstration in a lowest-index corpus picks R,B,Y,G,R,B: a fixed color SCHEDULE a
+    # policy can follow open-loop without reading which brick it carries. openyam-lab
+    # measured exactly that (D2, 120 episodes, 2026-08-15: 8.3% wrong-bin on-schedule vs
+    # 42.0% off-schedule) and randomizing the order was its largest gate lever (W4,
+    # per-brick 0.372 -> 0.626). With the order randomized there is no schedule to fit, so
+    # a policy that delivers correctly can only be conditioning on the carried brick. This
+    # removes a shortcut from the data; it adds no signal. Deliberately outside
+    # ``--noise_scale``: it is a separate mechanism, and folding it in would make every
+    # recipe string ambiguous about whether its episodes carried the schedule.
+    randomize_pick_order: bool = False
 
 
 @dataclass(frozen=True)
@@ -260,6 +274,11 @@ class EpisodeDraw:
     action_noise_std: float
     via_dx: float
     via_dy: float
+    # Carried as the FLAG, not as a sampled permutation: the target is drawn per pick from
+    # whatever is still unstowed (see ``EnvOracle._next_brick``), so a brick that a retry, a
+    # failed grasp or an unreachable pose takes off the table never has to be edited out of
+    # a pre-drawn order.
+    randomize_pick_order: bool = False
 
 
 def sample_episode_draw(rng: random.Random, noise: OracleNoise) -> EpisodeDraw:
@@ -272,6 +291,7 @@ def sample_episode_draw(rng: random.Random, noise: OracleNoise) -> EpisodeDraw:
         action_noise_std=noise.action_noise_std,
         via_dx=rng.uniform(-noise.via_jitter, noise.via_jitter),
         via_dy=rng.uniform(-noise.via_jitter, noise.via_jitter),
+        randomize_pick_order=noise.randomize_pick_order,
     )
 
 
@@ -537,6 +557,16 @@ class EnvOracle:
         self._sabotage_jitter = 0.0
         self.induced_offset = 0
         self.induced_noise = 0
+        # Every NEW target this episode selected, in the order it selected them (a retry
+        # re-attempts the same brick and is NOT appended). Recorded whether or not the order
+        # is randomized: the run_meta flag says what was configured, this says what the
+        # episode actually did, and only the second can catch a campaign that advertises a
+        # randomized schedule and shipped the fixed one.
+        self.pick_order: list[int] = []
+        if draw.randomize_pick_order and rng is None:
+            # A corpus whose run_meta claims a randomized schedule and whose episodes all
+            # pick R,B,Y,G,R,B is worse than a crash.
+            raise ValueError("randomize_pick_order requires an rng")
 
     @property
     def abandoned(self) -> bool:
@@ -568,13 +598,29 @@ class EnvOracle:
         return {i for i in range(self.num_bricks) if bool(ok[i])}
 
     def _next_brick(self, scene: SceneSnapshot) -> int | None:
+        """Select this pick's target among the bricks still on the table.
+
+        Lowest index by default. With ``draw.randomize_pick_order`` the choice is uniform
+        over the SAME candidate set: randomizing the order must not relax the reachability
+        filter or let a stowed brick be picked twice, so the candidate list is built before
+        the draw and only the choice changes. The draw is per pick rather than a permutation
+        fixed at episode start: candidacy is re-evaluated against the live scene every time,
+        so a brick that rolls out of reach mid-episode simply stops being a candidate.
+        """
         limit = layout.top_down_x_limit(self.bl)
-        for index in range(self.num_bricks):
-            if index in self._sorted or index in self._stowed(scene):
-                continue
-            if scene.brick_pos[index, 0].item() <= limit:
-                return index
-        return None
+        stowed = self._stowed(scene)
+        candidates = [
+            index
+            for index in range(self.num_bricks)
+            if index not in self._sorted
+            and index not in stowed
+            and scene.brick_pos[index, 0].item() <= limit
+        ]
+        if not candidates:
+            return None
+        if not self.draw.randomize_pick_order:
+            return candidates[0]
+        return self.rng.choice(candidates)
 
     def _release_target(self, brick: int) -> torch.Tensor:
         color = brick % len(layout.BRICK_COLOR_ORDER)
@@ -698,6 +744,7 @@ class EnvOracle:
                         else Phase.ABANDON
                     )
                     return None
+                self.pick_order.append(self.target_brick)
                 self._brick_start = scene.brick_pos[self.target_brick].clone()
                 self._induced_style = None
                 self._sabotage_radius = 0.0

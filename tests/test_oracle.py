@@ -598,3 +598,156 @@ def test_jaw_fold_base_sign_flips_the_swing_budget():
     assert oracle.fold_jaw_heading(
         -0.5, 0.0, 1.0, limits, base_yaw_range=(0.0, 1.2), base_sign=-1.0
     ) == pytest.approx(-0.5)
+
+
+# --- randomized pick order -------------------------------------------------
+#
+# Brick color is ``index % 4`` and ``_next_brick`` takes the lowest index, so every
+# demonstration in a lowest-index corpus picks R,B,Y,G,R,B in that order: a schedule a
+# policy can follow without looking at what it carries, and openyam-lab measured its policy
+# doing exactly that (8.3% wrong-bin on-schedule vs 42.0% off-schedule). These tests pin the
+# knob that removes the schedule (MS2 spec section 3.1), and pin that removing it costs none
+# of the guarantees the fixed order gave: same brick on a retry, every brick exactly once,
+# reachability filter intact, and the MS1 sequence byte for byte with the knob off.
+
+
+def _desk_snapshot(num_bricks, unreachable=()):
+    """``num_bricks`` bricks in a reachable row on the desk."""
+    bl = layout.DEFAULT_BIN_LAYOUT
+    pos = torch.zeros(num_bricks, 3)
+    for i in range(num_bricks):
+        x = layout.top_down_x_limit(bl) + 0.02 if i in unreachable else 0.20
+        pos[i] = torch.tensor([x, -0.10 + 0.04 * i, layout.BRICK_SIZE[2] / 2])
+    return oracle.SceneSnapshot(
+        brick_pos=pos,
+        brick_yaw=torch.zeros(num_bricks),
+        brick_lin_vel=torch.zeros(num_bricks, 3),
+        pick_point=torch.tensor([0.28, 0.0, 0.20]),
+    )
+
+
+def _order_oracle(num_bricks=6, seed=0, randomize=True, rng=None):
+    noise = oracle.OracleNoise(randomize_pick_order=randomize)
+    return oracle.EnvOracle(
+        layout.DEFAULT_BIN_LAYOUT,
+        num_bricks=num_bricks,
+        draw=oracle.sample_episode_draw(random.Random(0), noise),
+        rng=random.Random(seed) if rng is None else rng,
+    )
+
+
+def _run_pick(orc, scene):
+    """One clean pick->place cycle from HOVER; returns the brick it targeted."""
+    if orc.next_goal(scene) is None:  # HOVER's entry selects the target
+        return None
+    brick = orc.target_brick
+    orc.report(oracle.PhaseResult(outcome="converged", pinch_ok=None, lifted=None), scene)
+    _run_phase(orc, scene, outcome="stalled")  # DESCEND
+    _run_phase(orc, scene)  # CLOSE
+    _run_phase(orc, scene, pinch_ok=True, lifted=True)  # LIFT
+    for _ in range(4):  # RAISE, EXTEND, RELEASE, RETREAT
+        _run_phase(orc, scene)
+    return brick
+
+
+def _run_episode(orc, scene):
+    """Drive an episode of clean picks to DONE (or ABANDON); returns the order."""
+    _run_phase(orc, scene)  # SETTLE
+    while _run_pick(orc, scene) is not None:
+        pass
+    return list(orc.pick_order)
+
+
+def test_pick_order_defaults_to_lowest_index_and_consumes_no_randomness():
+    """Default off must be byte-identical: the MS1 order AND the same rng stream, or
+    every MS1 shard stops being comparable with the MS2 corpus."""
+    assert oracle.OracleNoise().randomize_pick_order is False
+    assert _draw().randomize_pick_order is False
+    rng = random.Random(3)
+    orc = _order_oracle(randomize=False, rng=rng)
+    before = rng.getstate()
+    assert _run_episode(orc, _desk_snapshot(6)) == [0, 1, 2, 3, 4, 5]
+    assert rng.getstate() == before
+
+
+def test_pick_order_is_recorded_with_the_knob_off_too():
+    """The sidecar's positive record that a run's schedule WAS fixed."""
+    orc = oracle.EnvOracle(layout.DEFAULT_BIN_LAYOUT, num_bricks=3, draw=_draw())
+    assert _run_episode(orc, _desk_snapshot(3)) == [0, 1, 2]
+
+
+def test_randomized_pick_order_varies_and_leaves_the_fixed_schedule():
+    """The point of the knob: neither the brick order nor the color order it implies may
+    stay predictable across episodes."""
+    scene = _desk_snapshot(6)
+    orders = [tuple(_run_episode(_order_oracle(seed=seed), scene)) for seed in range(20)]
+    assert len(set(orders)) >= 10
+    assert sum(order == (0, 1, 2, 3, 4, 5) for order in orders) <= 1
+    colors = {tuple(b % len(layout.BRICK_COLOR_ORDER) for b in order) for order in orders}
+    assert len(colors) >= 10
+
+
+def test_randomized_pick_order_eventually_chooses_every_reachable_brick_first():
+    """Uniform over the candidates: over many episodes every brick is the FIRST pick."""
+    scene = _desk_snapshot(6)
+    firsts = {_run_episode(_order_oracle(seed=seed), scene)[0] for seed in range(60)}
+    assert firsts == set(range(6))
+
+
+def test_randomized_pick_order_still_stows_every_brick_exactly_once():
+    """Randomizing the schedule must not cost coverage: no repeats, no skips."""
+    for seed in range(20):
+        orc = _order_oracle(seed=seed)
+        order = _run_episode(orc, _desk_snapshot(6))
+        assert sorted(order) == list(range(6))
+        assert orc.phase == oracle.Phase.DONE
+
+
+def test_randomized_pick_order_keeps_a_retry_on_the_same_brick():
+    """Randomization selects a NEW target; a failed grasp still re-attempts the brick it
+    just missed, and does not count as a second pick."""
+    orc = _order_oracle(seed=4)
+    scene = _desk_snapshot(6)
+    _run_phase(orc, scene)  # SETTLE
+    _run_phase(orc, scene)  # HOVER selects
+    first = orc.target_brick
+    _run_phase(orc, scene, outcome="stalled")  # DESCEND
+    _run_phase(orc, scene)  # CLOSE
+    _run_phase(orc, scene, pinch_ok=False, lifted=False)  # LIFT fails -> REOPEN
+    _run_phase(orc, scene)  # REOPEN -> HOVER
+    _run_phase(orc, scene)  # HOVER again
+    assert orc.target_brick == first
+    assert orc.pick_order == [first]
+
+
+def test_randomized_pick_order_is_reproducible_from_the_seed():
+    """A shard's order has to be re-derivable from its recorded seeds."""
+    scene = _desk_snapshot(6)
+    assert _run_episode(_order_oracle(seed=17), scene) == _run_episode(
+        _order_oracle(seed=17), scene
+    )
+    assert _run_episode(_order_oracle(seed=17), scene) != _run_episode(
+        _order_oracle(seed=18), scene
+    )
+
+
+def test_randomized_pick_order_still_skips_unreachable_bricks():
+    """The reachability filter is the oracle's, not the ordering's."""
+    for seed in range(8):
+        orc = _order_oracle(seed=seed)
+        order = _run_episode(orc, _desk_snapshot(6, unreachable=(2,)))
+        assert 2 not in order
+        assert sorted(order) == [0, 1, 3, 4, 5]
+        assert orc.phase == oracle.Phase.ABANDON
+
+
+def test_randomize_pick_order_without_an_rng_is_refused():
+    """A run_meta advertising a randomized schedule over a corpus that silently kept the
+    fixed one is worse than a crash."""
+    noise = oracle.OracleNoise(randomize_pick_order=True)
+    with pytest.raises(ValueError, match="rng"):
+        oracle.EnvOracle(
+            layout.DEFAULT_BIN_LAYOUT,
+            num_bricks=6,
+            draw=oracle.sample_episode_draw(random.Random(0), noise),
+        )
