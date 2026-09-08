@@ -1,4 +1,4 @@
-"""Recorder terms for scripted-oracle data generation (spec section 5.4 item 4).
+"""Recorder terms for scripted-oracle data generation (spec section 2.3, Datagen-v0).
 
 The dataset's action stream is the applied joint-position target -- what a
 joint-position policy must output and what the real robot's CAN interface

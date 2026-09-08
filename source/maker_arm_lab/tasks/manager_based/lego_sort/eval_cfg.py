@@ -1,6 +1,6 @@
 """Gate-evaluation env: the Datagen scene/DR with the dataset's action space.
 
-Registered as MakerArm-LegoSort-Eval-v0 (design spec section 5.5).
+Registered as MakerArm-LegoSort-Eval-v0 (design spec section 2.3, Eval-v0).
 Delta from LegoSortDatagenEnvCfg, and nothing else:
 
 - recorders: back to the empty default. Nothing is exported at eval time;

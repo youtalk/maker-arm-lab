@@ -16,7 +16,7 @@ class MITModeActuator(IdealPDActuator):
     """IdealPDActuator whose torque computation is pinned to core.mit_law.
 
     The indirection exists so the sim actuator and a future real-robot CAN
-    backend share one law (design spec section 5.2). Swap this class, keep
+    backend share one law (design spec section 4.4). Swap this class, keep
     the interface. This class is NOT behaviorally equivalent to
     IdealPDActuator on two points, both deliberate and both documented here
     (code review correction -- an earlier version of this docstring claimed
@@ -51,7 +51,7 @@ class MITModeActuator(IdealPDActuator):
        _data.joint_pos_target/joint_vel_target buffers and so never passes
        None here either. The branch is kept because a direct caller is the
        whole point of this class -- it is what the CAN backend of spec
-       section 5.2 will be -- and it is pinned by
+       section 4.4 will be -- and it is pinned by
        tests/test_mit_mode_actuator.py so it cannot rot while unused.
     2. computed_effort is the demand *unclamped by effort_limit*, applied_effort
        is the clamped one actually sent to the simulation -- matching

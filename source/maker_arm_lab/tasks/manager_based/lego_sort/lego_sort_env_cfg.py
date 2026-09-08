@@ -1,4 +1,4 @@
-"""LegoSort manager-based environment (design spec section 5.3).
+"""LegoSort manager-based environment (design spec section 2.3).
 
 Modeled on isaaclab_tasks' stack task
 (``manager_based/manipulation/stack/stack_env_cfg.py`` +
@@ -128,7 +128,7 @@ class LegoSortEnvCfg(ManagerBasedRLEnvCfg):
 
     num_bricks: int = 6
     num_arms: int = 1
-    # Contact-escalation last resort from the design spec's section 5.3 ladder.
+    # Contact-escalation last resort from openyam-lab's escalation ladder (not in the MS1 spec).
     # Carried over from OpenYAM's M1 LegoSort work, where it was never needed
     # (12/12 scripted grasps at real size on that arm); not yet re-validated on
     # the Maker Arm -- scripts/scripted_grasp_check.py (Task D3) is what would
@@ -142,16 +142,16 @@ class LegoSortEnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self):
         if self.num_arms != 1:
-            raise NotImplementedError("LegoSort implements single-arm only (spec section 5.3)")
+            raise NotImplementedError("LegoSort implements single-arm only (spec section 2.3)")
         if not 4 <= self.num_bricks <= 8:
-            raise ValueError("num_bricks must be in [4, 8] (spec section 5.3)")
+            raise ValueError("num_bricks must be in [4, 8] (spec section 2.3)")
         if self.brick_scale != 1.0:
             # Guarded rather than left as an unguarded public knob, because
             # what it produces when used is an inconsistent scene, silently:
             # the geometry scales but BRICK_MASS does not (so density falls as
             # the cube), MIN_SEPARATION does not, and layout's bin interior
             # AABB -- what the success predicate grades against -- does not
-            # either. Enlarged bricks are a real rung of the spec section 5.3
+            # either. Enlarged bricks are a real rung of openyam-lab's
             # escalation ladder, so this is a "finish the job" marker, not a
             # ban: scale the mass, the separation and the bin AABB together
             # and re-measure, then lift the guard.

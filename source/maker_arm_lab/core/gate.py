@@ -1,4 +1,4 @@
-"""Gate-evaluation rollout bookkeeping (design spec section 5.5).
+"""Gate-evaluation rollout bookkeeping (design spec section 2.3, Eval-v0).
 
 Torch-only, like core.checker: an eval script delegates here so the gate
 arithmetic has CPU unit tests. One RolloutTracker tracks one lockstep

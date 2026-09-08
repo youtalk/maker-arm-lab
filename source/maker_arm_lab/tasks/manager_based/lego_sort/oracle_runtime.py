@@ -569,7 +569,7 @@ class OracleRig:
         self.dwell_left[i] = self.dwell[i]
 
     def _command_noise(self, i: int) -> torch.Tensor | float:
-        """Per-step joint jitter for this env's episode draw (spec section 5.4 item 2).
+        """Per-step joint jitter for this env's episode draw (spec section 2.3, Datagen-v0 DR).
 
         Applied to the COMMAND and not to the plan, so the disturbance reaches the arm and
         the recorded action exactly as the servo version's action noise did, without the

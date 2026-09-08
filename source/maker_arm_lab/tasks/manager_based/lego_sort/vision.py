@@ -1,4 +1,4 @@
-"""Camera-observation variants of LegoSort (design spec section 5.3).
+"""Camera-observation variants of LegoSort (design spec section 2.3).
 
 Adds an ``images`` observation group carrying two 224x224 RGB streams -- a
 wrist camera and a fixed overhead camera -- to the joint-position and
@@ -35,7 +35,7 @@ from maker_arm_lab.robots import WRIST_CAM_POS_IN_WRIST, WRIST_CAM_ROT_IN_WRIST,
 from .lego_sort_env_cfg import LegoSortEnvCfg
 from .variants import LegoSortIKRelEnvCfg
 
-# Spec section 5.3 invariant: both streams are 224x224 RGB. Square, so the
+# Spec section 4.2 invariant: both streams are 224x224 RGB. Square, so the
 # horizontal and vertical fields of view are equal for square pixels (Isaac
 # Lab derives vertical_aperture = horizontal_aperture * height / width when
 # it is left at None -- isaaclab/sensors/camera/camera.py).

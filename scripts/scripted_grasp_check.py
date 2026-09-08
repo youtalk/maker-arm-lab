@@ -1,6 +1,6 @@
 """Scripted grasp + brick contact-stability validation (GPU).
 
-The physics proof this milestone hangs on (design spec section 5.3): real-size 31.8 x 15.8
+The physics proof this milestone hangs on (design spec section 5 item 4): real-size 31.8 x 15.8
 x 9.6 mm bricks must rest stably on the desk, and the arm must be able to pick one up
 autonomously.
 
