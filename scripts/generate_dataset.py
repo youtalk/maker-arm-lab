@@ -216,6 +216,10 @@ class Ledger:
     def __init__(self, path: Path):
         self.path = path
         self.runs: list[dict] = []
+        # The campaign's --target, written beside the runs so a consumer of the ledger alone
+        # (lerobot_stack/train_act.sh) can tell a complete corpus from the partial one a
+        # swept or breaker-stopped campaign leaves behind. None until run_campaign sets it.
+        self.target: int | None = None
 
     @property
     def total_successes(self) -> int:
@@ -243,13 +247,16 @@ class Ledger:
     def load(cls, path: Path) -> "Ledger":
         ledger = cls(path)
         if path.exists():
-            ledger.runs = json.loads(path.read_text()).get("runs", [])
+            payload = json.loads(path.read_text())
+            ledger.runs = payload.get("runs", [])
+            ledger.target = payload.get("target")
         return ledger
 
     def save(self) -> None:
-        self.path.write_text(
-            json.dumps({"total_successes": self.total_successes, "runs": self.runs}, indent=2)
-        )
+        payload = {"total_successes": self.total_successes, "runs": self.runs}
+        if self.target is not None:
+            payload["target"] = self.target
+        self.path.write_text(json.dumps(payload, indent=2))
 
     def append(self, record: dict) -> None:
         self.runs.append(record)
@@ -547,6 +554,7 @@ def run_campaign(
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     ledger_path = cfg.out_dir / "ledger.json"
     ledger = Ledger.load(ledger_path)
+    ledger.target = cfg.target
     # Before the early return, not after: reporting a campaign complete over a dataset known to
     # disagree with its own ledger is the worst outcome available, because nothing downstream
     # would ever look again.

@@ -1078,3 +1078,18 @@ def test_main_turns_a_tripped_breaker_into_campaign_fail(monkeypatch, capsys, tm
     assert rc == 1
     out = capsys.readouterr()
     assert "CAMPAIGN_FAIL" in out.out and "pooled 0.5" in out.err
+
+
+def test_the_ledger_records_the_campaign_target(tmp_path):
+    cfg = gd.CampaignCfg(
+        out_dir=tmp_path, dataset_root=tmp_path / "ds", target=40, attempts_per_run=50, num_envs=8
+    )
+
+    def fake_batch(run_index, permutation, shard_path):
+        _hdf5_path(shard_path).write_bytes(b"x")
+        return {"exported": 42, "attempts": 50}
+
+    gd.run_campaign(cfg, fake_batch, lambda _p: {"episodes": 42, "total": 42})
+    ledger = json.loads((tmp_path / "ledger.json").read_text())
+    assert ledger["target"] == 40
+    assert gd.Ledger.load(tmp_path / "ledger.json").target == 40
