@@ -3,11 +3,11 @@
 One PROCESS = one generation run = one draw of the run-level axes (bin layout,
 color permutation, camera pose, lighting, floor color) passed in through the
 constructor. Reset-level axes (brick scatter, desk color, brick mass/friction,
-start pose) are event terms firing per episode. Spec section 5.4 item 3.
+start pose) are event terms firing per episode. Spec section 2.3 (Datagen-v0).
 
 Lighting and the ground plane are single global prims shared by all parallel
 envs -- randomizing them per reset would change them mid-episode for the other
-envs, so they are constructor fields here, not event terms (spec section 5.3).
+envs, so they are constructor fields here, not event terms (spec section 2.3).
 """
 
 import math

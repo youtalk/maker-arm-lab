@@ -41,7 +41,7 @@ from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
 import maker_arm_lab.tasks  # noqa: F401  -- registers MakerArm-* envs
 
-# The contract the -Vision- ids promise (design spec section 5.3). Asserted
+# The contract the -Vision- ids promise (design spec section 4.2). Asserted
 # rather than printed: a check that only prints what it found cannot fail, and
 # the failure mode this script exists to catch is a camera that silently stops
 # producing pixels.

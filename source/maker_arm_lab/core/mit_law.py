@@ -1,6 +1,6 @@
 """RobStride MIT-mode control law: tau = kp*(q* - q) + kd*(qd* - qd) + tau_ff.
 
-This function is the sim<->real contract point (design spec section 5.2): the
+This function is the sim<->real contract point (design spec section 4.4): the
 Isaac Lab actuator (maker_arm_lab.actuators.mit_mode) and a future CAN backend
 must both reduce to exactly this law. Torch-only on purpose -- CPU unit tests
 must not require isaaclab.

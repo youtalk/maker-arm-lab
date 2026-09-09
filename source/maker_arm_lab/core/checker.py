@@ -1,4 +1,4 @@
-"""Per-brick and per-episode success predicates (design spec section 5.3).
+"""Per-brick and per-episode success predicates (design spec section 2.2, ported).
 
 Torch-only: the isaaclab-facing wrappers live in the task's mdp package and
 must delegate here, so the gate metric has CPU unit tests.

@@ -1,4 +1,4 @@
-"""Scripted pick-and-place oracle: per-env phase sequencing (spec section 5.4).
+"""Scripted pick-and-place oracle: per-env phase sequencing (spec section 2.2, ported).
 
 Torch + stdlib only -- NO isaaclab imports. The GPU binding that turns Goals
 into joint targets lives in tasks/manager_based/lego_sort/oracle_runtime.py,
@@ -240,7 +240,7 @@ _FOLD_GUARD_RAD = 0.10
 
 @dataclass(frozen=True)
 class OracleNoise:
-    """Range config for per-episode noise draws (spec section 5.4 item 2)."""
+    """Range config for per-episode noise draws (spec section 2.3, Datagen-v0 DR)."""
 
     hover_height: tuple[float, float] = (0.10, 0.14)
     lateral_offset: float = 0.003
