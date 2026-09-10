@@ -79,7 +79,10 @@ Each episode's ``episode_stats()`` payload also always carries
 ``"induced_offset"``/``"induced_noise"`` counters (how many of that episode's
 picks got a deliberate first-attempt grasp failure of each kind), propagated
 into the sidecar the same way -- they read ``0`` on runs where ``--induce_prob``
-is left at its default of ``0.0``.
+is left at its default. It also always carries ``"pick_order"``, the brick indices
+that episode targeted in order, which is what makes ``--randomize_pick_order``
+auditable per episode rather than only in ``RUN_META``: with the flag off it reads
+``[0, 1, ..., num_bricks - 1]``.
 
 Run:
   $ISAACLAB_PATH/isaaclab.sh -p scripts/generate_batch.py --headless \\
@@ -127,6 +130,16 @@ parser.add_argument(
     default=1.0,
     help="Multiplier on every OracleNoise axis (0 = OracleNoise's own nominal minus the "
     "hover-height band collapsed to its center; see the OracleNoise construction below).",
+)
+parser.add_argument(
+    "--randomize_pick_order",
+    action="store_true",
+    help="Pick the next brick uniformly at random among the ones still on the table instead "
+    "of taking the lowest index. Brick color is index %% 4, so the default order demonstrates "
+    "the fixed color schedule R,B,Y,G,R,B in every episode, which openyam-lab measured its "
+    "policy following instead of the brick it carries (8.3%% wrong-bin on-schedule vs 42.0%% "
+    "off-schedule). Off by default, so every MS1 recipe stays byte-identical. Drawn from the "
+    "--run_seed RNG, and each episode's record carries the pick_order it actually used.",
 )
 parser.add_argument(
     "--probe",
@@ -248,6 +261,10 @@ def build_run(args: argparse.Namespace) -> tuple[dict, layout.BinLayout, oracle.
         gain_scale=(1.0 - 0.3 * args.noise_scale, 1.0),
         action_noise_std=0.05 * args.noise_scale,
         via_jitter=0.02 * args.noise_scale,
+        # Outside --noise_scale on purpose: it removes a SHORTCUT (the fixed R,B,Y,G,R,B
+        # color schedule) rather than widening a noise band, so no recipe string should
+        # read as if it might have carried it.
+        randomize_pick_order=args.randomize_pick_order,
     )
     return draw, bl, noise
 
@@ -293,6 +310,8 @@ def run() -> tuple[bool, int, int]:
         "probe": args.probe,
         "noise_scale": args.noise_scale,
         "start_pose_offset_rad": args.start_pose_offset_rad,
+        # What was CONFIGURED; each episode's own "pick_order" records what was picked.
+        "randomize_pick_order": noise.randomize_pick_order,
         "induction": None
         if induction is None
         else {
@@ -410,6 +429,18 @@ def run() -> tuple[bool, int, int]:
         "episodes_per_env": {
             str(i): c for i, c in sorted(Counter(e["env"] for e in episodes).items())
         },
+        # The oracle's planning-lookahead counters (MS1 report section 9.3), summed over
+        # the run's episodes so the campaign ledger can carry them without re-reading the
+        # sidecar. Both read 0 on a run where every RAISE and every drawn hover planned.
+        "raise_vetoed": sum(int(e.get("raise_vetoed", 0)) for e in episodes),
+        "hover_lowered": sum(int(e.get("hover_lowered", 0)) for e in episodes),
+        # How many episodes actually targeted bricks out of lowest-index order. The
+        # per-run audit of --randomize_pick_order: with the flag on and six bricks, the
+        # lowest-index sequence occurs by chance once in 720 episodes, so a run where this
+        # reads 0 shipped the fixed schedule whatever RUN_META claims.
+        "off_schedule_episodes": sum(
+            1 for e in episodes if list(e.get("pick_order", [])) != sorted(e.get("pick_order", []))
+        ),
     }
     if args.probe:
         success_rate = exported / attempts if attempts else 0.0
