@@ -1,0 +1,500 @@
+"""Gate-evaluation supervisor: one policy server + N eval processes + aggregation.
+
+Stdlib-only, like generate_dataset.py, so it runs under the system Python while its
+subprocesses run in their own venvs: lerobot_stack/policy_server.py under
+lerobot_stack/.venv, scripts/eval_policy.py under isaaclab.sh -p (VIRTUAL_ENV bootstrapped
+the way generate_dataset.py's _isaaclab_batch_env does it). Ported from openyam-lab's
+run_gate_eval.py and cut down (MS2 spec section 5.2): no held-out permutation logic (the
+MS2 campaign's schedule covers all 24 bin-color permutations), no replay injection, no
+unstick plumbing, no parallel lanes.
+
+Draws: --processes run-level draws, each a uniformly random bin-color permutation and a
+(run_seed, layout_seed) pair derived from --seed with the campaign's exact formula
+((seed * 1000 + i) % 2**32, + 500 for the layout), asserted disjoint from every seed in the
+campaign ledger (--ledger). The MS2 seed sets are fixed in the plan: corpus 20260907
+(ledger), selection 20260917, official 20260927; ten apart because the formula spreads a
+campaign of R runs over seed*1000 + [0, R) and + [500, 500 + R).
+
+Each process's EVAL_OK payload is written to <out_dir>/eval_NNN.json and REUSED on a later
+invocation with the same out_dir and checkpoint, so an interrupted ladder rung or gate
+resumes where it stopped instead of re-rolling finished draws (a per-unit completion file,
+the harness-task-sweeps lesson). Delete the file to re-roll a draw.
+
+Prints GATE_OK or GATE_FAIL with the aggregate against --threshold; gate_results.json
+carries everything (per-brick rate with its Wilson 95% interval, the reported-not-gated
+secondaries, the draws, the served inference config).
+"""
+
+import argparse
+import itertools
+import json
+import math
+import os
+import random
+import subprocess
+import sys
+import threading
+from dataclasses import dataclass, field
+from pathlib import Path
+
+ALL_PERMUTATIONS = sorted(itertools.permutations(range(4)))
+_SEED_BOUND = 2**32
+
+
+class EvalProcessError(RuntimeError):
+    """One eval process failed (bad exit, no EVAL_OK token, or timeout)."""
+
+
+class GateRunError(RuntimeError):
+    """A process exhausted its retries; the gate run is invalid."""
+
+
+@dataclass
+class EvalDraw:
+    process_index: int
+    permutation: tuple
+    run_seed: int
+    layout_seed: int
+
+
+@dataclass
+class GateCfg:
+    checkpoint: str
+    out_dir: Path
+    processes: int
+    num_envs: int
+    seed: int
+    threshold: float
+    ledger: Path
+    isaaclab_path: Path = field(default_factory=lambda: Path.home() / "src/IsaacLab")
+    port: int = 5555
+    device: str = "cuda"
+    retries: int = 2
+    n_action_steps: int | None = None
+    temporal_ensemble_coeff: float | None = None
+    only_processes: tuple | None = None
+    eval_timeout_s: float = 4 * 3600
+
+
+def make_eval_draws(processes: int, seed: int) -> list[EvalDraw]:
+    rng = random.Random(f"gate:{seed}")
+    return [
+        EvalDraw(
+            process_index=i,
+            permutation=tuple(rng.choice(ALL_PERMUTATIONS)),
+            run_seed=(seed * 1000 + i) % _SEED_BOUND,
+            layout_seed=(seed * 1000 + 500 + i) % _SEED_BOUND,
+        )
+        for i in range(processes)
+    ]
+
+
+def select_draws(draws: list[EvalDraw], only_processes: tuple | None) -> list[EvalDraw]:
+    """Filter a FULL draw list; a subset re-run must revisit the same draws, so the list is
+    always drawn in full and filtered afterwards."""
+    if only_processes is None:
+        return draws
+    valid = {d.process_index for d in draws}
+    unknown = sorted(set(only_processes) - valid)
+    if unknown:
+        raise ValueError(f"--only_processes {unknown} is outside the {len(draws)} drawn processes")
+    wanted = set(only_processes)
+    return [d for d in draws if d.process_index in wanted]
+
+
+def ledger_seeds(ledger_runs: list[dict]) -> set[int]:
+    recorded = set()
+    for run in ledger_runs:
+        recorded.add(int(run["seeds"]["run_seed"]))
+        recorded.add(int(run["seeds"]["layout_seed"]))
+    return recorded
+
+
+def assert_seeds_disjoint(draws: list[EvalDraw], ledger_runs: list[dict]) -> None:
+    recorded = ledger_seeds(ledger_runs)
+    for d in draws:
+        if d.run_seed in recorded or d.layout_seed in recorded:
+            raise ValueError(f"eval draw {d.process_index} collides with a campaign seed: {d}")
+
+
+def assert_seed_sets_disjoint(*seed_sets: tuple[str, list[EvalDraw]]) -> None:
+    """Selection and official draws must not share a seed with each other either."""
+    seen: dict[int, str] = {}
+    for name, draws in seed_sets:
+        for d in draws:
+            for s in (d.run_seed, d.layout_seed):
+                if s in seen and seen[s] != name:
+                    raise ValueError(f"seed {s} appears in both {seen[s]} and {name}")
+                seen[s] = name
+
+
+def wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple[float, float]:
+    if trials <= 0:
+        return (0.0, 0.0)
+    p = successes / trials
+    denom = 1.0 + z * z / trials
+    center = (p + z * z / (2.0 * trials)) / denom
+    half = z * math.sqrt(p * (1.0 - p) / trials + z * z / (4.0 * trials * trials)) / denom
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
+def aggregate_gate(process_payloads: list[dict], threshold: float) -> dict:
+    """Per-brick success rate = bricks delivered to their correct bin / (num_bricks x
+    episodes), as RolloutTracker grades it, gated against `threshold`. Everything else is
+    reported, not gated. The Wilson interval is over bricks and therefore optimistic (the
+    six bricks of one episode are not independent); the report reads it as such."""
+    episodes = [ep for p in process_payloads for ep in p["episodes"]]
+    bricks_total = sum(ep["num_bricks"] for ep in episodes)
+    bricks_stowed = sum(ep["bricks_stowed"] for ep in episodes)
+    rate = bricks_stowed / bricks_total if bricks_total else 0.0
+    steps_total = sum(ep["steps"] for ep in episodes)
+    grasp_attempts = sum(ep.get("grasp_attempts", 0) for ep in episodes)
+    grasp_successes = sum(ep.get("grasp_successes", 0) for ep in episodes)
+    grasp_successes_strict = sum(ep.get("grasp_successes_strict", 0) for ep in episodes)
+    releases_queued = sum(p.get("releases_queued", 0) for p in process_payloads)
+    wrong_bin = sum(ep.get("wrong_bin_deposits", 0) for ep in episodes)
+    clamp_steps = sum(ep["clamp_steps"] for ep in episodes)
+    lo, hi = wilson_interval(bricks_stowed, bricks_total)
+    return {
+        "gate": {
+            "threshold": threshold,
+            "episodes": len(episodes),
+            "bricks_total": bricks_total,
+            "bricks_stowed": bricks_stowed,
+            "per_brick_rate": rate,
+            "wilson95": [lo, hi],
+            "passed": rate >= threshold,
+        },
+        "secondary": {
+            "all_six_episode_rate": (
+                sum(1 for ep in episodes if ep["success"]) / len(episodes) if episodes else 0.0
+            ),
+            "episodes_with_any_brick": sum(1 for ep in episodes if ep["bricks_stowed"] > 0),
+            "bricks_stowed_histogram": {
+                str(k): sum(1 for ep in episodes if ep["bricks_stowed"] == k)
+                for k in range((episodes[0]["num_bricks"] if episodes else 0) + 1)
+            },
+            "grasp_attempts_graded_total": grasp_attempts,
+            "grasp_successes_total": grasp_successes,
+            "grasp_success_rate": (grasp_successes / grasp_attempts) if grasp_attempts else None,
+            "grasp_success_rate_strict": (
+                (grasp_successes_strict / grasp_attempts) if grasp_attempts else None
+            ),
+            "grasp_attempts_unresolved_total": sum(
+                ep.get("grasp_attempts_unresolved", 0) for ep in episodes
+            ),
+            "releases_queued_total": releases_queued,
+            "wrong_bin_deposits_total": wrong_bin,
+            "wrong_bin_rate": (wrong_bin / releases_queued) if releases_queued else None,
+            "never_closed_episodes": sum(
+                1 for ep in episodes if ep.get("first_close_step", -1) == -1
+            ),
+            "clamp_steps_total": clamp_steps,
+            "clamp_fraction": (clamp_steps / steps_total) if steps_total else 0.0,
+            "clamp_steps_per_joint": [
+                sum(ep.get("clamp_steps_per_joint", [0] * 6)[j] for ep in episodes)
+                for j in range(6)
+            ],
+            "mean_steps": (steps_total / len(episodes)) if episodes else None,
+        },
+    }
+
+
+def _extract_json_line(text: str, token: str) -> dict:
+    """Last `token {json}` line wins, matching generate_dataset.parse_batch_output."""
+    for line in reversed(text.splitlines()):
+        if line.startswith(token + " "):
+            return json.loads(line[len(token) + 1 :])
+    return {}
+
+
+def _server_command(cfg: GateCfg) -> list[str]:
+    cmd = [
+        "lerobot_stack/.venv/bin/python",
+        "lerobot_stack/policy_server.py",
+        "--checkpoint",
+        cfg.checkpoint,
+        "--port",
+        str(cfg.port),
+        "--device",
+        cfg.device,
+    ]
+    if cfg.n_action_steps is not None:
+        cmd += ["--n_action_steps", str(cfg.n_action_steps)]
+    if cfg.temporal_ensemble_coeff is not None:
+        cmd += ["--temporal_ensemble_coeff", str(cfg.temporal_ensemble_coeff)]
+    return cmd
+
+
+class _ServerHandle:
+    def __init__(self, proc: subprocess.Popen, ready: dict):
+        self._proc = proc
+        self.ready = ready
+
+    def stop(self) -> None:
+        self._proc.terminate()
+        try:
+            self._proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait()
+
+
+def _start_server(cfg: GateCfg) -> _ServerHandle:
+    """Launch policy_server.py and block until it prints SERVER_READY (300 s budget)."""
+    proc = subprocess.Popen(_server_command(cfg), stdout=subprocess.PIPE, text=True)
+    ready = threading.Event()
+    lines: list[str] = []
+
+    def _reader() -> None:
+        for line in proc.stdout:
+            lines.append(line)
+            if line.startswith("SERVER_READY "):
+                ready.set()
+                break
+
+    thread = threading.Thread(target=_reader, daemon=True)
+    thread.start()
+    thread.join(timeout=300)
+    if not ready.is_set():
+        proc.kill()
+        proc.wait()
+        raise EvalProcessError(
+            f"policy_server.py did not print SERVER_READY within 300s:\n{''.join(lines)}"
+        )
+    return _ServerHandle(proc, _extract_json_line("".join(lines), "SERVER_READY"))
+
+
+def _isaaclab_eval_env(cfg: GateCfg) -> dict[str, str]:
+    env = {**os.environ, "OMNI_KIT_ACCEPT_EULA": "YES"}
+    env.setdefault("VIRTUAL_ENV", str(cfg.isaaclab_path / ".venv"))
+    return env
+
+
+def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
+    return [
+        f"{cfg.isaaclab_path}/isaaclab.sh",
+        "-p",
+        "scripts/eval_policy.py",
+        "--headless",
+        "--enable_cameras",
+        "--num_envs",
+        str(cfg.num_envs),
+        "--run_seed",
+        str(draw.run_seed),
+        "--layout_seed",
+        str(draw.layout_seed),
+        "--permutation",
+        ",".join(str(p) for p in draw.permutation),
+        "--server",
+        f"tcp://127.0.0.1:{cfg.port}",
+        "--out",
+        str(cfg.out_dir / f"eval_{draw.process_index:03d}.raw.json"),
+    ]
+
+
+def _run_eval_subprocess(cfg: GateCfg, draw: EvalDraw) -> dict:
+    cmd = _eval_command(cfg, draw)
+    try:
+        result = subprocess.run(
+            cmd,
+            env=_isaaclab_eval_env(cfg),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=cfg.eval_timeout_s,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise EvalProcessError(
+            f"eval process {draw.process_index} exceeded {cfg.eval_timeout_s}s"
+        ) from exc
+    (cfg.out_dir / f"eval_{draw.process_index:03d}.log").write_text(result.stdout + result.stderr)
+    if result.returncode != 0:
+        raise EvalProcessError(
+            f"eval process {draw.process_index} exited {result.returncode}:\n"
+            f"{result.stdout[-4000:]}\n{result.stderr[-4000:]}"
+        )
+    payload = _extract_json_line(result.stdout, "EVAL_OK")
+    if not payload:
+        raise EvalProcessError(
+            f"eval process {draw.process_index} printed no EVAL_OK token:\n"
+            f"{result.stdout[-4000:]}\n{result.stderr[-4000:]}"
+        )
+    return payload
+
+
+def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
+    """A finished draw's payload from a previous invocation, if it is for this checkpoint
+    and this draw; anything else is ignored rather than trusted."""
+    path = cfg.out_dir / f"eval_{draw.process_index:03d}.json"
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text())
+    same_draw = (
+        payload.get("run_seed") == draw.run_seed
+        and payload.get("layout_seed") == draw.layout_seed
+        and list(payload.get("permutation", [])) == list(draw.permutation)
+    )
+    same_policy = str(payload.get("policy_id", "")).startswith(f"act:{cfg.checkpoint}")
+    return payload if same_draw and same_policy else None
+
+
+def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
+    """Run every selected draw against one server; aggregate; write gate_results.json.
+
+    `run_eval(draw) -> payload` and `start_server() -> handle with .stop() and .ready` are
+    injected so the orchestration has CPU tests. Finished draws are reused from
+    eval_NNN.json; the server is started only if at least one draw still has to run."""
+    cfg.out_dir.mkdir(parents=True, exist_ok=True)
+    ledger_runs = json.loads(cfg.ledger.read_text()).get("runs", [])
+    draws = make_eval_draws(cfg.processes, cfg.seed)
+    assert_seeds_disjoint(draws, ledger_runs)
+    selected = select_draws(draws, cfg.only_processes)
+    payloads: dict[int, dict] = {}
+    todo = []
+    for draw in selected:
+        cached = _cached_payload(cfg, draw)
+        if cached is not None:
+            payloads[draw.process_index] = cached
+            print(
+                f"[gate] process {draw.process_index}: reusing eval_{draw.process_index:03d}.json"
+            )
+        else:
+            todo.append(draw)
+    server_ready: dict = {}
+    if todo:
+        server = start_server()
+        server_ready = dict(getattr(server, "ready", {}) or {})
+        try:
+            for draw in todo:
+                payload = None
+                for attempt in range(cfg.retries + 1):
+                    try:
+                        payload = run_eval(draw)
+                        break
+                    except EvalProcessError as err:
+                        print(
+                            f"[gate] process {draw.process_index} attempt {attempt + 1} failed: {err}",
+                            flush=True,
+                        )
+                if payload is None:
+                    raise GateRunError(
+                        f"process {draw.process_index} failed {cfg.retries + 1} times"
+                    )
+                (cfg.out_dir / f"eval_{draw.process_index:03d}.json").write_text(
+                    json.dumps(payload, indent=2)
+                )
+                payloads[draw.process_index] = payload
+                partial = aggregate_gate([payloads[k] for k in sorted(payloads)], cfg.threshold)
+                print(
+                    f"[gate] process {draw.process_index}: per-brick so far "
+                    f"{partial['gate']['bricks_stowed']}/{partial['gate']['bricks_total']} = "
+                    f"{partial['gate']['per_brick_rate']:.3f} over {partial['gate']['episodes']} episodes",
+                    flush=True,
+                )
+        finally:
+            server.stop()
+    ordered = [payloads[k] for k in sorted(payloads)]
+    results = aggregate_gate(ordered, cfg.threshold)
+    results["checkpoint"] = cfg.checkpoint
+    results["seed"] = cfg.seed
+    results["ledger"] = str(cfg.ledger)
+    results["num_envs"] = cfg.num_envs
+    # What the server SERVED with, from the handshake each eval process recorded (identical
+    # across processes by construction), falling back to the SERVER_READY line. Never the
+    # CLI request.
+    results["inference"] = next(
+        (p["inference"] for p in ordered if p.get("inference")), server_ready.get("inference", {})
+    )
+    results["policy_id"] = next((p.get("policy_id") for p in ordered), None)
+    results["draws"] = [
+        {
+            "process_index": d.process_index,
+            "permutation": list(d.permutation),
+            "run_seed": d.run_seed,
+            "layout_seed": d.layout_seed,
+        }
+        for d in selected
+    ]
+    results["wall_sec_per_episode"] = (
+        sum(p.get("wall_sec", 0.0) for p in ordered) / results["gate"]["episodes"]
+        if results["gate"]["episodes"]
+        else None
+    )
+    (cfg.out_dir / "gate_results.json").write_text(json.dumps(results, indent=2))
+    token = "GATE_OK" if results["gate"]["passed"] else "GATE_FAIL"
+    print(
+        f"{token} "
+        + json.dumps({"checkpoint": cfg.checkpoint, "seed": cfg.seed, **results["gate"]}),
+        flush=True,
+    )
+    return results
+
+
+def _process_list(raw: str) -> tuple:
+    try:
+        values = tuple(int(part) for part in raw.split(",") if part.strip())
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(f"not a comma-separated integer list: {raw!r}") from err
+    if not values:
+        raise argparse.ArgumentTypeError("selects no process")
+    return values
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint", required=True, help="a pretrained_model directory")
+    parser.add_argument("--out_dir", type=Path, required=True)
+    parser.add_argument("--ledger", type=Path, required=True, help="the campaign ledger.json")
+    parser.add_argument("--threshold", type=float, required=True, help="per-brick pass rate")
+    parser.add_argument("--processes", type=int, default=10)
+    parser.add_argument("--num_envs", type=int, default=12)
+    parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--isaaclab_path", type=Path, default=Path.home() / "src/IsaacLab")
+    parser.add_argument("--port", type=int, default=5555)
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--retries", type=int, default=2)
+    parser.add_argument("--n_action_steps", type=int, default=None)
+    parser.add_argument("--temporal_ensemble_coeff", type=float, default=None)
+    parser.add_argument("--only_processes", type=_process_list, default=None)
+    parser.add_argument("--eval_timeout_s", type=float, default=4 * 3600)
+    return parser.parse_args(argv)
+
+
+def _build_cfg(args: argparse.Namespace) -> GateCfg:
+    return GateCfg(
+        checkpoint=args.checkpoint,
+        out_dir=args.out_dir,
+        processes=args.processes,
+        num_envs=args.num_envs,
+        seed=args.seed,
+        threshold=args.threshold,
+        ledger=args.ledger,
+        isaaclab_path=args.isaaclab_path,
+        port=args.port,
+        device=args.device,
+        retries=args.retries,
+        n_action_steps=args.n_action_steps,
+        temporal_ensemble_coeff=args.temporal_ensemble_coeff,
+        only_processes=args.only_processes,
+        eval_timeout_s=args.eval_timeout_s,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    cfg = _build_cfg(_parse_args(argv))
+    try:
+        results = run_gate(
+            cfg,
+            run_eval=lambda draw: _run_eval_subprocess(cfg, draw),
+            start_server=lambda: _start_server(cfg),
+        )
+    except (GateRunError, EvalProcessError, ValueError, FileNotFoundError) as exc:
+        print(f"GATE_ERROR: {exc}", file=sys.stderr, flush=True)
+        print("GATE_ERROR", flush=True)
+        return 2
+    return 0 if results["gate"]["passed"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -7,7 +7,7 @@ from maker_arm_lab.core.trace import RolloutTrace
 
 
 def _step(value: float, num_envs: int = 2):
-    state = np.full((num_envs, 8), value, dtype=np.float32)
+    state = np.full((num_envs, 7), value, dtype=np.float32)
     raw = np.full((num_envs, 7), value + 1, dtype=np.float32)
     clamped = np.full((num_envs, 7), value + 2, dtype=np.float32)
     return state, raw, clamped
@@ -31,7 +31,7 @@ def test_each_env_keeps_only_its_own_rows(tmp_path):
     paths = trace.save(tmp_path, "eval_000")
 
     with np.load(paths[0]) as d:
-        assert d["state"].shape == (2, 8)
+        assert d["state"].shape == (2, 7)
         assert d["action_raw"].shape == (2, 7)
         assert d["action_clamped"].shape == (2, 7)
         np.testing.assert_allclose(d["state"][:, 0], [1.0, 2.0])
@@ -70,10 +70,23 @@ def test_an_env_that_never_ran_still_produces_a_readable_file(tmp_path):
     paths = trace.save(tmp_path, "eval_000")
 
     with np.load(paths[0]) as d:
-        assert d["state"].shape == (0, 8)
+        assert d["state"].shape == (0, 7)
 
 
 def test_mismatched_batch_size_is_rejected():
     trace = RolloutTrace(num_envs=2)
     with pytest.raises(ValueError):
         trace.append(*_step(0.0, 3), active=np.array([True, True, True]))
+
+
+def test_an_env_that_never_ran_is_written_at_the_policy_state_width(tmp_path):
+    """MS2 changed the empty-env fallback from the articulation's 8 to the dataset's 7 on
+    purpose: the trace is compared against the training distribution, whose state is (7,)."""
+    from maker_arm_lab.core.trace import POLICY_STATE_WIDTH
+
+    assert POLICY_STATE_WIDTH == 7
+    trace = RolloutTrace(num_envs=1)
+    (path,) = trace.save(tmp_path, "never_ran")
+    with np.load(path) as d:
+        assert d["state"].shape == (0, 7)
+        assert d["action_raw"].shape == (0, 7)

@@ -19,7 +19,11 @@ from dataclasses import asdict, dataclass, field
 
 import torch
 
+from ..robots.frames import GRIPPER_OPEN_POS
 from .checker import PINCH_MIN_FORCE, held_brick_from_forces
+
+ARM_JOINT_COUNT = 6
+POLICY_STATE_WIDTH = 7
 
 
 @dataclass
@@ -300,6 +304,26 @@ def grade_grasp_attempts(
     loose = held_brick_from_forces(left_mag, right_mag, min_force=min_force)
     strict = held_brick_from_forces(left_mag, right_mag, min_force=PINCH_MIN_FORCE)
     return loose[ids] >= 0, strict[ids] >= 0
+
+
+def policy_state(joint_pos: torch.Tensor) -> torch.Tensor:
+    """The (N,7) `observation.state` the policy was trained on, from the (N,8) articulation.
+
+    Columns 0..5 are the six arm joints in URDF order, column 6 is the LEFT jaw's opening
+    as a fraction of GRIPPER_OPEN_POS clipped to [0, 1], and the right jaw is dropped. This
+    is `convert_to_lerobot.py`'s formula (its GRIPPER_TRAVEL is pinned to GRIPPER_OPEN_POS by
+    tests/test_lerobot_schema_pin.py), kept here so the eval client and the converter cannot
+    drift apart: a policy fed the raw 8-wide joint vector, or the right jaw, would be
+    evaluated on a state it never saw. Torch-only, so it has a CPU test.
+    """
+    if joint_pos.dim() != 2 or joint_pos.shape[1] < ARM_JOINT_COUNT + 1:
+        raise ValueError(
+            f"expected joint_pos (N,>=7) with the left jaw at column 6, got {tuple(joint_pos.shape)}"
+        )
+    arm = joint_pos[:, :ARM_JOINT_COUNT]
+    left_jaw = joint_pos[:, ARM_JOINT_COUNT : ARM_JOINT_COUNT + 1]
+    gripper_open = (left_jaw / GRIPPER_OPEN_POS).clamp(0.0, 1.0)
+    return torch.cat([arm, gripper_open], dim=-1).to(torch.float32)
 
 
 def clamp_arm_actions(

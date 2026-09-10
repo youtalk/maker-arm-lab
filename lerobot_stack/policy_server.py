@@ -38,12 +38,25 @@ from policy_protocol import (
 
 
 class PolicyServer:
-    def __init__(self, policy_fn, reset_fn, policy_id: str, port: int, n_action_steps: int):
+    def __init__(
+        self,
+        policy_fn,
+        reset_fn,
+        policy_id: str,
+        port: int,
+        n_action_steps: int,
+        inference: dict | None = None,
+    ):
         self._policy_fn = policy_fn
         self._reset_fn = reset_fn
         self._policy_id = policy_id
         self._port = port
         self._n_action_steps = n_action_steps
+        # The inference config the loaded policy actually runs with (n_action_steps,
+        # temporal_ensemble_coeff, chunk_size), read off the policy after the overrides were
+        # applied and echoed in SERVER_READY and hello_ack so an eval payload records what
+        # was served rather than what the supervisor asked for.
+        self._inference = dict(inference or {})
         self._socket = None
 
     def bind(self) -> int:
@@ -58,6 +71,7 @@ class PolicyServer:
             "policy_id": self._policy_id,
             "n_action_steps": self._n_action_steps,
             "protocol": PROTOCOL_VERSION,
+            "inference": self._inference,
         }
         print("SERVER_READY " + json.dumps(ready), flush=True)
         return self._port
@@ -68,6 +82,7 @@ class PolicyServer:
             "protocol": PROTOCOL_VERSION,
             "policy_id": self._policy_id,
             "n_action_steps": self._n_action_steps,
+            "inference": self._inference,
             "obs_schema": {k: [list(shape), dtype] for k, (shape, dtype) in OBS_SCHEMA.items()},
             "action": [list(ACTION_SHAPE), ACTION_DTYPE],
         }
@@ -354,7 +369,26 @@ def load_act(
             checkpoint_dir, overrides, blank_camera, gripper_squash=marker is not None
         ),
         policy.config.n_action_steps,
+        served_inference(policy.config),
     )
+
+
+def served_inference(config) -> dict:
+    """The inference settings a loaded ACT config will actually serve with.
+
+    Read off the config AFTER `resolve_inference_overrides` was applied, not off the CLI:
+    the gate record has to say what ran. `temporal_ensemble_coeff` is None for plain
+    chunked serving, which is lerobot's own encoding of "ensembling off".
+    """
+    return {
+        "n_action_steps": int(config.n_action_steps),
+        "temporal_ensemble_coeff": (
+            None
+            if config.temporal_ensemble_coeff is None
+            else float(config.temporal_ensemble_coeff)
+        ),
+        "chunk_size": int(config.chunk_size),
+    }
 
 
 class TokenArgumentParser(argparse.ArgumentParser):
@@ -398,14 +432,16 @@ def main() -> int:
     parser = build_parser()
     try:
         args = parser.parse_args()
-        policy_fn, reset_fn, policy_id, n_action_steps = load_act(
+        policy_fn, reset_fn, policy_id, n_action_steps, inference = load_act(
             args.checkpoint,
             args.device,
             n_action_steps=args.n_action_steps,
             temporal_ensemble_coeff=args.temporal_ensemble_coeff,
             blank_camera=args.blank_camera,
         )
-        server = PolicyServer(policy_fn, reset_fn, policy_id, args.port, n_action_steps)
+        server = PolicyServer(
+            policy_fn, reset_fn, policy_id, args.port, n_action_steps, inference=inference
+        )
         server.bind()
         server.serve_forever()
     except Exception as exc:  # noqa: BLE001 -- any failure must become SERVER_FAIL, not a crash.

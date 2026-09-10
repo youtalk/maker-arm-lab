@@ -463,3 +463,58 @@ def test_episode_result_json_carries_the_per_joint_blocks():
     assert d["clamp_steps_per_joint"] == [0, 0, 0, 1, 0, 0]
     assert d["clamp_overshoot_max_per_joint"][3] == pytest.approx(0.4)
     assert len(d["clamp_overshoot_max_per_joint"]) == 6
+
+
+# --- MS2: the policy-side state -----------------------------------------------------------
+
+
+def test_policy_state_takes_the_arm_and_the_left_jaw_fraction():
+    from maker_arm_lab.core.gate import policy_state
+    from maker_arm_lab.robots.frames import GRIPPER_OPEN_POS
+
+    joint_pos = torch.tensor(
+        [
+            [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, GRIPPER_OPEN_POS / 2, 0.0],
+            [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, GRIPPER_OPEN_POS, GRIPPER_OPEN_POS],
+        ],
+        dtype=torch.float64,
+    )
+    state = policy_state(joint_pos)
+    assert state.shape == (2, 7) and state.dtype == torch.float32
+    assert torch.allclose(state[:, :6], joint_pos[:, :6].to(torch.float32))
+    assert state[0, 6].item() == pytest.approx(0.5)
+    assert state[1, 6].item() == pytest.approx(1.0)
+
+
+def test_policy_state_clips_the_fraction_and_ignores_the_right_jaw():
+    from maker_arm_lab.core.gate import policy_state
+    from maker_arm_lab.robots.frames import GRIPPER_OPEN_POS
+
+    joint_pos = torch.zeros(3, 8)
+    joint_pos[0, 6] = -0.001  # slightly past closed
+    joint_pos[1, 6] = GRIPPER_OPEN_POS * 1.2  # slightly past open
+    joint_pos[2, 7] = GRIPPER_OPEN_POS  # right jaw open, left closed
+    state = policy_state(joint_pos)
+    assert state[:, 6].tolist() == [0.0, 1.0, 0.0]
+
+
+def test_policy_state_matches_the_converters_formula():
+    """convert_to_lerobot.py: clip(state[:, 6] / GRIPPER_TRAVEL, 0, 1) on the raw joint_pos."""
+    import re
+    from pathlib import Path
+
+    from maker_arm_lab.core.gate import policy_state
+
+    text = (Path(__file__).resolve().parents[1] / "lerobot_stack/convert_to_lerobot.py").read_text()
+    travel = float(re.search(r"^GRIPPER_TRAVEL = ([0-9.]+)", text, re.MULTILINE).group(1))
+    assert "np.clip(state[:, 6] / GRIPPER_TRAVEL, 0.0, 1.0)" in text
+    joint_pos = torch.rand(5, 8) * 0.06
+    expected = torch.cat([joint_pos[:, :6], (joint_pos[:, 6:7] / travel).clamp(0, 1)], dim=-1)
+    assert torch.allclose(policy_state(joint_pos), expected)
+
+
+def test_policy_state_rejects_a_narrow_vector():
+    from maker_arm_lab.core.gate import policy_state
+
+    with pytest.raises(ValueError, match="left jaw"):
+        policy_state(torch.zeros(2, 6))

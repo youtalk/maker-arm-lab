@@ -319,6 +319,7 @@ def test_bind_announces_readiness_with_the_port_protocol_and_identity(capsys):
             "policy_id": "ready:test",
             "n_action_steps": 37,
             "protocol": PROTOCOL_VERSION,
+            "inference": {},  # nothing was loaded, so nothing is served
         }
     finally:
         # PolicyServer has no public teardown (the serve loop owns its socket for the
@@ -339,3 +340,54 @@ def test_a_usage_error_still_prints_a_token():
     assert result.returncode != 0
     assert result.stdout.startswith("SERVER_FAIL usage: "), result.stdout
     assert "--checkpoint" in result.stdout
+
+
+def test_served_inference_reads_the_resolved_config():
+    from types import SimpleNamespace
+
+    from policy_server import served_inference
+
+    plain = SimpleNamespace(n_action_steps=100, temporal_ensemble_coeff=None, chunk_size=100)
+    assert served_inference(plain) == {
+        "n_action_steps": 100,
+        "temporal_ensemble_coeff": None,
+        "chunk_size": 100,
+    }
+    ensembled = SimpleNamespace(n_action_steps=1, temporal_ensemble_coeff=0.01, chunk_size=100)
+    assert served_inference(ensembled) == {
+        "n_action_steps": 1,
+        "temporal_ensemble_coeff": 0.01,
+        "chunk_size": 100,
+    }
+
+
+def test_handshake_carries_the_served_inference():
+    import threading
+
+    srv = PolicyServer(
+        policy_fn=lambda s, w, o: np.zeros((s.shape[0], 7), dtype=np.float32),
+        reset_fn=lambda: None,
+        policy_id="inf:test",
+        port=0,
+        n_action_steps=1,
+        inference={"n_action_steps": 1, "temporal_ensemble_coeff": 0.01, "chunk_size": 100},
+    )
+    port = srv.bind()
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    req = zmq.Context.instance().socket(zmq.REQ)
+    req.setsockopt(zmq.RCVTIMEO, 10_000)
+    req.connect(f"tcp://127.0.0.1:{port}")
+    try:
+        send_message(req, {"type": "hello", "protocol": PROTOCOL_VERSION})
+        header, _ = recv_message(req)
+        assert header["inference"] == {
+            "n_action_steps": 1,
+            "temporal_ensemble_coeff": 0.01,
+            "chunk_size": 100,
+        }
+    finally:
+        send_message(req, {"type": "shutdown"})
+        recv_message(req)
+        thread.join(timeout=5)
+        req.close(0)
