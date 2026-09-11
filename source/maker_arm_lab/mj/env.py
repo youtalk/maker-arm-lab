@@ -1,0 +1,420 @@
+"""The MuJoCo LegoSort environment behind the duck-typed surface ``OracleRig`` drives.
+
+Every member below exists because something reads it: ``OracleRig`` (the rig), the batch
+loop in ``scripts/generate_batch.py``, ``core.stowed`` (grading), and the rollout loop in
+``scripts/eval_policy.py``. The names and shapes are Isaac Lab's, so those consumers run
+unchanged on either backend:
+
+    env.device, env.num_envs, env.cfg.num_bricks, env.cfg.bin_layout, env.max_episode_length
+    env.scene["robot"].data.{joint_pos, joint_vel, joint_pos_limits, body_pos_w, body_quat_w,
+                             computed_torque, applied_torque}, .find_bodies, .find_joints
+    env.scene["brick_N"].data.{root_pos_w, root_quat_w, root_lin_vel_w}
+    env.scene["finger_left_brick"].data.force_matrix_w   (N,1,B,3), likewise right
+    env.scene.env_origins (N,3), zeros: every env is its own world
+    env.action_manager.total_action_dim == 7, .get_term("arm_action")._joint_names / .clamped
+    env.termination_manager.active_terms, .get_term("success")
+    env.obs_buf["images"]["wrist_rgb" | "overhead_rgb"]   (N,224,224,3) uint8
+    env.recorder_manager.exported_successful_episode_count
+    env.step(action) -> (None, None, terminated, truncated, {}), env.reset(seed=, env_ids=)
+
+Semantics carried over from ``ManagerBasedRLEnv`` because the rig depends on them: a done
+env is auto-reset INSIDE ``step`` (its state tensors already show the next episode when
+``step`` returns, and the ``success`` term keeps the terminating step's value until the next
+``step``); the six arm targets pass through ``core.profile``'s Rust clamp and the per-env
+``clamped`` flag says whether that changed the target this step.
+
+Batching is a Python loop over one ``MjModel``/``MjData`` pair per env. Per-env models are
+what make per-episode physics randomization (brick mass and friction, desk color) possible;
+the cost is one ``copy`` of a compiled model per env at construction.
+"""
+
+from __future__ import annotations
+
+import copy
+import math
+import random
+import re
+import types
+from pathlib import Path
+
+import mujoco
+import numpy as np
+import torch
+
+from maker_arm_lab.assets.urdf_prep import gripper_velocity_limit
+from maker_arm_lab.core import layout
+from maker_arm_lab.core import profile as _profile
+from maker_arm_lab.core.stowed import per_brick_stowed
+from maker_arm_lab.mj import scene
+from maker_arm_lab.mj.recorder import ShardRecorder
+from maker_arm_lab.robots.frames import (
+    ARM_JOINT_NAMES,
+    GRIPPER_CLOSED_POS,
+    GRIPPER_OPEN_POS,
+    HOME_JOINT_POS,
+)
+
+CONTROL_HZ = 30
+# The binary gripper command is turned into a jaw target that moves at the URDF's jaw velocity
+# limit (0.1 m/s) instead of jumping. Isaac's implicit PhysX drive absorbed the jump; a MuJoCo
+# position actuator with kp 1000 N/m and a 20 N force cap saturates for the whole 52 mm of
+# travel, and a saturated actuator has no implicit damping, so the jaw slammed into its stop
+# and bounced (measured 2026-09-10: -8.8 mm, then +62.7 mm). Ramping the target keeps the
+# demand under the cap in transit and leaves the stall force on a brick at kp x 7.9 mm, the
+# same 7.6-7.9 N Isaac measured.
+GRIPPER_RATE_M_PER_S = gripper_velocity_limit()
+# The Isaac reset-level DR ranges (datagen.LegoSortDatagenEnvCfg.__post_init__), verbatim.
+DESK_COLOR_RANGE = {"r": (0.3, 0.7), "g": (0.25, 0.55), "b": (0.2, 0.45)}
+BRICK_MASS_SCALE = (0.7, 1.3)
+BRICK_FRICTION_SCALE = (0.8, 1.2)  # Isaac's static_friction_range; MuJoCo has one coefficient
+
+
+class _Robot:
+    """``scene["robot"]``: joint and body state views plus the two name lookups the rig uses."""
+
+    def __init__(self, env: MjLegoSortEnv):
+        self._env = env
+        self.joint_names = list(scene.JOINT_NAMES)
+        n, nbody = env.num_envs, env.models[0].nbody
+        # float32, as Isaac Lab's ArticulationData: the rig mixes these with float32 constants.
+        self._joint_pos = np.zeros((n, 8), dtype=np.float32)
+        self._joint_vel = np.zeros((n, 8), dtype=np.float32)
+        self._body_pos = np.zeros((n, nbody, 3), dtype=np.float32)
+        self._body_quat = np.zeros((n, nbody, 4), dtype=np.float32)
+        self._computed = np.zeros((n, 8), dtype=np.float32)
+        self._applied = np.zeros((n, 8), dtype=np.float32)
+        limits = np.array(
+            [env.models[0].jnt_range[j] for j in env.handles.joint_ids], dtype=np.float32
+        )
+        self.data = types.SimpleNamespace(
+            joint_pos=torch.from_numpy(self._joint_pos),
+            joint_vel=torch.from_numpy(self._joint_vel),
+            joint_pos_limits=torch.from_numpy(np.broadcast_to(limits, (n, 8, 2)).copy()),
+            body_pos_w=torch.from_numpy(self._body_pos),
+            body_quat_w=torch.from_numpy(self._body_quat),
+            computed_torque=torch.from_numpy(self._computed),
+            applied_torque=torch.from_numpy(self._applied),
+        )
+
+    def find_bodies(self, name: str):
+        return ([self._env.models[0].body(name).id], [name])
+
+    def find_joints(self, names, preserve_order: bool = False):
+        """Isaac's ``find_joints``: each entry is a name or a regex; indices into the 8-vector."""
+        found: list[tuple[int, str]] = []
+        for pattern in names:
+            for index, joint in enumerate(self.joint_names):
+                if joint == pattern or re.fullmatch(pattern, joint):
+                    found.append((index, joint))
+        if not preserve_order:
+            found.sort()
+        return ([i for i, _ in found], [n for _, n in found])
+
+    def refresh(self, i: int) -> None:
+        env, h = self._env, self._env.handles
+        m, d = env.models[i], env.datas[i]
+        self._joint_pos[i] = d.qpos[list(h.joint_qpos)]
+        self._joint_vel[i] = d.qvel[list(h.joint_dof)]
+        self._body_pos[i] = d.xpos
+        self._body_quat[i] = d.xquat
+        acts = list(h.arm_actuators) + list(h.gripper_actuators)
+        kp = m.actuator_gainprm[acts, 0]
+        kv = -m.actuator_biasprm[acts, 2]
+        self._computed[i] = kp * (d.ctrl[acts] - self._joint_pos[i]) - kv * self._joint_vel[i]
+        self._applied[i] = d.actuator_force[acts]
+
+
+class _Brick:
+    def __init__(self, num_envs: int):
+        self._pos = np.zeros((num_envs, 3), dtype=np.float32)
+        self._quat = np.zeros((num_envs, 4), dtype=np.float32)
+        self._vel = np.zeros((num_envs, 3), dtype=np.float32)
+        self.data = types.SimpleNamespace(
+            root_pos_w=torch.from_numpy(self._pos),
+            root_quat_w=torch.from_numpy(self._quat),
+            root_lin_vel_w=torch.from_numpy(self._vel),
+        )
+
+
+class _Contact:
+    def __init__(self, num_envs: int, num_bricks: int):
+        self._force = np.zeros((num_envs, 1, num_bricks, 3), dtype=np.float32)
+        self.data = types.SimpleNamespace(force_matrix_w=torch.from_numpy(self._force))
+
+
+class _Scene:
+    def __init__(self, env: MjLegoSortEnv):
+        self.env_origins = torch.zeros(env.num_envs, 3)
+        self._items: dict[str, object] = {"robot": _Robot(env)}
+        for b in range(env.cfg.num_bricks):
+            self._items[f"brick_{b}"] = _Brick(env.num_envs)
+        for side in ("left", "right"):
+            self._items[f"finger_{side}_brick"] = _Contact(env.num_envs, env.cfg.num_bricks)
+
+    def __getitem__(self, key: str):
+        return self._items[key]
+
+    def keys(self):
+        return self._items.keys()
+
+
+class MjLegoSortEnv:
+    def __init__(
+        self,
+        num_envs: int,
+        draw: dict,
+        *,
+        num_bricks: int = 6,
+        cameras: bool = True,
+        start_pose_offset_rad: float = 0.05,
+        desk_color: bool = True,
+        physics_dr: bool = True,
+        episode_length_s: float = 180.0,
+        export_dir: Path | str | None = None,
+        shard_name: str = "shard",
+        export_all: bool = False,
+    ):
+        self.device = "cpu"
+        self.num_envs = num_envs
+        self.cameras = cameras
+        bl = layout.BinLayout(
+            bin_x=draw["bin_x"],
+            bin_ys=tuple(draw["bin_ys"]),
+            slot_colors=tuple(draw["slot_colors"]),
+        )
+        self.cfg = types.SimpleNamespace(
+            num_bricks=num_bricks,
+            bin_layout=bl,
+            start_pose_offset_rad=start_pose_offset_rad,
+            desk_color=desk_color,
+            physics_dr=physics_dr,
+            episode_length_s=episode_length_s,
+            cameras=cameras,
+        )
+        self.max_episode_length = round(episode_length_s * CONTROL_HZ)
+        base_model, self.handles = scene.build_model(draw, num_bricks, cameras)
+        self.models = [base_model] + [copy.copy(base_model) for _ in range(num_envs - 1)]
+        self.datas = [mujoco.MjData(m) for m in self.models]
+        self._nominal_inertia = base_model.body_inertia[list(self.handles.brick_bodies)].copy()
+        self.renderers = [mujoco.Renderer(m, 224, 224) for m in self.models] if cameras else []
+        self._cam_wrist = base_model.camera("wrist").id if cameras else -1
+        self._cam_overhead = base_model.camera("overhead").id if cameras else -1
+        self.profile = _profile.sim_profile()
+        self.scene = _Scene(self)
+        self._arm_term = types.SimpleNamespace(
+            _joint_names=list(ARM_JOINT_NAMES),
+            clamped=torch.zeros(num_envs, dtype=torch.bool),
+        )
+        self.action_manager = types.SimpleNamespace(
+            total_action_dim=7, get_term=lambda name: self._arm_term
+        )
+        self._success = torch.zeros(num_envs, dtype=torch.bool)
+        self.termination_manager = types.SimpleNamespace(
+            active_terms=["time_out", "success"], get_term=lambda name: self._success
+        )
+        self._wrist = np.zeros((num_envs, 224, 224, 3), dtype=np.uint8)
+        self._overhead = np.zeros((num_envs, 224, 224, 3), dtype=np.uint8)
+        self.obs_buf = {
+            "images": {
+                "wrist_rgb": torch.from_numpy(self._wrist),
+                "overhead_rgb": torch.from_numpy(self._overhead),
+            }
+        }
+        self.episode_length_buf = np.zeros(num_envs, dtype=np.int64)
+        self._grip_ctrl = np.full((num_envs, 2), GRIPPER_OPEN_POS)
+        self.recorder = (
+            ShardRecorder(
+                Path(export_dir) / f"{shard_name}.hdf5",
+                num_envs,
+                export_all=export_all,
+                cameras=cameras,
+            )
+            if export_dir is not None
+            else None
+        )
+        self.recorder_manager = (
+            self.recorder
+            if self.recorder is not None
+            else types.SimpleNamespace(exported_successful_episode_count=0)
+        )
+        self._rng = random.Random(0)
+
+    # -- gym-ish surface ---------------------------------------------------------
+
+    def reset(self, seed: int | None = None, env_ids: torch.Tensor | None = None):
+        if seed is not None:
+            # Isaac Lab's configure_seed seeds these three; the scatter sampler in core.layout
+            # draws from the global `random`, so the seed reaches it the same way.
+            random.seed(seed)
+            np.random.seed(seed % 2**32)
+            torch.manual_seed(seed)
+            self._rng = random.Random(seed)
+        ids = range(self.num_envs) if env_ids is None else [int(i) for i in env_ids.tolist()]
+        for i in ids:
+            self._reset_env(i)
+        self._refresh(ids, images=True)
+        return None, {}
+
+    def step(self, action: torch.Tensor):
+        raw = torch.as_tensor(action).detach().to("cpu", torch.float32)
+        if raw.shape != (self.num_envs, 7):
+            raise ValueError(
+                f"expected an action of shape ({self.num_envs}, 7), got {tuple(raw.shape)}"
+            )
+        grip_open = raw[:, 6] >= 0.0
+        arm = _profile.clamp_targets_tensor(
+            raw[:, :6].double(), grip_open, self.profile, self._arm_term.clamped
+        )
+        grip_target = np.where(grip_open.numpy(), GRIPPER_OPEN_POS, GRIPPER_CLOSED_POS)
+        targets = np.concatenate(
+            [arm.numpy(), np.stack([grip_target, grip_target], axis=1)], axis=1
+        )
+        h = self.handles
+        robot = self.scene["robot"]
+        if self.recorder is not None:
+            phase = getattr(self, "oracle_cycle_phase", None)
+            brick = getattr(self, "oracle_cycle_brick", None)
+            for i in range(self.num_envs):
+                self.recorder.pre_step(
+                    i,
+                    robot._joint_pos[i],
+                    raw[i].numpy(),
+                    int(phase[i]) if phase is not None else -1,
+                    int(brick[i]) if brick is not None else -1,
+                    self._wrist[i] if self.cameras else None,
+                    self._overhead[i] if self.cameras else None,
+                )
+        step_limit = GRIPPER_RATE_M_PER_S / CONTROL_HZ
+        self._grip_ctrl += np.clip(targets[:, 6:] - self._grip_ctrl, -step_limit, step_limit)
+        for i in range(self.num_envs):
+            d = self.datas[i]
+            d.ctrl[list(h.arm_actuators)] = targets[i, :6]
+            d.ctrl[list(h.gripper_actuators)] = self._grip_ctrl[i]
+            mujoco.mj_step(self.models[i], d, nstep=scene.CONTROL_SUBSTEPS)
+        self.episode_length_buf += 1
+        self._refresh(range(self.num_envs), images=False)
+        success = per_brick_stowed(self).all(dim=-1)
+        truncated = torch.from_numpy(self.episode_length_buf >= self.max_episode_length)
+        self._success = success.clone()
+        terminated = success.clone()
+        if self.recorder is not None:
+            clamped = self._arm_term.clamped.numpy()
+            for i in range(self.num_envs):
+                self.recorder.post_step(i, targets[i], bool(clamped[i]))
+        done = (terminated | truncated).nonzero().flatten().tolist()
+        for i in done:
+            if self.recorder is not None:
+                self.recorder.end(i, bool(success[i]))
+            self._reset_env(i)
+        self._refresh(range(self.num_envs), images=True)
+        return None, None, terminated, truncated, {}
+
+    def close(self) -> None:
+        for r in self.renderers:
+            r.close()
+        self.renderers = []
+        if self.recorder is not None:
+            self.recorder.close()
+
+    # -- internals -----------------------------------------------------------------
+
+    def _reset_env(self, i: int) -> None:
+        m, d, h = self.models[i], self.datas[i], self.handles
+        # Physics DR first: mj_setConst re-derives the model constants AT qpos0 and resets the
+        # data to it, so it has to run before the pose below is written.
+        if self.cfg.desk_color:
+            m.geom_rgba[h.desk_geom, :3] = [random.uniform(*DESK_COLOR_RANGE[c]) for c in "rgb"]
+        if self.cfg.physics_dr:
+            for b, body in enumerate(h.brick_bodies):
+                scale = random.uniform(*BRICK_MASS_SCALE)
+                m.body_mass[body] = layout.BRICK_MASS * scale
+                m.body_inertia[body] = self._nominal_inertia[b] * scale
+                m.geom_friction[h.brick_geoms[b], 0] = scene.BRICK_FRICTION[0] * random.uniform(
+                    *BRICK_FRICTION_SCALE
+                )
+            mujoco.mj_setConst(m, d)
+        mujoco.mj_resetData(m, d)
+        offset = self.cfg.start_pose_offset_rad
+        for k, name in enumerate(ARM_JOINT_NAMES):
+            lo, hi = m.jnt_range[h.joint_ids[k]]
+            q = HOME_JOINT_POS[name] + (random.uniform(-offset, offset) if offset > 0.0 else 0.0)
+            d.qpos[h.joint_qpos[k]] = min(max(q, lo), hi)
+        for adr in h.joint_qpos[6:]:
+            d.qpos[adr] = GRIPPER_OPEN_POS
+        bl = self.cfg.bin_layout
+        poses = layout.sample_brick_poses(
+            self.cfg.num_bricks,
+            layout.MIN_SEPARATION,
+            {
+                "x": layout.scatter_x(bl),
+                "y": layout.SCATTER_Y,
+                "z": (layout.SPAWN_Z, layout.SPAWN_Z),
+                "yaw": (-math.pi, math.pi),
+            },
+            max_radius=layout.SCATTER_MAX_RADIUS,
+        )
+        for b, pose in enumerate(poses):
+            adr = h.brick_qpos[b]
+            d.qpos[adr : adr + 3] = pose[:3]
+            d.qpos[adr + 3 : adr + 7] = (math.cos(pose[5] / 2.0), 0.0, 0.0, math.sin(pose[5] / 2.0))
+            d.qvel[h.brick_dof[b] : h.brick_dof[b] + 6] = 0.0
+        # Hold the pose the reset left: the first command the rig sends is this same pose.
+        d.ctrl[list(h.arm_actuators)] = d.qpos[list(h.joint_qpos[:6])]
+        d.ctrl[list(h.gripper_actuators)] = GRIPPER_OPEN_POS
+        self._grip_ctrl[i] = GRIPPER_OPEN_POS
+        mujoco.mj_forward(m, d)
+        self.episode_length_buf[i] = 0
+        if self.recorder is not None:
+            self.recorder.begin(i, self._initial_state(i))
+
+    def _initial_state(self, i: int) -> dict[str, np.ndarray]:
+        d, h = self.datas[i], self.handles
+        return {
+            "robot_joint_position": d.qpos[list(h.joint_qpos)].astype(np.float32),
+            "robot_joint_velocity": d.qvel[list(h.joint_dof)].astype(np.float32),
+            "robot_root_pose": np.concatenate([d.xpos[h.base_body], d.xquat[h.base_body]]).astype(
+                np.float32
+            ),
+            "robot_root_velocity": np.zeros(6, dtype=np.float32),
+            "brick_root_pose": np.stack([d.qpos[a : a + 7] for a in h.brick_qpos]).astype(
+                np.float32
+            ),
+            "brick_root_velocity": np.stack([d.qvel[a : a + 6] for a in h.brick_dof]).astype(
+                np.float32
+            ),
+        }
+
+    def _refresh(self, ids, images: bool) -> None:
+        h = self.handles
+        robot = self.scene["robot"]
+        left = self.scene["finger_left_brick"]._force
+        right = self.scene["finger_right_brick"]._force
+        force = np.zeros(6)
+        for i in ids:
+            m, d = self.models[i], self.datas[i]
+            robot.refresh(i)
+            for b, body in enumerate(h.brick_bodies):
+                brick = self.scene[f"brick_{b}"]
+                brick._pos[i] = d.xpos[body]
+                brick._quat[i] = d.xquat[body]
+                brick._vel[i] = d.qvel[h.brick_dof[b] : h.brick_dof[b] + 3]
+            left[i] = 0.0
+            right[i] = 0.0
+            for k in range(d.ncon):
+                con = d.contact[k]
+                geoms = (con.geom1, con.geom2)
+                for side, finger in enumerate(h.finger_geoms):
+                    if geoms[0] in finger or geoms[1] in finger:
+                        other = geoms[1] if geoms[0] in finger else geoms[0]
+                        if other in h.brick_geoms:
+                            mujoco.mj_contactForce(m, d, k, force)
+                            world = con.frame.reshape(3, 3).T @ force[:3]
+                            (left if side == 0 else right)[i, 0, h.brick_geoms.index(other)] += (
+                                world
+                            )
+            if images and self.cameras:
+                r = self.renderers[i]
+                r.update_scene(d, camera=self._cam_wrist)
+                self._wrist[i] = r.render()
+                r.update_scene(d, camera=self._cam_overhead)
+                self._overhead[i] = r.render()
