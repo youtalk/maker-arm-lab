@@ -31,7 +31,8 @@ Three things landed beside the re-baseline, each on a pre-registered rule:
 - The recipe corpus (section 6). Corrective approaches (`hover_jitter`) and the lead trim were
   ported. The yield probes adopted `ns2.0 sp0.2 induce0.12 hover_jitter 0.005-0.035 rpo` at
   yield 0.92. Ten lanes generated 1209 source episodes (7263 per-brick sub-episodes) in 1.6
-  hours. Its training, ladder and gate are in section 6.4.
+  hours. Its 600k training was cut at step 83k by a host reboot at 08:07 PDT, so its gate is
+  not measured. Section 6.4 records the state and the one command that resumes the chain.
 
 ## 2. The port
 
@@ -304,13 +305,45 @@ Merged: `MERGE_OK lanes=10 episodes=7263 frames=3441541`, 6.0 sub-episodes per s
 is a `grasp_retries_exhausted`, the recipe's own induction and correctives. The 21 s per
 attempt against the re-baseline's 150 is the Rust planner and the smooth walk.
 
-### 6.4 Training, ladder and gate
+### 6.4 Training, ladder and gate: interrupted, not measured
 
-Pending. The chain trains `train/act_t2_600k` (600k steps, from 07:35 PDT) and runs the same
-ladder, check and official gate under `eval_t2/`. This section is filled in after the gate.
+The training smoke passed at 07:35 PDT (`TRAIN_OK`, 100 steps on the 7263-sub-episode corpus).
+`train_act.sh` accepted the corpus against the ledger target of 1000, which counts sources. The
+600k run started at 07:35 into `train/act_t2_600k` (wandb `ms3-act-t2-600k`, run `iccsupub`),
+alone on the GPU at about 44 steps/s. It wrote the checkpoints 025000, 050000 and 075000.
+
+At 08:07:33 PDT the host shut down for a reboot (a clean systemd shutdown, the same kernel
+before and after). The trainer's last log line is step 83,325. The chain driver died with it.
+`train/done_t2` was never written, so the chain's guard held: no rung, check or gate ran under
+`eval_t2/`. The recipe lever is therefore pulled but not read. Nothing in this report reads
+against 0.076 yet.
+
+One defect surfaced. The trainer log ends with `TRAIN_OK out=.../act_t2_600k steps=600000`
+although the run stopped at 83k. `train_act.sh` prints its token from an EXIT trap. Bash runs
+that trap on the shutdown signal, and the status it sees is the previous command's zero, not
+the killed trainer's. The token had no consumer here, because the chain reads `done_t2`,
+which `run_train_t2.sh` writes only after the wrapper returns. The fix is one trap line for
+TERM, INT and HUP that exits non-zero, so the EXIT trap prints `TRAIN_FAIL`. It is not in this
+report's branch, which carries documents only.
+
+What remains is a relaunch, not a resume. `train_act.sh` has no resume path, and a fresh 600k
+run keeps the protocol identical to the re-baseline's. The killed run is parked under a new
+name, and the same chain driver skips every finished stage by its completion file. Section 8
+has the two commands. Expected wall clock: about 3.8 hours of training, then about 66 minutes
+of ladder, check and gate, as the re-baseline's chain took. The read rule is unchanged. L3 runs
+on draws 0 to 2 of seed 20261017, then the check on all five draws. The official gate runs once
+on seed 20261027 with R-GATE against 0.70. The number is reported beside 0.076 and never pooled
+with it. The session that
+finished this report was not permitted to park the killed run or start the chain, so the
+relaunch is the owner's.
 
 ## 7. Levers not pulled
 
+- The recipe corpus's ladder and gate (design section 5 item 2, the second half). The corpus and
+  the training smoke are done, the training was cut by the reboot in section 6.4, and the
+  relaunch is two commands in section 8. Until it runs, the lever has no read.
+- The `train_act.sh` token contract on a signal death (section 6.4): one trap line, on its own
+  branch, with a test that kills the wrapper and expects `TRAIN_FAIL`.
 - The privileged-state BC ceiling (design section 5 item 3) needs per-frame brick poses in the
   shard and an `observation.environment_state` feature in the dataset. Neither exists yet.
 - DAgger with the oracle as expert (item 4) needs the rig's resume-from-state entry.
@@ -338,6 +371,12 @@ bash t1/launch_lanes.sh 10 100 && bash t1/run_chain_mj.sh
 
 # Recipe corpus: the t2 chain waits for the t1 lanes and the t1 gate on its own.
 bash t2/run_chain_t2.sh
+
+# After the 2026-09-11 08:07 PDT reboot (section 6.4): park the killed run and its log, then
+# relaunch the same chain. Finished stages skip themselves. About 3.8 h of training, then
+# about 66 min of ladder, check and gate; the result lands in eval_t2/official/gate_results.json.
+mv train/act_t2_600k train/act_t2_600k.killed-0807 && mv train/train_t2.log train/train_t2.killed-0807.log
+setsid bash -c 'exec bash t2/run_chain_t2.sh' < /dev/null > /dev/null 2>&1 &
 
 # Tables of this report.
 python3 report_tables.py all
