@@ -7,6 +7,7 @@ plus one cameras-on shard round trip so the HDF5 layout is pinned against the co
 import random
 
 import h5py
+import mujoco
 import numpy as np
 import pytest
 import torch
@@ -32,8 +33,6 @@ def _hold_action(env) -> torch.Tensor:
 
 def _teleport_all_bricks_into_bins(env, i: int) -> None:
     """Rest every brick on its own color's bin floor, then let the physics settle."""
-    import mujoco
-
     h, d = env.handles, env.datas[i]
     centers = layout.bin_interior_centers(env.cfg.bin_layout)
     rest_z = -layout.BIN_INTERIOR[2] / 2 + layout.BRICK_SIZE[2] / 2 + 0.0005
@@ -140,6 +139,16 @@ def test_reset_of_one_env_leaves_the_other_alone(env):
     assert env.episode_length_buf[0] == 0 and env.episode_length_buf[1] == 1
 
 
+def _can_render() -> bool:
+    """False where no GL context can be made (CI runs with MUJOCO_GL=disable)."""
+    try:
+        mujoco.Renderer(mujoco.MjModel.from_xml_string("<mujoco/>"), 8, 8).close()
+    except Exception:  # noqa: BLE001 -- any GL failure means "skip the render test"
+        return False
+    return True
+
+
+@pytest.mark.skipif(not _can_render(), reason="no MuJoCo GL context on this host")
 def test_shard_layout_matches_the_converter(tmp_path):
     env = MjLegoSortEnv(
         1, _draw(), num_bricks=2, cameras=True, episode_length_s=1.0, export_dir=tmp_path
