@@ -9,15 +9,18 @@ host, and this report was assembled from it with `~/data/maker-arm-ms3/report_ta
 
 ## 1. Summary
 
-**The MuJoCo port reproduces the Isaac gate number.** The MS2 recipe re-run on MuJoCo scored
-**55/720 = 0.076 per-brick**, Wilson 95% [0.059, 0.098] (section 3.6). The criterion is
-**≥ 0.70**. The recipe is a 1000-episode success-only corpus of the staircase oracle with
-randomized pick order. It trains plain ACT for 600k steps, selects by rule L3, and gates on
-120 official episodes. Isaac's MS2 read 52/720 = 0.072 [0.055, 0.093] on the same recipe and protocol.
+**The MuJoCo port reproduces the Isaac gate number, and the recipe corpus lifts it 5.9 times**.
+The MS2 recipe re-run on MuJoCo scored **55/720 = 0.076 per-brick**, Wilson 95% [0.059, 0.098]
+(section 3.6). Isaac's MS2 read 52/720 = 0.072 [0.055, 0.093] on the same recipe and protocol.
 The two simulators agree to within the interval. The levers measured on MuJoCo from here read
-against 0.076, and the simulator switch does not confound them. The gate **FAILED**, as the
-design expected of a re-baseline. Corpus to gate took 11.7 hours. The Isaac campaign was
-budgeted at three GPU days.
+against 0.076, and the simulator switch does not confound them. The recipe corpus scored
+**323/720 = 0.449**, Wilson [0.413, 0.485] (section 6.7). It is the openyam-lab recipe on the
+smooth walk, cut into per-brick sub-episodes with a 60-frame lead. The criterion is **≥ 0.70**.
+Both gates **FAILED**. The recipe gate reads under 0.50, so the read rule R-GATE stops the
+milestone for an owner decision (section 6.8). Each corpus is 1000 success-only sources, plain
+ACT for 600k steps, rule L3 with the check step, and one official gate on 120 episodes. The
+re-baseline took 11.7 hours from corpus to gate. The recipe corpus took 6.4 hours of compute.
+The Isaac campaign was budgeted at three GPU days.
 
 Three things landed beside the re-baseline, each on a pre-registered rule:
 
@@ -31,8 +34,8 @@ Three things landed beside the re-baseline, each on a pre-registered rule:
 - The recipe corpus (section 6). Corrective approaches (`hover_jitter`) and the lead trim were
   ported. The yield probes adopted `ns2.0 sp0.2 induce0.12 hover_jitter 0.005-0.035 rpo` at
   yield 0.92. Ten lanes generated 1209 source episodes (7263 per-brick sub-episodes) in 1.6
-  hours. Its 600k training was cut at step 83k by a host reboot at 08:07 PDT, so its gate is
-  not measured. Section 6.4 records the state and the one command that resumes the chain.
+  hours. A host reboot cut its first 600k run at step 83k, and the same chain re-ran it from
+  scratch. The gate read 0.449 (section 6.7).
 
 ## 2. The port
 
@@ -305,45 +308,123 @@ Merged: `MERGE_OK lanes=10 episodes=7263 frames=3441541`, 6.0 sub-episodes per s
 is a `grasp_retries_exhausted`, the recipe's own induction and correctives. The 21 s per
 attempt against the re-baseline's 150 is the Rust planner and the smooth walk.
 
-### 6.4 Training, ladder and gate: interrupted, not measured
+### 6.4 Training, interrupted once
 
 The training smoke passed at 07:35 PDT (`TRAIN_OK`, 100 steps on the 7263-sub-episode corpus).
 `train_act.sh` accepted the corpus against the ledger target of 1000, which counts sources. The
-600k run started at 07:35 into `train/act_t2_600k` (wandb `ms3-act-t2-600k`, run `iccsupub`),
-alone on the GPU at about 44 steps/s. It wrote the checkpoints 025000, 050000 and 075000.
+first 600k run started at 07:35 (wandb run `iccsupub`). At 08:07:33 PDT the host shut down for
+a reboot, a clean systemd shutdown with the same kernel before and after. The run stopped at
+step 83,325. `train/done_t2` was never written, so the chain's guard held and nothing ran under
+`eval_t2/`. The killed run is parked as `train/act_t2_600k.killed-0807`. The same chain driver
+was relaunched at 08:37 on the owner's instruction. Every finished stage skipped itself on its
+completion file, and a fresh 600k run started into `train/act_t2_600k` (wandb
+`ms3-act-t2-600k`). A fresh run rather than a resume keeps the protocol identical to the
+re-baseline's, and `train_act.sh` has no resume path. It took 3 h 44 min (08:37 to 12:21 PDT)
+at about 45 steps/s, alone on the GPU. The final loss was 0.066 after 1.39 epochs over 3.44 M
+frames, a liveness read only.
 
-At 08:07:33 PDT the host shut down for a reboot (a clean systemd shutdown, the same kernel
-before and after). The trainer's last log line is step 83,325. The chain driver died with it.
-`train/done_t2` was never written, so the chain's guard held: no rung, check or gate ran under
-`eval_t2/`. The recipe lever is therefore pulled but not read. Nothing in this report reads
-against 0.076 yet.
-
-One defect surfaced. The trainer log ends with `TRAIN_OK out=.../act_t2_600k steps=600000`
-although the run stopped at 83k. `train_act.sh` prints its token from an EXIT trap. Bash runs
-that trap on the shutdown signal, and the status it sees is the previous command's zero, not
-the killed trainer's. The token had no consumer here, because the chain reads `done_t2`,
+One defect surfaced in the killed run. Its log ends with `TRAIN_OK out=.../act_t2_600k
+steps=600000` although it stopped at 83k. `train_act.sh` prints its token from an EXIT trap.
+Bash runs that trap on the shutdown signal, and the status it sees is the previous command's
+zero, not the killed trainer's. The token had no consumer, because the chain reads `done_t2`,
 which `run_train_t2.sh` writes only after the wrapper returns. The fix is one trap line for
 TERM, INT and HUP that exits non-zero, so the EXIT trap prints `TRAIN_FAIL`. It is not in this
 report's branch, which carries documents only.
 
-What remains is a relaunch, not a resume. `train_act.sh` has no resume path, and a fresh 600k
-run keeps the protocol identical to the re-baseline's. The killed run is parked under a new
-name, and the same chain driver skips every finished stage by its completion file. Section 8
-has the two commands. Expected wall clock: about 3.8 hours of training, then about 66 minutes
-of ladder, check and gate, as the re-baseline's chain took. The read rule is unchanged. L3 runs
-on draws 0 to 2 of seed 20261017, then the check on all five draws. The official gate runs once
-on seed 20261027 with R-GATE against 0.70. The number is reported beside 0.076 and never pooled
-with it. The session that
-finished this report was not permitted to park the killed run or start the chain, so the
-relaunch is the owner's.
+### 6.5 Selection ladder (rule L3)
+
+The same ladder as section 3.3: fifteen rungs on draws 0 to 2 of seed 20261017, 216 bricks per
+rung, four rungs at a time, 20.6 s per episode. It took 49 minutes (12:21 to 13:10 PDT).
+
+| rung | per-brick (draws 0-2, 216 bricks) |
+|---|---|
+| 250k | 55/216 = 0.255 |
+| 275k | 73/216 = 0.338 |
+| 300k | 59/216 = 0.273 |
+| 325k | 75/216 = 0.347 |
+| 350k | 108/216 = 0.500 |
+| 375k | 69/216 = 0.319 |
+| 400k | 78/216 = 0.361 |
+| 425k | 105/216 = 0.486 |
+| 450k | 100/216 = 0.463 |
+| 475k | 88/216 = 0.407 |
+| 500k | 104/216 = 0.481 |
+| 525k | 50/216 = 0.231 |
+| 550k | 74/216 = 0.343 |
+| 575k | 116/216 = 0.537 **L3 candidate** |
+| 600k | 83/216 = 0.384 |
+
+Every rung reads above the re-baseline's best rung (0.144). The ladder is non-monotone again:
+525k dips to 0.231 between 0.481 and 0.343. The candidate's neighbours read 0.343 and 0.384,
+so it is not an isolated spike by the rule's definition. A blind `last` takes 600k at 0.384.
+
+### 6.6 Check step
+
+The top two rungs ran on all five draws of the selection seed, 60 episodes and 360 bricks
+each: 575k 162/360 = 0.450, 350k 150/360 = 0.417. Both ladder reads regressed on draws 3 and 4
+(575k 46/144 = 0.319, 350k 42/144 = 0.292). The rule gates the higher checked rate: **575k**,
+the same rung the re-baseline gated.
+
+### 6.7 Official gate, evaluated once
+
+The gate command was the one of section 3.5 with `--out_dir eval_t2/official` and the t2
+ledger. The checkpoint was `train/act_t2_600k/checkpoints/575000`. Five draws ran at a time,
+then one aggregating pass. It is pure policy, no supervisor. Results are in
+`eval_t2/official/gate_results.json`. It took 65 minutes from the end of training to the gate
+read (12:21 to 13:27 PDT), ladder included.
+
+| | MuJoCo recipe corpus (t2) | MuJoCo re-baseline (t1) | Isaac MS2 |
+| --- | --- | --- | --- |
+| per-brick | **323/720 = 0.449**, Wilson [0.413, 0.485] | 55/720 = 0.076, [0.059, 0.098] | 52/720 = 0.072, [0.055, 0.093] |
+| episodes with any brick | 102/120 | 41/120 | 42/120 |
+| histogram, 0 to 6 bricks | 18, 20, 21, 18, 21, 9, 13 | 79, 29, 10, 2, 0, 0, 0 | 78 sorted none, none sorted six |
+| all six bricks | 13/120 | 0/120 | 0/120 |
+| never closed the jaws | 0/120 | 45/120 | 3/120 |
+| first close, median (p10, p90) | 198 (152, 306) | 563 (289, 1829) | 1249 (476, 2792) |
+| graded grasp attempts | 1602, one per 398 steps | 427, one per 1518 steps | 693, one per 935 steps |
+| clamp fraction | 0.019, on joints 4 and 6 | 0.168, all on joint 6 | 7.4e-4, all on joint 6 |
+| wrong bin | 82 of 549 releases | 1 of 59 releases | 13 of 90 held |
+| wall | 24.7 s/episode at five concurrent draws | 24.5 s/episode | 25 s/episode |
+
+### 6.8 Reading the gate
+
+**R-GATE says STOP**. The recipe design's read rule (section 8.4 there) has three bands. It
+passes at 0.70, fires the contingent second tranche between 0.50 and 0.70, and stops under
+0.50 for an owner decision. The gate reads 0.449 and its interval tops out at 0.485, so the
+second tranche does not fire. The lever is still the largest step from one campaign on either
+arm: 0.076 to 0.449 on the same simulator, protocol and seeds. openyam-lab's largest was 0.468
+to 0.758. The corpus carries six openyam-lab levers at once, plus the smooth walk: widened
+noise, induction, correctives, randomized pick order, the per-brick split and the lead trim.
+The step is therefore not attributable to any one of them. That was the known cost of decision
+D2.
+
+The factor account reads ① 1602/720 = 2.23, ② 128/1602 = 0.080, ③ 323/128 = 2.52. Two of the
+three are not factors on MuJoCo. ① is above one because the policy attempts 2.2 graded grasps
+per brick, where the definition assumed at most one. ③ is above one because the pinch grader
+misses holds at MuJoCo's 6.1 N grip (section 3.6): 323 bricks were stowed by grasps, and the
+grader credited 128 of those grasps. Only the product is read, and it is the gate number. A
+grader retuned on MuJoCo is the prerequisite for reading ② and ③ apart, and it is not done.
+
+What changed against the re-baseline is the cadence. The re-baseline policy never closed in 45
+episodes and first closed at a median of 563 steps. The recipe policy closes in every episode,
+first at a median of 198 steps, which is the lead trim's effect (openyam-lab: 877 to 299). It
+then attempts a grasp every 398 steps, 13.4 per episode, against the demonstrated cycle of 534
+steps per brick. It sorts all six bricks in 13 episodes and at least one in 102. Its commands
+are clamped on 1.9 % of steps (re-baseline 16.8 %), now split between joints 4 and 6. The loss
+is in the misses and in the sorting: 1602 attempts for 323 stowed bricks, and 82 wrong-bin
+deposits against 549 queued releases (0.149, MS2's Isaac policy 0.16 of detected releases).
+The corpus was generated with randomized pick order. The color-schedule shortcut that
+openyam-lab's pick-order fix removed (0.415 to 0.058) is therefore not open to this policy. The
+wrong-bin loss has no measured mechanism here. The close-event instrument, which gives the
+misses and the wrong bins a geometry, is not ported (section 7).
 
 ## 7. Levers not pulled
 
-- The recipe corpus's ladder and gate (design section 5 item 2, the second half). The corpus and
-  the training smoke are done, the training was cut by the reboot in section 6.4, and the
-  relaunch is two commands in section 8. Until it runs, the lever has no read.
 - The `train_act.sh` token contract on a signal death (section 6.4): one trap line, on its own
   branch, with a test that kills the wrapper and expects `TRAIN_FAIL`.
+- The pinch grader on MuJoCo. `PINCH_MIN_FORCE` and `PINCH_MIN_STALL` were tuned on Isaac's
+  7.6 N grip and credit 128 holds for 323 stowed bricks at MuJoCo's 6.1 N. Until they are
+  re-measured there, factors ② and ③ have no separate read on MuJoCo.
 - The privileged-state BC ceiling (design section 5 item 3) needs per-frame brick poses in the
   shard and an `observation.environment_state` feature in the dataset. Neither exists yet.
 - DAgger with the oracle as expert (item 4) needs the rig's resume-from-state entry.
@@ -351,6 +432,15 @@ relaunch is the owner's.
   later probe. The speed ladder cleared the cycle bar without it.
 - The `--unstick` supervisor (D1 Option A), the close-event instrument (recipe design 5.2) and
   the BCE gripper head are not ported. Every gate here is pure policy.
+
+Hand-off. R-GATE stopped the milestone at 0.449 for an owner decision, and decision D4 keeps
+the task fixed. The two pre-registered escalations stand. The privileged-state ceiling
+separates a control problem from a vision problem in one training run. DAgger with the oracle
+as expert attacks the covariate shift the recipe design named, and a round costs hours on
+MuJoCo. Before either, two instruments are due on MuJoCo. The pinch grader retuned to the 6.1 N
+grip makes ② and ③ read as factors again. The close-event instrument gives the misses and the
+82 wrong-bin deposits a geometry. The tranche-2 table of the recipe design needs the second
+and did not fire anyway.
 
 ## 8. Reproduction
 
@@ -372,9 +462,9 @@ bash t1/launch_lanes.sh 10 100 && bash t1/run_chain_mj.sh
 # Recipe corpus: the t2 chain waits for the t1 lanes and the t1 gate on its own.
 bash t2/run_chain_t2.sh
 
-# After the 2026-09-11 08:07 PDT reboot (section 6.4): park the killed run and its log, then
-# relaunch the same chain. Finished stages skip themselves. About 3.8 h of training, then
-# about 66 min of ladder, check and gate; the result lands in eval_t2/official/gate_results.json.
+# After the 2026-09-11 08:07 PDT reboot (section 6.4) the killed run and its log were parked
+# and the same chain relaunched. Finished stages skip themselves. 3 h 44 min of training, then
+# 65 min of ladder, check and gate; the result is eval_t2/official/gate_results.json.
 mv train/act_t2_600k train/act_t2_600k.killed-0807 && mv train/train_t2.log train/train_t2.killed-0807.log
 setsid bash -c 'exec bash t2/run_chain_t2.sh' < /dev/null > /dev/null 2>&1 &
 
