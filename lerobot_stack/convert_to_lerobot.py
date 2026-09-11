@@ -68,8 +68,12 @@ FEATURES = {
 SETTLE_INT, DONE_INT, ABANDON_INT = 0, 10, 11
 
 
-def cycle_segments(phase: np.ndarray, brick: np.ndarray) -> list[np.ndarray]:
+def cycle_segments(phase: np.ndarray, brick: np.ndarray, lead_keep: int = 0) -> list[np.ndarray]:
     """Frame-index segments, one per brick cycle.
+
+    ``lead_keep`` attaches the LAST that many SETTLE frames to the first cycle (openyam-lab's
+    ``--lead_keep 60``, MS3 recipe design 5.3): a short hold at the start state stays in the
+    corpus, the 240-frame fixed point does not. 0 keeps none.
 
     Drops SETTLE/DONE/ABANDON frames, then cuts each time a NEW non-negative
     brick value appears (differs from the last non-negative value seen).
@@ -95,6 +99,10 @@ def cycle_segments(phase: np.ndarray, brick: np.ndarray) -> list[np.ndarray]:
         current.append(int(t))
     if current and last_brick is not None:
         segments.append(current)
+    if segments and lead_keep > 0:
+        first = segments[0][0]
+        lead = [t for t in range(max(0, first - lead_keep), first) if phase[t] == SETTLE_INT]
+        segments[0] = lead + segments[0]
     return [np.asarray(s) for s in segments]
 
 
@@ -106,6 +114,7 @@ def convert(
     *,
     split_cycles: bool = False,
     sidecar_dir: Path | None = None,
+    lead_keep: int = 0,
 ) -> tuple[int, int]:
     """Convert `shards` into (or append them onto) the LeRobot dataset at `root`.
 
@@ -122,6 +131,8 @@ def convert(
     """
     if sidecar_dir is not None and not split_cycles:
         raise ValueError("sidecar_dir requires split_cycles")
+    if lead_keep and not split_cycles:
+        raise ValueError("lead_keep requires split_cycles")
     # Resume iff root/meta/info.json (the local LeRobot dataset marker) exists. A bare
     # root.exists() check is not enough: the campaign supervisor pre-creates dataset_root as an
     # empty directory before the first conversion ever runs, so root.exists() is True with no
@@ -190,7 +201,7 @@ def convert(
                         )
                     phase = grp["obs/cycle_phase"][:steps]
                     brick = grp["obs/cycle_brick"][:steps]
-                    segments = cycle_segments(phase, brick)
+                    segments = cycle_segments(phase, brick, lead_keep)
                 else:
                     segments = [np.arange(steps)]
                 # Hoisted out of the segment loop: read+stack once per demo instead of once
@@ -250,6 +261,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--split_cycles", action="store_true")
     parser.add_argument(
+        "--lead_keep",
+        type=int,
+        default=0,
+        help="with --split_cycles: keep the last N SETTLE frames on each demo's first cycle",
+    )
+    parser.add_argument(
         "--sidecar_dir",
         type=Path,
         default=None,
@@ -279,6 +296,7 @@ def main() -> int:
             args.repo_id,
             args.fps,
             split_cycles=args.split_cycles,
+            lead_keep=args.lead_keep,
             sidecar_dir=args.sidecar_dir,
         )
     except Exception as exc:  # noqa: BLE001 -- any failure must become CONVERT_FAIL, not a crash.

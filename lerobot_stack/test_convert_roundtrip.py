@@ -162,6 +162,19 @@ def test_cycle_segments_keeps_retries_and_minus_one_gaps_in_cycle():
     assert [s.tolist() for s in segs] == [[0, 1, 2, 3, 4, 5, 6, 7], [8, 9]]
 
 
+def test_cycle_segments_lead_keep_attaches_the_last_settle_frames_to_the_first_cycle():
+    """The recipe's 60-frame lead (openyam-lab's --lead_keep 60, MS3 recipe design 5.3): the
+    first cycle keeps the LAST lead_keep SETTLE frames, later cycles are untouched, and a
+    lead longer than the SETTLE run keeps the whole run."""
+    phase = np.array([0, 0, 0, 1, 2, 8, 1, 2, 8], dtype=np.int8)
+    brick = np.array([-1, -1, -1, 0, 0, 0, 1, 1, 1], dtype=np.int8)
+    two = cycle_segments(phase, brick, lead_keep=2)
+    assert [s.tolist() for s in two] == [[1, 2, 3, 4, 5], [6, 7, 8]]
+    whole = cycle_segments(phase, brick, lead_keep=10)
+    assert [s.tolist() for s in whole] == [[0, 1, 2, 3, 4, 5], [6, 7, 8]]
+    assert [s.tolist() for s in cycle_segments(phase, brick)] == [[3, 4, 5], [6, 7, 8]]
+
+
 def test_cycle_segments_with_no_brick_yields_no_segments():
     phase = np.array([0, 1], dtype=np.int8)
     brick = np.array([-1, -1], dtype=np.int8)
@@ -193,6 +206,25 @@ def test_split_cycles_roundtrip_with_sidecars(tmp_path):
     s1 = np.load(sidecars / "1.npz")
     assert s1["cycle_brick"].tolist() == [1, 1, 1, 1]
     assert s1["cycle_phase"].tolist() == [1, 2, 3, 8]
+
+
+def test_split_cycles_lead_keep_extends_the_first_cycle(tmp_path):
+    shard = tmp_path / "shard.hdf5"
+    _write_shard(shard, demos=1, steps=10)
+    _add_cycle_channels(shard, [[0, 0, 1, 2, 3, 8, 1, 2, 3, 8]], [[-1, -1, 0, 0, 0, 0, 1, 1, 1, 1]])
+    root = tmp_path / "dataset"
+    converted, total = convert(
+        [shard], root, "youtalk/maker-arm-legosort-test", fps=30, split_cycles=True, lead_keep=1
+    )
+    assert (converted, total) == (2, 2)
+    lengths = sorted(
+        int(n)
+        for f in root.glob("meta/episodes/**/*.parquet")
+        for n in __import__("pandas").read_parquet(f)["length"]
+    )
+    assert lengths == [4, 5]  # the first cycle carries one SETTLE frame, the second none
+    with pytest.raises(ValueError, match="split_cycles"):
+        convert([shard], tmp_path / "other", "youtalk/maker-arm-legosort-test", fps=30, lead_keep=1)
 
 
 def test_split_cycles_roundtrip_without_sidecars(tmp_path):
