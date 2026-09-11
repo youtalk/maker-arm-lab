@@ -45,6 +45,14 @@ class EpisodeResult:
     grasp_attempts_unresolved: int = 0
     clamp_steps_per_joint: list = field(default_factory=lambda: [0] * 6)
     clamp_overshoot_max_per_joint: list = field(default_factory=lambda: [0.0] * 6)
+    # The close-event instrument (MS3 visual inspection, 2026-09-11): one entry per close
+    # command while the episode was live. `closes_nearest_cm` is the xy distance from the tool
+    # to the nearest brick still on the desk (-1.0 when none is left), `closes_held_window`
+    # whether the jaws held a brick at any step of GRASP_HOLD_WINDOW after that close, and
+    # `releases` one [brick color, bin color or None] per graded release.
+    closes_nearest_cm: list = field(default_factory=list)
+    closes_held_window: list = field(default_factory=list)
+    releases: list = field(default_factory=list)
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -71,6 +79,9 @@ class RolloutTracker:
         self._grasp_successes = torch.zeros(num_envs, dtype=torch.long)
         self._grasp_successes_strict = torch.zeros(num_envs, dtype=torch.long)
         self._grasp_pending = torch.zeros(num_envs, dtype=torch.long)
+        self._closes_cm: list[list[float]] = [[] for _ in range(num_envs)]
+        self._closes_held: list[list[bool]] = [[] for _ in range(num_envs)]
+        self._releases: list[list[list]] = [[] for _ in range(num_envs)]
 
     def latch_pre_step(self, per_brick: torch.Tensor) -> None:
         active = ~self.done
@@ -151,8 +162,12 @@ class RolloutTracker:
         ids = env_ids.detach().to(device="cpu", dtype=torch.long)
         self._wrong_bin.index_add_(0, ids, torch.ones_like(ids))
 
-    def record_grasp_attempt(self, env_ids: torch.Tensor) -> None:
+    def record_grasp_attempt(self, env_ids: torch.Tensor, nearest_cm=None) -> None:
         """Open one PENDING grasp attempt per entry of `env_ids`.
+
+        `nearest_cm`, when given, is one float per entry: the tool's xy distance to the
+        nearest brick still on the desk at the close command, appended to the live episode's
+        `closes_nearest_cm` (the approach-precision read; a finished env's entries are dropped).
 
         A grasp attempt is one open -> close gripper transition; whether it
         gripped anything is unknowable at that instant, so the attempt is parked
@@ -182,6 +197,28 @@ class RolloutTracker:
         """
         ids = env_ids.detach().to(device="cpu", dtype=torch.long)
         self._grasp_pending.index_add_(0, ids, torch.ones_like(ids))
+        if nearest_cm is not None:
+            for i, cm in zip(ids.tolist(), nearest_cm):
+                if not bool(self.done[i]):
+                    self._closes_cm[i].append(float(cm))
+
+    def record_hold_window(self, env_ids: torch.Tensor, held_any) -> None:
+        """One bool per entry: did the jaws hold a brick at any step of the hold window after
+        a close of that env. Appended to the live episode's `closes_held_window`."""
+        for i, ok in zip(env_ids.detach().to(device="cpu", dtype=torch.long).tolist(), held_any):
+            if not bool(self.done[i]):
+                self._closes_held[i].append(bool(ok))
+
+    def record_release(self, env_ids: torch.Tensor, colors, landed) -> None:
+        """One graded release per entry: the released brick's color and the color of the bin
+        it settled in (None when it reached no bin). Appended to the live episode's
+        `releases`; `record_wrong_bin` keeps the count the reports already read."""
+        ids = env_ids.detach().to(device="cpu", dtype=torch.long).tolist()
+        for i, color, bin_color in zip(ids, colors, landed):
+            if not bool(self.done[i]):
+                self._releases[i].append(
+                    [str(color), None if bin_color is None else str(bin_color)]
+                )
 
     def record_grasp_outcome(
         self, env_ids: torch.Tensor, held: torch.Tensor, held_strict: torch.Tensor
@@ -247,6 +284,9 @@ class RolloutTracker:
                 grasp_attempts_unresolved=int(self._grasp_pending[i]),
                 clamp_steps_per_joint=[int(v) for v in self._clamp_steps_joint[i]],
                 clamp_overshoot_max_per_joint=[float(v) for v in self._clamp_overshoot_max[i]],
+                closes_nearest_cm=list(self._closes_cm[i]),
+                closes_held_window=list(self._closes_held[i]),
+                releases=[list(r) for r in self._releases[i]],
             )
         self.done |= newly
 

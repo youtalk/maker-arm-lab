@@ -15,6 +15,7 @@ from pathlib import Path
 
 import torch
 
+from maker_arm_lab.core import layout
 from maker_arm_lab.core.checker import containing_bin, held_brick_from_forces
 from maker_arm_lab.core.gate import (
     RolloutTracker,
@@ -31,7 +32,7 @@ from maker_arm_lab.core.stowed import (
     per_brick_stowed,
 )
 from maker_arm_lab.core.trace import RolloutTrace
-from maker_arm_lab.robots.frames import ARM_JOINT_REGEX
+from maker_arm_lab.robots.frames import ARM_JOINT_REGEX, TOOL_BODY
 
 WRONG_BIN_SETTLE_STEPS = 30
 """Control steps (1 s at 30 Hz) to wait after a release before reading the bin. A released
@@ -43,6 +44,14 @@ GRASP_SETTLE_STEPS = 20
 Under the oracle's CLOSE_STEPS = 45 jaw-stroke budget (core/oracle.py); inherited from
 openyam-lab and not re-measured on the Maker Arm's gripper, so the grasp rate it grades is a
 relative instrument (MS2 report read rules)."""
+
+GRASP_HOLD_WINDOW = (10, 60)
+"""Control steps after a close command over which a held brick counts for the close-event
+instrument's `closes_held_window`. The single read at GRASP_SETTLE_STEPS credited 14 of 64
+holds on the MS3 t2 checkpoint (2026-09-11 visual inspection): the policy's close command
+flickers while the 0.1 m/s jaw ramp is still in transit, so the pinch is often not yet formed
+at +20 and is there by +60. The window read is an instrument beside `grasp_successes`, not a
+replacement: the pre-registered field keeps its definition."""
 
 HELD_MIN_FORCE = 1.0
 """Newtons on the weaker jaw for `held_brick_from_forces` to call a brick held: the loose
@@ -96,8 +105,10 @@ def rollout(
     bin_centers = _bin_centers_cached(_env_bin_layout(env), device)
     bin_half_extents = _bin_half_extents_cached(device)
     target_bins = brick_color_ids(num_bricks)  # (B,) cpu long
+    tool = robot.find_bodies(TOOL_BODY)[0][0]
     pending_releases: list[tuple[int, int, int]] = []  # (env, brick, due_step)
     pending_grasps: list[tuple[int, int]] = []  # (env, due_step)
+    pending_holds: list[list] = []  # [env, close_step, held_any]
     releases_queued = 0
     grip_open_prev = None
 
@@ -126,6 +137,16 @@ def rollout(
         left_mag = env.scene["finger_left_brick"].data.force_matrix_w.norm(dim=-1).squeeze(1)
         right_mag = env.scene["finger_right_brick"].data.force_matrix_w.norm(dim=-1).squeeze(1)
         held = held_brick_from_forces(left_mag, right_mag, min_force=HELD_MIN_FORCE).to("cpu")
+        pos, vel = _brick_states(env)
+        for entry in pending_holds:
+            if step_index >= entry[1] + GRASP_HOLD_WINDOW[0]:
+                entry[2] = entry[2] or bool(held[entry[0]] >= 0)
+        due_holds = [h for h in pending_holds if step_index >= h[1] + GRASP_HOLD_WINDOW[1]]
+        if due_holds:
+            pending_holds = [h for h in pending_holds if step_index < h[1] + GRASP_HOLD_WINDOW[1]]
+            tracker.record_hold_window(
+                torch.tensor([h[0] for h in due_holds], dtype=torch.long), [h[2] for h in due_holds]
+            )
         if grip_open_prev is not None:
             # Releases: a brick held on an open-after-close is queued and read back a second
             # later. A (env, brick) already awaiting its check is not re-queued, so gripper
@@ -149,16 +170,33 @@ def rollout(
             ]
             if opened:
                 pending_grasps.extend((i, step_index + GRASP_SETTLE_STEPS) for i in opened)
-                tracker.record_grasp_attempt(torch.tensor(opened, dtype=torch.long))
+                pending_holds.extend([i, step_index, False] for i in opened)
+                nearest_cm = _nearest_brick_cm(
+                    pos.to("cpu"),
+                    robot.data.body_pos_w[:, tool, :2].to("cpu"),
+                    held,
+                    bin_centers.to("cpu"),
+                    bin_half_extents.to("cpu"),
+                )
+                tracker.record_grasp_attempt(
+                    torch.tensor(opened, dtype=torch.long), [nearest_cm[i] for i in opened]
+                )
         grip_open_prev = grip_open
         due = [entry for entry in pending_releases if entry[2] <= step_index]
         if due:
             pending_releases = [entry for entry in pending_releases if entry[2] > step_index]
             env_ids = torch.tensor([e for e, _, _ in due], dtype=torch.long)
             brick_ids = torch.tensor([b for _, b, _ in due], dtype=torch.long)
-            pos, vel = _brick_states(env)
             landed = containing_bin(pos, vel, bin_centers, bin_half_extents).to("cpu")
             settled = landed[env_ids, brick_ids]
+            tracker.record_release(
+                env_ids,
+                [
+                    layout.BRICK_COLOR_ORDER[int(b) % len(layout.BRICK_COLOR_ORDER)]
+                    for b in brick_ids
+                ],
+                [layout.BRICK_COLOR_ORDER[int(k)] if int(k) >= 0 else None for k in settled],
+            )
             # -1 is a brick that reached no bin at all: a failed cycle, not a mis-sort.
             wrong = (settled >= 0) & (settled != target_bins[brick_ids])
             if wrong.any():
@@ -219,6 +257,26 @@ def rollout(
         stem = out_stem or f"eval_seed{run_seed}"
         payload["traces"] = [str(p) for p in trace.save(trace_dir, stem)]
     return payload
+
+
+def _nearest_brick_cm(pos, tool_xy, held, bin_centers, bin_half_extents) -> list[float]:
+    """Per env: xy distance in cm from the tool to the nearest brick still on the desk, or -1.
+
+    A brick inside a bin's footprint, above the desk (lifted or on the shelf) or between the
+    jaws right now is not a pick target, so it is left out.
+    """
+    in_bin = (
+        ((pos[:, :, None, :2] - bin_centers[None, None, :, :2]).abs() <= bin_half_extents[:2])
+        .all(dim=-1)
+        .any(dim=-1)
+    )
+    on_desk = (pos[..., 2] > -0.05) & (pos[..., 2] < 0.12)
+    dist = (pos[:, :, :2] - tool_xy[:, None, :]).norm(dim=-1)
+    dist[in_bin | ~on_desk] = float("inf")
+    for i in torch.nonzero(held >= 0).flatten().tolist():
+        dist[i, int(held[i])] = float("inf")
+    nearest = dist.min(dim=-1).values
+    return [100.0 * float(d) if torch.isfinite(d) else -1.0 for d in nearest]
 
 
 def out_stem(out: str, run_seed: int) -> str:

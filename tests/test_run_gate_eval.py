@@ -84,6 +84,30 @@ def _payload(draw: ge.EvalDraw, episodes: list[dict], checkpoint="ck", **extra) 
 # --- draws and seeds ------------------------------------------------------------------------
 
 
+def test_aggregate_reads_the_close_event_instrument():
+    """The confusion names which color went to which bin; the close reads pair each close's
+    nearest-brick distance with its hold window by index, so an open window pairs with nothing."""
+    draw = ge.EvalDraw(process_index=0, permutation=(0, 1, 2, 3), run_seed=1, layout_seed=2)
+    episodes = [
+        _episode(
+            1,
+            releases=[["red", "yellow"], ["red", "red"], ["blue", None]],
+            closes_nearest_cm=[0.5, 3.0, 1.0],
+            closes_held_window=[True, False],
+        ),
+        _episode(
+            0, releases=[["red", "yellow"]], closes_nearest_cm=[-1.0], closes_held_window=[False]
+        ),
+    ]
+    sec = ge.aggregate_gate([_payload(draw, episodes)], 0.7)["secondary"]
+    assert sec["wrong_bin_confusion"] == {"red->yellow": 2}
+    assert (sec["closes_graded_window"], sec["closes_within_2cm"]) == (3, 1)
+    assert sec["hold_rate_window"] == pytest.approx(1 / 3)
+    assert sec["hold_rate_window_within_2cm"] == pytest.approx(1.0)
+    legacy = ge.aggregate_gate([_payload(draw, [_episode(0)])], 0.7)["secondary"]
+    assert legacy["wrong_bin_confusion"] == {} and legacy["hold_rate_window"] is None
+
+
 def test_draws_are_deterministic_and_use_the_campaign_seed_formula():
     a = ge.make_eval_draws(10, SELECTION_SEED)
     b = ge.make_eval_draws(10, SELECTION_SEED)
