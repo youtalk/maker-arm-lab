@@ -74,6 +74,7 @@ class GateCfg:
     temporal_ensemble_coeff: float | None = None
     only_processes: tuple | None = None
     eval_timeout_s: float = 4 * 3600
+    backend: str = "isaac"  # "mujoco" spawns scripts/mj_eval_policy.py under .venv/bin/python
 
 
 def make_eval_draws(processes: int, seed: int) -> list[EvalDraw]:
@@ -265,19 +266,29 @@ def _start_server(cfg: GateCfg) -> _ServerHandle:
     return _ServerHandle(proc, _extract_json_line("".join(lines), "SERVER_READY"))
 
 
+MUJOCO_PYTHON = ".venv/bin/python"
+
+
 def _isaaclab_eval_env(cfg: GateCfg) -> dict[str, str]:
+    if cfg.backend == "mujoco":
+        return {**os.environ, "MUJOCO_GL": os.environ.get("MUJOCO_GL", "egl")}
     env = {**os.environ, "OMNI_KIT_ACCEPT_EULA": "YES"}
     env.setdefault("VIRTUAL_ENV", str(cfg.isaaclab_path / ".venv"))
     return env
 
 
 def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
-    return [
-        f"{cfg.isaaclab_path}/isaaclab.sh",
-        "-p",
-        "scripts/eval_policy.py",
-        "--headless",
-        "--enable_cameras",
+    if cfg.backend == "mujoco":
+        prefix = [MUJOCO_PYTHON, "scripts/mj_eval_policy.py"]
+    else:
+        prefix = [
+            f"{cfg.isaaclab_path}/isaaclab.sh",
+            "-p",
+            "scripts/eval_policy.py",
+            "--headless",
+            "--enable_cameras",
+        ]
+    return prefix + [
         "--num_envs",
         str(cfg.num_envs),
         "--run_seed",
@@ -458,6 +469,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--temporal_ensemble_coeff", type=float, default=None)
     parser.add_argument("--only_processes", type=_process_list, default=None)
     parser.add_argument("--eval_timeout_s", type=float, default=4 * 3600)
+    parser.add_argument("--backend", choices=("isaac", "mujoco"), default="isaac")
     return parser.parse_args(argv)
 
 
@@ -478,6 +490,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         temporal_ensemble_coeff=args.temporal_ensemble_coeff,
         only_processes=args.only_processes,
         eval_timeout_s=args.eval_timeout_s,
+        backend=args.backend,
     )
 
 

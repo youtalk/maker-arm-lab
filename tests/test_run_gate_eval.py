@@ -366,3 +366,35 @@ def test_commands_carry_the_inference_flags_and_the_draw(tmp_path):
     assert cmd[cmd.index("--permutation") + 1] == ",".join(str(p) for p in draw.permutation)
     assert cmd[cmd.index("--num_envs") + 1] == "2"
     assert "--enable_cameras" in cmd and "--headless" in cmd
+
+
+def test_eval_command_mujoco_backend_spawns_the_mujoco_client(tmp_path):
+    cfg = ge.GateCfg(
+        checkpoint="ck",
+        out_dir=tmp_path,
+        processes=1,
+        num_envs=4,
+        seed=7,
+        threshold=0.7,
+        ledger=tmp_path / "ledger.json",
+        backend="mujoco",
+    )
+    draw = ge.make_eval_draws(1, 7)[0]
+    cmd = ge._eval_command(cfg, draw)
+    assert cmd[:2] == [ge.MUJOCO_PYTHON, "scripts/mj_eval_policy.py"]
+    assert "--headless" not in cmd and cmd[cmd.index("--num_envs") + 1] == "4"
+    assert ge._isaaclab_eval_env(cfg)["MUJOCO_GL"]
+    isaac = ge._eval_command(
+        ge.GateCfg(
+            checkpoint="ck",
+            out_dir=tmp_path,
+            processes=1,
+            num_envs=4,
+            seed=7,
+            threshold=0.7,
+            ledger=tmp_path / "ledger.json",
+        ),
+        draw,
+    )
+    assert isaac[1:3] == ["-p", "scripts/eval_policy.py"]
+    assert cmd[cmd.index("--num_envs") :] == isaac[isaac.index("--num_envs") :]
