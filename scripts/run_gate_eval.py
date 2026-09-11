@@ -155,6 +155,20 @@ def aggregate_gate(process_payloads: list[dict], threshold: float) -> dict:
     releases_queued = sum(p.get("releases_queued", 0) for p in process_payloads)
     wrong_bin = sum(ep.get("wrong_bin_deposits", 0) for ep in episodes)
     clamp_steps = sum(ep["clamp_steps"] for ep in episodes)
+    # The close-event instrument: pairs (nearest brick at the close, held within the window),
+    # paired by index so a window still open at the episode's end pairs with nothing.
+    closes = [
+        (cm, ok)
+        for ep in episodes
+        for cm, ok in zip(ep.get("closes_nearest_cm", []), ep.get("closes_held_window", []))
+    ]
+    near = [(cm, ok) for cm, ok in closes if 0.0 <= cm <= 2.0]
+    confusion: dict[str, int] = {}
+    for ep in episodes:
+        for color, landed in ep.get("releases", []):
+            if landed is not None and landed != color:
+                key = f"{color}->{landed}"
+                confusion[key] = confusion.get(key, 0) + 1
     lo, hi = wilson_interval(bricks_stowed, bricks_total)
     return {
         "gate": {
@@ -190,6 +204,13 @@ def aggregate_gate(process_payloads: list[dict], threshold: float) -> dict:
             "never_closed_episodes": sum(
                 1 for ep in episodes if ep.get("first_close_step", -1) == -1
             ),
+            "wrong_bin_confusion": dict(sorted(confusion.items())),
+            "closes_graded_window": len(closes),
+            "closes_within_2cm": len(near),
+            "hold_rate_window": (sum(ok for _, ok in closes) / len(closes)) if closes else None,
+            "hold_rate_window_within_2cm": (sum(ok for _, ok in near) / len(near))
+            if near
+            else None,
             "clamp_steps_total": clamp_steps,
             "clamp_fraction": (clamp_steps / steps_total) if steps_total else 0.0,
             "clamp_steps_per_joint": [

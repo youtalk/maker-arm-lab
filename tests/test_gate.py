@@ -129,6 +129,9 @@ def test_to_json_round_trips_plain_types():
         "grasp_attempts_unresolved": 0,
         "clamp_steps_per_joint": [0] * 6,
         "clamp_overshoot_max_per_joint": [0.0] * 6,
+        "closes_nearest_cm": [],
+        "closes_held_window": [],
+        "releases": [],
     }
     scalars = {k: v for k, v in d.items() if not isinstance(v, list)}
     assert all(type(v) in (int, bool) for v in scalars.values())
@@ -518,3 +521,22 @@ def test_policy_state_rejects_a_narrow_vector():
 
     with pytest.raises(ValueError, match="left jaw"):
         policy_state(torch.zeros(2, 6))
+
+
+def test_close_events_and_releases_are_kept_per_live_episode():
+    """The close-event instrument: one entry per close, hold window and graded release, kept
+    only while the episode is live, so a finished env's later events never reach its result."""
+    tr = RolloutTracker(num_envs=2, num_bricks=6)
+    tr.record_grasp_attempt(torch.tensor([0, 1]), nearest_cm=[1.5, -1.0])
+    tr.record_hold_window(torch.tensor([0, 1]), [True, False])
+    tr.record_release(torch.tensor([1]), ["red"], ["yellow"])
+    tr.record_release(torch.tensor([1]), ["blue"], [None])
+    tr.record_step(0, terminated=_bool([T, F]), truncated=_bool([F, F]), success=_bool([F, F]))
+    tr.record_grasp_attempt(torch.tensor([0, 1]), nearest_cm=[2.0, 0.5])  # env 0 is done
+    tr.record_hold_window(torch.tensor([1]), [True])
+    tr.record_step(1, terminated=_bool([F, F]), truncated=_bool([F, T]), success=_bool([F, F]))
+    a, b = tr.results[0], tr.results[1]
+    assert (a.closes_nearest_cm, a.closes_held_window, a.releases) == ([1.5], [True], [])
+    assert (b.closes_nearest_cm, b.closes_held_window) == ([-1.0, 0.5], [False, True])
+    assert b.releases == [["red", "yellow"], ["blue", None]]
+    assert a.grasp_attempts_unresolved == 1 and b.grasp_attempts_unresolved == 2
