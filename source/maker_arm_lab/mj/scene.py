@@ -23,6 +23,12 @@ Mapping from the Isaac task, in the order the Isaac cfgs declare it:
 * Cameras: Isaac's ``OffsetCfg(convention="ros")`` quaternions are composed with a half turn
   about x (``core.cameras.ROS_TO_MUJOCO_CAM``); square images make Isaac's horizontal FOV and
   MuJoCo's ``fovy`` the same number.
+* Lights: Isaac's ``DomeLightCfg`` is an environment light (the whole sky), its optional
+  ``DistantLightCfg`` sun the only shadow caster. MuJoCo has no environment light, so the dome
+  is a shadowless top-down directional light plus an ambient term of the same strength (a
+  uniform sky lights a vertical face at exactly half a horizontal one), and the sun is a second
+  directional light with its shadow. The gains are calibrated against MS2 Isaac frames
+  (``DOME_GAIN`` and friends below).
 """
 
 from __future__ import annotations
@@ -98,6 +104,20 @@ NOSLIP_ITERATIONS = 3
 IMPRATIO = 10.0
 FLOOR_Z = -0.75  # the Isaac GroundPlaneCfg's height
 
+# Light levels, calibrated 2026-09-11 against MS2 Isaac frames rendered at the same run draws
+# (campaign runs 4, 6, 11 and 16: dome 1031-3059, sun 281-1985, 3141-7987 K). The first port
+# (dome 0.7 diffuse + 0.35 ambient at intensity / 4000, sun 0.6 at 2000, full black-body tint)
+# lit a held brick at the 1.4 rad release tilt at a third of Isaac's brightness, cut the desk
+# under the sun's shadow to 0.22-0.40 of its lit level (Isaac about 0.84) and turned 3300 K into
+# orange; the t2 policy put dark held bricks in the wrong bin and lost the target brick under
+# the gripper's shadow (docs/ms3-mujoco-gate.md). With these the held brick reads at Isaac's
+# saturation in every reference draw and the shadow keeps 0.52-0.76 of the lit level.
+DOME_GAIN = 1.0 / 1000.0  # light level per unit of dome_intensity
+DOME_CAP = 2.5  # bright draws clip, as Isaac's do, but the brick hues survive
+SUN_GAIN = 0.3 / 2000.0  # a full sun adds 30 % on top of a 1000 dome: a mild shadow
+TINT_BLEND = 0.3  # fraction of the black-body tint kept (Isaac's 3141 K read R/B 1.17)
+SHADOW_MAP_SIZE = 4096  # the default 1024 over the 6 m floor is 3.5 mm per texel
+
 
 @dataclass(frozen=True)
 class SceneHandles:
@@ -134,6 +154,11 @@ def kelvin_rgb(temperature_k: float) -> tuple[float, float, float]:
         else (0.0 if t <= 19 else 138.5177312231 * math.log(t - 10) - 305.0447927307)
     )
     return tuple(min(255.0, max(0.0, c)) / 255.0 for c in (red, green, blue))
+
+
+def dome_tint(temperature_k: float) -> np.ndarray:
+    """The dome's RGB tint: the black-body color pulled ``1 - TINT_BLEND`` of the way to white."""
+    return 1.0 - TINT_BLEND * (1.0 - np.array(kelvin_rgb(temperature_k)))
 
 
 def _half(size) -> list[float]:
@@ -299,16 +324,16 @@ def build_spec(draw: dict, num_bricks: int = 6, cameras_on: bool = True) -> mujo
             fovy=cameras.WRIST_FOV_DEG,
         )
 
-    # Lighting: the dome light becomes ambient plus a shadowless overhead directional light
-    # tinted by its color temperature; the optional sun is a second directional light.
+    # Lighting (module docstring): a hemisphere dome, half top-down diffuse and half ambient,
+    # tinted by its color temperature; the optional sun casts the only shadow.
     spec.visual.headlight.active = 0
-    tint = np.array(kelvin_rgb(draw["dome_color_temp"]))
-    dome = tint * min(1.5, draw["dome_intensity"] / 4000.0)
+    spec.visual.quality.shadowsize = SHADOW_MAP_SIZE
+    dome = dome_tint(draw["dome_color_temp"]) * min(DOME_CAP, DOME_GAIN * draw["dome_intensity"])
     dome_light = spec.worldbody.add_light(name="dome", pos=[0.3, 0.0, 2.0], dir=[0.0, 0.0, -1.0])
     dome_light.type = mujoco.mjtLightType.mjLIGHT_DIRECTIONAL
     dome_light.castshadow = False
-    dome_light.diffuse = (0.7 * dome).tolist()
-    dome_light.ambient = (0.35 * dome).tolist()
+    dome_light.diffuse = (0.5 * dome).tolist()
+    dome_light.ambient = (0.5 * dome).tolist()
     dome_light.specular = [0.05, 0.05, 0.05]
     if draw["sun_intensity"] > 0.0:
         sun = spec.worldbody.add_light(
@@ -318,7 +343,7 @@ def build_spec(draw: dict, num_bricks: int = 6, cameras_on: bool = True) -> mujo
         )
         sun.type = mujoco.mjtLightType.mjLIGHT_DIRECTIONAL
         sun.castshadow = True
-        strength = 0.6 * draw["sun_intensity"] / 2000.0
+        strength = SUN_GAIN * draw["sun_intensity"]
         sun.diffuse = [strength] * 3
         sun.specular = [0.1 * strength] * 3
 

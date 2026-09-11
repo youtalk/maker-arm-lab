@@ -150,3 +150,26 @@ def test_kelvin_rgb_is_warm_below_and_cool_above_daylight():
     warm, day, cool = scene.kelvin_rgb(3000.0), scene.kelvin_rgb(6600.0), scene.kelvin_rgb(9000.0)
     assert warm[0] > warm[2] and cool[2] > cool[0]
     assert all(0.9 <= c <= 1.0 for c in day)
+
+
+def test_lights_are_a_hemisphere_dome_and_a_mild_sun():
+    """The calibrated light rig (scene.DOME_GAIN and friends): the dome lights a vertical face
+    at half a horizontal one (ambient == top-down diffuse), only the sun casts a shadow, and at
+    the darkest dome with the strongest sun the shadow still keeps most of the light."""
+    draw = sample_run_draw(random.Random(3))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    draw["dome_intensity"], draw["sun_intensity"], draw["dome_color_temp"] = 1000.0, 2000.0, 3000.0
+    model, _ = scene.build_model(draw, num_bricks=1, cameras_on=False)
+    dome, sun = model.light("dome"), model.light("sun")
+    assert not dome.castshadow[0] and sun.castshadow[0]
+    assert dome.ambient.tolist() == pytest.approx(dome.diffuse.tolist())
+    tint = scene.dome_tint(3000.0)
+    assert dome.diffuse.tolist() == pytest.approx((0.5 * tint).tolist())
+    assert tint[0] > tint[2] > 0.8  # warm, but no longer orange
+    assert sun.diffuse.tolist() == pytest.approx([0.3] * 3)
+    lit = dome.diffuse + dome.ambient + sun.diffuse
+    assert ((dome.diffuse + dome.ambient) / lit).min() > 0.7  # the shadow keeps > 70 %
+    assert model.vis.quality.shadowsize == scene.SHADOW_MAP_SIZE
+    bright = dict(draw, dome_intensity=6000.0)
+    model, _ = scene.build_model(bright, num_bricks=1, cameras_on=False)
+    assert model.light("dome").diffuse.max() == pytest.approx(0.5 * scene.DOME_CAP)
