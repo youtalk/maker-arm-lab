@@ -377,7 +377,7 @@ class OracleRig:
         noise: oracle.OracleNoise,
         rng: random.Random,
         induction: oracle.FailureInduction | None = None,
-        transport_speed: float = 1.0,
+        transport_speed: float = trajectory.TRANSPORT_SPEED,
     ):
         self.env = env
         # Multiplier on the pace of the transport legs (TRANSPORT_PHASES); see leg_resolution.

@@ -69,7 +69,7 @@ def test_motion_stats_count_static_frames_and_accelerations():
 def test_transport_speed_is_a_batch_argument_recorded_in_run_meta():
     parser = argparse.ArgumentParser()
     batch_loop.add_batch_arguments(parser)
-    assert parser.parse_args(["--out_dir", "x"]).transport_speed == 1.0
+    assert parser.parse_args(["--out_dir", "x"]).transport_speed == tj.TRANSPORT_SPEED == 4.0
     args = parser.parse_args(["--out_dir", "x", "--transport_speed", "3"])
     assert args.transport_speed == 3.0
     draw, _, noise = batch_loop.build_run(args)

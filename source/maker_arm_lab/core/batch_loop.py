@@ -321,10 +321,10 @@ def add_batch_arguments(parser) -> None:
     parser.add_argument(
         "--transport_speed",
         type=float,
-        default=1.0,
+        default=trajectory.TRANSPORT_SPEED,
         help="Multiplier on the pace of the transport legs (HOVER, LIFT, RAISE, EXTEND, "
-        "RETREAT) under the minimum-jerk walk; 1.0 is the old staircase's pace. DESCEND is "
-        "never scaled.",
+        "RETREAT) under the minimum-jerk walk; 1.0 is the old staircase's pace, the default "
+        "is the speed-ladder read. DESCEND is never scaled.",
     )
     parser.add_argument(
         "--induce_prob",

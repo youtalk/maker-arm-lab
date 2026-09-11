@@ -20,6 +20,15 @@ import torch
 CONTROL_HZ = 30.0
 """The control rate the walk is sampled at (sim dt 1/120 with decimation 4)."""
 
+TRANSPORT_SPEED = 4.0
+"""The adopted multiplier on the transport legs' pace (HOVER, LIFT, RAISE, EXTEND, RETREAT).
+
+Read off the pre-registered speed ladder on MuJoCo, 2026-09-10 (12 envs, 50 attempts, cameras
+off, the same seeds per rung): yield 0.960 / 1.000 / 1.000 / 0.980 and 935 / 665 / 539 / 484
+control steps per brick at 1x / 2x / 3x / 4x, against the staircase's 815; the rule adopted
+the fastest rung with yield >= 0.95 and a cycle at most 0.85x the 1x control.
+"""
+
 MIN_JERK_PEAK_VELOCITY = 1.875
 """max s'(t) over [0, 1]: the peak speed is this times the mean speed."""
 
