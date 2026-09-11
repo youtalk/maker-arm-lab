@@ -3,7 +3,7 @@
 The scripted oracle -- the same ``OracleRig`` that generated the MS1 and MS2 corpora on Isaac
 -- runs a two-brick episode on the MuJoCo env with cameras off and must stow both bricks: a
 real pinch at the measured stall (PINCH_MIN_STALL, PINCH_MIN_FORCE), a lift, a carry, a
-release into the right bin, twice. About 15 s on one core. The six-brick episode is the
+release into the right bin, twice. A few seconds on one core. The six-brick episode is the
 same code path six times over and is left to ``scripts/mj_generate_batch.py --probe``.
 """
 
@@ -23,12 +23,20 @@ def test_oracle_sorts_two_bricks_on_mujoco():
     rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
     pinches = []
     steps = 0
+    last_lift_pinch = None
     while steps < 4000:
+        goal = rig.goals[0]
+        in_lift = goal is not None and goal.phase is oracle.Phase.LIFT
+        if in_lift and not rig.plans[0]:
+            # The lift's walk is done and the brick is in free air: what the rig's own LIFT
+            # gate reads on the phase's last step is the last of these samples.
+            last_lift_pinch = rig.pinch_evidence(0, rig.oracles[0].target_brick)
         out = rig.step()
         steps += 1
-        goal = rig.goals[0]
-        if goal is not None and goal.phase is oracle.Phase.LIFT and rig.steps_in_phase[0] == 60:
-            pinches.append(rig.pinch_evidence(0, rig.oracles[0].target_brick))
+        after = rig.goals[0]
+        if in_lift and (after is None or after.phase is not oracle.Phase.LIFT):
+            pinches.append(last_lift_pinch)
+            last_lift_pinch = None
         if bool(out["dones"][0]) or bool(out["abandoned"][0]):
             break
     stats = rig.episode_stats(0)
