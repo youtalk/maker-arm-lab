@@ -201,6 +201,10 @@ class CampaignCfg:
     # when set, so the ledger's own command record shows whether a campaign's episodes
     # could still contain the schedule.
     randomize_pick_order: bool = False
+    # Nearest-first target selection (oracle.OracleNoise.nearest_first_pick_order): keeps
+    # the schedule broken and makes the target readable from the cameras. Forwarded only
+    # when set, for the same ledger reason; the two orders are mutually exclusive.
+    nearest_first_pick_order: bool = False
     # Corrective approaches (oracle.OracleNoise.hover_jitter, MS3 recipe design 5.1):
     # forwarded only when the range is non-empty, for the same ledger reason.
     hover_jitter_min: float = 0.0
@@ -790,6 +794,8 @@ def _batch_command(
         ]
     if cfg.randomize_pick_order:
         cmd += ["--randomize_pick_order"]
+    if cfg.nearest_first_pick_order:
+        cmd += ["--nearest_first_pick_order"]
     if cfg.hover_jitter_max > 0.0:
         cmd += [
             "--hover_jitter_min",
@@ -916,6 +922,7 @@ def _build_cfg(args: argparse.Namespace) -> CampaignCfg:
         induce_offset_max=args.induce_offset_max,
         induce_noise_boost=args.induce_noise_boost,
         randomize_pick_order=args.randomize_pick_order,
+        nearest_first_pick_order=args.nearest_first_pick_order,
         hover_jitter_min=args.hover_jitter_min,
         hover_jitter_max=args.hover_jitter_max,
         backend=args.backend,
@@ -987,6 +994,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=(
             "pick the next brick at random instead of lowest-index, removing the fixed "
             "R,B,Y,G,R,B color schedule (openyam-lab's largest gate lever). Off by default"
+        ),
+    )
+    parser.add_argument(
+        "--nearest_first_pick_order",
+        action="store_true",
+        help=(
+            "pick the brick nearest the tool instead of lowest-index: the schedule stays "
+            "broken and the target becomes readable from the cameras. Off by default, and "
+            "refused together with --randomize_pick_order"
         ),
     )
     parser.add_argument(

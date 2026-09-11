@@ -1030,6 +1030,26 @@ def test_build_cfg_carries_randomize_pick_order_and_the_breaker(tmp_path):
     assert custom.breaker_min_rate == 0.5 and custom.breaker_min_runs == 2
 
 
+def test_batch_command_and_cfg_carry_nearest_first_pick_order(tmp_path):
+    """Lever 5's order has to reach the batch, and the ledger's own command record has to
+    show which of the three orders a campaign ran."""
+    base = ["--out_dir", str(tmp_path / "w"), "--dataset_root", str(tmp_path / "d")]
+    assert "--nearest_first_pick_order" not in gd._batch_command(
+        _cmd_cfg(tmp_path), 0, (0, 1, 2, 3), tmp_path / "shard_000"
+    )
+    cfg = _cmd_cfg(tmp_path, nearest_first_pick_order=True)
+    assert "--nearest_first_pick_order" in gd._batch_command(
+        cfg, 0, (0, 1, 2, 3), tmp_path / "shard_000"
+    )
+    assert gd._build_cfg(gd._parse_args(base)).nearest_first_pick_order is False
+    assert (
+        gd._build_cfg(
+            gd._parse_args(base + ["--nearest_first_pick_order"])
+        ).nearest_first_pick_order
+        is True
+    )
+
+
 def test_the_ledger_carries_each_runs_meta_and_stats(tmp_path):
     cfg = gd.CampaignCfg(
         out_dir=tmp_path, dataset_root=tmp_path / "ds", target=40, attempts_per_run=50, num_envs=8

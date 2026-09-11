@@ -878,3 +878,89 @@ def test_hover_jitter_without_an_rng_is_refused():
             num_bricks=1,
             draw=oracle.sample_episode_draw(random.Random(0), noise),
         )
+
+
+# --- nearest-first pick order ----------------------------------------------
+#
+# The third order (MS3 visual-inspection plan, lever 5). The randomized order removes the
+# color schedule, but it also leaves the next target unreadable from the image: the
+# 2026-09-11 probes found 30-45% of the closes 2 cm or further from any brick sitting
+# BETWEEN two bricks under 10 cm apart, the signature of a policy averaging over candidates
+# it cannot disambiguate. Nearest-first keeps the schedule broken -- the desk layout is
+# random, so the color order still varies per episode -- and makes the target a function of
+# the scene the cameras see. These tests pin that both properties hold.
+
+
+def _scatter_snapshot(xys, pick_point=(0.28, 0.0, 0.20)):
+    """Bricks at the given desk xy positions, tool at ``pick_point``."""
+    pos = torch.zeros(len(xys), 3)
+    for i, (x, y) in enumerate(xys):
+        pos[i] = torch.tensor([x, y, layout.BRICK_SIZE[2] / 2])
+    return oracle.SceneSnapshot(
+        brick_pos=pos,
+        brick_yaw=torch.zeros(len(xys)),
+        brick_lin_vel=torch.zeros(len(xys), 3),
+        pick_point=torch.tensor(list(pick_point)),
+    )
+
+
+def _nearest_oracle(num_bricks=6, rng=None):
+    noise = oracle.OracleNoise(nearest_first_pick_order=True)
+    return oracle.EnvOracle(
+        layout.DEFAULT_BIN_LAYOUT,
+        num_bricks=num_bricks,
+        draw=oracle.sample_episode_draw(random.Random(0), noise),
+        rng=rng,
+    )
+
+
+def test_nearest_first_takes_the_closest_brick_and_consumes_no_randomness():
+    """The rule is the scene's, not the seed's: a deterministic order that spends no
+    randomness, so a nearest-first shard stays re-derivable from its layout alone."""
+    assert oracle.OracleNoise().nearest_first_pick_order is False
+    assert _draw().nearest_first_pick_order is False
+    rng = random.Random(3)
+    orc = _nearest_oracle(num_bricks=4, rng=rng)
+    before = rng.getstate()
+    # Distances from the tool at x 0.28: brick 1 is nearest, then 3, 0, 2.
+    scene = _scatter_snapshot([(0.20, -0.10), (0.26, 0.02), (0.18, 0.14), (0.24, -0.05)])
+    assert _run_episode(orc, scene) == [1, 3, 0, 2]
+    assert rng.getstate() == before
+
+
+def test_nearest_first_leaves_the_fixed_color_schedule():
+    """Nearest-first must not hand back the R,B,Y,G shortcut the randomized order removed:
+    the desk is scattered at random, so the color order has to vary across episodes."""
+    rng = random.Random(11)
+    colors = set()
+    for _ in range(20):
+        xys = [(rng.uniform(0.14, 0.26), rng.uniform(-0.14, 0.14)) for _ in range(6)]
+        order = _run_episode(_nearest_oracle(), _scatter_snapshot(xys))
+        colors.add(tuple(b % len(layout.BRICK_COLOR_ORDER) for b in order))
+    assert len(colors) >= 10
+    assert (0, 1, 2, 3, 0, 1) not in colors
+
+
+def test_nearest_first_still_stows_every_brick_exactly_once():
+    """Changing the order must not cost coverage: no repeats, no skips, and the
+    reachability filter stays the oracle's."""
+    orc = _nearest_oracle()
+    order = _run_episode(orc, _desk_snapshot(6))
+    assert sorted(order) == list(range(6))
+    assert orc.phase == oracle.Phase.DONE
+    orc = _nearest_oracle()
+    assert 2 not in _run_episode(orc, _desk_snapshot(6, unreachable=(2,)))
+    assert orc.phase == oracle.Phase.ABANDON
+
+
+def test_nearest_first_and_randomize_pick_order_together_are_refused():
+    """Two orders cannot both be the order. A run_meta advertising both would leave no
+    reader able to say which one its episodes carried."""
+    noise = oracle.OracleNoise(randomize_pick_order=True, nearest_first_pick_order=True)
+    with pytest.raises(ValueError, match="one pick order"):
+        oracle.EnvOracle(
+            layout.DEFAULT_BIN_LAYOUT,
+            num_bricks=3,
+            draw=oracle.sample_episode_draw(random.Random(0), noise),
+            rng=random.Random(0),
+        )
