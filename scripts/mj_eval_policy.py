@@ -9,6 +9,13 @@ Isaac ``MakerArm-LegoSort-Eval-v0`` cfg inherits it. Runs under the project's ow
 
     uv run python scripts/mj_eval_policy.py --num_envs 12 --run_seed 1 --layout_seed 2 \\
         --permutation 0,1,2,3 --server tcp://127.0.0.1:5555 --out /tmp/eval_000.json
+
+``--viewer`` opens the MuJoCo GUI on env 0 and grades the rollout as usual, for watching a
+trained policy instead of reading its payload. The window and the offscreen camera renderer
+share one GL backend, so that run goes through glfw and needs a display:
+
+    MUJOCO_GL=glfw uv run python scripts/mj_eval_policy.py --viewer --num_envs 1 \\
+        --run_seed 1 --layout_seed 2 --permutation 0,1,2,3 --server tcp://127.0.0.1:5555
 """
 
 import argparse
@@ -19,7 +26,10 @@ import sys
 import traceback
 from pathlib import Path
 
-os.environ.setdefault("MUJOCO_GL", "egl")
+# --viewer needs an on-screen GL context; the offscreen camera renderer shares the backend,
+# so the whole process moves to glfw for that run. Read off argv because the backend is fixed
+# at the first mujoco import, which happens below.
+os.environ.setdefault("MUJOCO_GL", "glfw" if "--viewer" in sys.argv else "egl")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lerobot_stack"))
 import policy_client
@@ -56,6 +66,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         default="",
         help="dump one npz per env with the per-step (7,) state and raw/clamped action",
     )
+    parser.add_argument(
+        "--viewer",
+        action="store_true",
+        help="open the MuJoCo GUI on env 0 (use --num_envs 1; slows the rollout to render rate)",
+    )
     parser.add_argument("--headless", action="store_true", help="accepted for Isaac-command parity")
     parser.add_argument("--enable_cameras", action="store_true", help="accepted for parity")
     args = parser.parse_args(argv)
@@ -77,6 +92,7 @@ def main(argv=None) -> int:
         return 1
     policy = None
     env = None
+    viewer = None
     try:
         draw = sample_run_draw(random.Random(args.layout_seed))
         draw["slot_colors"] = perm
@@ -84,6 +100,21 @@ def main(argv=None) -> int:
             args.num_envs, draw, num_bricks=NUM_BRICKS, cameras=not args.random_actions
         )
         env.reset(seed=args.run_seed)
+        if args.viewer:
+            import mujoco.viewer
+
+            # env 0 only: the batch is a Python loop over one model/data pair per env, and the
+            # viewer holds one pair. The auto-reset inside step() writes the same MjData, so
+            # the window follows the whole rollout, episode after episode.
+            viewer = mujoco.viewer.launch_passive(env.models[0], env.datas[0])
+            stepped = env.step
+
+            def env_step(action):
+                out = stepped(action)
+                viewer.sync()
+                return out
+
+            env.step = env_step
         policy = None if args.random_actions else policy_client.ServerPolicy(args.server)
         payload = rollout(
             env,
@@ -108,6 +139,8 @@ def main(argv=None) -> int:
         )
         return 1
     finally:
+        if viewer is not None:
+            viewer.close()
         if policy is not None:
             policy.close()
         if env is not None:
