@@ -65,7 +65,7 @@ import random
 
 import torch
 
-from maker_arm_lab.core import layout, oracle
+from maker_arm_lab.core import layout, oracle, trajectory
 from maker_arm_lab.core.action_scale import IK_SCALE
 from maker_arm_lab.core.checker import (
     PINCH_MAX_ASYMMETRY,
@@ -165,6 +165,26 @@ WAYPOINT_HOLD_STEPS = 2
 # to close the tracking error the walk leaves behind (the trim's time constant is ~33 steps;
 # see core.global_ik.JointTrim).
 WALK_BUDGET_FRACTION = 0.6
+# The staircase walked one waypoint spacing per WAYPOINT_HOLD_STEPS control steps; these are
+# that pace in physical units per second, the unit `transport_speed` multiplies. At 1.0 a
+# leg takes the time the staircase took, but under core.trajectory's minimum-jerk law: the
+# target moves on every step, from rest to rest, peaking at 1.875x this speed mid-leg.
+# DESCEND always walks at 1.0: it is stall-gated and grasp-critical.
+LINEAR_PACE_M_PER_S = WAYPOINT_STEP_M * trajectory.CONTROL_HZ / WAYPOINT_HOLD_STEPS
+TILT_PACE_RAD_PER_S = WAYPOINT_TILT_STEP_RAD * trajectory.CONTROL_HZ / WAYPOINT_HOLD_STEPS
+JOINT_PACE_RAD_PER_S = WAYPOINT_JOINT_STEP_RAD * trajectory.CONTROL_HZ / WAYPOINT_HOLD_STEPS
+# Acceleration cap as a multiple of the leg's peak speed (1/s): the ramp to peak speed takes
+# about a quarter of a second at 4.0. It binds only on legs of a few centimetres.
+WALK_ACCEL_PER_PEAK_SPEED = 4.0
+TRANSPORT_PHASES = frozenset(
+    {
+        oracle.Phase.HOVER,
+        oracle.Phase.LIFT,
+        oracle.Phase.RAISE,
+        oracle.Phase.EXTEND,
+        oracle.Phase.RETREAT,
+    }
+)
 
 # Jaw-heading offsets a CARRY leg may end at when the held heading gives no walkable path,
 # tried in this order (see `OracleRig._plan_carry` for the measurement and for why moving the
@@ -259,6 +279,14 @@ JOINT_NOISE_PER_RAW_UNIT = IK_SCALE[0] / JACOBIAN_M_PER_RAD
 #   (carrying strikes over for hold phases only, resetting for active ones) is more state to
 #   keep consistent for a case measurement shows is not currently live there.
 WATCHDOG_TRIP_STRIKES = 30
+# A step near a joint stop counts as a strike only if the arm is NOT where it was told to be:
+# the solver accepts an end pose with any non-negative margin, and the minimum-jerk walk
+# decelerates into such a pose over more than WATCHDOG_TRIP_STRIKES steps (measured on
+# MuJoCo: a HOVER ending 0.0008 rad from link_003_joint's stop was abandoned on the last step
+# of its walk under the bare near-limit rule). Tracking error at rest is under 0.002 rad; an
+# arm pinned on a stop by a command it cannot follow is off by far more. Speed and past-the-
+# limit strikes are unchanged.
+WATCHDOG_TRACKING_TOL_RAD = 0.02
 
 
 def grasp_center_for(pick, tilt: float, heading: float, offset_z: float) -> tuple:
@@ -292,16 +320,19 @@ def leg_resolution(
     tilt_change: float = 0.0,
     heading_change: float = 0.0,
     joint_change: float = 0.0,
+    speed_scale: float = 1.0,
 ) -> tuple[int, int]:
-    """How many waypoints a leg gets, and how many control steps each is commanded for.
+    """How many waypoints a leg gets, and how many control steps its walk takes.
 
-    Resolution comes from the geometry (position, tilt, joint travel); pace comes from the
-    phase's own budget. ``EpisodeDraw.gain_scale`` -- the per-episode approach-speed draw,
-    which used to scale the servo's proportional gain -- cuts the leg finer, and the walk is
-    then held to ``WALK_BUDGET_FRACTION`` of the phase's ``max_steps``, so a slow draw cannot
-    spend a budget core.oracle sized for a faster one. A leg still too long for its budget is
-    cut COARSER rather than truncated: the arm has to reach the end of the leg, and a
-    truncated plan would leave every later phase starting from the wrong pose.
+    Resolution comes from the geometry (position, tilt, joint travel) so the waypoints stay
+    inside core.global_ik's continuity cap. Pace comes from the staircase's own (the
+    ``*_PACE_*`` constants) times ``EpisodeDraw.gain_scale`` -- the per-episode approach-speed
+    draw, which used to scale the servo's proportional gain -- times ``speed_scale``, under
+    core.trajectory's minimum-jerk law with its acceleration cap. Both are held to
+    ``WALK_BUDGET_FRACTION`` of the phase's ``max_steps``, so a slow draw cannot spend a
+    budget core.oracle sized for a faster one: a leg too long for its budget is cut coarser
+    and walked faster rather than truncated, because the arm has to reach the end of the
+    leg, and a truncated plan would leave every later phase starting from the wrong pose.
     """
     count = max(
         2,
@@ -311,8 +342,19 @@ def leg_resolution(
         math.ceil(joint_change / (WAYPOINT_JOINT_STEP_RAD * gain_scale)),
     )
     budget = max(2, int(WALK_BUDGET_FRACTION * max_steps))
-    count = min(count, budget)
-    return count, max(1, min(WAYPOINT_HOLD_STEPS, budget // count))
+    pace = gain_scale * speed_scale
+    seconds = max(
+        trajectory.walk_seconds(quantity, unit * pace, WALK_ACCEL_PER_PEAK_SPEED)
+        for quantity, unit in (
+            (distance, LINEAR_PACE_M_PER_S),
+            (tilt_change, TILT_PACE_RAD_PER_S),
+            (heading_change, TILT_PACE_RAD_PER_S),
+            (joint_change, JOINT_PACE_RAD_PER_S),
+        )
+    )
+    # `- 1e-6`: 0.12 m at 0.045 m/s is 80 steps, not the 81 float rounding would give.
+    steps = max(2, math.ceil(seconds * trajectory.CONTROL_HZ - 1e-6))
+    return min(count, budget), min(steps, budget)
 
 
 class OracleRig:
@@ -335,8 +377,11 @@ class OracleRig:
         noise: oracle.OracleNoise,
         rng: random.Random,
         induction: oracle.FailureInduction | None = None,
+        transport_speed: float = 1.0,
     ):
         self.env = env
+        # Multiplier on the pace of the transport legs (TRANSPORT_PHASES); see leg_resolution.
+        self.transport_speed = transport_speed
         self.bl = bl
         self.noise = noise
         self.rng = rng
@@ -374,10 +419,11 @@ class OracleRig:
         # The joint target being commanded right now, float64 CPU, URDF order. This is the
         # arm's setpoint between waypoints and through every hold phase.
         self.q_cmd = [torch.zeros(ARM_DOF, dtype=torch.float64) for _ in range(self.num_envs)]
-        # Remaining waypoints of the current phase's plan, and the dwell schedule walking it.
+        # The current phase's plan (joint waypoints, emptied when the walk completes), how
+        # many control steps its walk takes, and how many it has taken.
         self.plans: list[list[torch.Tensor]] = [[] for _ in range(self.num_envs)]
-        self.dwell = [WAYPOINT_HOLD_STEPS] * self.num_envs
-        self.dwell_left = [1] * self.num_envs
+        self.walk_steps = [1] * self.num_envs
+        self.walk_step = [0] * self.num_envs
         # Where a desk-resting brick sits in `grasp_center` coordinates. Per env because the
         # descend ladder picks its own offset per rung (the offset balancing desk clearance
         # against tip margin moves with tilt), and that choice then has to survive into the
@@ -557,15 +603,19 @@ class OracleRig:
         return {"bricks_delivered": delivered, "succeeded": succeeded}
 
     def _advance_plan(self, i: int) -> None:
-        """Move the commanded joint target one control step along this phase's plan."""
+        """Move the commanded joint target one control step along this phase's plan: the
+        polyline point at the minimum-jerk fraction of the walk, the last waypoint exactly
+        on the final step, after which the plan is exhausted and the target holds there."""
         plan = self.plans[i]
         if not plan:
             return
-        self.dwell_left[i] -= 1
-        if self.dwell_left[i] > 0:
+        self.walk_step[i] += 1
+        if self.walk_step[i] >= self.walk_steps[i]:
+            self.q_cmd[i] = plan[-1]
+            self.plans[i] = []
             return
-        self.q_cmd[i] = plan.pop(0)
-        self.dwell_left[i] = self.dwell[i]
+        fraction = trajectory.min_jerk(self.walk_step[i] / self.walk_steps[i])
+        self.q_cmd[i] = trajectory.polyline_point(plan, fraction)
 
     def _command_noise(self, i: int) -> torch.Tensor | float:
         """Per-step joint jitter for this env's episode draw (spec section 2.3, Datagen-v0 DR).
@@ -806,8 +856,8 @@ class OracleRig:
         commanded and may end at a relaxed one; see ``_plan_carry``.
         """
         self.plans[i] = []
-        self.dwell[i] = WAYPOINT_HOLD_STEPS
-        self.dwell_left[i] = 1
+        self.walk_steps[i] = 1
+        self.walk_step[i] = 0
         self.unplanned[i] = False
         if goal.yaw is not None:
             self.commanded_yaw[i] = oracle.fold_jaw_heading(
@@ -957,13 +1007,13 @@ class OracleRig:
         A dry run of exactly what `_plan_leg` will do at EXTEND entry -- the same goal
         (`EnvOracle.extend_goal`), the same heading ladder and the same fallback -- from the
         pose a candidate RAISE plan ends at. Nothing it computes is kept: the plan is thrown
-        away, `direct_legs` is not touched, and the waypoint dwell `_plan_cartesian` sets as
+        away, `direct_legs` is not touched, and the walk length `_plan_cartesian` sets as
         a side effect is restored, so a vetoed RAISE leaves the env exactly as an unplanned
         one does.
         """
         goal = self.oracles[i].extend_goal()
         pick_from, tilt_from = self._commanded_pick_pose(i, q)
-        dwell = self.dwell[i]
+        walk_steps = self.walk_steps[i]
         plan, _, _ = self._plan_carry(
             i,
             goal,
@@ -974,7 +1024,7 @@ class OracleRig:
             max(goal.tilt_rad, GRASP_TILT_RAD),
             heading,
         )
-        self.dwell[i] = dwell
+        self.walk_steps[i] = walk_steps
         return plan is not None
 
     def _plan_hover_ladder(self, i, goal, start, pick_to, heading) -> list[torch.Tensor] | None:
@@ -1009,18 +1059,18 @@ class OracleRig:
         (`EnvOracle.descend_goal`, at the yaw the HOVER goal carries, with the runtime's
         DESCEND_CLEARANCE_MEASURED applied as `_enter_phase` applies it), the same tilt
         ladder. Nothing it computes is kept: the plan is dropped and the per-env state the
-        ladder writes -- pick offset, commanded tilt, waypoint dwell -- is restored.
+        ladder writes -- pick offset, commanded tilt, walk length -- is restored.
         """
         goal = self.oracles[i].descend_goal(hover.yaw)
         goal.target_pos[2] = goal.target_pos[2] + DESCEND_CLEARANCE_MEASURED
         pick_offset = self.pick_offset[i].clone()
-        tilt, dwell = self.commanded_tilt[i], self.dwell[i]
+        tilt, walk_steps = self.commanded_tilt[i], self.walk_steps[i]
         pick_from, tilt_from = self._commanded_pick_pose(i, q)
         plan = self._plan_descend(
             i, goal, q, pick_from, tilt_from, goal.target_pos.double().cpu(), heading
         )
         self.pick_offset[i] = pick_offset
-        self.commanded_tilt[i], self.dwell[i] = tilt, dwell
+        self.commanded_tilt[i], self.walk_steps[i] = tilt, walk_steps
         return plan is not None
 
     def _plan_hover(self, i, goal, start, pick_to, heading) -> list[torch.Tensor] | None:
@@ -1090,7 +1140,7 @@ class OracleRig:
             heading_to = heading_from
         if offset_z is None:
             offset_z = float(self.pick_offset[i, 2].item())
-        count, dwell = self._leg_resolution(
+        count, steps = self._leg_resolution(
             i,
             goal,
             distance=float((pick_to - pick_from).norm()),
@@ -1109,7 +1159,7 @@ class OracleRig:
         chain = self.ik.solve_path(targets, seed=start)
         if chain is None:
             return None
-        self.dwell[i] = dwell
+        self.walk_steps[i] = steps
         return [step.q for step in chain]
 
     def _plan_direct(self, i, goal, start, pick_to, tilt_to, heading) -> list[torch.Tensor] | None:
@@ -1130,15 +1180,18 @@ class OracleRig:
 
     def _interpolate(self, i, goal, start, end) -> list[torch.Tensor]:
         """Joint-space waypoints from ``start`` to ``end``, cut to this phase's budget."""
-        count, dwell = self._leg_resolution(
+        count, steps = self._leg_resolution(
             i, goal, joint_change=float(torch.max(torch.abs(end - start)))
         )
-        self.dwell[i] = dwell
+        self.walk_steps[i] = steps
         return [start + (end - start) * t for t in torch.linspace(0.0, 1.0, count).double()]
 
     def _leg_resolution(self, i: int, goal: oracle.Goal, **geometry: float) -> tuple[int, int]:
-        """``leg_resolution`` for this env's episode draw and this phase's budget."""
-        return leg_resolution(goal.max_steps, self.oracles[i].draw.gain_scale, **geometry)
+        """``leg_resolution`` for this env's episode draw, this phase's budget and pace."""
+        speed_scale = self.transport_speed if goal.phase in TRANSPORT_PHASES else 1.0
+        return leg_resolution(
+            goal.max_steps, self.oracles[i].draw.gain_scale, speed_scale=speed_scale, **geometry
+        )
 
     def _target_for(self, pick, tilt: float, heading: float, offset_z: float) -> GraspTarget:
         """The six-scalar grasp task that puts the PICK point at ``pick``."""
@@ -1182,8 +1235,8 @@ class OracleRig:
             self.q_cmd[i] = self.q_arm(i)
             self.trims[i].reset()
             self.plans[i] = []
-            self.dwell[i] = WAYPOINT_HOLD_STEPS
-            self.dwell_left[i] = 1
+            self.walk_steps[i] = 1
+            self.walk_step[i] = 0
             self.brick_start[i] = None
             self.previous_pick_point[i] = None
             self.steps_in_phase[i] = 0
@@ -1298,6 +1351,12 @@ class OracleRig:
             if self.goals[i] is None:
                 continue
             tripped = oracle.watchdog_trips(joint_pos[i], joint_vel[i], self.limits)
+            if tripped and not oracle.watchdog_trips(
+                joint_pos[i], joint_vel[i], self.limits, guard_rad=0.0
+            ):
+                # Near a stop, not past it, not fast: a jam only if off the commanded target.
+                tracking = (joint_pos[i].double().cpu() - self.q_cmd[i]).abs().max()
+                tripped = float(tracking) >= WATCHDOG_TRACKING_TOL_RAD
             self.watchdog_strikes[i] = self.watchdog_strikes[i] + 1 if tripped else 0
             if self.watchdog_strikes[i] >= WATCHDOG_TRIP_STRIKES:
                 self.abandoned[i] = True

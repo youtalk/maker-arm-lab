@@ -22,7 +22,7 @@ from pathlib import Path
 
 import torch
 
-from maker_arm_lab.core import layout, oracle
+from maker_arm_lab.core import layout, oracle, trajectory
 from maker_arm_lab.core.layout import sample_run_draw
 
 CAMPAIGN_TARGET_SUCCESSES = 50
@@ -97,6 +97,7 @@ def run_meta(
         "probe": args.probe,
         "noise_scale": args.noise_scale,
         "start_pose_offset_rad": args.start_pose_offset_rad,
+        "transport_speed": args.transport_speed,
         # What was CONFIGURED; each episode's own "pick_order" records what was picked.
         "randomize_pick_order": noise.randomize_pick_order,
         "induction": None
@@ -150,12 +151,15 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
     clamped_steps = 0
     attempts = 0
     cycle_bricks: list[set[int]] = [set() for _ in range(rig.num_envs)]
+    motion = trajectory.MotionStats(rig.num_envs)
     start = time.time()
     deadline = start + max_wall_minutes * 60
     try:
         while attempts < target_attempts and time.time() < deadline:
             out = rig.step()
             control_steps += 1
+            for i in range(rig.num_envs):
+                motion.observe(i, rig.q_cmd[i])
             # Per-env flag: on how many envs the arm's command had to be clamped this step.
             clamped_steps += int(env.action_manager.get_term("arm_action").clamped.sum().item())
             for i, b in enumerate(env.oracle_cycle_brick.tolist()):
@@ -184,6 +188,8 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
                     # Watchdog/oracle abandon: explicit env-scoped reset. The episode exports
                     # with success=False -- dropped in the default 'succeeded' mode.
                     env.reset(env_ids=torch.tensor(abandoned_ids, device=env.device))
+                for i in env_ids:
+                    motion.reset(i)
                 rig.rearm(env_ids)
     finally:
         wall_seconds = time.time() - start
@@ -197,6 +203,7 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
         "attempts": attempts,
         "wall_seconds": wall_seconds,
         "exported": exported,
+        "motion": motion.summary(),
     }
 
 
@@ -239,6 +246,11 @@ def run_stats(counters: dict, *, target_attempts: int, num_envs: int, probe: boo
         "off_schedule_episodes": sum(
             1 for e in episodes if list(e.get("pick_order", [])) != sorted(e.get("pick_order", []))
         ),
+        # The smooth-oracle probe's reads (design section 5 item 1): control steps per
+        # episode across the batch, and the commanded target's static-frame fraction and
+        # acceleration quantiles.
+        "env_steps_per_episode": control_steps * num_envs / attempts if attempts else None,
+        "motion": counters.get("motion", {}),
     }
     if probe:
         success_rate = exported / attempts if attempts else 0.0
@@ -305,6 +317,14 @@ def add_batch_arguments(parser) -> None:
         default=None,
         help="half-width of the uniform per-joint offset applied to the arm's start pose at "
         "reset (the env's own default is 0.05).",
+    )
+    parser.add_argument(
+        "--transport_speed",
+        type=float,
+        default=1.0,
+        help="Multiplier on the pace of the transport legs (HOVER, LIFT, RAISE, EXTEND, "
+        "RETREAT) under the minimum-jerk walk; 1.0 is the old staircase's pace. DESCEND is "
+        "never scaled.",
     )
     parser.add_argument(
         "--induce_prob",
