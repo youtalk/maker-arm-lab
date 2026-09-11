@@ -72,6 +72,10 @@ def _load():
         module = importlib.util.module_from_spec(spec)
         module.__package__ = "_lego_sort_stub"
         spec.loader.exec_module(module)
+        # The runtime grades stowed bricks through core.stowed.per_brick_stowed, which reads
+        # brick poses off the scene; these tests drive the outcome through `env.stowed`
+        # directly, so the module-level name is pointed at that shortcut here.
+        module.per_brick_stowed = lambda env: env.stowed
         return module
     finally:
         for n in stubs:

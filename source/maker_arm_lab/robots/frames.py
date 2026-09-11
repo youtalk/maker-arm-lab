@@ -265,3 +265,75 @@ _FORWARD = (-math.sin(_PITCH), 0.0, -math.cos(_PITCH))
 _RIGHT = (0.0, 1.0, 0.0)
 _DOWN = (math.cos(_PITCH), 0.0, -math.sin(_PITCH))  # forward x right
 WRIST_CAM_ROT_IN_WRIST = quat_wxyz_from_axes(_RIGHT, _DOWN, _FORWARD)
+
+
+# The URDF's value, kept because it is the vendored one (README: "Gripper effort 20 N ...
+# are placeholders"). Task D3 step 4.3 authorises raising it to 40 N if the pinch will not
+# hold; ruling D3-17 put it back after measuring the raise inert.
+#
+# WHY IT IS INERT, and this is the part that survives: the effort limit is not what caps the
+# grip -- the gripper's implicit PD below is. The jaws are commanded to 0.0 (closed) and
+# stall on the brick, so the demand is `stiffness` x the stall, and on the shipping arm that
+# reads 1000 N/m x 7.43-7.71 mm = 7.4-7.7 N against a measured 7.59-7.62 N of grip on all ten
+# carries of the 10/10 gate (Task D3 part 16, symmetric to 0.001). A ~7.6 N demand never
+# reached even this 20 N cap, let alone a 40 N one, so raising it cannot change an outcome.
+#
+# HISTORICAL NOTE ON THE A/B, because its numbers are dead. The raise was pulled in part 13
+# against two trials that pinched properly and then slipped during the lift, and the A/B
+# showed both slips unchanged at 20 N and 40 N. That defect NO LONGER EXISTS -- it was the
+# Nyquist-rate chatter described in this file's ARM_ARMATURE comment modulating the grip, and
+# at HEAD the ENTRAINED bucket is empty and every trial is pinch_ok. So the part-13 grip
+# figures are chatter-era and are not cited above; the quiet-arm numbers are, and they support
+# the same conclusion far better -- they match the stiffness arithmetic to within 0.2 N.
+#
+# The lever on a grip that will not survive a lift is therefore `stiffness` below, not this
+# constant. Whatever the real gripper turns out to hold at, measured during MA-series
+# bring-up, belongs here -- but a strengthened-looking constant that changes no outcome does
+# not.
+GRIPPER_EFFORT_LIMIT_N = 20.0
+# The implicit PD that sets the grip in sim (see the block above): 1000 N/m stalls at 7.4-7.7 N
+# on a 15.8 mm brick. No real-arm counterpart; the real gripper is a position-controlled RS00.
+GRIPPER_STIFFNESS = 1000.0
+GRIPPER_DAMPING = 200.0
+
+# Rotor inertia reflected through the gearbox, for all six arm joints.
+#
+# Still UNVERIFIED (spec section 7) -- this is NOT a measured rotor inertia. It is a
+# stability floor, and it is an arrival re-measurement item: the real value is the motor's
+# rotor inertia times the gear ratio squared, which the vendor URDF omits and the SDK does
+# not publish. Replace it on MA-series bring-up, and see below for what your measured value
+# has to clear.
+#
+# WHAT IT IS PROTECTING AGAINST. The URDF omits armature and this was 0.0, which is not a
+# neutral default. Measured by /tmp/d3_decompose.py on 2026-09-06 (Task D3 part 14),
+# instrumented inside MITModeActuator.compute so the law's three terms are read at the
+# instant it differences them: at 0.0 every wrist joint sat in a period-2 limit cycle at the
+# Nyquist frequency of the 120 Hz physics rate. link_005_joint reversed sign EVERY substep
+# at +-4.2 rad/s with the applied torque flipping +-9 N.m, while its mean position error was
+# 0.25 mrad -- the torque was almost entirely the damping term reacting to its own last step.
+#
+# That is the explicit-damping instability, and the bound is
+#
+#     kd * dt / M_eff  >=  2
+#
+# It bites the WRIST joints specifically, because they carry almost no link inertia, so
+# M_eff is whatever armature says -- and it said zero. For kd = 2.0 (link_005..007) at
+# dt = 1/120 the marginal value is kd*dt/2 = 0.00833, and the measured bracket straddles it:
+#
+#     armature 0.005  -> still chatters (qd -3.52 / +4.28 / -4.03 / +3.38 rad/s per substep)
+#     armature 0.01   -> clean          (qd ~0.004 rad/s)
+#     armature 0.02   -> clean, shipped (~2.4x margin on the 0.00833 bound)
+#
+# A MEASURED VALUE MUST STILL CLEAR THAT BOUND. If the real rotor inertia comes in below
+# ~0.0083 for the wrist joints, raising the physics rate or lowering kd is the fix -- do not
+# simply keep this number, because too LARGE an armature is its own sim/real divergence: it
+# silently adds fictitious inertia and slows dynamics the real arm would not have.
+#
+# What it cost while it was 0.0, which is why every number in this task's parts 11-13 should
+# be re-read: the chatter aliased every post-hoc sample from ArticulationData, because
+# computed_torque comes from the last of decimation=4 substeps while joint_pos and joint_vel
+# are read back after that substep integrated -- opposite phases of a period-2 oscillation.
+# With armature set, the same decomposition closes to 5e-6 N.m and max |qd| across the arm
+# falls from 4.99 to 0.002 rad/s.
+ARM_ARMATURE_UNVERIFIED = True
+ARM_ARMATURE = 0.02

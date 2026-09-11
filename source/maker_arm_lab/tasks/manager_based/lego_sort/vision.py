@@ -29,18 +29,21 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import TiledCameraCfg
 from isaaclab.utils import configclass
 
-from maker_arm_lab.core import layout
+from maker_arm_lab.core.cameras import (
+    IMAGE_HEIGHT,
+    IMAGE_WIDTH,
+    OVERHEAD_CAM_POS,
+    OVERHEAD_CAM_ROT,
+    OVERHEAD_FOV_DEG,
+    WRIST_FOV_DEG,
+)
 from maker_arm_lab.robots import WRIST_CAM_POS_IN_WRIST, WRIST_CAM_ROT_IN_WRIST, WRIST_LINK
 
 from .lego_sort_env_cfg import LegoSortEnvCfg
 from .variants import LegoSortIKRelEnvCfg
 
-# Spec section 4.2 invariant: both streams are 224x224 RGB. Square, so the
-# horizontal and vertical fields of view are equal for square pixels (Isaac
-# Lab derives vertical_aperture = horizontal_aperture * height / width when
-# it is left at None -- isaaclab/sensors/camera/camera.py).
-IMAGE_WIDTH = 224
-IMAGE_HEIGHT = 224
+# IMAGE_WIDTH / IMAGE_HEIGHT, the FOVs and the overhead pose live in core.cameras (isaaclab-free)
+# so the MuJoCo scene shares them; this module owns only the Isaac cfg objects.
 
 # Isaac Lab's default horizontal aperture (a 35 mm spherical projector's).
 # Kept fixed so that a field of view maps to exactly one focal length.
@@ -65,24 +68,6 @@ def _focal_for_fov(fov_deg: float) -> float:
 # the camera is mounted in front of the wrist motor (front face z = -0.1128 in
 # link_007). What follows is the FOV half of that derivation.
 _WRIST_CAM_PRIM_PATH = "{ENV_REGEX_NS}/Robot/" + WRIST_LINK + "/wrist_cam"
-
-# Kept at 70.0 deliberately, not left alone. The mount clears the jaws by
-# offsetting 30 mm along +x over a 51.6 mm standoff to grasp_center
-# (robots.frames), and at that range the FOV decides whether the jaws frame the
-# grasp point or swallow it. Rendered and measured at the home pose:
-#
-#     FOV     fully-open jaw tip      what enters the top of the frame
-#     70     u = 218.0 of 224        nothing but desk (top ray lands at x=0.062)
-#     85     u = 193.0               the arm's own base (top ray lands at x=-0.004)
-#    100     u = 174.3               ditto, further behind the base (x=-0.097)
-#
-# So 70 deg is very nearly the exact FOV that puts the fully-open jaw tips ON
-# the frame edge: wider pulls the jaws inward, shrinks the brick, and starts
-# imaging the robot's own column instead of the workspace. It is wide enough for
-# the workspace -- at the home pose the frame covers 0.32 m of desk at 0.23 m
-# range, spanning core.layout's scatter band. Widening was the obvious lever for
-# the short standoff and it was tested and rejected on the renders, not assumed.
-WRIST_FOV_DEG = 70.0
 
 _WRIST_CAM = TiledCameraCfg(
     prim_path=_WRIST_CAM_PRIM_PATH,
@@ -122,37 +107,8 @@ _WRIST_CAM = TiledCameraCfg(
 )
 
 # --------------------------------------------------------------------------
-# Overhead camera
+# Overhead camera: pose and FOV derived in core.cameras from core.layout.
 # --------------------------------------------------------------------------
-# Straight down over the desk, framing the brick scatter zone AND all four
-# bins. Every number is derived from maker_arm_lab.core.layout so that moving
-# the scatter zone or the bins re-derives the pose instead of silently
-# de-framing the view (SCATTER_X already moved once, in openyam-lab's M1
-# Task 10; scripts/release_envelope_check.py, Task D4, is what re-validates
-# the scatter band and bin positions on this arm).
-OVERHEAD_FOV_DEG = 60.0
-# Fraction of slack around the region that must be visible.
-_OVERHEAD_MARGIN = 1.15
-
-# The derivation itself lives in maker_arm_lab.core.layout, which is torch/stdlib
-# only and therefore CPU-testable -- see tests/test_layout.py, which perturbs
-# SCATTER_X and asserts the resulting frame still contains the scatter zone and
-# the bins. Keeping it here would have left a GPU render as the only thing
-# guarding the invariant the pose exists to satisfy.
-OVERHEAD_CAM_POS = layout.overhead_view_pose(OVERHEAD_FOV_DEG, _OVERHEAD_MARGIN)
-
-# Look straight down with world +x ("away from the arm base", toward the bins)
-# as image-up. In the ROS camera convention Isaac Lab uses for `rot`
-# (+z = view direction, +x = image-right, +y = image-down) that is
-#   z_cam = (0, 0, -1)   x_cam = (0, -1, 0)   y_cam = (-1, 0, 0)
-# whose quaternion is a 180 deg turn about (1, -1, 0)/sqrt(2). Written from
-# those axes rather than copied from a reference file. This composition
-# (bins along the top edge, arm base at the bottom, +y to the left) was
-# confirmed by rendering on openyam-lab; it follows from core.layout alone,
-# not from the robot asset, so it is expected to hold here unchanged -- Task
-# C10's GPU smoke is what re-confirms it on this scene.
-_SQRT1_2 = math.sqrt(0.5)
-OVERHEAD_CAM_ROT = (0.0, _SQRT1_2, -_SQRT1_2, 0.0)
 
 _OVERHEAD_CAM = TiledCameraCfg(
     prim_path="{ENV_REGEX_NS}/overhead_cam",

@@ -15,8 +15,7 @@ CPU test suite needs exactly that submodule import to work without isaaclab, the
 isaaclab-dependent names cannot be pulled in eagerly.
 
 So: the isaaclab-free names are re-exported eagerly below, and the
-isaaclab-dependent names (``MAKER_ARM_CFG``, ``MAKER_ARM_USD_PATH``,
-``GRIPPER_EFFORT_LIMIT_N``, ``ARM_ARMATURE``, ``ARM_ARMATURE_UNVERIFIED``) are resolved
+isaaclab-dependent names (``MAKER_ARM_CFG``, ``MAKER_ARM_USD_PATH``) are resolved
 lazily through the module-level
 ``__getattr__`` (PEP 562): touching one of them imports ``.maker_arm`` -- and only then
 pulls in isaaclab -- on first access, while ``from maker_arm_lab.robots import frames``
@@ -32,15 +31,7 @@ import maker_arm_rs  # noqa: F401 -- fail fast at import, not deferred to first 
 
 from .frames import *  # noqa: F403 -- isaaclab-free; safe to re-export eagerly
 
-_LAZY_NAMES = frozenset(
-    {
-        "MAKER_ARM_CFG",
-        "MAKER_ARM_USD_PATH",
-        "GRIPPER_EFFORT_LIMIT_N",
-        "ARM_ARMATURE",
-        "ARM_ARMATURE_UNVERIFIED",
-    }
-)
+_LAZY_NAMES = frozenset({"MAKER_ARM_CFG", "MAKER_ARM_USD_PATH"})
 
 
 def __getattr__(name: str):

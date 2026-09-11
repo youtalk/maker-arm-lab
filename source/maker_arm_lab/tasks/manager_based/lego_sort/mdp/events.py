@@ -20,7 +20,6 @@ parse_env_cfg(...); cfg.num_bricks = 8``, which silently desyncs ``cfg`` from
 the live scene with no error otherwise.
 """
 
-import math
 import random
 
 import isaaclab.utils.math as math_utils
@@ -29,53 +28,9 @@ from isaaclab.envs import ManagerBasedEnv
 
 from maker_arm_lab.core import layout
 
-
-def _sample_brick_poses(
-    num_bricks: int,
-    min_separation: float,
-    pose_range: dict[str, tuple[float, float]],
-    max_sample_tries: int = 5000,
-    max_radius: float | None = None,
-) -> list[list[float]]:
-    """Rejection-sample (x, y, z, roll, pitch, yaw) per brick, min_separation apart in xyz.
-
-    ``max_radius`` (``layout.SCATTER_MAX_RADIUS``) clips the scatter box's unreachable
-    corners. It is an INVARIANT, not a preference: unlike ``min_separation``, which the
-    last-try escape below is allowed to violate rather than loop forever, a brick outside
-    it is never emitted. Task D3 measured that the grasp task has no solution at all beyond
-    that radius, at any jaw heading, so such a brick is a permanent failure floor in every
-    dataset generated from the scene rather than a merely awkward draw. On the final try the
-    sample is pulled back along its own radius instead of being accepted as-is.
-    """
-    range_list = [
-        pose_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]
-    ]
-    pose_list: list[list[float]] = []
-
-    for _ in range(num_bricks):
-        for try_index in range(max_sample_tries):
-            sample = [random.uniform(low, high) for low, high in range_list]
-            last_try = try_index == max_sample_tries - 1
-
-            if max_radius is not None and math.hypot(sample[0], sample[1]) > max_radius:
-                if not last_try:
-                    # Resample rather than clamp, so the distribution stays uniform over the
-                    # admissible region instead of piling up on the boundary arc.
-                    continue
-                sample = list(sample)
-                sample[0], sample[1] = layout.clip_to_reach(sample[0], sample[1], max_radius)
-
-            # Accept the first brick unconditionally, or on the last try (avoids an infinite loop).
-            if len(pose_list) == 0 or last_try:
-                pose_list.append(sample)
-                break
-
-            # Accept if sufficiently far from every already-placed brick.
-            if all(math.dist(sample[:3], pose[:3]) > min_separation for pose in pose_list):
-                pose_list.append(sample)
-                break
-
-    return pose_list
+# The rejection sampler lives in core.layout (isaaclab-free) so the MuJoCo backend scatters
+# bricks with the same code; kept under its old name here for the call below.
+_sample_brick_poses = layout.sample_brick_poses
 
 
 def randomize_brick_poses(

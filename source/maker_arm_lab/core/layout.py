@@ -356,3 +356,79 @@ def bin_static_boxes(
             )
         )
     return boxes
+
+
+def sample_brick_poses(
+    num_bricks: int,
+    min_separation: float,
+    pose_range: dict[str, tuple[float, float]],
+    max_sample_tries: int = 5000,
+    max_radius: float | None = None,
+) -> list[list[float]]:
+    """Rejection-sample (x, y, z, roll, pitch, yaw) per brick, min_separation apart in xyz.
+
+    ``max_radius`` (``SCATTER_MAX_RADIUS``) clips the scatter box's unreachable
+    corners. It is an INVARIANT, not a preference: unlike ``min_separation``, which the
+    last-try escape below is allowed to violate rather than loop forever, a brick outside
+    it is never emitted. Task D3 measured that the grasp task has no solution at all beyond
+    that radius, at any jaw heading, so such a brick is a permanent failure floor in every
+    dataset generated from the scene rather than a merely awkward draw. On the final try the
+    sample is pulled back along its own radius instead of being accepted as-is.
+    """
+    range_list = [
+        pose_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]
+    ]
+    pose_list: list[list[float]] = []
+
+    for _ in range(num_bricks):
+        for try_index in range(max_sample_tries):
+            sample = [random.uniform(low, high) for low, high in range_list]
+            last_try = try_index == max_sample_tries - 1
+
+            if max_radius is not None and math.hypot(sample[0], sample[1]) > max_radius:
+                if not last_try:
+                    # Resample rather than clamp, so the distribution stays uniform over the
+                    # admissible region instead of piling up on the boundary arc.
+                    continue
+                sample = list(sample)
+                sample[0], sample[1] = clip_to_reach(sample[0], sample[1], max_radius)
+
+            # Accept the first brick unconditionally, or on the last try (avoids an infinite loop).
+            if len(pose_list) == 0 or last_try:
+                pose_list.append(sample)
+                break
+
+            # Accept if sufficiently far from every already-placed brick.
+            if all(math.dist(sample[:3], pose[:3]) > min_separation for pose in pose_list):
+                pose_list.append(sample)
+                break
+
+    return pose_list
+
+
+def sample_run_draw(rng):
+    """One generation run's randomization draw -> LegoSortDatagenEnvCfg kwargs.
+
+    Consumed by scripts/generate_batch.py (``LegoSortDatagenEnvCfg(**sample_run_draw(rng))``)
+    and by ``maker_arm_lab.mj.scene``, so the run-level draw distribution has exactly one
+    definition across both simulators. The permutation drawn here is a
+    uniform shuffle for smoke purposes only -- the batch supervisor overrides
+    ``slot_colors`` explicitly for without-replacement scheduling across a
+    campaign.
+    """
+    perm = list(range(4))
+    rng.shuffle(perm)
+    bl = sample_bin_layout(rng, tuple(perm))
+    return {
+        "bin_x": bl.bin_x,
+        "bin_ys": bl.bin_ys,
+        "slot_colors": bl.slot_colors,
+        "dome_intensity": rng.uniform(1000.0, 6000.0),
+        "dome_color_temp": rng.uniform(3000.0, 8000.0),
+        "sun_intensity": rng.uniform(0.0, 2000.0),
+        "sun_rpy_deg": (rng.uniform(-60, 60), rng.uniform(-60, 60), rng.uniform(0, 360)),
+        "floor_color": (rng.uniform(0.05, 0.6),) * 3,
+        "wrist_cam_dpos": tuple(rng.uniform(-0.002, 0.002) for _ in range(3)),
+        "overhead_cam_dpos": tuple(rng.uniform(-0.01, 0.01) for _ in range(3)),
+        "overhead_cam_drot_deg": tuple(rng.uniform(-2.0, 2.0) for _ in range(3)),
+    }

@@ -16,10 +16,14 @@ packages = ["source/maker_arm_lab"]
 
 [dependency-groups]
 dev = [
+    "gymnasium>=1.0",
     "h5py>=3.11",
     "maker-arm-rs",
+    "mujoco>=3.3",
     "numpy>=1.26",
+    "pillow>=12.3.0",
     "pytest>=8",
+    "pyzmq>=27.2.0",
     "ruff>=0.8",
     "torch>=2.7",
 ]

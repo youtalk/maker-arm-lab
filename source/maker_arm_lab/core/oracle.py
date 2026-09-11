@@ -346,6 +346,27 @@ class Phase(enum.Enum):
     ABANDON = enum.auto()
 
 
+# Explicit pin, NOT Phase.value: the recorded integers are a dataset schema
+# that must survive any future reordering of the Phase enum. SETTLE/DONE/ABANDON
+# (0/10/11) are re-declared locally in lerobot_stack/convert_to_lerobot.py -- that
+# venv cannot import this module, so nothing enforces the two copies agree;
+# renumber here and update that file's SETTLE_INT/DONE_INT/ABANDON_INT by hand.
+PHASE_TO_INT = {
+    "SETTLE": 0,
+    "HOVER": 1,
+    "DESCEND": 2,
+    "CLOSE": 3,
+    "LIFT": 4,
+    "REOPEN": 5,
+    "RAISE": 6,
+    "EXTEND": 7,
+    "RELEASE": 8,
+    "RETREAT": 9,
+    "DONE": 10,
+    "ABANDON": 11,
+}
+
+
 @dataclass
 class Goal:
     phase: Phase
