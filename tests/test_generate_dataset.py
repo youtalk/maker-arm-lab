@@ -510,13 +510,16 @@ def test_campaign_target_default_matches_generate_batch_s_extrapolation_target(t
     """The supervisor's default --target and generate_batch.py's CAMPAIGN_TARGET_SUCCESSES are
     the same campaign size seen from two sides: the supervisor stops at it, and a --probe run
     extrapolates its wall clock to it. They live in two files because this one is stdlib-only
-    and generate_batch.py imports isaaclab at module scope, so the pin is by source text (the
+    and the constant lives in core/batch_loop.py (shared by both backends), so the pin is by
+    source text (the
     same technique the LeRobot-side schema pins use). openyam-lab's 600 came across with the
     file; MS1's campaign is an order of magnitude smaller, and a stale default here would
     silently run a 12x campaign for anyone who omitted --target."""
-    batch_src = (Path(__file__).resolve().parents[1] / "scripts/generate_batch.py").read_text()
+    batch_src = (
+        Path(__file__).resolve().parents[1] / "source/maker_arm_lab/core/batch_loop.py"
+    ).read_text()
     match = re.search(r"^CAMPAIGN_TARGET_SUCCESSES = (\d+)", batch_src, re.MULTILINE)
-    assert match is not None, "generate_batch.py no longer defines CAMPAIGN_TARGET_SUCCESSES"
+    assert match is not None, "core/batch_loop.py no longer defines CAMPAIGN_TARGET_SUCCESSES"
     batch_target = int(match.group(1))
 
     assert gd.CampaignCfg(out_dir=tmp_path, dataset_root=tmp_path / "ds").target == batch_target
@@ -1093,3 +1096,50 @@ def test_the_ledger_records_the_campaign_target(tmp_path):
     ledger = json.loads((tmp_path / "ledger.json").read_text())
     assert ledger["target"] == 40
     assert gd.Ledger.load(tmp_path / "ledger.json").target == 40
+
+
+def test_batch_command_mujoco_backend_spawns_the_mujoco_script(tmp_path):
+    """--backend mujoco swaps only the interpreter and script; every recipe flag survives."""
+    cfg = _cmd_cfg(tmp_path, backend="mujoco", randomize_pick_order=True, induce_prob=0.12)
+    cmd = gd._batch_command(cfg, 3, (1, 0, 3, 2), tmp_path / "shard_003")
+    assert cmd[:2] == [gd.MUJOCO_PYTHON, "scripts/mj_generate_batch.py"]
+    assert "isaaclab.sh" not in cmd[0] and "--headless" not in cmd
+    assert cmd[cmd.index("--permutation") + 1] == "1,0,3,2"
+    assert "--randomize_pick_order" in cmd and cmd[cmd.index("--induce_prob") + 1] == "0.12"
+    isaac = gd._batch_command(_cmd_cfg(tmp_path), 3, (1, 0, 3, 2), tmp_path / "shard_003")
+    assert isaac[1:3] == ["-p", "scripts/generate_batch.py"]
+    # The flag tail is identical between backends (this cfg's extra flags aside).
+    assert (
+        cmd[cmd.index("--out_dir") : cmd.index("--max_wall_minutes") + 2]
+        == isaac[isaac.index("--out_dir") : isaac.index("--max_wall_minutes") + 2]
+    )
+
+
+def test_mujoco_backend_env_needs_no_kit(tmp_path):
+    env = gd._isaaclab_batch_env(_cmd_cfg(tmp_path, backend="mujoco"))
+    assert "OMNI_KIT_ACCEPT_EULA" not in env or env.get("MUJOCO_GL")
+    assert env["MUJOCO_GL"]
+
+
+def test_build_cfg_carries_the_backend(tmp_path):
+    cfg = gd._build_cfg(
+        gd._parse_args(
+            [
+                "--out_dir",
+                str(tmp_path / "w"),
+                "--dataset_root",
+                str(tmp_path / "d"),
+                "--backend",
+                "mujoco",
+            ]
+        )
+    )
+    assert cfg.backend == "mujoco"
+    assert (
+        gd._build_cfg(
+            gd._parse_args(
+                ["--out_dir", str(tmp_path / "w"), "--dataset_root", str(tmp_path / "d")]
+            )
+        ).backend
+        == "isaac"
+    )

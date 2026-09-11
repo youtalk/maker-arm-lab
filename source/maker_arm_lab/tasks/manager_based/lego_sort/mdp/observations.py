@@ -13,15 +13,10 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from maker_arm_lab.core import layout
+from maker_arm_lab.core.stowed import brick_color_ids  # noqa: F401 -- re-exported
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
-
-
-def brick_color_ids(num_bricks: int) -> torch.Tensor:
-    """Target bin index per brick: brick i gets color i % 4 (BRICK_COLOR_ORDER)."""
-    return torch.arange(num_bricks) % len(layout.BRICK_COLOR_ORDER)
 
 
 def brick_poses_w(env: ManagerBasedRLEnv) -> torch.Tensor:

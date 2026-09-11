@@ -8,5 +8,6 @@ from .urdf_prep import (  # noqa: F401
     VENDORED_URDF,
     arm_joint_limits,
     gripper_travel,
+    gripper_velocity_limit,
     write_zup_urdf,
 )

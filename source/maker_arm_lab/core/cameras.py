@@ -1,0 +1,53 @@
+"""Camera constants shared by the Isaac and MuJoCo scenes (isaaclab-free).
+
+The wrist camera POSE lives in ``robots.frames`` (it is a frame on the arm); what lives here
+is the optics and the fixed overhead camera, which follow ``core.layout`` rather than the
+robot. ``tasks/manager_based/lego_sort/vision.py`` imports these to build the Isaac
+``TiledCameraCfg`` pair, and ``maker_arm_lab.mj.scene`` imports them to build the MuJoCo
+cameras, so a change here moves both simulators together.
+"""
+
+import math
+
+from maker_arm_lab.core import layout
+
+# Spec section 4.2 invariant: both streams are 224x224 RGB. Square, so the horizontal and
+# vertical fields of view are equal for square pixels.
+IMAGE_WIDTH = 224
+IMAGE_HEIGHT = 224
+
+# Wrist camera field of view, degrees. Kept at 70.0 deliberately, not left alone. The mount
+# clears the jaws by offsetting 30 mm along +x over a 51.6 mm standoff to grasp_center
+# (robots.frames), and at that range the FOV decides whether the jaws frame the grasp point
+# or swallow it. Rendered and measured at the home pose on the Isaac scene:
+#
+#     FOV     fully-open jaw tip      what enters the top of the frame
+#     70     u = 218.0 of 224        nothing but desk (top ray lands at x=0.062)
+#     85     u = 193.0               the arm's own base (top ray lands at x=-0.004)
+#    100     u = 174.3               ditto, further behind the base (x=-0.097)
+#
+# So 70 deg is very nearly the exact FOV that puts the fully-open jaw tips ON the frame
+# edge: wider pulls the jaws inward, shrinks the brick, and starts imaging the robot's own
+# column instead of the workspace. At the home pose the frame covers 0.32 m of desk at
+# 0.23 m range, spanning core.layout's scatter band.
+WRIST_FOV_DEG = 70.0
+
+# Overhead camera: straight down over the desk, framing the brick scatter zone AND all four
+# bins. Every number is derived from core.layout so that moving the scatter zone or the bins
+# re-derives the pose instead of silently de-framing the view.
+OVERHEAD_FOV_DEG = 60.0
+# Fraction of slack around the region that must be visible.
+OVERHEAD_MARGIN = 1.15
+OVERHEAD_CAM_POS = layout.overhead_view_pose(OVERHEAD_FOV_DEG, OVERHEAD_MARGIN)
+
+# Look straight down with world +x ("away from the arm base", toward the bins) as image-up.
+# In the ROS camera convention (+z = view direction, +x = image-right, +y = image-down) that is
+#   z_cam = (0, 0, -1)   x_cam = (0, -1, 0)   y_cam = (-1, 0, 0)
+# whose quaternion is a 180 deg turn about (1, -1, 0)/sqrt(2). This composition (bins along
+# the top edge, arm base at the bottom, +y to the left) was confirmed by rendering.
+_SQRT1_2 = math.sqrt(0.5)
+OVERHEAD_CAM_ROT = (0.0, _SQRT1_2, -_SQRT1_2, 0.0)
+
+# A ROS-convention camera (x right, y down, z forward) and a MuJoCo camera (x right, y up,
+# looks along -z) differ by a half turn about the camera's own x axis.
+ROS_TO_MUJOCO_CAM = (0.0, 1.0, 0.0, 0.0)

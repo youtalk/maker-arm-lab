@@ -54,6 +54,12 @@ def gripper_travel(urdf: Path = VENDORED_URDF) -> float:
     return float(joints[GRIPPER_JOINT_NAMES[0]].find("limit").get("upper"))
 
 
+def gripper_velocity_limit(urdf: Path = VENDORED_URDF) -> float:
+    """Per-jaw prismatic velocity limit in m/s (the driver joint's ``<limit velocity>``)."""
+    joints = _joints(ET.parse(urdf).getroot())
+    return float(joints[GRIPPER_JOINT_NAMES[0]].find("limit").get("velocity"))
+
+
 def write_zup_urdf(src: Path, dst: Path, mount_rpy: tuple[float, float, float] = MOUNT_RPY) -> Path:
     """Write ``dst``: ``src`` plus a fixed ``mount_link`` root, with absolute mesh paths."""
     tree = ET.parse(src)

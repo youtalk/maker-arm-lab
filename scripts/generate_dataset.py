@@ -85,6 +85,9 @@ class CircuitBreakerTripped(RuntimeError):
 # throughput target: too tight silently truncates a good run, while too loose costs nothing
 # that _batch_timeout_seconds below does not already bound.
 BATCH_WALL_MINUTES = 180.0
+# The project venv's interpreter, relative to the repo root the supervisor runs from (the same
+# convention as the converter's "lerobot_stack/.venv/bin/python").
+MUJOCO_PYTHON = ".venv/bin/python"
 
 # How far past its own deadline a generate_batch.py run may go before the supervisor stops
 # waiting. The child's --max_wall_minutes bounds its episode loop only; Isaac Lab's Kit
@@ -198,6 +201,10 @@ class CampaignCfg:
     # when set, so the ledger's own command record shows whether a campaign's episodes
     # could still contain the schedule.
     randomize_pick_order: bool = False
+    # Which simulator runs the batches: "isaac" spawns scripts/generate_batch.py under
+    # isaaclab.sh, "mujoco" spawns scripts/mj_generate_batch.py under the project venv. Both
+    # speak the same RUN_META / RUN_STATS / BATCH_OK contract, so nothing else here differs.
+    backend: str = "isaac"
     # Circuit breaker: once ``breaker_min_runs`` runs have completed, a pooled
     # successes/attempts below ``breaker_min_rate`` stops the campaign (CircuitBreakerTripped)
     # before the next run is launched. None disables it. The defaults are the MS2 spec's
@@ -727,12 +734,17 @@ def _batch_command(
     cfg: CampaignCfg, run_index: int, permutation: tuple, shard_path: Path
 ) -> list[str]:
     run_seed, layout_seed = _derive_seeds(cfg, run_index)
-    cmd = [
-        f"{cfg.isaaclab_path}/isaaclab.sh",
-        "-p",
-        "scripts/generate_batch.py",
-        "--headless",
-        "--enable_cameras",
+    if cfg.backend == "mujoco":
+        cmd = [MUJOCO_PYTHON, "scripts/mj_generate_batch.py"]
+    else:
+        cmd = [
+            f"{cfg.isaaclab_path}/isaaclab.sh",
+            "-p",
+            "scripts/generate_batch.py",
+            "--headless",
+            "--enable_cameras",
+        ]
+    cmd += [
         "--out_dir",
         str(cfg.out_dir),
         "--shard_name",
@@ -823,6 +835,10 @@ def _isaaclab_batch_env(cfg: CampaignCfg) -> dict[str, str]:
     provides -- if the campaign is itself launched from inside an already-activated venv
     (isaaclab's or otherwise), that takes precedence.
     """
+    if cfg.backend == "mujoco":
+        # No Kit, no isaaclab venv: the MuJoCo script runs under .venv/bin/python and only
+        # needs a GL backend for its EGL renders.
+        return {**os.environ, "MUJOCO_GL": os.environ.get("MUJOCO_GL", "egl")}
     env = {**os.environ, "OMNI_KIT_ACCEPT_EULA": "YES"}
     env.setdefault("VIRTUAL_ENV", str(cfg.isaaclab_path / ".venv"))
     return env
@@ -883,6 +899,7 @@ def _build_cfg(args: argparse.Namespace) -> CampaignCfg:
         induce_offset_max=args.induce_offset_max,
         induce_noise_boost=args.induce_noise_boost,
         randomize_pick_order=args.randomize_pick_order,
+        backend=args.backend,
         breaker_min_rate=None if args.breaker_min_rate < 0 else args.breaker_min_rate,
         breaker_min_runs=args.breaker_min_runs,
         split_cycles=args.split_cycles,
@@ -956,6 +973,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--breaker_min_runs", type=int, default=4)
+    parser.add_argument(
+        "--backend",
+        choices=("isaac", "mujoco"),
+        default="isaac",
+        help="simulator that runs the batches; the ledger, converter and tokens are the same",
+    )
     parser.add_argument("--split_cycles", action="store_true")
     parser.add_argument("--sidecar_dir", type=Path, default=None)
     parser.add_argument("--resume", action="store_true")

@@ -63,7 +63,6 @@ centers, RETREAT_POINT) to mean the same physical pose in every env.
 import math
 import random
 
-import isaaclab.utils.math as math_utils
 import torch
 
 from maker_arm_lab.core import layout, oracle
@@ -83,6 +82,9 @@ from maker_arm_lab.core.global_ik import (
     fold_to_half_turn,
     tool_axis_world,
 )
+from maker_arm_lab.core.oracle import PHASE_TO_INT
+from maker_arm_lab.core.quat import quat_apply
+from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_NAMES,
     BASE_YAW_SIGN,
@@ -97,9 +99,6 @@ from maker_arm_lab.robots.frames import (
     WRIST_ROLL_INDEX,
     WRIST_ROLL_SIGN,
 )
-
-from . import mdp
-from .mdp.recorders import PHASE_TO_INT
 
 # --- The grasp attitude ------------------------------------------------------
 # The tool leans toward world +x. Task D3 part 8 measured that this shipping convention is
@@ -517,7 +516,7 @@ class OracleRig:
         # auto-resets a finished env before it returns -- reading brick poses afterwards
         # describes the NEXT episode's scatter. Device-side and never synced here; the one
         # host read is in episode_stats.
-        self._stowed_sample = mdp.per_brick_stowed(self.env)
+        self._stowed_sample = per_brick_stowed(self.env)
         _, _, terminated, truncated, _ = self.env.step(action)
         # Isaac Lab's ManagerBasedRLEnv.step() resets terminated|truncated envs to their NEXT
         # episode's initial state before returning, so for those envs every read below
@@ -1321,7 +1320,7 @@ class OracleRig:
 
     def tool_tilt(self, i: int) -> float:
         """Measured tool-axis tilt off world -z, rad. 0 is a level (straight-down) tool."""
-        axis = math_utils.quat_apply(self.tool_quat(i), self.tool_axis)
+        axis = quat_apply(self.tool_quat(i), self.tool_axis)
         return math.acos(max(-1.0, min(1.0, -axis[2].item())))
 
     def attitude_reference(self, i: int) -> tuple[float, float]:
@@ -1359,12 +1358,12 @@ class OracleRig:
         return (
             self.robot.data.body_pos_w[i, self.tool]
             - origin
-            + math_utils.quat_apply(self.tool_quat(i), self.pick_offset[i])
+            + quat_apply(self.tool_quat(i), self.pick_offset[i])
         )
 
     def jaw_yaw(self, i: int) -> float:
         """World heading of the jaw closing axis (JAW_AXIS_BODY in the tool frame), flat."""
-        v = math_utils.quat_apply(self.tool_quat(i), self.jaw_axis)
+        v = quat_apply(self.tool_quat(i), self.jaw_axis)
         return math.atan2(v[1].item(), v[0].item())
 
     def _brick_pos(self, i: int, brick: int) -> torch.Tensor:
@@ -1380,7 +1379,7 @@ class OracleRig:
         quats = torch.stack(
             [self.env.scene[f"brick_{b}"].data.root_quat_w[i] for b in range(self.num_bricks)]
         )
-        long_axis = math_utils.quat_apply(quats, self.ex.expand(self.num_bricks, 3)).cpu()
+        long_axis = quat_apply(quats, self.ex.expand(self.num_bricks, 3)).cpu()
         return torch.atan2(long_axis[:, 1], long_axis[:, 0])
 
     def wrist_roll(self, i: int) -> float:

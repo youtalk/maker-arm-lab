@@ -17,9 +17,10 @@ REPO = Path(__file__).resolve().parents[1]
 SWEPT_DIRS = ("source", "scripts", "lerobot_stack", "tests")
 SUFFIXES = {".py", ".sh"}
 SKIP_PARTS = {".venv", "__pycache__"}
-# The MS2 design spec HAS a subdivided section 5 (5.1 to 5.5), and the MS2 scripts cite it as
-# "MS2 spec section 5.x" on purpose; only an unqualified dotted citation is dangling.
-DANGLING = re.compile(r"(?<!MS2 spec )section 5\.\d")
+# The MS2 design spec and the MS2 report (docs/ms2-act-gate.md) both HAVE a subdivided
+# section 5, and the scripts cite them as "MS2 spec section 5.x" / "MS2 report section 5.x"
+# on purpose; only an unqualified dotted citation is dangling.
+DANGLING = re.compile(r"(?<!MS2 spec )(?<!MS2 report )section 5\.\d")
 
 
 def _swept_files() -> list[Path]:

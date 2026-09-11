@@ -154,6 +154,29 @@ def test_unreachable_target_returns_none(ik):
     assert ik.solve(target) is None
 
 
+def test_solve_with_the_restart_spread_is_fast(ik, home):
+    """The planner's cost is the 24-restart solve (HOVER, and every solve_path fallback):
+    1.18 s in torch on this arm. In Rust it is tens of milliseconds; 0.5 s leaves a slow CI
+    runner room without letting the torch cost back in."""
+    import time
+
+    pose = ik.pose_of(home)
+    target = GraspTarget(
+        position=(
+            float(pose.position[0]) + 0.01,
+            float(pose.position[1]),
+            float(pose.position[2]) - 0.02,
+        ),
+        tilt=max(pose.tilt, math.radians(1.0)),
+        jaw_heading=pose.jaw_heading,
+        lean_azimuth=pose.lean_azimuth,
+    )
+    ik.solve(target, seed=home, restarts=24)  # warm-up
+    start = time.perf_counter()
+    ik.solve(target, seed=home, restarts=24)
+    assert time.perf_counter() - start < 0.5
+
+
 def test_solve_is_deterministic(ik):
     """Same task, same joints -- an oracle that picked a different branch per run would
     make datasets irreproducible."""

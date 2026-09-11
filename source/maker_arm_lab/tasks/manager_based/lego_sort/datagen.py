@@ -10,8 +10,6 @@ envs -- randomizing them per reset would change them mid-episode for the other
 envs, so they are constructor fields here, not event terms (spec section 2.3).
 """
 
-import math
-
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -20,72 +18,20 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
 from maker_arm_lab.core import layout
+from maker_arm_lab.core.layout import (
+    sample_run_draw,  # noqa: F401 -- generate_batch imports it here
+)
+from maker_arm_lab.core.quat import compose_offset_rot, quat_from_rpy_deg
 from maker_arm_lab.robots import ARM_JOINT_REGEX
 
 from . import mdp
 from .mdp.recorders import DatagenRecorderManagerCfg
 from .vision import LegoSortJointPosVisionEnvCfg
 
-
-def _quat_from_rpy_deg(rpy_deg):
-    """(w, x, y, z) from roll/pitch/yaw in degrees, ZYX convention."""
-    r, p, y = (math.radians(v) / 2.0 for v in rpy_deg)
-    cr, sr, cp, sp, cy, sy = (
-        math.cos(r),
-        math.sin(r),
-        math.cos(p),
-        math.sin(p),
-        math.cos(y),
-        math.sin(y),
-    )
-    return (
-        cr * cp * cy + sr * sp * sy,
-        sr * cp * cy - cr * sp * sy,
-        cr * sp * cy + sr * cp * sy,
-        cr * cp * sy - sr * sp * cy,
-    )
-
-
-def _compose_offset_rot(rot, drot_deg):
-    """Left-multiply a small rpy jitter onto a camera OffsetCfg quaternion."""
-    dw, dx, dy, dz = _quat_from_rpy_deg(drot_deg)
-    w, x, y, z = rot
-    return (
-        dw * w - dx * x - dy * y - dz * z,
-        dw * x + dx * w + dy * z - dz * y,
-        dw * y - dx * z + dy * w + dz * x,
-        dw * z + dx * y - dy * x + dz * w,
-    )
-
-
-def sample_run_draw(rng):
-    """One generation run's randomization draw -> LegoSortDatagenEnvCfg kwargs.
-
-    Consumed by scripts/generate_batch.py, which builds
-    ``LegoSortDatagenEnvCfg(**sample_run_draw(rng))`` so the run-level draw
-    distribution has exactly one definition. The permutation drawn here is a
-    uniform shuffle for smoke purposes only -- the batch supervisor overrides
-    ``slot_colors`` explicitly for without-replacement scheduling across a
-    campaign.
-    """
-    from maker_arm_lab.core import layout as _layout
-
-    perm = list(range(4))
-    rng.shuffle(perm)
-    bl = _layout.sample_bin_layout(rng, tuple(perm))
-    return {
-        "bin_x": bl.bin_x,
-        "bin_ys": bl.bin_ys,
-        "slot_colors": bl.slot_colors,
-        "dome_intensity": rng.uniform(1000.0, 6000.0),
-        "dome_color_temp": rng.uniform(3000.0, 8000.0),
-        "sun_intensity": rng.uniform(0.0, 2000.0),
-        "sun_rpy_deg": (rng.uniform(-60, 60), rng.uniform(-60, 60), rng.uniform(0, 360)),
-        "floor_color": (rng.uniform(0.05, 0.6),) * 3,
-        "wrist_cam_dpos": tuple(rng.uniform(-0.002, 0.002) for _ in range(3)),
-        "overhead_cam_dpos": tuple(rng.uniform(-0.01, 0.01) for _ in range(3)),
-        "overhead_cam_drot_deg": tuple(rng.uniform(-2.0, 2.0) for _ in range(3)),
-    }
+# The quaternion helpers moved to core.quat (isaaclab-free) so the MuJoCo scene applies the
+# same camera jitter; the old private names stay as aliases for this module's own use.
+_quat_from_rpy_deg = quat_from_rpy_deg
+_compose_offset_rot = compose_offset_rot
 
 
 @configclass
