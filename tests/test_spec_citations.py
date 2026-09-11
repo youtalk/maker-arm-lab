@@ -2,7 +2,8 @@
 
 The MS1 design spec's section 5 is an unsubdivided numbered list, so ``section 5 item N`` is
 the only valid sub-reference; the dotted forms were OpenYAM's numbering carried in
-by the port. ``docs/ms1-maker-arm-sim.md`` section 7 records the sweep this test protects.
+by the port. A citation qualified as ``MS2 spec section 5.x`` names a spec that does have
+those sections and is allowed. ``docs/ms1-maker-arm-sim.md`` section 7 records the sweep this test protects.
 """
 
 from __future__ import annotations
@@ -16,7 +17,9 @@ REPO = Path(__file__).resolve().parents[1]
 SWEPT_DIRS = ("source", "scripts", "lerobot_stack", "tests")
 SUFFIXES = {".py", ".sh"}
 SKIP_PARTS = {".venv", "__pycache__"}
-DANGLING = re.compile(r"section 5\.\d")
+# The MS2 design spec HAS a subdivided section 5 (5.1 to 5.5), and the MS2 scripts cite it as
+# "MS2 spec section 5.x" on purpose; only an unqualified dotted citation is dangling.
+DANGLING = re.compile(r"(?<!MS2 spec )section 5\.\d")
 
 
 def _swept_files() -> list[Path]:
