@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+from maker_arm_rs import Kinematics
 
 from maker_arm_lab.assets.urdf_prep import (
     ARM_JOINT_NAMES,
@@ -64,9 +65,10 @@ MAX_WAYPOINT_STEP = 0.12
 # A solution counts as feasible only if it actually satisfies the task. These are far tighter
 # than the grasp needs (the brick is 15.8 mm wide); a Levenberg-Marquardt root find on a
 # well-posed 6x6 system converges to machine precision or not at all, so a loose tolerance
-# would only let non-convergence through as success.
-POS_TOL = 1e-5  # m
-ANG_TOL = math.radians(0.05)
+# would only let non-convergence through as success. The values live with the solver in
+# maker-arm-rs; they are re-exported here for the callers that read them.
+POS_TOL = Kinematics.POS_TOL  # m
+ANG_TOL = Kinematics.ANG_TOL  # rad
 
 _DEFAULT_RESTARTS = 24
 # Fixed so that two runs of the same task return the same joint vector. An oracle that
@@ -258,23 +260,33 @@ class IKSolution:
 class GlobalIK:
     """Forward kinematics and a global solver for the Maker Arm's six arm joints.
 
-    Construction parses the vendored URDF once; solving is allocation-light after that.
-    Everything is float64 on CPU: this is a 6x6 root find run a few dozen times per grasp,
-    not a per-step control loop, and float32 would put the convergence tolerance in the same
-    range as the residual.
+    The solver itself lives in maker-arm-rs (``maker_arm_rs.Kinematics``, from
+    ``crates/maker-arm/src/kinematics.rs``): FK over the URDF chain, the six-scalar grasp
+    residual, the central-difference Jacobian, the Levenberg-Marquardt refine, multi-seed
+    branch selection, and the continuity-constrained path walk. It moved there because the
+    torch version spent its time in dispatch overhead on 3x3 matrices: a 24-restart solve
+    cost 1.18 s. This class parses the vendored URDF once, hands the chain to Rust, and
+    converts between the lab's tensors and dataclasses and the plain Python data the binding
+    takes. The restart spread is still drawn here, with torch's generator under the fixed
+    seed, so a solve tries the same seeds MS1 and MS2 tried. Everything is float64.
     """
 
     def __init__(self, urdf: Path = VENDORED_URDF) -> None:
-        self._links = self._load_chain(urdf)
-        self._mount = _rpy_matrix(*MOUNT_RPY)
         limits = arm_joint_limits(urdf)
         self.lower = torch.tensor([lo for lo, _ in limits], dtype=torch.float64)
         self.upper = torch.tensor([hi for _, hi in limits], dtype=torch.float64)
-        self._tool_axis = torch.tensor(TOOL_AXIS_BODY, dtype=torch.float64)
-        self._jaw_axis = torch.tensor(JAW_AXIS_BODY, dtype=torch.float64)
+        self._kin = Kinematics(
+            mount_rpy=tuple(MOUNT_RPY),
+            links=self._load_chain(urdf),
+            lower=self.lower.tolist(),
+            upper=self.upper.tolist(),
+            tool_axis=tuple(TOOL_AXIS_BODY),
+            jaw_axis=tuple(JAW_AXIS_BODY),
+        )
 
     @staticmethod
-    def _load_chain(urdf: Path) -> list[dict]:
+    def _load_chain(urdf: Path) -> list[tuple[tuple, tuple, tuple | None]]:
+        """The chain's joints as ``(xyz, rpy, axis)`` per URDF joint, ``axis`` None when fixed."""
         root = ET.parse(urdf).getroot()
         joints = {j.get("name"): j for j in root.findall("joint")}
         out = []
@@ -282,19 +294,11 @@ class GlobalIK:
             joint = joints[name]
             origin, axis = joint.find("origin"), joint.find("axis")
             out.append(
-                {
-                    "xyz": torch.tensor(
-                        [float(v) for v in origin.get("xyz").split()], dtype=torch.float64
-                    ),
-                    "rot": _rpy_matrix(*[float(v) for v in origin.get("rpy").split()]),
-                    "axis": (
-                        torch.tensor(
-                            [float(v) for v in axis.get("xyz").split()], dtype=torch.float64
-                        )
-                        if axis is not None
-                        else None
-                    ),
-                }
+                (
+                    tuple(float(v) for v in origin.get("xyz").split()),
+                    tuple(float(v) for v in origin.get("rpy").split()),
+                    tuple(float(v) for v in axis.get("xyz").split()) if axis is not None else None,
+                )
             )
         return out
 
@@ -302,153 +306,39 @@ class GlobalIK:
     def fk_batch(self, q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """(N, 6) joint coordinates -> (N, 3) positions and (N, 3, 3) rotations."""
         q = torch.as_tensor(q, dtype=torch.float64).reshape(-1, ARM_DOF)
-        n = q.shape[0]
-        rot = self._mount.expand(n, 3, 3).clone()
-        pos = torch.zeros(n, 3, dtype=torch.float64)
-        index = 0
-        for link in self._links:
-            pos = pos + torch.einsum("nij,j->ni", rot, link["xyz"])
-            rot = rot @ link["rot"]
-            if link["axis"] is not None:
-                rot = rot @ self._axis_rotation(link["axis"], q[:, index])
-                index += 1
-        return pos, rot
+        pos, rot = self._kin.fk_batch(q.tolist())
+        return torch.tensor(pos, dtype=torch.float64), torch.tensor(rot, dtype=torch.float64)
 
     def fk(self, q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """(6,) joint coordinates -> (3,) position and (3, 3) rotation of `grasp_center`."""
-        pos, rot = self.fk_batch(q)
-        return pos[0], rot[0]
-
-    @staticmethod
-    def _axis_rotation(axis: torch.Tensor, angles: torch.Tensor) -> torch.Tensor:
-        """Rodrigues, batched over `angles`."""
-        unit = axis / torch.linalg.norm(axis)
-        skew = torch.tensor(
-            [
-                [0.0, -unit[2], unit[1]],
-                [unit[2], 0.0, -unit[0]],
-                [-unit[1], unit[0], 0.0],
-            ],
-            dtype=torch.float64,
-        )
-        sin = torch.sin(angles).reshape(-1, 1, 1)
-        one_minus_cos = (1.0 - torch.cos(angles)).reshape(-1, 1, 1)
-        eye = torch.eye(3, dtype=torch.float64)
-        return eye + sin * skew + one_minus_cos * (skew @ skew)
+        pos, rot = self._kin.fk(_joints(q))
+        return torch.tensor(pos, dtype=torch.float64), torch.tensor(rot, dtype=torch.float64)
 
     def pose_of(self, q: torch.Tensor) -> GraspPose:
         """The four commanded quantities, read off a joint vector."""
-        pos, rot = self.fk(q)
-        tool = rot @ self._tool_axis
-        jaw = rot @ self._jaw_axis
+        position, tilt, jaw_heading, lean_azimuth = self._kin.pose_of(_joints(q))
         return GraspPose(
-            position=pos,
-            tilt=float(torch.arccos(torch.clamp(-tool[2], -1.0, 1.0))),
-            jaw_heading=float(torch.atan2(jaw[1], jaw[0])),
-            lean_azimuth=float(torch.atan2(tool[1], tool[0])),
+            position=torch.tensor(position, dtype=torch.float64),
+            tilt=tilt,
+            jaw_heading=jaw_heading,
+            lean_azimuth=lean_azimuth,
         )
 
     def margins(self, q: torch.Tensor) -> torch.Tensor:
         """Per-joint distance to the nearer URDF stop (rad). Negative means past it."""
-        q = torch.as_tensor(q, dtype=torch.float64)
-        return torch.minimum(q - self.lower, self.upper - q)
+        return torch.tensor(self._kin.margins(_joints(q)), dtype=torch.float64)
 
     # -- the solver -----------------------------------------------------------
-    def _residual_batch(self, q: torch.Tensor, target: GraspTarget) -> torch.Tensor:
-        """(N, 6) joint coordinates -> (N, 6) task-space residual."""
-        pos, rot = self.fk_batch(q)
-        tool = torch.einsum("nij,j->ni", rot, self._tool_axis)
-        jaw = torch.einsum("nij,j->ni", rot, self._jaw_axis)
-        want = torch.tensor(target.position, dtype=torch.float64)
-        tilt = torch.arccos(torch.clamp(-tool[:, 2], -1.0, 1.0))
-        heading = torch.atan2(jaw[:, 1], jaw[:, 0])
-        azimuth = torch.atan2(tool[:, 1], tool[:, 0])
-        return torch.stack(
-            [
-                pos[:, 0] - want[0],
-                pos[:, 1] - want[1],
-                pos[:, 2] - want[2],
-                tilt - target.tilt,
-                fold_to_half_turn(heading - target.jaw_heading),
-                wrap_to_pi(azimuth - target.lean_azimuth),
-            ],
-            dim=1,
-        )
-
-    def _residual(self, q: torch.Tensor, target: GraspTarget) -> torch.Tensor:
-        return self._residual_batch(q.reshape(1, ARM_DOF), target)[0]
-
-    def _residual_jacobian(
-        self, q: torch.Tensor, target: GraspTarget, eps: float = 1e-7
-    ) -> torch.Tensor:
-        """d(residual)/dq by central differences, as one batched FK call."""
-        steps = torch.eye(ARM_DOF, dtype=torch.float64) * eps
-        probe = torch.cat([q.reshape(1, -1) + steps, q.reshape(1, -1) - steps], dim=0)
-        res = self._residual_batch(probe, target)
-        return ((res[:ARM_DOF] - res[ARM_DOF:]) / (2.0 * eps)).T
-
-    def _refine(self, seed: torch.Tensor, target: GraspTarget, max_iter: int = 120) -> torch.Tensor:
-        """Levenberg-Marquardt onto the constraint manifold, clamped to the joint box."""
-        q = torch.clamp(seed.clone(), self.lower, self.upper)
-        residual = self._residual(q, target)
-        cost = float(residual @ residual)
-        damping = 1e-4
-        for _ in range(max_iter):
-            if cost < 1e-24:
-                break
-            jac = self._residual_jacobian(q, target)
-            normal = jac.T @ jac + damping * torch.eye(ARM_DOF, dtype=torch.float64)
-            try:
-                delta = torch.linalg.solve(normal, -(jac.T @ residual))
-            except RuntimeError:  # singular normal matrix at a kinematic singularity
-                break
-            candidate = torch.clamp(q + delta, self.lower, self.upper)
-            trial = self._residual(candidate, target)
-            trial_cost = float(trial @ trial)
-            if trial_cost < cost:
-                q, residual, cost = candidate, trial, trial_cost
-                damping = max(damping * 0.5, 1e-12)
-            else:
-                damping *= 4.0
-                if damping > 1e12:
-                    break
-        return q
-
-    def _seeds(self, seed: torch.Tensor | None, restarts: int) -> list[torch.Tensor]:
+    def _seeds(self, seed: torch.Tensor | None, restarts: int) -> list[list[float]]:
         """The caller's seed first, then a deterministic spread across the joint box."""
-        out: list[torch.Tensor] = []
+        out: list[list[float]] = []
         if seed is not None:
-            out.append(torch.as_tensor(seed, dtype=torch.float64).reshape(ARM_DOF).clone())
+            out.append(_joints(seed))
         generator = torch.Generator().manual_seed(_RNG_SEED)
         if restarts > 0:
             spread = torch.rand((restarts, ARM_DOF), generator=generator, dtype=torch.float64)
-            out.extend(self.lower + spread * (self.upper - self.lower))
+            out.extend((self.lower + spread * (self.upper - self.lower)).tolist())
         return out
-
-    def _grade(
-        self, q: torch.Tensor, target: GraspTarget, reference: torch.Tensor | None
-    ) -> IKSolution:
-        residual = self._residual(q, target)
-        step = float(torch.max(torch.abs(q - reference))) if reference is not None else 0.0
-        return IKSolution(
-            q=q,
-            margin=float(torch.min(self.margins(q))),
-            position_error=float(torch.linalg.norm(residual[:3])),
-            tilt_error=abs(float(residual[3])),
-            heading_error=abs(float(residual[4])),
-            azimuth_error=abs(float(residual[5])),
-            step=step,
-        )
-
-    @staticmethod
-    def _is_feasible(solution: IKSolution) -> bool:
-        return (
-            solution.position_error < POS_TOL
-            and solution.tilt_error < ANG_TOL
-            and solution.heading_error < ANG_TOL
-            and solution.azimuth_error < ANG_TOL
-            and solution.margin >= 0.0
-        )
 
     def solve(
         self,
@@ -466,21 +356,13 @@ class GlobalIK:
         rather than as a lurch. Returns None if nothing feasible was found, which is the
         honest answer for a pose the arm cannot reach in this task's six constraints.
         """
-        reference = (
-            torch.as_tensor(q_prev, dtype=torch.float64).reshape(ARM_DOF)
-            if q_prev is not None
-            else None
+        found = self._kin.solve(
+            _target(target),
+            self._seeds(seed, restarts),
+            q_prev=None if q_prev is None else _joints(q_prev),
+            max_step=max_step,
         )
-        best: IKSolution | None = None
-        for candidate_seed in self._seeds(seed, restarts):
-            solution = self._grade(self._refine(candidate_seed, target), target, reference)
-            if not self._is_feasible(solution):
-                continue
-            if max_step is not None and reference is not None and solution.step > max_step:
-                continue
-            if best is None or solution.margin > best.margin:
-                best = solution
-        return best
+        return None if found is None else _solution(found)
 
     def solve_path(
         self,
@@ -494,32 +376,42 @@ class GlobalIK:
         Returns None as soon as one waypoint has no solution within `max_step` of the last:
         a path that cannot be walked continuously is not a path, and silently returning the
         reachable prefix would hand the caller a trajectory that stops mid-descend.
+
+        Each waypoint is seeded from the previous solution and the restart spread is only
+        tried where that seed does not converge: measured on the torch solver, a 24-waypoint
+        descend cost 0.06 s that way against 19.8 s with the spread at every waypoint, and
+        the spread is still there for the waypoint where the cheap seed fails, so this is a
+        speed-up and not a weaker search.
         """
-        out: list[IKSolution] = []
-        previous = torch.as_tensor(seed, dtype=torch.float64).reshape(ARM_DOF)
-        for target in targets:
-            # Escalate rather than always paying for the restart spread. Continuity means
-            # the previous waypoint is a seed a few millimetres away, so the seeded solve
-            # almost always converges; measured, a 24-waypoint descend costs 0.06 s that way
-            # against 19.8 s with the full spread at every waypoint. The spread is still
-            # there for the waypoint where the cheap seed does not converge, so this is a
-            # speed-up and not a weaker search.
-            solution = self.solve(
-                target, seed=previous, restarts=0, q_prev=previous, max_step=max_step
-            )
-            if solution is None and restarts > 0:
-                solution = self.solve(
-                    target,
-                    seed=previous,
-                    restarts=restarts,
-                    q_prev=previous,
-                    max_step=max_step,
-                )
-            if solution is None:
-                return None
-            out.append(solution)
-            previous = solution.q
-        return out
+        path = self._kin.solve_path(
+            [_target(t) for t in targets], _joints(seed), self._seeds(None, restarts), max_step
+        )
+        return None if path is None else [_solution(s) for s in path]
+
+
+def _joints(q: torch.Tensor) -> list[float]:
+    return torch.as_tensor(q, dtype=torch.float64).reshape(ARM_DOF).tolist()
+
+
+def _target(target: GraspTarget) -> tuple:
+    return (
+        tuple(float(v) for v in target.position),
+        target.tilt,
+        target.jaw_heading,
+        target.lean_azimuth,
+    )
+
+
+def _solution(found: dict) -> IKSolution:
+    return IKSolution(
+        q=torch.tensor(found["q"], dtype=torch.float64),
+        margin=found["margin"],
+        position_error=found["position_error"],
+        tilt_error=found["tilt_error"],
+        heading_error=found["heading_error"],
+        azimuth_error=found["azimuth_error"],
+        step=found["step"],
+    )
 
 
 class JointTrim:
