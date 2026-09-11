@@ -173,7 +173,14 @@ def run() -> tuple[bool, int, int]:
     env.reset(seed=args.run_seed)
 
     induction = make_induction(args)
-    rig = OracleRig(env, bl, noise, random.Random(args.run_seed), induction=induction)
+    rig = OracleRig(
+        env,
+        bl,
+        noise,
+        random.Random(args.run_seed),
+        induction=induction,
+        transport_speed=args.transport_speed,
+    )
     meta = run_meta(
         args,
         draw,

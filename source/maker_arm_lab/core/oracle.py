@@ -248,6 +248,13 @@ class OracleNoise:
     gain_scale: tuple[float, float] = (0.7, 1.0)
     action_noise_std: float = 0.05  # raw-action units, translation channels
     via_jitter: float = 0.02  # RETREAT via-point jitter, m
+    # Corrective approaches (MS3 recipe design 5.1, ported from openyam-lab): a per-pick
+    # lateral offset of the HOVER target, radius uniform in this range at a uniform angle,
+    # drawn every time HOVER is (re)entered for a target. DESCEND keeps the brick's true
+    # pose, so every approach demonstrates nulling a lateral error on camera. (0, 0) is off.
+    # Deliberately outside --noise_scale, like randomize_pick_order: a separate mechanism,
+    # and folding it in would make every recipe string ambiguous about what it carried.
+    hover_jitter: tuple[float, float] = (0.0, 0.0)
     # Pick the next target uniformly at random among the not-yet-stowed bricks instead of
     # taking the lowest index. Off by default, so every MS1 recipe stays byte-identical.
     #
@@ -274,6 +281,10 @@ class EpisodeDraw:
     action_noise_std: float
     via_dx: float
     via_dy: float
+    # Carried as a RANGE, not a sampled value: the HOVER offset is drawn per PICK (see
+    # ``EnvOracle._draw_hover_jitter``), not per episode, so every one of an episode's six
+    # approaches demands its own correction.
+    hover_jitter_range: tuple[float, float] = (0.0, 0.0)
     # Carried as the FLAG, not as a sampled permutation: the target is drawn per pick from
     # whatever is still unstowed (see ``EnvOracle._next_brick``), so a brick that a retry, a
     # failed grasp or an unreachable pose takes off the table never has to be edited out of
@@ -291,6 +302,7 @@ def sample_episode_draw(rng: random.Random, noise: OracleNoise) -> EpisodeDraw:
         action_noise_std=noise.action_noise_std,
         via_dx=rng.uniform(-noise.via_jitter, noise.via_jitter),
         via_dy=rng.uniform(-noise.via_jitter, noise.via_jitter),
+        hover_jitter_range=noise.hover_jitter,
         randomize_pick_order=noise.randomize_pick_order,
     )
 
@@ -578,6 +590,11 @@ class EnvOracle:
         self._sabotage_jitter = 0.0
         self.induced_offset = 0
         self.induced_noise = 0
+        self._hover_dx = 0.0
+        self._hover_dy = 0.0
+        # Corrective approaches this episode actually demonstrated (one per HOVER entry with
+        # the knob on), the per-episode counterpart of run_meta's configured range.
+        self.hover_jitters = 0
         # Every NEW target this episode selected, in the order it selected them (a retry
         # re-attempts the same brick and is NOT appended). Recorded whether or not the order
         # is randomized: the run_meta flag says what was configured, this says what the
@@ -588,6 +605,28 @@ class EnvOracle:
             # A corpus whose run_meta claims a randomized schedule and whose episodes all
             # pick R,B,Y,G,R,B is worse than a crash.
             raise ValueError("randomize_pick_order requires an rng")
+        if draw.hover_jitter_range[1] > 0.0 and rng is None:
+            # Silently dropping the jitter would produce a corpus whose run_meta claims
+            # corrective approaches and whose episodes contain none. Refuse instead.
+            raise ValueError("hover_jitter_range requires an rng")
+
+    def _draw_hover_jitter(self) -> None:
+        """Draw this pick's HOVER-only lateral offset, uniform radius in the range.
+
+        Called at every point that (re)sets ``_brick_start``: a fresh target and a retry
+        both re-enter HOVER and both deserve a fresh correction to demonstrate. The radius
+        is uniform in the range rather than area-uniform, because the quantity swept is the
+        LATERAL ERROR the descent has to null, sampled evenly over that error.
+        """
+        lo, hi = self.draw.hover_jitter_range
+        if hi <= 0.0:
+            self._hover_dx = self._hover_dy = 0.0
+            return
+        radius = self.rng.uniform(lo, hi)
+        angle = self.rng.uniform(-math.pi, math.pi)
+        self._hover_dx = radius * math.cos(angle)
+        self._hover_dy = radius * math.sin(angle)
+        self.hover_jitters += 1
 
     @property
     def abandoned(self) -> bool:
@@ -767,6 +806,7 @@ class EnvOracle:
                     return None
                 self.pick_order.append(self.target_brick)
                 self._brick_start = scene.brick_pos[self.target_brick].clone()
+                self._draw_hover_jitter()
                 self._induced_style = None
                 self._sabotage_radius = 0.0
                 self._sabotage_side = 1.0
@@ -786,8 +826,8 @@ class EnvOracle:
                         self._induced_style = "noise"
                         self.induced_noise += 1
             target = self._brick_start.clone()
-            target[0] += self.draw.lateral_dx
-            target[1] += self.draw.lateral_dy
+            target[0] += self.draw.lateral_dx + self._hover_dx
+            target[1] += self.draw.lateral_dy + self._hover_dy
             target[2] += self.draw.hover_height
             yaw = scene.brick_yaw[self.target_brick].item() + self.draw.yaw_offset
             if self._induced_style == "offset" and self.retries_used == 0:
@@ -889,6 +929,7 @@ class EnvOracle:
                 self.phase = Phase.ABANDON
         elif self.phase == Phase.REOPEN:
             self._brick_start = scene.brick_pos[self.target_brick].clone()
+            self._draw_hover_jitter()
             self.phase = Phase.HOVER  # same target_brick, fresh brick pose
         elif self.phase == Phase.RAISE:
             self.phase = Phase.EXTEND

@@ -129,38 +129,46 @@ def test_grasp_center_sits_above_the_pick_point():
     assert center[2] > float(pick[2]) + 0.03
 
 
-def test_leg_resolution_cuts_by_geometry():
-    """A leg is cut fine enough for core.global_ik's continuity cap: a 0.12 m leg at the 3 mm
-    nominal spacing is 40 waypoints, well inside DEFAULT_MAX_STEPS' walk budget."""
-    count, dwell = _rt.leg_resolution(max_steps=300, gain_scale=1.0, distance=0.12)
+def test_leg_resolution_cuts_by_geometry_and_walks_at_the_staircase_pace():
+    """A leg is cut fine enough for core.global_ik's continuity cap (a 0.12 m leg at the 3 mm
+    nominal spacing is 40 waypoints) and, at transport_speed 1.0, walked in the time the old
+    staircase took: 40 waypoints held 2 steps each = 80 control steps."""
+    count, steps = _rt.leg_resolution(max_steps=300, gain_scale=1.0, distance=0.12)
     assert count == 40
-    assert dwell == _rt.WAYPOINT_HOLD_STEPS
+    assert steps == 80
+
+
+def test_leg_resolution_transport_speed_shortens_the_walk_not_the_resolution():
+    count, steps = _rt.leg_resolution(max_steps=300, gain_scale=1.0, distance=0.12, speed_scale=2.0)
+    assert count == 40
+    assert steps == 40
 
 
 def test_leg_resolution_never_exceeds_the_phase_budget():
     """RAISE is the binding case: 60 steps of budget against a leg that applies the whole of
     RELEASE_TILT_RAD. The walk must fit inside WALK_BUDGET_FRACTION of that budget -- a
     truncated plan would leave EXTEND starting from a pose RAISE never reached."""
-    count, dwell = _rt.leg_resolution(
+    count, steps = _rt.leg_resolution(
         max_steps=60, gain_scale=1.0, distance=0.10, tilt_change=1.40 - frames.GRASP_TILT_RAD
     )
-    assert count * dwell <= int(_rt.WALK_BUDGET_FRACTION * 60)
+    assert count <= int(_rt.WALK_BUDGET_FRACTION * 60)
+    assert steps <= int(_rt.WALK_BUDGET_FRACTION * 60)
 
 
 def test_leg_resolution_slows_the_walk_for_a_low_gain_draw():
     """``EpisodeDraw.gain_scale`` used to scale the servo's gain; on the planner it cuts the
-    leg finer, so a slow draw walks the same leg in more waypoints."""
-    fast, _ = _rt.leg_resolution(max_steps=300, gain_scale=1.0, distance=0.12)
-    slow, _ = _rt.leg_resolution(max_steps=300, gain_scale=0.7, distance=0.12)
-    assert slow > fast
+    leg finer and walks it slower, so a slow draw takes more steps over the same leg."""
+    fast_count, fast_steps = _rt.leg_resolution(max_steps=300, gain_scale=1.0, distance=0.12)
+    slow_count, slow_steps = _rt.leg_resolution(max_steps=300, gain_scale=0.7, distance=0.12)
+    assert slow_count > fast_count and slow_steps > fast_steps
 
 
 def test_leg_resolution_has_a_floor_of_two_waypoints():
     """A leg with no geometry at all (a re-plan onto the pose already commanded) still has a
-    start and an end, so the walk is never empty and `step()` always has a waypoint to pop."""
-    count, dwell = _rt.leg_resolution(max_steps=20, gain_scale=1.0)
+    start and an end, so the walk is never empty and `step()` always has a target."""
+    count, steps = _rt.leg_resolution(max_steps=20, gain_scale=1.0)
     assert count == 2
-    assert dwell >= 1
+    assert steps == 2
 
 
 def test_heading_relaxation_tries_the_held_heading_first():
@@ -193,11 +201,11 @@ def test_heading_relaxation_widens_symmetrically_and_stops_at_60_degrees():
 def test_leg_resolution_counts_a_heading_sweep_like_a_tilt_sweep():
     """A carry leg that relaxes the heading rotates the wrist along the leg, and a leg cut
     for position alone would put that rotation over core.global_ik's continuity cap."""
-    plain, _ = _rt.leg_resolution(max_steps=300, gain_scale=1.0, distance=0.01)
-    swept, _ = _rt.leg_resolution(
+    plain, plain_steps = _rt.leg_resolution(max_steps=300, gain_scale=1.0, distance=0.01)
+    swept, swept_steps = _rt.leg_resolution(
         max_steps=300, gain_scale=1.0, distance=0.01, heading_change=math.radians(60.0)
     )
-    assert swept > plain
+    assert swept > plain and swept_steps > plain_steps
 
 
 def test_the_command_path_can_leave_the_joint_box_so_the_clamp_flag_can_fire():
@@ -330,6 +338,30 @@ def _stub_rig(num_envs: int = 1, num_bricks: int = 4):
     return env, rig
 
 
+def test_the_walk_moves_the_target_every_step_and_ends_on_the_last_waypoint():
+    """`_advance_plan` walks the plan's polyline under the minimum-jerk law: the commanded
+    target moves on every control step (no staircase dwell), slowly at both ends and fastest
+    mid-leg, and lands exactly on the last waypoint with the plan exhausted."""
+    _, rig = _stub_rig()
+    a = torch.zeros(6, dtype=torch.float64)
+    b = torch.tensor([0.3, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=torch.float64)
+    rig.q_cmd[0] = a.clone()
+    rig.plans[0] = [a, (a + b) / 2, b]
+    rig.walk_steps[0] = 12
+    rig.walk_step[0] = 0
+    seen = []
+    for _ in range(12):
+        rig._advance_plan(0)
+        seen.append(rig.q_cmd[0].clone())
+    steps = torch.stack(seen)
+    assert torch.equal(steps[-1], b) and rig.plans[0] == []
+    d = (steps[1:] - steps[:-1])[:, 0]
+    assert torch.all(d > 0)
+    assert d[0] < d[5] and d[-1] < d[5]
+    rig._advance_plan(0)
+    assert torch.equal(rig.q_cmd[0], b)
+
+
 def test_step_hands_the_action_term_a_command_it_has_not_clamped():
     """`OracleRig.step()` must pass its command through UNCLAMPED, so the action term's own
     clamp is the one that acts and, crucially, RECORDS (`obs/clamped`).
@@ -406,11 +438,13 @@ def test_a_watchdog_abandon_freezes_the_outcome_on_the_step_it_is_raised():
     env, rig = _stub_rig(num_envs=2)
     # The stub's zero pose already sits ON two of the URDF's stops (link_003_joint's upper
     # bound and link_004_joint's lower bound are both 0.0), which is watchdog_trips' own
-    # "near a limit" criterion -- so env 0 trips every step and is abandoned after
-    # WATCHDOG_TRIP_STRIKES of them. Env 1 is moved to mid-range so it keeps running, which
-    # is what makes this the batch pattern rather than a single-env read.
+    # "near a limit" criterion; commanding env 0 to mid-range while it sits there makes it
+    # an arm stuck on a stop it was not sent to, so it trips every step and is abandoned
+    # after WATCHDOG_TRIP_STRIKES of them. Env 1 is moved to mid-range so it keeps running,
+    # which is what makes this the batch pattern rather than a single-env read.
     joint_pos = env.scene._robot.data.joint_pos
     joint_pos[1, rig.arm_ids] = rig.limits.mean(dim=1).float()
+    rig.q_cmd[0] = rig.limits.mean(dim=1).double()
     env.stowed[0, :2] = True
 
     for _ in range(_rt.WATCHDOG_TRIP_STRIKES):
@@ -458,6 +492,33 @@ def _raise_goal(target):
         oracle.RAISE_MAX_STEPS,
         0,
     )
+
+
+def test_the_watchdog_ignores_an_arm_resting_on_a_stop_it_was_sent_to():
+    """A pose on a joint stop is a legitimate end of a leg (the solver accepts margin >= 0)
+    and the minimum-jerk walk decelerates into it over more than WATCHDOG_TRIP_STRIKES steps,
+    so "near a limit" alone cannot mean "jammed". It is a jam only when the arm is not where
+    it was told to be: measured on MuJoCo, a HOVER ending 0.0008 rad from link_003_joint's
+    stop was abandoned at the last step of its walk under the old rule."""
+    _, rig = _stub_rig()
+    # The stub's zero pose sits on two stops; it is also exactly the commanded target.
+    for _ in range(2 * _rt.WATCHDOG_TRIP_STRIKES):
+        rig.step()
+    assert not bool(rig.abandoned[0])
+    # Now the arm is told to be somewhere else and does not move: a jam.
+    rig.q_cmd[0] = rig.limits.mean(dim=1).double()
+    for _ in range(_rt.WATCHDOG_TRIP_STRIKES):
+        rig.step()
+    assert bool(rig.abandoned[0])
+    assert rig.stats[0]["abandon"] == "watchdog"
+
+
+def test_episode_stats_carry_the_hover_jitter_count():
+    """The per-episode sidecar must say how many corrective approaches the episode actually
+    demonstrated (the run_meta range says only what was configured)."""
+    _, rig = _stub_rig()
+    rig.step()
+    assert rig.episode_stats(0)["hover_jitters"] == rig.oracles[0].hover_jitters == 0
 
 
 def test_raise_is_refused_when_extend_cannot_be_planned_from_where_it_ends():
