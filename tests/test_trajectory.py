@@ -77,3 +77,25 @@ def test_transport_speed_is_a_batch_argument_recorded_in_run_meta():
         args, draw, noise, None, num_bricks=6, export_mode="x", backend="t", task="t"
     )
     assert meta["transport_speed"] == 3.0
+
+
+def test_hover_jitter_is_a_batch_argument_recorded_in_run_meta():
+    parser = argparse.ArgumentParser()
+    batch_loop.add_batch_arguments(parser)
+    plain = parser.parse_args(["--out_dir", "x"])
+    assert (plain.hover_jitter_min, plain.hover_jitter_max) == (0.0, 0.0)
+    args = parser.parse_args(
+        ["--out_dir", "x", "--hover_jitter_min", "0.005", "--hover_jitter_max", "0.035"]
+    )
+    draw, _, noise = batch_loop.build_run(args)
+    assert noise.hover_jitter == (0.005, 0.035)
+    meta = batch_loop.run_meta(
+        args, draw, noise, None, num_bricks=6, export_mode="x", backend="t", task="t"
+    )
+    assert meta["hover_jitter"] == [0.005, 0.035]
+    with pytest.raises(ValueError, match="hover_jitter"):
+        batch_loop.build_run(
+            parser.parse_args(
+                ["--out_dir", "x", "--hover_jitter_min", "0.04", "--hover_jitter_max", "0.035"]
+            )
+        )

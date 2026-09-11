@@ -201,6 +201,10 @@ class CampaignCfg:
     # when set, so the ledger's own command record shows whether a campaign's episodes
     # could still contain the schedule.
     randomize_pick_order: bool = False
+    # Corrective approaches (oracle.OracleNoise.hover_jitter, MS3 recipe design 5.1):
+    # forwarded only when the range is non-empty, for the same ledger reason.
+    hover_jitter_min: float = 0.0
+    hover_jitter_max: float = 0.0
     # Which simulator runs the batches: "isaac" spawns scripts/generate_batch.py under
     # isaaclab.sh, "mujoco" spawns scripts/mj_generate_batch.py under the project venv. Both
     # speak the same RUN_META / RUN_STATS / BATCH_OK contract, so nothing else here differs.
@@ -784,6 +788,13 @@ def _batch_command(
         ]
     if cfg.randomize_pick_order:
         cmd += ["--randomize_pick_order"]
+    if cfg.hover_jitter_max > 0.0:
+        cmd += [
+            "--hover_jitter_min",
+            str(cfg.hover_jitter_min),
+            "--hover_jitter_max",
+            str(cfg.hover_jitter_max),
+        ]
     return cmd
 
 
@@ -899,6 +910,8 @@ def _build_cfg(args: argparse.Namespace) -> CampaignCfg:
         induce_offset_max=args.induce_offset_max,
         induce_noise_boost=args.induce_noise_boost,
         randomize_pick_order=args.randomize_pick_order,
+        hover_jitter_min=args.hover_jitter_min,
+        hover_jitter_max=args.hover_jitter_max,
         backend=args.backend,
         breaker_min_rate=None if args.breaker_min_rate < 0 else args.breaker_min_rate,
         breaker_min_runs=args.breaker_min_runs,
@@ -954,6 +967,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--induce_offset_min", type=float, default=0.015)
     parser.add_argument("--induce_offset_max", type=float, default=0.025)
     parser.add_argument("--induce_noise_boost", type=float, default=5.0)
+    parser.add_argument("--hover_jitter_min", type=float, default=0.0)
+    parser.add_argument(
+        "--hover_jitter_max",
+        type=float,
+        default=0.0,
+        help="corrective approaches: per-pick lateral HOVER offset radius range (m); 0 = off",
+    )
     parser.add_argument(
         "--randomize_pick_order",
         action="store_true",

@@ -814,3 +814,67 @@ def test_a_stowed_brick_stays_sorted_even_if_it_is_later_jostled():
     moving.brick_lin_vel[0, 0] = 0.5  # jostled: not at rest this instant
     assert orc.next_goal(moving) is None
     assert orc.phase == oracle.Phase.DONE
+
+
+# --- hover_jitter: corrective approaches (MS3 recipe design 5.1, ported from openyam-lab) ---
+
+
+def _jittered_oracle(seed=3, jitter=(0.005, 0.035)):
+    noise = oracle.OracleNoise(hover_jitter=jitter)
+    draw = oracle.sample_episode_draw(random.Random(seed), noise)
+    return oracle.EnvOracle(
+        layout.DEFAULT_BIN_LAYOUT, num_bricks=1, draw=draw, rng=random.Random(seed)
+    )
+
+
+def test_hover_jitter_is_off_by_default_and_needs_no_rng():
+    """With the knob off nothing changes: the HOVER target is the brick plus the episode's
+    lateral offset, no jitter is counted, and an oracle without an rng still runs."""
+    orc = _oracle()
+    scene = _snapshot()
+    _run_phase(orc, scene)  # SETTLE
+    goal = orc.next_goal(scene)
+    assert goal.phase == oracle.Phase.HOVER
+    assert float(goal.target_pos[0]) == pytest.approx(0.20 + orc.draw.lateral_dx)
+    assert float(goal.target_pos[1]) == pytest.approx(0.05 + orc.draw.lateral_dy)
+    assert orc.hover_jitters == 0 and orc.draw.hover_jitter_range == (0.0, 0.0)
+
+
+def test_hover_jitter_offsets_hover_only_inside_the_annulus():
+    orc = _jittered_oracle()
+    scene = _snapshot()
+    _run_phase(orc, scene)  # SETTLE
+    hover = _run_phase(orc, scene)  # HOVER
+    dx = float(hover.target_pos[0]) - (0.20 + orc.draw.lateral_dx)
+    dy = float(hover.target_pos[1]) - (0.05 + orc.draw.lateral_dy)
+    assert 0.005 <= math.hypot(dx, dy) <= 0.035
+    assert orc.hover_jitters == 1
+    descend = orc.next_goal(scene)
+    assert descend.phase == oracle.Phase.DESCEND
+    assert float(descend.target_pos[0]) == pytest.approx(0.20 + orc.draw.lateral_dx)
+    assert float(descend.target_pos[1]) == pytest.approx(0.05 + orc.draw.lateral_dy)
+
+
+def test_hover_jitter_is_redrawn_for_a_retry():
+    """A retry re-enters HOVER and deserves its own correction to demonstrate."""
+    orc = _jittered_oracle()
+    scene = _snapshot()
+    _run_phase(orc, scene)  # SETTLE
+    first = _run_phase(orc, scene).target_pos.clone()  # HOVER
+    _run_phase(orc, scene, outcome="stalled")  # DESCEND
+    _run_phase(orc, scene)  # CLOSE
+    _run_phase(orc, scene, pinch_ok=False, lifted=False)  # LIFT, no pinch
+    _run_phase(orc, scene)  # REOPEN
+    second = _run_phase(orc, scene).target_pos  # HOVER again, same brick
+    assert orc.hover_jitters == 2
+    assert not torch.allclose(first[:2], second[:2])
+
+
+def test_hover_jitter_without_an_rng_is_refused():
+    noise = oracle.OracleNoise(hover_jitter=(0.005, 0.035))
+    with pytest.raises(ValueError, match="rng"):
+        oracle.EnvOracle(
+            layout.DEFAULT_BIN_LAYOUT,
+            num_bricks=1,
+            draw=oracle.sample_episode_draw(random.Random(0), noise),
+        )

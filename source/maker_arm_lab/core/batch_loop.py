@@ -43,6 +43,11 @@ def build_run(args) -> tuple[dict, layout.BinLayout, oracle.OracleNoise]:
             f"--induce_offset_min ({args.induce_offset_min}) must be <= "
             f"--induce_offset_max ({args.induce_offset_max})"
         )
+    if not 0.0 <= args.hover_jitter_min <= args.hover_jitter_max:
+        raise ValueError(
+            f"--hover_jitter_min/max must satisfy 0 <= min <= max, got "
+            f"{args.hover_jitter_min}/{args.hover_jitter_max}"
+        )
     rng = random.Random(args.layout_seed)
     draw = sample_run_draw(rng)
     draw["slot_colors"] = perm
@@ -60,6 +65,7 @@ def build_run(args) -> tuple[dict, layout.BinLayout, oracle.OracleNoise]:
         # color schedule) rather than widening a noise band, so no recipe string should
         # read as if it might have carried it.
         randomize_pick_order=args.randomize_pick_order,
+        hover_jitter=(args.hover_jitter_min, args.hover_jitter_max),
     )
     return draw, bl, noise
 
@@ -100,6 +106,8 @@ def run_meta(
         "transport_speed": args.transport_speed,
         # What was CONFIGURED; each episode's own "pick_order" records what was picked.
         "randomize_pick_order": noise.randomize_pick_order,
+        # Configured range; each episode's "hover_jitters" says how many it demonstrated.
+        "hover_jitter": list(noise.hover_jitter),
         "induction": None
         if induction is None
         else {
@@ -246,6 +254,7 @@ def run_stats(counters: dict, *, target_attempts: int, num_envs: int, probe: boo
         "off_schedule_episodes": sum(
             1 for e in episodes if list(e.get("pick_order", [])) != sorted(e.get("pick_order", []))
         ),
+        "hover_jitters": sum(int(e.get("hover_jitters", 0)) for e in episodes),
         # The smooth-oracle probe's reads (design section 5 item 1): control steps per
         # episode across the batch, and the commanded target's static-frame fraction and
         # acceleration quantiles.
@@ -304,6 +313,18 @@ def add_batch_arguments(parser) -> None:
         action="store_true",
         help="Pick the next brick uniformly at random among the ones still on the table instead "
         "of taking the lowest index (openyam-lab's largest gate lever). Off by default.",
+    )
+    parser.add_argument(
+        "--hover_jitter_min",
+        type=float,
+        default=0.0,
+        help="Corrective approaches: lower radius (m) of the per-pick lateral HOVER offset.",
+    )
+    parser.add_argument(
+        "--hover_jitter_max",
+        type=float,
+        default=0.0,
+        help="Upper radius (m) of the per-pick lateral HOVER offset; 0 = off (the default).",
     )
     parser.add_argument(
         "--probe",

@@ -1292,6 +1292,7 @@ class OracleRig:
             **outcome,
             "induced_offset": orc.induced_offset,
             "induced_noise": orc.induced_noise,
+            "hover_jitters": orc.hover_jitters,
             # The brick indices this episode targeted, in order (retries are not repeated
             # entries). The acceptance discriminator for --randomize_pick_order: run_meta
             # can only say the flag was set, while a campaign whose episodes all read

@@ -442,6 +442,31 @@ def test_batch_command_passes_induction_flags(tmp_path):
     assert cmd[cmd.index("--induce_noise_boost") + 1] == "5.0"
 
 
+def test_batch_command_passes_hover_jitter_only_when_set(tmp_path):
+    cmd = gd._batch_command(_cmd_cfg(tmp_path), 0, (0, 1, 2, 3), tmp_path / "shard_000")
+    assert "--hover_jitter_min" not in cmd and "--hover_jitter_max" not in cmd
+    cfg = _cmd_cfg(tmp_path, hover_jitter_min=0.005, hover_jitter_max=0.035)
+    cmd = gd._batch_command(cfg, 0, (0, 1, 2, 3), tmp_path / "shard_000")
+    assert cmd[cmd.index("--hover_jitter_min") + 1] == "0.005"
+    assert cmd[cmd.index("--hover_jitter_max") + 1] == "0.035"
+    args = gd._parse_args(
+        [
+            "--out_dir",
+            str(tmp_path / "w"),
+            "--dataset_root",
+            str(tmp_path / "d"),
+            "--hover_jitter_min",
+            "0.005",
+            "--hover_jitter_max",
+            "0.035",
+        ]
+    )
+    assert (gd._build_cfg(args).hover_jitter_min, gd._build_cfg(args).hover_jitter_max) == (
+        0.005,
+        0.035,
+    )
+
+
 def test_build_cfg_carries_the_distribution_flags(tmp_path):
     args = gd._parse_args(
         [

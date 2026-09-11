@@ -513,6 +513,14 @@ def test_the_watchdog_ignores_an_arm_resting_on_a_stop_it_was_sent_to():
     assert rig.stats[0]["abandon"] == "watchdog"
 
 
+def test_episode_stats_carry_the_hover_jitter_count():
+    """The per-episode sidecar must say how many corrective approaches the episode actually
+    demonstrated (the run_meta range says only what was configured)."""
+    _, rig = _stub_rig()
+    rig.step()
+    assert rig.episode_stats(0)["hover_jitters"] == rig.oracles[0].hover_jitters == 0
+
+
 def test_raise_is_refused_when_extend_cannot_be_planned_from_where_it_ends():
     """Env 3, brick 0 of the instrumented batch: a near pick (radius 0.155 m, azimuth -11
     deg) bound for the far -y bin. RAISE's Cartesian ladder failed and `_plan_direct` walked
