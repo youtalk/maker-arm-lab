@@ -13,6 +13,8 @@ consumers and are unchanged):
     obs/clamped (T,) bool        the Rust clamp changed this step's target
     initial_state/articulation/robot/{joint_position,joint_velocity,root_pose,root_velocity}
     initial_state/rigid_object/brick_N/{root_pose,root_velocity}     one leading axis of 1
+    initial_state/bin_layout (1,5) f32: bin_x and the four slot y values of this episode's
+        layout
 
 Frames are appended per control step. Images go to resizable datasets under ``inflight/``
 in chunks of ``flush_every`` frames, so RAM stays flat whatever the episode length; at the
@@ -156,6 +158,8 @@ class ShardRecorder:
         state = self._initial[env_index]
         for key in ("joint_position", "joint_velocity", "root_pose", "root_velocity"):
             robot.create_dataset(key, data=state[f"robot_{key}"][None].astype(np.float32))
+        if "bin_layout" in state:
+            init.create_dataset("bin_layout", data=state["bin_layout"][None].astype(np.float32))
         rigid = init.create_group("rigid_object")
         for b in range(state["brick_root_pose"].shape[0]):
             brick = rigid.create_group(f"brick_{b}")
