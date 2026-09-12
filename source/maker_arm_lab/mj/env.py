@@ -323,6 +323,8 @@ class MjLegoSortEnv:
                     int(brick[i]) if brick is not None else -1,
                     self._wrist[i] if self.cameras else None,
                     self._overhead[i] if self.cameras else None,
+                    context_camera=self.context_camera[i],
+                    context_privileged=self.context_privileged[i],
                 )
         step_limit = GRIPPER_RATE_M_PER_S / CONTROL_HZ
         self._grip_ctrl += np.clip(targets[:, 6:] - self._grip_ctrl, -step_limit, step_limit)

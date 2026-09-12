@@ -4,6 +4,7 @@ Real MuJoCo on CPU with cameras off (a few hundred control steps run in well und
 plus one cameras-on shard round trip so the HDF5 layout is pinned against the converter.
 """
 
+import json
 import random
 
 import h5py
@@ -181,6 +182,10 @@ def test_shard_layout_matches_the_converter(tmp_path):
         assert g["initial_state/articulation/robot/joint_position"].shape == (1, 8)
         assert g["initial_state/rigid_object/brick_1/root_pose"].shape == (1, 7)
         assert g["initial_state/bin_layout"].shape == (1, 5)
+        assert g["obs/context_camera"].shape == (6, 6)
+        assert g["obs/context_privileged"].shape == (6, 42)
+        assert json.loads(g["obs/context_camera"].attrs["names"])[0] == "overhead_cam_x"
+        assert json.loads(g["obs/context_privileged"].attrs["names"])[-1] == "brick_5_qz"
         assert "inflight" not in f
         # The action's arm columns are the pre-clamp command; joint_targets the applied ones.
         assert np.allclose(g["actions"][0, :6], action[0, :6].numpy(), atol=1e-6)
