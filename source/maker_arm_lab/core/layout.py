@@ -232,14 +232,18 @@ def color_slot(bl: BinLayout, color_index: int) -> int:
     return bl.slot_colors.index(color_index)
 
 
-def sample_bin_layout(rng: random.Random, slot_colors: tuple[int, int, int, int]) -> BinLayout:
+def sample_bin_layout(
+    rng: random.Random, slot_colors: tuple[int, int, int, int], spatial_scale: float = 1.0
+) -> BinLayout:
     """Run-level draw: x in [-0.01, +0.02] around nominal, per-slot y +-0.02.
 
-    Rejection-samples the y jitter until adjacent slot centers are >=
-    _MIN_SLOT_GAP apart (outer bin width is 0.10 m, so anything closer risks
-    wall contact).
+    ``spatial_scale`` multiplies the x range (the generalization ladder of the MS4 roadmap
+    reads camera and bin_x shifts outside the training range). The y range is NOT scaled:
+    the rejection sampling below keeps adjacent slot centers >= _MIN_SLOT_GAP apart (outer
+    bin width is 0.10 m, so anything closer risks wall contact), and a wider y band would
+    mostly be rejected.
     """
-    bin_x = _BIN_X + rng.uniform(-0.01, 0.02)
+    bin_x = _BIN_X + rng.uniform(-0.01, 0.02) * spatial_scale
     while True:
         bin_ys = tuple(y + rng.uniform(-0.02, 0.02) for y in _BIN_Y)
         if all(b - a >= _MIN_SLOT_GAP for a, b in itertools.pairwise(bin_ys)):
@@ -406,7 +410,7 @@ def sample_brick_poses(
     return pose_list
 
 
-def sample_run_draw(rng):
+def sample_run_draw(rng, spatial_scale: float = 1.0):
     """One generation run's randomization draw -> LegoSortDatagenEnvCfg kwargs.
 
     Consumed by scripts/generate_batch.py (``LegoSortDatagenEnvCfg(**sample_run_draw(rng))``)
@@ -414,11 +418,12 @@ def sample_run_draw(rng):
     definition across both simulators. The permutation drawn here is a
     uniform shuffle for smoke purposes only -- the batch supervisor overrides
     ``slot_colors`` explicitly for without-replacement scheduling across a
-    campaign.
+    campaign. ``spatial_scale`` widens the camera pose and bin x jitter (1.0 is the
+    training distribution); the MuJoCo env draws the same distribution per episode.
     """
     perm = list(range(4))
     rng.shuffle(perm)
-    bl = sample_bin_layout(rng, tuple(perm))
+    bl = sample_bin_layout(rng, tuple(perm), spatial_scale)
     return {
         "bin_x": bl.bin_x,
         "bin_ys": bl.bin_ys,
@@ -428,7 +433,7 @@ def sample_run_draw(rng):
         "sun_intensity": rng.uniform(0.0, 2000.0),
         "sun_rpy_deg": (rng.uniform(-60, 60), rng.uniform(-60, 60), rng.uniform(0, 360)),
         "floor_color": (rng.uniform(0.05, 0.6),) * 3,
-        "wrist_cam_dpos": tuple(rng.uniform(-0.002, 0.002) for _ in range(3)),
-        "overhead_cam_dpos": tuple(rng.uniform(-0.01, 0.01) for _ in range(3)),
-        "overhead_cam_drot_deg": tuple(rng.uniform(-2.0, 2.0) for _ in range(3)),
+        "wrist_cam_dpos": tuple(rng.uniform(-0.002, 0.002) * spatial_scale for _ in range(3)),
+        "overhead_cam_dpos": tuple(rng.uniform(-0.01, 0.01) * spatial_scale for _ in range(3)),
+        "overhead_cam_drot_deg": tuple(rng.uniform(-2.0, 2.0) * spatial_scale for _ in range(3)),
     }

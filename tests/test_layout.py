@@ -323,3 +323,20 @@ class TestScatterCornerClip:
         for x, y in itertools.product(layout.SCATTER_X, layout.SCATTER_Y):
             cx, cy = layout.clip_to_reach(x, y)
             assert math.hypot(cx, cy) <= layout.SCATTER_MAX_RADIUS + 1e-12
+
+
+def test_spatial_scale_widens_the_camera_and_bin_x_draws_only():
+    rng = random.Random(3)
+    draws = [layout.sample_run_draw(rng, spatial_scale=3.0) for _ in range(300)]
+    cam = [abs(v) for d in draws for v in d["overhead_cam_dpos"]]
+    rot = [abs(v) for d in draws for v in d["overhead_cam_drot_deg"]]
+    assert max(cam) > 0.01 and max(cam) <= 0.03 + 1e-9
+    assert max(rot) > 2.0 and max(rot) <= 6.0 + 1e-9
+    assert all(-0.03 - 1e-9 <= d["bin_x"] - layout._BIN_X <= 0.06 + 1e-9 for d in draws)
+    assert any(d["bin_x"] - layout._BIN_X > 0.02 for d in draws)
+    for d in draws:
+        for y, nominal in zip(d["bin_ys"], layout._BIN_Y):
+            assert abs(y - nominal) <= 0.02 + 1e-9
+    assert layout.sample_run_draw(random.Random(3)) == layout.sample_run_draw(
+        random.Random(3), spatial_scale=1.0
+    )
