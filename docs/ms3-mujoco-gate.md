@@ -1,13 +1,24 @@
-# MS3 — MuJoCo first: the port, the re-baseline, and the first two levers
+# MS3 — MuJoCo first: the port, the levers, and the gate pass
 
 Milestone: MS3. Spec: `2026-09-10-ms3-mujoco-design.md`. That spec supersedes the execution
 order of `2026-09-10-ms3-recipe-transplant-design.md` and keeps its gate, decisions, seeds,
-instruments and read rules. Executed 2026-09-10 to 2026-09-11 on the RTX 5090 host (MuJoCo
+instruments and read rules. Executed 2026-09-10 to 2026-09-12 on the RTX 5090 host (MuJoCo
 3.13, LeRobot 0.5.1, maker-arm-rs at its `feat/kinematics` merge). Every number below is read
 off a file named beside it. The running record is `~/data/maker-arm-ms3/README.md` on that
 host, and this report was assembled from it with `~/data/maker-arm-ms3/report_tables.py`.
 
 ## 1. Summary
+
+**MS3 passes.** The Phase 4 corpus t4 scored **605/720 = 0.840 per brick**, Wilson 95%
+[0.812, 0.865], on the pre-registered second seed 20261047 (section 8.4). The whole interval
+clears the 0.70 criterion. R-GATE passes, and the milestone closes on this report. Two
+campaigns followed the recipe gate of 0.449. A visual inspection found that the t2 policy
+memorized the 50 run-level bin and camera layouts of its corpus. It also found that the MuJoCo
+light rig hid brick colors in shadow. The t3 corpus added many short runs, a new rig, a
+nearest-first pick order and a close-event instrument. It scored **484/720 = 0.672** (section
+7.6), and its wrong-bin deposits fell from 82 of 549 releases to 1 of 617. That read fired the
+pre-registered second tranche. The failed closes of the t3 gate selected wide corrective
+approaches, and t4 added 375 episodes of them (section 8).
 
 **The MuJoCo port reproduces the Isaac gate number, and the recipe corpus lifts it 5.9 times**.
 The MS2 recipe re-run on MuJoCo scored **55/720 = 0.076 per-brick**, Wilson 95% [0.059, 0.098]
@@ -416,9 +427,258 @@ deposits against 549 queued releases (0.149, MS2's Isaac policy 0.16 of detected
 The corpus was generated with randomized pick order. The color-schedule shortcut that
 openyam-lab's pick-order fix removed (0.415 to 0.058) is therefore not open to this policy. The
 wrong-bin loss has no measured mechanism here. The close-event instrument, which gives the
-misses and the wrong bins a geometry, is not ported (section 7).
+misses and the wrong bins a geometry, was not ported at that gate. It is now PR #29 (section 7.2).
 
-## 7. Levers not pulled
+## 7. The visual inspection and the t3 corpus
+
+### 7.1 What the inspection found
+
+After the recipe gate, the owner watched the t2 policy in the MuJoCo viewer (PR #27). Two
+reads came out of it. Dark robot shadows hid the color of the bricks, and grasped bricks went
+to a wrong bin. Instrumented probes on four official draws then separated three causes, in this
+order of weight:
+
+1. **Layout memorization.** The t2 corpus has 50 runs, so it has 50 combinations of run-level
+   bin positions and overhead camera pose. On an unseen combination the policy sends a brick to
+   a neighboring bin. On official draw 4 at nominal bin and camera geometry, the same checkpoint
+   stowed 50 of 72 bricks instead of 14. Its wrong releases fell from 22 to 2.
+2. **The light rig.** The MuJoCo port put most of the light in a hard sun. With shadows off,
+   draw 0 stowed 31 of 72 instead of 16.
+3. **Approach precision.** Half of all closes landed 2 cm or more from the nearest brick, and a
+   close that far away rarely holds.
+
+### 7.2 Levers, and the owner decision
+
+The owner composed four levers into one corpus. The gate then cannot separate them:
+
+| lever | change | where |
+| --- | --- | --- |
+| 1, many short runs | `--attempts_per_run 12` on 12 envs, one wave per run: about 100 layouts for 1200 attempts | lane script only |
+| 2, light rig | hemisphere dome and mild sun, calibrated on Isaac frames | PR #28 |
+| 3, instrument | `[brick, bin]` per release, nearest-brick distance and a windowed hold per close | PR #29 |
+| 5, recipe knobs | `--nearest_first_pick_order` instead of the randomized order, `--induce_prob` 0.12 to 0.06, `hover_jitter` 0.005-0.035 to 0.005-0.020 | PR #30 |
+
+Nearest-first takes the candidate brick closest to the tool in the desk plane. The desk scatter
+is random, so the color order still varies per episode, and the target becomes a function of
+the scene the cameras see. The oracle refuses a draw that asks for both pick orders.
+
+### 7.3 Corpus (`t3/`)
+
+Ten lanes, lane seed `20261057 + 100 * lane`, target 100 each, the t2 recipe otherwise.
+
+| lane | runs | exported/attempts | rate | abandons | hover_lowered | s/attempt |
+| --- | --- | --- | --- | --- | --- | --- |
+| lane_0 | 9 | 105/108 | 0.972 | 3 | 73 | 17 |
+| lane_1 | 9 | 102/108 | 0.944 | 6 | 82 | 18 |
+| lane_2 | 9 | 104/108 | 0.963 | 4 | 88 | 17 |
+| lane_3 | 9 | 103/108 | 0.954 | 5 | 76 | 17 |
+| lane_4 | 9 | 105/108 | 0.972 | 3 | 83 | 17 |
+| lane_5 | 9 | 107/108 | 0.991 | 1 | 77 | 16 |
+| lane_6 | 9 | 103/108 | 0.954 | 5 | 91 | 15 |
+| lane_7 | 9 | 107/108 | 0.991 | 1 | 81 | 17 |
+| lane_8 | 9 | 107/108 | 0.991 | 1 | 86 | 17 |
+| lane_9 | 9 | 105/108 | 0.972 | 3 | 74 | 17 |
+| **all** | **90** | **1048/1080** | **0.970** [0.958, 0.979] | 32 | 811 | |
+
+The merge holds 6289 sub-episodes and 2,924,212 frames. That is 15 % fewer frames than t2 for
+about the same source count, because the lower induction produces fewer retry cycles. All 24
+color-slot permutations appear.
+
+### 7.4 Three interruptions
+
+- **A moved checkout.** The first launch ran from the main checkout. At 16:19 PDT another
+  session switched that checkout to a docs branch, and every lane died on its next run with
+  `unrecognized arguments: --nearest_first_pick_order`. All 30 finished runs carried the
+  pre-registered knobs, so the lanes resumed. Every later stage ran from a dedicated worktree
+  whose `PYTHONPATH` puts its own `source/` ahead of the editable install.
+- **Two training runs died at step 36823.** Both runs failed at the same step in a DataLoader
+  worker with `Could not push packet to decoder: Invalid data found when processing input`.
+  The trainer seeds its shuffle, so the failure was deterministic. A replay of the dataloader
+  with the decoder instrumented named the item: frames 4388 and 4389 of one lane's wrist video,
+  in episode 1445. A complete `ffmpeg -v error` decode of all 180 videos found no other bad
+  file.
+- **The repair.** The converter had deleted the shard HDF5, so a reconversion of the video was
+  impossible. A plain re-encode drops the undecodable packets and returns 35138 frames instead
+  of 35144, and that shifts every later frame index. The re-encode with `-vsync cfr -r 30`
+  refills the gap by duplication and keeps the count, the frame rate and the duration. The
+  third run trained 600k steps in 3 h 43 min.
+
+### 7.5 Selection ladder (rule L3)
+
+| rung | per-brick (draws 0-2, 216 bricks) |
+| --- | --- |
+| 250k | 100/216 = 0.463 |
+| 275k | 80/216 = 0.370 |
+| 300k | 107/216 = 0.495 |
+| 325k | 131/216 = 0.606 |
+| 350k | 127/216 = 0.588 |
+| 375k | 119/216 = 0.551 |
+| 400k | 134/216 = 0.620 |
+| 425k | 142/216 = 0.657 |
+| 450k | 129/216 = 0.597 |
+| 475k | 140/216 = 0.648 |
+| 500k | 158/216 = 0.731 |
+| 525k | 150/216 = 0.694 |
+| 550k | 148/216 = 0.685 |
+| 575k | 160/216 = 0.741 **L3 candidate** |
+| 600k | 135/216 = 0.625 |
+
+The candidate is not an isolated spike. The check step on draws 0 to 4 read 575k 272/360 =
+0.756 against 500k 261/360 = 0.725 and gated 575k.
+
+### 7.6 Official gate, evaluated once
+
+Seed 20261027, checkpoint 575000, pure policy, `eval_t3/official/gate_results.json`.
+
+| | t3 | t2 |
+| --- | --- | --- |
+| per-brick | **484/720 = 0.672**, Wilson [0.637, 0.706] | 323/720 = 0.449, [0.413, 0.485] |
+| episodes with any brick | 115/120 | 102/120 |
+| histogram, 0 to 6 bricks | 5, 12, 15, 11, 16, 21, 40 | 18, 20, 21, 18, 21, 9, 13 |
+| all six bricks | 40/120 | 13/120 |
+| never closed the jaws | 0/120 | 0/120 |
+| first close, median (p10, p90) | 216 (163, 317) | 198 (152, 306) |
+| graded grasp attempts | 1345, one per 447 steps | 1602, one per 398 steps |
+| wrong bin | **1 of 617 releases** | 82 of 549 releases |
+| closes within 2 cm | 720 of 1338 (53.8 %) | not instrumented |
+| windowed hold, all closes and within 2 cm | 0.524 and 0.860 | not instrumented |
+| clamp fraction | 0.115, all on joint 6 | 0.019, on joints 4 and 6 |
+| wall | 24.5 s/episode | 24.7 s/episode |
+
+### 7.7 Reading the gate
+
+**R-GATE fires the second tranche.** The read is 0.672, inside the 0.50 to 0.70 band. It is
+1.50 times t2 on the same simulator, protocol and seeds.
+
+The wrong-bin loss is gone. One error in 617 releases (`green->yellow`) replaces 82 in 549,
+as the layout ablations predicted for lever 1. The grasp itself did not
+change. Holds by nearest-brick distance read 92 % under 1.5 cm and 68 % at 1.5 to 2 cm. They read
+28 % at 2 to 3 cm, 8 % at 3 to 5 cm and 0 % beyond. That profile matches the t2 probes. What remains is where
+the closes land.
+
+The tranche-2 table of the recipe design picks its lever from the anatomy of the failed closes.
+Of 637 failed closes, 45.1 % missed by 3.5 cm or more. That is above the 35 % line, so the
+table selects wide corrective approaches (`hover_jitter 0.035-0.080`). A coverage read supports that choice.
+The t3 corpus demonstrates lateral corrections up to about 2.5 cm: the jitter range, the induced
+offsets and `lateral_offset` together. Of the failed closes, 69.4 % missed by more than that. The
+policy's dominant failure lies outside the error band its demonstrations ever null. Lever 5's
+narrowing pushed the wrong way for this failure mode.
+
+The clamp fraction rose from 0.019 to 0.115, all on joint 6. It is not explained, and it did not
+hold the gate back.
+
+## 8. Phase 4: wide corrective approaches (`t4/`)
+
+### 8.1 Probe P3, pre-registered
+
+Branch 1 reverses a knob that t3 had just adopted, so the owner asked for a probe first. Three
+arms differed only in `hover_jitter`, each 24 attempts on the same paired seeds (20261003 and
+20261004), `--probe`, the t3 recipe otherwise. The rule, written before the run: take the wide
+arm if its yield is 0.85 or better.
+
+| arm | `hover_jitter` | yield | corrections per episode | s/episode |
+| --- | --- | --- | --- | --- |
+| N | 0.005-0.020 (t3) | 24/24 | 6.3 | 8.1 |
+| M | 0.020-0.050 | 24/24 | 6.2 | 7.8 |
+| W | 0.035-0.080 (branch 1) | 24/24 | 6.1 | 7.3 |
+
+The oracle nulls an 8 cm offset as reliably as a 2 cm one. The rule took W.
+
+### 8.2 Corpus
+
+Ten lanes, lane seed `20261037 + 100 * lane`, target 35 each, the t3 recipe with
+`hover_jitter 0.035-0.080`.
+
+| lane | runs | exported/attempts | rate | abandons | hover_lowered |
+| --- | --- | --- | --- | --- | --- |
+| lane_0 | 3 | 36/36 | 1.000 | 0 | 42 |
+| lane_1 | 3 | 36/36 | 1.000 | 0 | 47 |
+| lane_2 | 4 | 45/48 | 0.938 | 3 | 73 |
+| lane_3 | 3 | 36/36 | 1.000 | 0 | 53 |
+| lane_4 | 4 | 45/48 | 0.938 | 3 | 61 |
+| lane_5 | 3 | 35/36 | 0.972 | 1 | 57 |
+| lane_6 | 3 | 36/36 | 1.000 | 0 | 47 |
+| lane_7 | 3 | 36/36 | 1.000 | 0 | 55 |
+| lane_8 | 3 | 35/36 | 0.972 | 1 | 56 |
+| lane_9 | 3 | 35/36 | 0.972 | 1 | 45 |
+| **all** | **32** | **375/384** | **0.977** [0.956, 0.988] | 9 | 536 |
+
+The lanes took 25 minutes. The merge of t3's ten lanes and these ten holds 8539 sub-episodes and
+4,002,347 frames over 122 layouts. The wide correctives are 27 % of the frames. The merge passes
+`video_files_size_in_mb=1`, so every video is a byte copy of its lane source. Before training,
+the chain decoded all 244 videos with `ffmpeg -v error` and stops on any error. It passed in
+under four minutes. Training ran 600k steps in 3 h 41 min with no failure.
+
+### 8.3 Selection ladder (rule L3)
+
+| rung | per-brick (draws 0-2, 216 bricks) |
+| --- | --- |
+| 250k | 161/216 = 0.745 |
+| 275k | 113/216 = 0.523 |
+| 300k | 178/216 = 0.824 |
+| 325k | 146/216 = 0.676 |
+| 350k | 154/216 = 0.713 |
+| 375k | 177/216 = 0.819 |
+| 400k | 166/216 = 0.769 |
+| 425k | 177/216 = 0.819 |
+| 450k | 187/216 = 0.866 **L3 candidate** |
+| 475k | 155/216 = 0.718 |
+| 500k | 140/216 = 0.648 |
+| 525k | 176/216 = 0.815 |
+| 550k | 184/216 = 0.852 |
+| 575k | 172/216 = 0.796 |
+| 600k | 185/216 = 0.856 |
+
+The candidate is not an isolated spike. The check step on draws 0 to 4 read 600k 315/360 =
+0.875 against 450k 310/360 = 0.861 and gated 600k. On the same five selection draws t3's gated
+rung read 0.756.
+
+### 8.4 Official gate, evaluated once
+
+The pre-registered second seed 20261047, checkpoint 600000, pure policy,
+`eval_t4/official/gate_results.json`. t3 and t2 were gated on seed 20261027, so the columns do
+not share draws.
+
+| | t4 | t3 | t2 |
+| --- | --- | --- | --- |
+| per-brick | **605/720 = 0.840**, Wilson [0.812, 0.865] | 484/720 = 0.672, [0.637, 0.706] | 323/720 = 0.449, [0.413, 0.485] |
+| episodes with any brick | 117/120 | 115/120 | 102/120 |
+| histogram, 0 to 6 bricks | 3, 2, 3, 11, 12, 18, 71 | 5, 12, 15, 11, 16, 21, 40 | 18, 20, 21, 18, 21, 9, 13 |
+| all six bricks | 71/120 | 40/120 | 13/120 |
+| never closed the jaws | 0/120 | 0/120 | 0/120 |
+| first close, median (p10, p90) | 252 (189, 317) | 216 (163, 317) | 198 (152, 306) |
+| graded grasp attempts | 1196, one per 457 steps | 1345, one per 447 steps | 1602, one per 398 steps |
+| wrong bin | 9 of 764 releases | 1 of 617 releases | 82 of 549 releases |
+| closes within 2 cm | 824 of 1191 (69.2 %) | 720 of 1338 (53.8 %) | |
+| windowed hold, all closes and within 2 cm | 0.714 and 0.951 | 0.524 and 0.860 | |
+| clamp fraction | 0.029, all on joint 6 | 0.115, all on joint 6 | 0.019 |
+| wall | 24.1 s/episode | 24.5 s/episode | 24.7 s/episode |
+
+### 8.5 Reading the gate
+
+**R-GATE passes, and the milestone closes.** The read is 0.840, and the whole interval clears
+0.70. After Phase 4 the milestone stops whatever the outcome (recipe design section 9), and this
+outcome is a pass.
+
+The wide correctives moved closes into the band that holds. Closes within 2 cm rose from 53.8 %
+to 69.2 %, and the hold rate there from 0.860 to 0.951. Holds by distance read 97 %, 82 %, 42 %,
+12 % and 0 %. The failed closes kept their shape (median 3.36 cm, 69.5 % beyond 2.5 cm), and
+there are 47 % fewer of them (341 against 637). The policy sorts all six bricks in 71 of 120
+episodes.
+
+Wrong bin reads 9 of 764 releases, up from t3's 1 but 13 times under t2. With more releases and
+different draws, it is recorded and not read as a regression. The clamp fraction fell back to
+0.029.
+
+The factor account reads 1.66, 0.216 and 2.34. As in t2 and t3, the pinch grader under-credits
+holds on MuJoCo, so only the product is a number. The windowed instrument of PR #29 is the
+readable grasp measure.
+
+Attribution. The passing corpus carries many short runs, the new rig, the instrument,
+nearest-first order, lower induction and the wide correctives. The gates in this report cannot
+say how much each one contributes.
+
+## 9. Levers not pulled
 
 - The `train_act.sh` token contract on a signal death (section 6.4): one trap line, on its own
   branch, with a test that kills the wrapper and expects `TRAIN_FAIL`.
@@ -430,23 +690,25 @@ misses and the wrong bins a geometry, is not ported (section 7).
 - DAgger with the oracle as expert (item 4) needs the rig's resume-from-state entry.
 - Cross-leg blending of the smooth walk (RAISE into EXTEND, RETREAT into HOVER) is left for a
   later probe. The speed ladder cleared the cycle bar without it.
-- The `--unstick` supervisor (D1 Option A), the close-event instrument (recipe design 5.2) and
-  the BCE gripper head are not ported. Every gate here is pure policy.
+- The `--unstick` supervisor (D1 Option A) and the BCE gripper head are not ported. Every gate
+  here is pure policy. The close-event instrument is ported (PR #29).
+- A decode check in the converter. `generate_dataset.py` deletes the shard HDF5 before anything
+  decodes the video it wrote, so a bad encode cannot be reconverted (section 7.4). The t4 chain
+  checks the merged videos, but the check belongs before the delete.
+- DONE hold frames. The corpus has no frames after the last brick, so the policy repeats the
+  pick cycle on an empty desk. It costs nothing at the gate and is due before a real-arm demo.
+- The joint-6 clamp. It rose to 0.115 on t3 and fell to 0.029 on t4, with no measured mechanism.
 
-Hand-off. R-GATE stopped the milestone at 0.449 for an owner decision, and decision D4 keeps
-the task fixed. The two pre-registered escalations stand. The privileged-state ceiling
-separates a control problem from a vision problem in one training run. DAgger with the oracle
-as expert attacks the covariate shift the recipe design named, and a round costs hours on
-MuJoCo. Before either, two instruments are due on MuJoCo. The pinch grader retuned to the 6.1 N
-grip makes ② and ③ read as factors again. The close-event instrument gives the misses and the
-82 wrong-bin deposits a geometry. The tranche-2 table of the recipe design needs the second
-and did not fire anyway.
+Hand-off. The milestone passed at 0.840 (section 8.5), so the pre-registered escalations did
+not fire. The privileged-state ceiling, DAgger and the pinch grader retune carry over to the
+post-gate roadmap.
 
-## 8. Reproduction
+## 10. Reproduction
 
 ```
 # Code: maker-arm-lab PRs #17, #18 (the port), #20, #21 (Rust planner), #22 (smooth walk),
-# #23 (hover_jitter), #25 (lead_keep); maker-arm-rs PR #5. Drivers and ledger under
+# #23 (hover_jitter), #25 (lead_keep), #27 (viewer), #28 (light rig), #29 (close-event
+# instrument), #30 (nearest-first order); maker-arm-rs PR #5. Drivers and ledger under
 # ~/data/maker-arm-ms3/ (each driver writes a `done` file; launch with setsid).
 
 # Yield probe (design section 3) and the speed ladder (section 5).
@@ -467,6 +729,16 @@ bash t2/run_chain_t2.sh
 # 65 min of ladder, check and gate; the result is eval_t2/official/gate_results.json.
 mv train/act_t2_600k train/act_t2_600k.killed-0807 && mv train/train_t2.log train/train_t2.killed-0807.log
 setsid bash -c 'exec bash t2/run_chain_t2.sh' < /dev/null > /dev/null 2>&1 &
+
+# t3: the visual-inspection levers, from a dedicated worktree (section 7.4). Lanes resume by
+# themselves on a relaunch. Failed training runs are parked before a relaunch, as for t2.
+git worktree add ~/src/maker-arm-lab-t3 feat/ms3-nearest-first-pick
+setsid bash -c 'exec bash t3/run_chain_t3.sh' < /dev/null > /dev/null 2>&1 &
+
+# Phase 4: probe P3, then the tranche-2 chain (lanes, merge with t3, video check, train, ladder,
+# check, gate on 20261047).
+bash probes/p3_hover_width/run_p3.sh
+setsid bash -c 'exec bash t4/run_chain_t4.sh' < /dev/null > /dev/null 2>&1 &
 
 # Tables of this report.
 python3 report_tables.py all
