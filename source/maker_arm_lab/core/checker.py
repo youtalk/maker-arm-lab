@@ -97,6 +97,21 @@ re-measured.
 """
 
 
+def bin_targets(bin_centers_w: torch.Tensor, brick_color_ids: torch.Tensor) -> torch.Tensor:
+    """Each brick's target bin center: (B,3) from (4,3) centers, (N,B,3) from (N,4,3).
+
+    The (4,3) form is one layout shared by every env (the Isaac scene, and a MuJoCo run
+    without per-episode draws). The (N,4,3) form is one layout per env (MuJoCo with
+    ``--episode_draws``). It is indexed along its LAST bin axis, so env n is graded against
+    its own bins and never against env ``color_id``'s, which a plain ``[]`` index would do.
+    """
+    if bin_centers_w.dim() == 2:
+        return bin_centers_w[brick_color_ids]
+    if bin_centers_w.dim() == 3:
+        return bin_centers_w[:, brick_color_ids]
+    raise ValueError(f"bin_centers_w must be (4,3) or (N,4,3), got {tuple(bin_centers_w.shape)}")
+
+
 def bricks_at_rest_in_bins(
     brick_pos_w: torch.Tensor,
     brick_lin_vel_w: torch.Tensor,
@@ -107,26 +122,16 @@ def bricks_at_rest_in_bins(
 ) -> torch.Tensor:
     """(N,B) bool: brick b in env n is at rest inside its correct-color bin.
 
-    The bins are identical in every env, so ``bin_centers_w`` is (4,3) and is
-    broadcast across envs. A per-env (N,4,3) form used to be accepted here too,
-    but nothing ever produced one -- ``terminations._bin_centers_cached``
-    returns ``layout.bin_interior_centers()``, which is (4,3) by construction --
-    so that branch shipped unreachable. It is rejected explicitly rather than
-    silently accepted, because indexing a (N,4,3) tensor with ``brick_color_ids``
-    would select *envs* by colour id and grade every brick against the wrong
-    env's bins without raising.
-
     Args:
         brick_pos_w: (N,B,3) brick centers, world frame.
         brick_lin_vel_w: (N,B,3) brick linear velocities.
-        bin_centers_w: (4,3) bin interior AABB centers.
+        bin_centers_w: (4,3) bin interior AABB centers shared by every env, or (N,4,3)
+            centers per env (see ``bin_targets``).
         bin_half_extents: (3,) bin interior half extents.
         brick_color_ids: (B,) long, target bin index per brick.
         max_speed: "at rest" linear speed threshold [m/s].
     """
-    if bin_centers_w.dim() != 2:
-        raise ValueError(f"bin_centers_w must be (4,3), got {tuple(bin_centers_w.shape)}")
-    targets = bin_centers_w[brick_color_ids]  # (B,3)
+    targets = bin_targets(bin_centers_w, brick_color_ids)  # (B,3) or (N,B,3)
     inside = ((brick_pos_w - targets).abs() <= bin_half_extents).all(dim=-1)
     at_rest = brick_lin_vel_w.norm(dim=-1) <= max_speed
     return inside & at_rest
@@ -163,14 +168,19 @@ def containing_bin(
     Args:
         brick_pos_w: (N,B,3) brick centers, world frame.
         brick_lin_vel_w: (N,B,3) brick linear velocities.
-        bin_centers_w: (4,3) bin interior AABB centers.
+        bin_centers_w: (4,3) shared centers, or (N,4,3) per env.
         bin_half_extents: (3,) bin interior half extents.
         max_speed: "at rest" linear speed threshold [m/s].
     """
-    if bin_centers_w.dim() != 2:
-        raise ValueError(f"bin_centers_w must be (4,3), got {tuple(bin_centers_w.shape)}")
+    if bin_centers_w.dim() == 2:
+        bins = bin_centers_w[None, None]  # (1,1,4,3)
+    elif bin_centers_w.dim() == 3:
+        bins = bin_centers_w[:, None]  # (N,1,4,3)
+    else:
+        raise ValueError(
+            f"bin_centers_w must be (4,3) or (N,4,3), got {tuple(bin_centers_w.shape)}"
+        )
     pos = brick_pos_w.unsqueeze(2)  # (N,B,1,3)
-    bins = bin_centers_w.unsqueeze(0).unsqueeze(0)  # (1,1,4,3)
     inside = ((pos - bins).abs() <= bin_half_extents).all(dim=-1)  # (N,B,4)
     at_rest = brick_lin_vel_w.norm(dim=-1) <= max_speed  # (N,B)
     resting_in_any = inside.any(dim=-1) & at_rest

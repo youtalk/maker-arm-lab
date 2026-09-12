@@ -56,31 +56,27 @@ def test_episode_success_requires_all():
     assert not done.item()
 
 
-def test_per_env_bin_centers_are_rejected():
-    """(N,4,3) used to be silently accepted by an unreachable branch.
+def test_per_env_bin_centers_grade_each_env_against_its_own_bins():
+    """(N,4,3) centers: env n is graded against ITS bins, never against env color_id's."""
+    shifted = BIN_CENTERS.clone()
+    shifted[:, 0] += 0.10  # a second layout, 10 cm further from the arm
+    per_env = torch.stack([BIN_CENTERS, shifted])  # (2,4,3)
+    color_ids = torch.tensor([0, 1])
+    vel = torch.zeros(2, 2, 3)
+    own = torch.stack([BIN_CENTERS[color_ids], shifted[color_ids]])  # (2,2,3)
+    assert bricks_at_rest_in_bins(own, vel, per_env, HALF, color_ids).all()
+    assert containing_bin(own, vel, per_env, HALF).tolist() == [[0, 1], [0, 1]]
+    crossed = torch.stack([shifted[color_ids], BIN_CENTERS[color_ids]])
+    assert not bricks_at_rest_in_bins(crossed, vel, per_env, HALF, color_ids).any()
+    assert containing_bin(crossed, vel, per_env, HALF).tolist() == [[-1, -1], [-1, -1]]
 
-    Indexing it with ``brick_color_ids`` selects *envs* by colour id, so every
-    brick would be graded against the wrong env's bins with nothing raising.
-    """
-    pos = BIN_CENTERS[torch.tensor([0])].unsqueeze(0).repeat(3, 1, 1)
-    per_env_centers = BIN_CENTERS.unsqueeze(0).repeat(3, 1, 1)
-    with pytest.raises(ValueError, match=r"bin_centers_w must be \(4,3\)"):
-        bricks_at_rest_in_bins(pos, _still(pos), per_env_centers, HALF, torch.tensor([0]))
 
-
-def test_containing_bin_rejects_per_env_bin_centers():
-    """``containing_bin`` shares ``bricks_at_rest_in_bins``'s (4,3)-only invariant.
-
-    Without this guard, a (N,4,3) centers tensor broadcasts against (N,B,3)
-    positions into a silently-wrong (1,N,B) result instead of raising -- and
-    Task 6 indexes this per env every step, so a rank-3 return would corrupt
-    wrong-bin bookkeeping instead of crashing.
-    """
-    pos = torch.zeros((4, 4, 3))
-    vel = torch.zeros((4, 4, 3))
-    per_env_centers = BIN_CENTERS.unsqueeze(0).repeat(4, 1, 1)
-    with pytest.raises(ValueError, match=r"bin_centers_w must be \(4,3\)"):
-        containing_bin(pos, vel, per_env_centers, HALF)
+def test_bin_centers_of_another_rank_are_rejected():
+    pos = torch.zeros(1, 1, 3)
+    with pytest.raises(ValueError, match=r"\(4,3\) or \(N,4,3\)"):
+        bricks_at_rest_in_bins(pos, _still(pos), BIN_CENTERS[None, None], HALF, torch.tensor([0]))
+    with pytest.raises(ValueError, match=r"\(4,3\) or \(N,4,3\)"):
+        containing_bin(pos, _still(pos), BIN_CENTERS[None, None], HALF)
 
 
 def test_batched_envs():
