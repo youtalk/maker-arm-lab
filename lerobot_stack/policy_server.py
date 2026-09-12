@@ -28,6 +28,7 @@ import zmq
 from policy_protocol import (
     ACTION_DTYPE,
     ACTION_SHAPE,
+    CONTEXT_KEY,
     OBS_SCHEMA,
     PROTOCOL_VERSION,
     recv_message,
@@ -46,6 +47,7 @@ class PolicyServer:
         port: int,
         n_action_steps: int,
         inference: dict | None = None,
+        context_dim: int = 0,
     ):
         self._policy_fn = policy_fn
         self._reset_fn = reset_fn
@@ -57,6 +59,11 @@ class PolicyServer:
         # applied and echoed in SERVER_READY and hello_ack so an eval payload records what
         # was served rather than what the supervisor asked for.
         self._inference = dict(inference or {})
+        # Width of the optional context array this policy takes (0 = none). Echoed in the
+        # handshake so a client knows whether to send one, and a step's context width is
+        # checked against it -- a mismatch, including a missing context when this is > 0,
+        # is a bad_obs error rather than a shape exception surfacing inside the policy.
+        self._context_dim = context_dim
         self._socket = None
 
     def bind(self) -> int:
@@ -72,6 +79,7 @@ class PolicyServer:
             "n_action_steps": self._n_action_steps,
             "protocol": PROTOCOL_VERSION,
             "inference": self._inference,
+            "context_dim": self._context_dim,
         }
         print("SERVER_READY " + json.dumps(ready), flush=True)
         return self._port
@@ -83,6 +91,7 @@ class PolicyServer:
             "policy_id": self._policy_id,
             "n_action_steps": self._n_action_steps,
             "inference": self._inference,
+            "context_dim": self._context_dim,
             "obs_schema": {k: [list(shape), dtype] for k, (shape, dtype) in OBS_SCHEMA.items()},
             "action": [list(ACTION_SHAPE), ACTION_DTYPE],
         }
@@ -115,8 +124,20 @@ class PolicyServer:
                         self._socket, {"type": "error", "error": "bad_obs", "message": str(err)}
                     )
                     return True
+                context = arrays.get(CONTEXT_KEY)
+                width = 0 if context is None else int(context.shape[1])
+                if width != self._context_dim:
+                    send_message(
+                        self._socket,
+                        {
+                            "type": "error",
+                            "error": "bad_obs",
+                            "message": f"context width {width}, this policy takes {self._context_dim}",
+                        },
+                    )
+                    return True
                 action = np.asarray(
-                    self._policy_fn(arrays["state"], arrays["wrist"], arrays["overhead"]),
+                    self._policy_fn(arrays["state"], arrays["wrist"], arrays["overhead"], context),
                     dtype=np.float32,
                 )
                 validate_action(action, batch)
@@ -276,6 +297,7 @@ def inference_policy_id(
     overrides: dict,
     blank_camera: str | None = None,
     gripper_squash: bool = False,
+    context_dim: int = 0,
 ) -> str:
     """Suffix the policy id with the active overrides so eval payloads are self-describing."""
     policy_id = f"act:{checkpoint_dir}"
@@ -287,6 +309,8 @@ def inference_policy_id(
         policy_id += "+gbce"
     if blank_camera is not None:
         policy_id += f"+blank{blank_camera}"
+    if context_dim:
+        policy_id += f"+ctx{context_dim}"
     return policy_id
 
 
@@ -297,7 +321,7 @@ def load_act(
     temporal_ensemble_coeff: float | None = None,
     blank_camera: str | None = None,
 ):
-    """Build (policy_fn, reset_fn, policy_id, n_action_steps) from a LeRobot checkpoint.
+    """Build (policy_fn, reset_fn, policy_id, n_action_steps, inference, context_dim).
 
     checkpoint_dir is a `pretrained_model` directory (e.g.
     <output_dir>/checkpoints/last/pretrained_model). The checkpoint's own
@@ -305,7 +329,9 @@ def load_act(
     the same way lerobot_eval loads them (verified against lerobot 0.5.1:
     `preprocessor_overrides={"device_processor": {"device": ...}}`).
     Image conversion (uint8 HWC -> float32 CHW / 255) mirrors
-    lerobot.envs.utils.preprocess_observation.
+    lerobot.envs.utils.preprocess_observation; images are sent to the policy only
+    when the checkpoint has image features. `context_dim` is the checkpoint's
+    `env_state_feature.shape[0]`, or 0 for a checkpoint that takes no context.
     Inference-config overrides (n_action_steps, temporal_ensemble_coeff) are applied
     at checkpoint load and reflected in the returned policy_id suffix.
     """
@@ -328,6 +354,9 @@ def load_act(
     policy = ACTPolicy.from_pretrained(checkpoint_dir, config=config)
     policy.to(device)
     policy.eval()
+    env_feature = policy.config.env_state_feature
+    context_dim = int(env_feature.shape[0]) if env_feature is not None else 0
+    uses_images = bool(policy.config.image_features)
     pre, post = make_pre_post_processors(
         policy_cfg=policy.config,
         pretrained_path=checkpoint_dir,
@@ -344,13 +373,16 @@ def load_act(
     def _images(array: np.ndarray) -> torch.Tensor:
         return torch.from_numpy(array).permute(0, 3, 1, 2).to(torch.float32) / 255.0
 
-    def policy_fn(state: np.ndarray, wrist: np.ndarray, overhead: np.ndarray) -> np.ndarray:
-        wrist, overhead = blank_streams(wrist, overhead, blank_camera)
-        batch = {
-            "observation.state": torch.from_numpy(state),
-            "observation.images.wrist": _images(wrist),
-            "observation.images.overhead": _images(overhead),
-        }
+    def policy_fn(
+        state: np.ndarray, wrist: np.ndarray, overhead: np.ndarray, context: np.ndarray | None
+    ) -> np.ndarray:
+        batch = {"observation.state": torch.from_numpy(state)}
+        if uses_images:
+            wrist, overhead = blank_streams(wrist, overhead, blank_camera)
+            batch["observation.images.wrist"] = _images(wrist)
+            batch["observation.images.overhead"] = _images(overhead)
+        if context_dim:
+            batch["observation.environment_state"] = torch.from_numpy(context)
         batch = pre(batch)
         with torch.inference_mode():
             action = policy.select_action(batch)
@@ -366,10 +398,15 @@ def load_act(
         policy_fn,
         policy.reset,
         inference_policy_id(
-            checkpoint_dir, overrides, blank_camera, gripper_squash=marker is not None
+            checkpoint_dir,
+            overrides,
+            blank_camera,
+            gripper_squash=marker is not None,
+            context_dim=context_dim,
         ),
         policy.config.n_action_steps,
         served_inference(policy.config),
+        context_dim,
     )
 
 
@@ -432,7 +469,7 @@ def main() -> int:
     parser = build_parser()
     try:
         args = parser.parse_args()
-        policy_fn, reset_fn, policy_id, n_action_steps, inference = load_act(
+        policy_fn, reset_fn, policy_id, n_action_steps, inference, context_dim = load_act(
             args.checkpoint,
             args.device,
             n_action_steps=args.n_action_steps,
@@ -440,7 +477,13 @@ def main() -> int:
             blank_camera=args.blank_camera,
         )
         server = PolicyServer(
-            policy_fn, reset_fn, policy_id, args.port, n_action_steps, inference=inference
+            policy_fn,
+            reset_fn,
+            policy_id,
+            args.port,
+            n_action_steps,
+            inference=inference,
+            context_dim=context_dim,
         )
         server.bind()
         server.serve_forever()

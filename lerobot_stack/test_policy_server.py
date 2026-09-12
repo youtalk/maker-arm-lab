@@ -27,21 +27,14 @@ def _obs(batch=2):
     }
 
 
-@pytest.fixture()
-def server():
-    calls = {"reset": 0}
-
-    def fake_policy(state, wrist, overhead):
-        action = np.zeros((state.shape[0], 7), dtype=np.float32)
-        action[:, 0] = state[:, 0] + 1.0  # provably passed through
-        return action
-
+def _start_server(policy_fn, calls, context_dim=0):
     srv = PolicyServer(
-        policy_fn=fake_policy,
+        policy_fn=policy_fn,
         reset_fn=lambda: calls.__setitem__("reset", calls["reset"] + 1),
         policy_id="fake:test",
         port=0,
         n_action_steps=100,
+        context_dim=context_dim,
     )
     port = srv.bind()
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -50,13 +43,46 @@ def server():
     req = ctx.socket(zmq.REQ)
     req.setsockopt(zmq.RCVTIMEO, 10_000)
     req.connect(f"tcp://127.0.0.1:{port}")
-    yield req, calls
+    return req, thread
+
+
+def _stop_server(req, thread):
     send_message(req, {"type": "shutdown"})
     header, _ = recv_message(req)
     assert header["type"] == "shutdown_ack"
     thread.join(timeout=5)
     assert not thread.is_alive()
     req.close(0)
+
+
+@pytest.fixture()
+def server():
+    calls = {"reset": 0}
+
+    def fake_policy(state, wrist, overhead, context=None):
+        calls["context"] = context
+        action = np.zeros((state.shape[0], 7), dtype=np.float32)
+        action[:, 0] = state[:, 0] + 1.0  # provably passed through
+        return action
+
+    req, thread = _start_server(fake_policy, calls, context_dim=0)
+    yield req, calls
+    _stop_server(req, thread)
+
+
+@pytest.fixture()
+def server_ctx():
+    calls = {"reset": 0}
+
+    def fake_policy(state, wrist, overhead, context=None):
+        calls["context"] = context
+        action = np.zeros((state.shape[0], 7), dtype=np.float32)
+        action[:, 0] = state[:, 0] + 1.0
+        return action
+
+    req, thread = _start_server(fake_policy, calls, context_dim=6)
+    yield req, calls
+    _stop_server(req, thread)
 
 
 def _rpc(req, header, arrays=None):
@@ -103,9 +129,30 @@ def test_bad_obs_is_reported_with_the_key(server):
     assert "wrist" in header["message"]
 
 
+def test_a_context_step_reaches_the_policy_and_a_width_mismatch_is_refused(server_ctx):
+    req, calls = server_ctx
+    _rpc(req, {"type": "hello", "protocol": PROTOCOL_VERSION})
+    header, _ = _rpc(
+        req, {"type": "step", "batch": 2}, {**_obs(), "context": np.full((2, 6), 0.5, np.float32)}
+    )
+    assert header["type"] == "action" and calls["context"].shape == (2, 6)
+    header, _ = _rpc(
+        req, {"type": "step", "batch": 2}, {**_obs(), "context": np.zeros((2, 5), np.float32)}
+    )
+    assert header["type"] == "error" and header["error"] == "bad_obs"
+    header, _ = _rpc(req, {"type": "step", "batch": 2}, _obs())
+    assert header["type"] == "error" and header["error"] == "bad_obs"
+
+
+def test_hello_ack_reports_the_context_width(server_ctx):
+    req, _ = server_ctx
+    header, _ = _rpc(req, {"type": "hello", "protocol": PROTOCOL_VERSION})
+    assert header["context_dim"] == 6
+
+
 def test_nan_action_is_flagged():
     srv = PolicyServer(
-        policy_fn=lambda s, w, o: np.full((s.shape[0], 7), np.nan, dtype=np.float32),
+        policy_fn=lambda s, w, o, context=None: np.full((s.shape[0], 7), np.nan, dtype=np.float32),
         reset_fn=lambda: None,
         policy_id="nan:test",
         port=0,
@@ -303,7 +350,7 @@ def test_bind_announces_readiness_with_the_port_protocol_and_identity(capsys):
     # The supervisor blocks on this line before it connects, so its shape is a contract:
     # the token, then one JSON object carrying the port it actually bound.
     srv = PolicyServer(
-        policy_fn=lambda s, w, o: np.zeros((s.shape[0], 7), dtype=np.float32),
+        policy_fn=lambda s, w, o, context=None: np.zeros((s.shape[0], 7), dtype=np.float32),
         reset_fn=lambda: None,
         policy_id="ready:test",
         port=0,
@@ -320,6 +367,7 @@ def test_bind_announces_readiness_with_the_port_protocol_and_identity(capsys):
             "n_action_steps": 37,
             "protocol": PROTOCOL_VERSION,
             "inference": {},  # nothing was loaded, so nothing is served
+            "context_dim": 0,
         }
     finally:
         # PolicyServer has no public teardown (the serve loop owns its socket for the
@@ -365,7 +413,7 @@ def test_handshake_carries_the_served_inference():
     import threading
 
     srv = PolicyServer(
-        policy_fn=lambda s, w, o: np.zeros((s.shape[0], 7), dtype=np.float32),
+        policy_fn=lambda s, w, o, context=None: np.zeros((s.shape[0], 7), dtype=np.float32),
         reset_fn=lambda: None,
         policy_id="inf:test",
         port=0,
