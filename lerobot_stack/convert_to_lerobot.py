@@ -18,9 +18,16 @@ follows the 30 Hz control rate.
 Every exit path prints CONVERT_OK or CONVERT_FAIL on stdout. scripts/generate_dataset.py
 parses that line, and a run that terminates without either reads to it as a HANG rather
 than a failure -- a far worse outcome than a reported failure.
+
+``--context {camera,privileged}`` additionally reads a shard's ``obs/context_<name>``
+dataset and writes it as the single feature ``observation.environment_state``. The two
+context channels never mix in one dataset: one ``--context`` per conversion. ``--no_images``
+drops both image features (the privileged-state ceiling) and requires ``--context`` -- a
+dataset with neither images nor a context channel has nothing to condition the policy on.
 """
 
 import argparse
+import json
 import sys
 import traceback
 from pathlib import Path
@@ -44,13 +51,15 @@ ARM_JOINTS = [
 # because this venv has no maker_arm_lab; tests/test_lerobot_schema_pin.py keeps it honest.
 GRIPPER_TRAVEL = 0.0524125
 
-FEATURES = {
+BASE_FEATURES = {
     "action": {"dtype": "float32", "shape": (7,), "names": ARM_JOINTS + ["gripper"]},
     "observation.state": {
         "dtype": "float32",
         "shape": (7,),
         "names": ARM_JOINTS + ["gripper_open"],
     },
+}
+IMAGE_FEATURES = {
     "observation.images.wrist": {
         "dtype": "video",
         "shape": (224, 224, 3),
@@ -62,6 +71,35 @@ FEATURES = {
         "names": ["height", "width", "channels"],
     },
 }
+CONTEXT_CHANNELS = ("camera", "privileged")
+
+
+def build_features(context_names: list[str] | None, images: bool) -> dict:
+    """The dataset features for one conversion: state and action always, images unless
+    dropped, and ``observation.environment_state`` when a context channel is selected."""
+    features = dict(BASE_FEATURES)
+    if images:
+        features.update(IMAGE_FEATURES)
+    if context_names is not None:
+        features["observation.environment_state"] = {
+            "dtype": "float32",
+            "shape": (len(context_names),),
+            "names": list(context_names),
+        }
+    return features
+
+
+def read_context_names(shard: Path, context: str) -> list[str]:
+    """The ``names`` attribute of the first demo's ``obs/context_<context>`` dataset."""
+    key = f"obs/context_{context}"
+    with h5py.File(shard, "r") as f:
+        demos = sorted(f["data"].keys(), key=lambda k: int(k.split("_")[1]))
+        if not demos or key not in f["data"][demos[0]]:
+            raise RuntimeError(
+                f"{shard} has no {key} dataset -- --context {context} needs shards recorded "
+                "with the MS4 recorder (both context channels)"
+            )
+        return json.loads(f["data"][demos[0]][key].attrs["names"])
 
 
 # PHASE_TO_INT pins (recorders.py): dropped outright when splitting.
@@ -115,6 +153,8 @@ def convert(
     split_cycles: bool = False,
     sidecar_dir: Path | None = None,
     lead_keep: int = 0,
+    context: str | None = None,
+    images: bool = True,
 ) -> tuple[int, int]:
     """Convert `shards` into (or append them onto) the LeRobot dataset at `root`.
 
@@ -133,6 +173,12 @@ def convert(
         raise ValueError("sidecar_dir requires split_cycles")
     if lead_keep and not split_cycles:
         raise ValueError("lead_keep requires split_cycles")
+    if context is not None and context not in CONTEXT_CHANNELS:
+        raise ValueError(f"context must be one of {CONTEXT_CHANNELS}, got {context!r}")
+    if not images and context is None:
+        raise ValueError("a dataset without images needs a context channel (--context)")
+    context_names = read_context_names(shards[0], context) if context is not None else None
+    context_key = f"obs/context_{context}" if context is not None else None
     # Resume iff root/meta/info.json (the local LeRobot dataset marker) exists. A bare
     # root.exists() check is not enough: the campaign supervisor pre-creates dataset_root as an
     # empty directory before the first conversion ever runs, so root.exists() is True with no
@@ -170,7 +216,7 @@ def convert(
         dataset = LeRobotDataset.create(
             repo_id,
             fps=fps,
-            features=FEATURES,
+            features=build_features(context_names, images),
             root=root,
             robot_type="maker_arm",
             use_videos=True,
@@ -186,9 +232,17 @@ def convert(
                 actions = grp["actions"][:]  # (T, 7) raw pre-clamp oracle command
                 targets = grp["joint_targets"][:]  # (T, 8)
                 state = grp["obs/joint_pos_abs"][:]  # (T, 8): 6 arm + left/right jaw (m)
-                wrist = grp["obs/images/wrist_rgb"][:]  # (T, 224, 224, 3) uint8
-                overhead = grp["obs/images/overhead_rgb"][:]
-                steps = min(len(actions), len(targets), len(state), len(wrist), len(overhead))
+                wrist = grp["obs/images/wrist_rgb"] if images else None  # (T, 224, 224, 3) uint8
+                overhead = grp["obs/images/overhead_rgb"] if images else None
+                lengths = [len(actions), len(targets), len(state)]
+                if images:
+                    lengths += [len(wrist), len(overhead)]
+                if context_key is not None:
+                    if context_key not in grp:
+                        raise RuntimeError(f"{shard}:{demo} has no {context_key} dataset")
+                    ctx = grp[context_key][:]
+                    lengths.append(len(ctx))
+                steps = min(lengths)
                 # The right jaw is dropped, not averaged in: the two jaws are separately
                 # actuated here, and the left one is the declared reference (module docstring).
                 gripper_open = np.clip(state[:, 6] / GRIPPER_TRAVEL, 0.0, 1.0)
@@ -213,17 +267,19 @@ def convert(
                     # index of the episode about to be saved
                     episode_index = dataset.meta.total_episodes
                     for t in seg:
-                        dataset.add_frame(
-                            {
-                                "action": np.concatenate([targets[t, :6], actions[t, 6:7]]).astype(
-                                    np.float32
-                                ),
-                                "observation.state": state7[t].astype(np.float32),
-                                "observation.images.wrist": wrist[t],
-                                "observation.images.overhead": overhead[t],
-                                "task": TASK,
-                            }
-                        )
+                        frame = {
+                            "action": np.concatenate([targets[t, :6], actions[t, 6:7]]).astype(
+                                np.float32
+                            ),
+                            "observation.state": state7[t].astype(np.float32),
+                            "task": TASK,
+                        }
+                        if images:
+                            frame["observation.images.wrist"] = wrist[t]
+                            frame["observation.images.overhead"] = overhead[t]
+                        if context_key is not None:
+                            frame["observation.environment_state"] = ctx[t].astype(np.float32)
+                        dataset.add_frame(frame)
                     dataset.save_episode()
                     if sidecar_dir is not None:
                         sidecar_dir.mkdir(parents=True, exist_ok=True)
@@ -278,6 +334,17 @@ def build_parser() -> argparse.ArgumentParser:
             "reuse it only to resume into that same --root."
         ),
     )
+    parser.add_argument(
+        "--context",
+        choices=CONTEXT_CHANNELS,
+        default=None,
+        help="write obs/context_<name> as observation.environment_state (MS4 levers 1 and 3)",
+    )
+    parser.add_argument(
+        "--no_images",
+        action="store_true",
+        help="drop both image features (the privileged-state ceiling); requires --context",
+    )
     return parser
 
 
@@ -298,6 +365,8 @@ def main() -> int:
             split_cycles=args.split_cycles,
             lead_keep=args.lead_keep,
             sidecar_dir=args.sidecar_dir,
+            context=args.context,
+            images=not args.no_images,
         )
     except Exception as exc:  # noqa: BLE001 -- any failure must become CONVERT_FAIL, not a crash.
         print(f"CONVERT_FAIL {type(exc).__name__}: {exc}", flush=True)
