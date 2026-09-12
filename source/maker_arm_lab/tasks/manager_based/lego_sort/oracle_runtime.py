@@ -1222,8 +1222,12 @@ class OracleRig:
         """Re-seed the envs in ``env_ids`` after their caller has reset them."""
         for i in env_ids:
             draw = oracle.sample_episode_draw(self.rng, self.noise)
+            # MuJoCo with per-episode draws moves the bins at every reset: the oracle for env
+            # i must plan for env i's bins. Every other env carries the rig's one layout.
+            layouts = getattr(self.env, "bin_layouts", None)
+            bl = self.bl if layouts is None else layouts[i]
             self.oracles[i] = oracle.EnvOracle(
-                self.bl, self.num_bricks, draw, induction=self.induction, rng=self.rng
+                bl, self.num_bricks, draw, induction=self.induction, rng=self.rng
             )
             self.commanded_yaw[i] = self.jaw_yaw(i)
             self.commanded_tilt[i] = self.tool_tilt(i)
