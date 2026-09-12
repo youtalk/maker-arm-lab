@@ -422,3 +422,57 @@ def test_eval_command_mujoco_backend_spawns_the_mujoco_client(tmp_path):
     )
     assert isaac[1:3] == ["-p", "scripts/eval_policy.py"]
     assert cmd[cmd.index("--num_envs") :] == isaac[isaac.index("--num_envs") :]
+
+
+def test_eval_command_forwards_the_draw_flags_to_the_mujoco_client(tmp_path):
+    cfg = ge.GateCfg(
+        checkpoint="ck",
+        out_dir=tmp_path,
+        processes=1,
+        num_envs=4,
+        seed=7,
+        threshold=0.7,
+        ledger=tmp_path / "ledger.json",
+        backend="mujoco",
+        episode_draws=True,
+        frame_jitter=True,
+        spatial_scale=3.0,
+    )
+    draw = ge.make_eval_draws(1, 7)[0]
+    cmd = ge._eval_command(cfg, draw)
+    assert "--episode_draws" in cmd and "--frame_jitter" in cmd
+    assert cmd[cmd.index("--spatial_scale") + 1] == "3.0"
+    plain = ge._eval_command(
+        ge.GateCfg(
+            checkpoint="ck",
+            out_dir=tmp_path,
+            processes=1,
+            num_envs=4,
+            seed=7,
+            threshold=0.7,
+            ledger=tmp_path / "ledger.json",
+            backend="mujoco",
+        ),
+        draw,
+    )
+    assert "--episode_draws" not in plain and "--spatial_scale" not in plain
+    args = ge._parse_args(
+        [
+            "--checkpoint",
+            "ck",
+            "--out_dir",
+            str(tmp_path),
+            "--ledger",
+            "l",
+            "--threshold",
+            "0.7",
+            "--seed",
+            "1",
+            "--backend",
+            "mujoco",
+            "--episode_draws",
+            "--spatial_scale",
+            "2",
+        ]
+    )
+    assert ge._build_cfg(args).episode_draws is True and ge._build_cfg(args).spatial_scale == 2.0

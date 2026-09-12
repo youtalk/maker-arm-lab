@@ -1211,3 +1211,15 @@ def test_build_cfg_carries_the_backend(tmp_path):
         ).backend
         == "isaac"
     )
+
+
+def test_batch_command_and_cfg_carry_the_episode_draw_flags(tmp_path):
+    base = ["--out_dir", str(tmp_path / "w"), "--dataset_root", str(tmp_path / "d")]
+    plain = gd._batch_command(_cmd_cfg(tmp_path), 0, (0, 1, 2, 3), tmp_path / "shard_000")
+    assert "--episode_draws" not in plain and "--frame_jitter" not in plain
+    cfg = _cmd_cfg(tmp_path, episode_draws=True, frame_jitter=True)
+    cmd = gd._batch_command(cfg, 0, (0, 1, 2, 3), tmp_path / "shard_000")
+    assert "--episode_draws" in cmd and "--frame_jitter" in cmd
+    parsed = gd._build_cfg(gd._parse_args(base + ["--episode_draws", "--frame_jitter"]))
+    assert parsed.episode_draws is True and parsed.frame_jitter is True
+    assert gd._build_cfg(gd._parse_args(base)).episode_draws is False

@@ -209,6 +209,10 @@ class CampaignCfg:
     # forwarded only when the range is non-empty, for the same ledger reason.
     hover_jitter_min: float = 0.0
     hover_jitter_max: float = 0.0
+    # Per-episode scene draws and per-frame camera jitter (MS4 lever 1), MuJoCo only.
+    # Forwarded only when set, so the ledger's command record shows which corpora had them.
+    episode_draws: bool = False
+    frame_jitter: bool = False
     # Which simulator runs the batches: "isaac" spawns scripts/generate_batch.py under
     # isaaclab.sh, "mujoco" spawns scripts/mj_generate_batch.py under the project venv. Both
     # speak the same RUN_META / RUN_STATS / BATCH_OK contract, so nothing else here differs.
@@ -803,6 +807,10 @@ def _batch_command(
             "--hover_jitter_max",
             str(cfg.hover_jitter_max),
         ]
+    if cfg.episode_draws:
+        cmd += ["--episode_draws"]
+    if cfg.frame_jitter:
+        cmd += ["--frame_jitter"]
     return cmd
 
 
@@ -925,6 +933,8 @@ def _build_cfg(args: argparse.Namespace) -> CampaignCfg:
         nearest_first_pick_order=args.nearest_first_pick_order,
         hover_jitter_min=args.hover_jitter_min,
         hover_jitter_max=args.hover_jitter_max,
+        episode_draws=args.episode_draws,
+        frame_jitter=args.frame_jitter,
         backend=args.backend,
         breaker_min_rate=None if args.breaker_min_rate < 0 else args.breaker_min_rate,
         breaker_min_runs=args.breaker_min_runs,
@@ -1004,6 +1014,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "broken and the target becomes readable from the cameras. Off by default, and "
             "refused together with --randomize_pick_order"
         ),
+    )
+    parser.add_argument(
+        "--episode_draws",
+        action="store_true",
+        help="MuJoCo only: bins, lights and cameras are redrawn per episode (MS4 lever 1)",
+    )
+    parser.add_argument(
+        "--frame_jitter",
+        action="store_true",
+        help="MuJoCo only: small overhead-camera jitter resampled per rendered frame",
     )
     parser.add_argument(
         "--breaker_min_rate",

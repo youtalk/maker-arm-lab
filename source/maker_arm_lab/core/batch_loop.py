@@ -110,6 +110,8 @@ def run_meta(
         "nearest_first_pick_order": noise.nearest_first_pick_order,
         # Configured range; each episode's "hover_jitters" says how many it demonstrated.
         "hover_jitter": list(noise.hover_jitter),
+        "episode_draws": bool(getattr(args, "episode_draws", False)),
+        "frame_jitter": bool(getattr(args, "frame_jitter", False)),
         "induction": None
         if induction is None
         else {
@@ -334,6 +336,17 @@ def add_batch_arguments(parser) -> None:
         type=float,
         default=0.0,
         help="Upper radius (m) of the per-pick lateral HOVER offset; 0 = off (the default).",
+    )
+    parser.add_argument(
+        "--episode_draws",
+        action="store_true",
+        help="MuJoCo only: redraw bins, lights and cameras at every episode reset instead "
+        "of once per run (MS4 lever 1). The color permutation stays per run.",
+    )
+    parser.add_argument(
+        "--frame_jitter",
+        action="store_true",
+        help="MuJoCo only: resample a small overhead-camera jitter on every rendered frame.",
     )
     parser.add_argument(
         "--probe",
