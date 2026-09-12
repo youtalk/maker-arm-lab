@@ -279,3 +279,34 @@ def mj_scene_overhead_pose(draw):
     from maker_arm_lab.mj import scene as mj_scene
 
     return mj_scene.overhead_camera_pose(draw)
+
+
+def test_context_channels_are_always_filled_and_the_served_one_follows_the_mode():
+    from maker_arm_lab.mj import env as mj_env
+
+    env = MjLegoSortEnv(
+        2, _draw(), num_bricks=2, cameras=False, episode_draws=True, context="camera"
+    )
+    env.reset(seed=4)
+    assert env.context_mode == "camera"
+    assert env.obs_buf["context"].shape == (2, 6) and env.obs_buf["context"].dtype == torch.float32
+    assert env.context_camera.shape == (2, 6) and env.context_privileged.shape == (2, 42)
+    assert not np.allclose(env.context_camera[0], env.context_camera[1])
+    # Bricks 0 and 1 fill the first 14 values; the missing bricks 2..5 are zeros.
+    assert np.abs(env.context_privileged[:, 14:]).max() == 0.0
+    pos0 = env.scene["brick_0"].data.root_pos_w[0].numpy()
+    assert np.allclose(env.context_privileged[0, :3], pos0, atol=1e-6)
+    env.step(_hold_action(env))
+    assert np.allclose(env.obs_buf["context"].numpy(), env.context_camera)
+    env.close()
+    plain = MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, context="privileged")
+    plain.reset(seed=4)
+    assert plain.obs_buf["context"].shape == (1, 42)
+    none = MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False)
+    none.reset(seed=4)
+    assert none.context_mode == "none" and none.obs_buf["context"].shape == (1, 0)
+    assert len(mj_env.CONTEXT_CAMERA_NAMES) == 6 and len(mj_env.CONTEXT_PRIVILEGED_NAMES) == 42
+    plain.close()
+    none.close()
+    with pytest.raises(ValueError, match="context"):
+        MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, context="wrong")

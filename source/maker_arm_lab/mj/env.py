@@ -46,9 +46,15 @@ import torch
 from maker_arm_lab.assets.urdf_prep import gripper_velocity_limit
 from maker_arm_lab.core import cameras, layout
 from maker_arm_lab.core import profile as _profile
-from maker_arm_lab.core.quat import compose_offset_rot, quat_mul
+from maker_arm_lab.core.quat import compose_offset_rot, quat_mul, rpy_from_quat
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.mj import scene
+from maker_arm_lab.mj.context_names import (
+    CONTEXT_CAMERA_NAMES,  # noqa: F401 -- re-exported as mj_env.CONTEXT_CAMERA_NAMES
+    CONTEXT_DIMS,
+    CONTEXT_MAX_BRICKS,
+    CONTEXT_PRIVILEGED_NAMES,  # noqa: F401 -- re-exported as mj_env.CONTEXT_PRIVILEGED_NAMES
+)
 from maker_arm_lab.mj.recorder import ShardRecorder
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_NAMES,
@@ -181,6 +187,7 @@ class MjLegoSortEnv:
         episode_draws: bool = False,
         frame_jitter: bool = False,
         spatial_scale: float = 1.0,
+        context: str = "none",
         episode_length_s: float = 180.0,
         export_dir: Path | str | None = None,
         shard_name: str = "shard",
@@ -206,6 +213,18 @@ class MjLegoSortEnv:
             episode_length_s=episode_length_s,
             cameras=cameras,
         )
+        if context not in CONTEXT_DIMS:
+            raise ValueError(f"context must be one of {sorted(CONTEXT_DIMS)}, got {context!r}")
+        if num_bricks > CONTEXT_MAX_BRICKS:
+            raise ValueError(f"context channels hold {CONTEXT_MAX_BRICKS} bricks, got {num_bricks}")
+        self.context_mode = context
+        self.context_camera = np.zeros((num_envs, CONTEXT_DIMS["camera"]), dtype=np.float32)
+        self.context_privileged = np.zeros((num_envs, CONTEXT_DIMS["privileged"]), dtype=np.float32)
+        served = {
+            "none": np.zeros((num_envs, 0), dtype=np.float32),
+            "camera": self.context_camera,
+            "privileged": self.context_privileged,
+        }[context]
         self.max_episode_length = round(episode_length_s * CONTROL_HZ)
         # The run-level draw, and the draw in force per env: equal to run_draw for every env
         # unless episode_draws redraws bins, lights and cameras at each reset.
@@ -238,7 +257,8 @@ class MjLegoSortEnv:
             "images": {
                 "wrist_rgb": torch.from_numpy(self._wrist),
                 "overhead_rgb": torch.from_numpy(self._overhead),
-            }
+            },
+            "context": torch.from_numpy(served),
         }
         self.episode_length_buf = np.zeros(num_envs, dtype=np.int64)
         self._grip_ctrl = np.full((num_envs, 2), GRIPPER_OPEN_POS)
@@ -393,6 +413,8 @@ class MjLegoSortEnv:
         d.ctrl[list(h.arm_actuators)] = d.qpos[list(h.joint_qpos[:6])]
         d.ctrl[list(h.gripper_actuators)] = GRIPPER_OPEN_POS
         self._grip_ctrl[i] = GRIPPER_OPEN_POS
+        pos, rot = scene.overhead_camera_pose(self.episode_draws[i])
+        self.context_camera[i] = np.array([*pos, *rpy_from_quat(rot)], dtype=np.float32)
         mujoco.mj_forward(m, d)
         self.episode_length_buf[i] = 0
         if self.recorder is not None:
@@ -430,6 +452,8 @@ class MjLegoSortEnv:
                 brick._pos[i] = d.xpos[body]
                 brick._quat[i] = d.xquat[body]
                 brick._vel[i] = d.qvel[h.brick_dof[b] : h.brick_dof[b] + 3]
+            for b, adr in enumerate(h.brick_qpos):
+                self.context_privileged[i, 7 * b : 7 * b + 7] = d.qpos[adr : adr + 7]
             left[i] = 0.0
             right[i] = 0.0
             for k in range(d.ncon):
