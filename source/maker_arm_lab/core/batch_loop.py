@@ -65,6 +65,7 @@ def build_run(args) -> tuple[dict, layout.BinLayout, oracle.OracleNoise]:
         # color schedule) rather than widening a noise band, so no recipe string should
         # read as if it might have carried it.
         randomize_pick_order=args.randomize_pick_order,
+        nearest_first_pick_order=args.nearest_first_pick_order,
         hover_jitter=(args.hover_jitter_min, args.hover_jitter_max),
     )
     return draw, bl, noise
@@ -106,6 +107,7 @@ def run_meta(
         "transport_speed": args.transport_speed,
         # What was CONFIGURED; each episode's own "pick_order" records what was picked.
         "randomize_pick_order": noise.randomize_pick_order,
+        "nearest_first_pick_order": noise.nearest_first_pick_order,
         # Configured range; each episode's "hover_jitters" says how many it demonstrated.
         "hover_jitter": list(noise.hover_jitter),
         "induction": None
@@ -313,6 +315,13 @@ def add_batch_arguments(parser) -> None:
         action="store_true",
         help="Pick the next brick uniformly at random among the ones still on the table instead "
         "of taking the lowest index (openyam-lab's largest gate lever). Off by default.",
+    )
+    parser.add_argument(
+        "--nearest_first_pick_order",
+        action="store_true",
+        help="Pick the brick nearest the tool instead of the lowest index, so the target is "
+        "readable from the cameras; refused together with --randomize_pick_order. Off by "
+        "default.",
     )
     parser.add_argument(
         "--hover_jitter_min",

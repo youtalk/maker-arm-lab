@@ -269,6 +269,19 @@ class OracleNoise:
     # ``--noise_scale``: it is a separate mechanism, and folding it in would make every
     # recipe string ambiguous about whether its episodes carried the schedule.
     randomize_pick_order: bool = False
+    # Take the candidate nearest the tool instead, the third order (MS3 visual-inspection
+    # plan, lever 5). Mutually exclusive with ``randomize_pick_order``.
+    #
+    # The randomized order broke the color schedule but left the next target unreadable:
+    # the 2026-09-11 probes on the t2 policy found 30-45% of the closes 2 cm or further
+    # from any brick sitting BETWEEN two bricks under 10 cm apart, which is what averaging
+    # over candidates the image cannot disambiguate looks like. Nearest-first keeps the
+    # schedule broken -- the desk scatter is random, so the color order still varies per
+    # episode -- and makes the target a function of the scene the cameras see. Distance is
+    # measured in the desk plane from ``SceneSnapshot.pick_point``: the bricks all sit at
+    # desk height, so the tool's own height is not part of which one is closest. Like the
+    # other two orders it is outside ``--noise_scale``.
+    nearest_first_pick_order: bool = False
 
 
 @dataclass(frozen=True)
@@ -290,6 +303,9 @@ class EpisodeDraw:
     # failed grasp or an unreachable pose takes off the table never has to be edited out of
     # a pre-drawn order.
     randomize_pick_order: bool = False
+    # Carried as the FLAG for the same reason: the nearest candidate is re-read from the
+    # live scene at every pick, never fixed at episode start.
+    nearest_first_pick_order: bool = False
 
 
 def sample_episode_draw(rng: random.Random, noise: OracleNoise) -> EpisodeDraw:
@@ -304,6 +320,7 @@ def sample_episode_draw(rng: random.Random, noise: OracleNoise) -> EpisodeDraw:
         via_dy=rng.uniform(-noise.via_jitter, noise.via_jitter),
         hover_jitter_range=noise.hover_jitter,
         randomize_pick_order=noise.randomize_pick_order,
+        nearest_first_pick_order=noise.nearest_first_pick_order,
     )
 
 
@@ -601,6 +618,10 @@ class EnvOracle:
         # episode actually did, and only the second can catch a campaign that advertises a
         # randomized schedule and shipped the fixed one.
         self.pick_order: list[int] = []
+        if draw.randomize_pick_order and draw.nearest_first_pick_order:
+            # Two orders cannot both be the order, and a run_meta advertising both would
+            # leave no reader able to say which one the episodes carried.
+            raise ValueError("only one pick order may be selected")
         if draw.randomize_pick_order and rng is None:
             # A corpus whose run_meta claims a randomized schedule and whose episodes all
             # pick R,B,Y,G,R,B is worse than a crash.
@@ -661,11 +682,13 @@ class EnvOracle:
         """Select this pick's target among the bricks still on the table.
 
         Lowest index by default. With ``draw.randomize_pick_order`` the choice is uniform
-        over the SAME candidate set: randomizing the order must not relax the reachability
-        filter or let a stowed brick be picked twice, so the candidate list is built before
-        the draw and only the choice changes. The draw is per pick rather than a permutation
-        fixed at episode start: candidacy is re-evaluated against the live scene every time,
-        so a brick that rolls out of reach mid-episode simply stops being a candidate.
+        over the SAME candidate set, and with ``draw.nearest_first_pick_order`` it is the
+        candidate closest to the tool in the desk plane: changing the order must not relax
+        the reachability filter or let a stowed brick be picked twice, so the candidate
+        list is built first and only the choice among it changes. The choice is per pick
+        rather than a permutation fixed at episode start: candidacy is re-evaluated against
+        the live scene every time, so a brick that rolls out of reach mid-episode simply
+        stops being a candidate.
         """
         limit = layout.top_down_x_limit(self.bl)
         stowed = self._stowed(scene)
@@ -678,6 +701,11 @@ class EnvOracle:
         ]
         if not candidates:
             return None
+        if self.draw.nearest_first_pick_order:
+            return min(
+                candidates,
+                key=lambda i: float((scene.brick_pos[i, :2] - scene.pick_point[:2]).norm()),
+            )
         if not self.draw.randomize_pick_order:
             return candidates[0]
         return self.rng.choice(candidates)
