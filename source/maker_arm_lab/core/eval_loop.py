@@ -24,11 +24,10 @@ from maker_arm_lab.core.gate import (
     policy_state,
 )
 from maker_arm_lab.core.stowed import (
-    _bin_centers_cached,
     _bin_half_extents_cached,
     _brick_states,
-    _env_bin_layout,
     brick_color_ids,
+    env_bin_centers,
     per_brick_stowed,
 )
 from maker_arm_lab.core.trace import RolloutTrace
@@ -102,7 +101,6 @@ def rollout(
     tracker = RolloutTracker(num_envs, num_bricks)
     trace = RolloutTrace(num_envs) if trace_dir else None
     device = str(env.device)
-    bin_centers = _bin_centers_cached(_env_bin_layout(env), device)
     bin_half_extents = _bin_half_extents_cached(device)
     target_bins = brick_color_ids(num_bricks)  # (B,) cpu long
     tool = robot.find_bodies(TOOL_BODY)[0][0]
@@ -120,6 +118,8 @@ def rollout(
             raise EvalFailure("wall_clock", f"exceeded {max_wall_minutes} min at step {step_index}")
         per_brick = per_brick_stowed(env)
         tracker.latch_pre_step(per_brick)
+        # Live, because a MuJoCo env with per-episode draws moves its bins at every reset.
+        bin_centers = env_bin_centers(env, device)
         state = policy_state(robot.data.joint_pos).to("cpu").numpy()
         if random_actions:
             span = limits[..., 1] - limits[..., 0]
@@ -260,13 +260,15 @@ def rollout(
 
 
 def _nearest_brick_cm(pos, tool_xy, held, bin_centers, bin_half_extents) -> list[float]:
-    """Per env: xy distance in cm from the tool to the nearest brick still on the desk, or -1.
+    """Per env: xy distance in cm from the tool to the nearest brick still on the desk, or -1;
+    bin centers are (4,3) or (N,4,3).
 
     A brick inside a bin's footprint, above the desk (lifted or on the shelf) or between the
     jaws right now is not a pick target, so it is left out.
     """
+    centers = bin_centers if bin_centers.dim() == 3 else bin_centers[None]  # (N or 1,4,3)
     in_bin = (
-        ((pos[:, :, None, :2] - bin_centers[None, None, :, :2]).abs() <= bin_half_extents[:2])
+        ((pos[:, :, None, :2] - centers[:, None, :, :2]).abs() <= bin_half_extents[:2])
         .all(dim=-1)
         .any(dim=-1)
     )
