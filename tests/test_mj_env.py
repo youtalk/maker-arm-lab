@@ -34,7 +34,7 @@ def _hold_action(env) -> torch.Tensor:
 def _teleport_all_bricks_into_bins(env, i: int) -> None:
     """Rest every brick on its own color's bin floor, then let the physics settle."""
     h, d = env.handles, env.datas[i]
-    centers = layout.bin_interior_centers(env.cfg.bin_layout)
+    centers = layout.bin_interior_centers(env.bin_layouts[i])
     rest_z = -layout.BIN_INTERIOR[2] / 2 + layout.BRICK_SIZE[2] / 2 + 0.0005
     for b, adr in enumerate(h.brick_qpos):
         color = b % 4
