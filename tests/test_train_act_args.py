@@ -138,3 +138,13 @@ def test_a_marker_write_failure_still_prints_exactly_one_token(rig):
     assert "TRAIN_OK" in result.stdout
     assert result.stdout.count("TRAIN_") == 1
     assert "action_space.json" in result.stderr
+
+
+def test_an_existing_marker_is_never_overwritten(rig):
+    # A delta run's $OUT, relaunched at the default absolute: LeRobot refuses the existing
+    # $OUT long after TRAIN_LAUNCHED is set, so the trap must leave the marker alone.
+    rig["out"].mkdir()
+    (rig["out"] / "action_space.json").write_text('{"action_space": "delta"}')
+    result = _run(rig, **_full_env(rig))
+    assert json.loads((rig["out"] / "action_space.json").read_text()) == {"action_space": "delta"}
+    assert result.stdout.count("TRAIN_") == 1

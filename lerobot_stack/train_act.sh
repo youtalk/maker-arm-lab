@@ -51,12 +51,15 @@ set -euo pipefail
 # reaches both, which is how long runs on this host are actually stopped.
 # TRAIN_LAUNCHED flips to 1 right before lerobot-train starts. emit_train_token() reads it to
 # decide whether to write the action_space marker (see the ACTION_SPACE block below for why
-# that write happens here and not before the launch).
+# that write happens here and not before the launch, and why it never overwrites one).
 TRAIN_LAUNCHED=0
 
 emit_train_token() {
     local status=$?
-    if [ "$TRAIN_LAUNCHED" -eq 1 ]; then
+    # An existing marker is never overwritten: LeRobot refuses to train into an $OUT that
+    # already exists, and it refuses after TRAIN_LAUNCHED is set, so a relaunch with a
+    # different ACTION_SPACE would otherwise relabel an earlier run's checkpoints.
+    if [ "$TRAIN_LAUNCHED" -eq 1 ] && [ ! -e "$OUT/action_space.json" ]; then
         { mkdir -p "$OUT" && printf '{"action_space": "%s"}\n' "$ACTION_SPACE" \
             > "$OUT/action_space.json"; } \
             || echo "train_act.sh: could not write $OUT/action_space.json" >&2
@@ -120,7 +123,8 @@ PY
 # output_dir already exists and resume is false, and this script never resumes, so creating
 # $OUT before the launch would make every real run fail at startup. Writing from the trap also
 # means a swept run that dies mid-training, or one stopped by a group SIGTERM, still leaves its
-# marker next to whatever checkpoints it managed to save.
+# marker next to whatever checkpoints it managed to save. A marker that is already there is
+# left alone: the run that wrote it is the one whose checkpoints are in $OUT.
 ACTION_SPACE="${ACTION_SPACE:-absolute}"
 python3 - "$DATASET_ROOT" "$ACTION_SPACE" <<'PY'
 import json, pathlib, sys
