@@ -116,6 +116,7 @@ def test_a_ledger_without_a_target_needs_an_explicit_minimum(rig):
 def test_the_action_space_marker_is_written_next_to_the_checkpoints(rig):
     result = _run(rig, **_full_env(rig), ACTION_SPACE="delta")
     assert result.returncode == 1 and "action_space" in result.stderr  # dataset says absolute
+    assert not (rig["out"] / "action_space.json").exists()
     (rig["dataset"] / "meta" / "action_space.json").write_text('{"action_space": "delta"}')
     result = _run(rig, **_full_env(rig), ACTION_SPACE="delta")
     assert result.returncode == 0, result.stderr

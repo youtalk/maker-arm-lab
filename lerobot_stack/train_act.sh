@@ -49,8 +49,17 @@ set -euo pipefail
 # parent, so a SIGTERM addressed to this PID alone would orphan lerobot-train;
 # a signal to the process group (Ctrl-C, or the group kill a sweep uses)
 # reaches both, which is how long runs on this host are actually stopped.
+# TRAIN_LAUNCHED flips to 1 right before lerobot-train starts. emit_train_token() reads it to
+# decide whether to write the action_space marker (see the ACTION_SPACE block below for why
+# that write happens here and not before the launch).
+TRAIN_LAUNCHED=0
+
 emit_train_token() {
     local status=$?
+    if [ "$TRAIN_LAUNCHED" -eq 1 ]; then
+        mkdir -p "$OUT"
+        printf '{"action_space": "%s"}\n' "$ACTION_SPACE" > "$OUT/action_space.json"
+    fi
     if [ "$status" -eq 0 ]; then
         echo "TRAIN_OK out=${OUT:-unset} steps=${STEPS:-unset}"
     else
@@ -104,7 +113,13 @@ PY
 
 # MS4 lever 2: the action space the dataset was converted in. The policy server reads the
 # marker written next to the checkpoints and adds the measured joint position back for
-# "delta", so the wire and the real arm keep receiving absolute joint targets.
+# "delta", so the wire and the real arm keep receiving absolute joint targets. The marker
+# itself is written by emit_train_token(), the EXIT trap, once lerobot-train has returned --
+# not here. LeRobot 0.5.1's TrainPipelineConfig.validate() raises FileExistsError whenever
+# output_dir already exists and resume is false, and this script never resumes, so creating
+# $OUT before the launch would make every real run fail at startup. Writing from the trap also
+# means a swept run that dies mid-training, or one stopped by a group SIGTERM, still leaves its
+# marker next to whatever checkpoints it managed to save.
 ACTION_SPACE="${ACTION_SPACE:-absolute}"
 python3 - "$DATASET_ROOT" "$ACTION_SPACE" <<'PY'
 import json, pathlib, sys
@@ -112,10 +127,11 @@ root, wanted = pathlib.Path(sys.argv[1]), sys.argv[2]
 marker = root / "meta" / "action_space.json"
 recorded = json.loads(marker.read_text())["action_space"] if marker.exists() else "absolute"
 if recorded != wanted:
-    sys.exit(f"train_act.sh: {root} holds {recorded} actions, ACTION_SPACE={wanted} disagrees")
+    sys.exit(
+        f"train_act.sh: action_space mismatch: {root} holds {recorded} actions, "
+        f"ACTION_SPACE={wanted}"
+    )
 PY
-mkdir -p "$OUT"
-printf '{"action_space": "%s"}\n' "$ACTION_SPACE" > "$OUT/action_space.json"
 
 WANDB_ENABLE="${WANDB_ENABLE:-true}"
 WANDB_PROJECT="${WANDB_PROJECT:-maker-arm-lab}"
@@ -150,6 +166,7 @@ elif [ "$WANDB_ENABLE" = true ] && [ "$WANDB_MODE" = online ]; then
     exit 1
 fi
 
+TRAIN_LAUNCHED=1
 .venv/bin/lerobot-train \
     --dataset.repo_id=youtalk/maker-arm-legosort \
     --dataset.root="$DATASET_ROOT" \
