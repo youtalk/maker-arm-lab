@@ -58,6 +58,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="multiplier on the camera-pose and bin_x jitter of the run draw and of every "
         "per-episode draw (1.0 = training)",
     )
+    parser.add_argument(
+        "--context",
+        choices=("none", "camera", "privileged"),
+        default="none",
+        help="which context channel the env serves to the policy (observation.environment_state)",
+    )
     parser.add_argument("--server", type=str, default="tcp://127.0.0.1:5555")
     parser.add_argument(
         "--out", type=str, default="", help="write the EVAL_OK payload JSON here too"
@@ -113,6 +119,7 @@ def main(argv=None) -> int:
             episode_draws=args.episode_draws,
             frame_jitter=args.frame_jitter,
             spatial_scale=args.spatial_scale,
+            context=args.context,
         )
         env.reset(seed=args.run_seed)
         if args.viewer:

@@ -476,3 +476,38 @@ def test_eval_command_forwards_the_draw_flags_to_the_mujoco_client(tmp_path):
         ]
     )
     assert ge._build_cfg(args).episode_draws is True and ge._build_cfg(args).spatial_scale == 2.0
+
+
+def test_eval_command_forwards_the_context_to_the_mujoco_client(tmp_path):
+    cfg = ge.GateCfg(
+        checkpoint="ck",
+        out_dir=tmp_path,
+        processes=1,
+        num_envs=4,
+        seed=7,
+        threshold=0.7,
+        ledger=tmp_path / "ledger.json",
+        backend="mujoco",
+        context="privileged",
+    )
+    cmd = ge._eval_command(cfg, ge.make_eval_draws(1, 7)[0])
+    assert cmd[cmd.index("--context") + 1] == "privileged"
+    args = ge._parse_args(
+        [
+            "--checkpoint",
+            "ck",
+            "--out_dir",
+            str(tmp_path),
+            "--ledger",
+            "l",
+            "--threshold",
+            "0.7",
+            "--seed",
+            "1",
+            "--backend",
+            "mujoco",
+        ]
+    )
+    plain = ge._build_cfg(args)
+    assert plain.context == "none"
+    assert "--context" not in ge._eval_command(plain, ge.make_eval_draws(1, 7)[0])

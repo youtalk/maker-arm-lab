@@ -78,6 +78,7 @@ class GateCfg:
     episode_draws: bool = False  # MuJoCo only
     frame_jitter: bool = False  # MuJoCo only
     spatial_scale: float = 1.0  # MuJoCo only: the generalization ladder of the MS4 roadmap
+    context: str = "none"  # MuJoCo only: the context channel served to the policy
 
 
 def make_eval_draws(processes: int, seed: int) -> list[EvalDraw]:
@@ -310,6 +311,8 @@ def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
             prefix.append("--frame_jitter")
         if cfg.spatial_scale != 1.0:
             prefix += ["--spatial_scale", str(cfg.spatial_scale)]
+        if cfg.context != "none":
+            prefix += ["--context", cfg.context]
     else:
         prefix = [
             f"{cfg.isaaclab_path}/isaaclab.sh",
@@ -518,6 +521,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "and of every per-episode draw (1.0 = training; the generalization ladder of the "
         "MS4 roadmap)",
     )
+    parser.add_argument(
+        "--context",
+        choices=("none", "camera", "privileged"),
+        default="none",
+        help="MuJoCo only: which context channel the env serves to the policy "
+        "(observation.environment_state); must match the checkpoint",
+    )
     return parser.parse_args(argv)
 
 
@@ -542,6 +552,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         episode_draws=args.episode_draws,
         frame_jitter=args.frame_jitter,
         spatial_scale=args.spatial_scale,
+        context=args.context,
     )
 
 
