@@ -64,7 +64,7 @@ uv run pytest tests/test_urdf_validation.py
 
 ## Registered task ids
 
-The last column is what each script's `--task` default actually selects, read off the scripts rather than off the spec's original assignment — the two diverged when the oracle migrated.
+The last column is what each script's `--task` default actually selects, read off the scripts rather than off the spec's original assignment — the two diverged when the oracle migrated. Since MS4 the Isaac task is frozen at its MS3 features and smoke-tested only; every new capability lands on the MuJoCo backend.
 
 | Task id | Arm action | Cameras | Runs on it today |
 | --- | --- | --- | --- |

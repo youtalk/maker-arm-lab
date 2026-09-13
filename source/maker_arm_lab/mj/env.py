@@ -16,8 +16,10 @@ unchanged on either backend:
     env.obs_buf["images"]["wrist_rgb" | "overhead_rgb"]   (N,224,224,3) uint8
     env.recorder_manager.exported_successful_episode_count
     env.step(action) -> (None, None, terminated, truncated, {}), env.reset(seed=, env_ids=)
+
+MuJoCo-only members (the Isaac env has none of these; core/ reads them through getattr):
     env.bin_layouts (one core.layout.BinLayout per env), env.episode_draws, env.run_draw
-        -- MuJoCo only; the shared code reads them through getattr with a default.
+    env.context_mode, env.obs_buf["context"], env.context_camera, env.context_privileged
 
 Semantics carried over from ``ManagerBasedRLEnv`` because the rig depends on them: a done
 env is auto-reset INSIDE ``step`` (its state tensors already show the next episode when
