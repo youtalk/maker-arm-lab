@@ -62,6 +62,8 @@ def test_the_loop_sends_the_served_context_and_checks_its_width():
         env, policy, run_seed=1, layout_seed=2, permutation=(0, 1, 2, 3), max_wall_minutes=1.0
     )
     assert payload["context"] == "camera" and set(policy.widths) == {6}
+    assert payload["spatial_scale"] == 1.0
+    assert payload["episode_draws"] is False and payload["frame_jitter"] is False
     env.close()
     env = _env("none")
     with pytest.raises(EvalFailure, match="context"):
