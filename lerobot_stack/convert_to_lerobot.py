@@ -24,6 +24,13 @@ dataset and writes it as the single feature ``observation.environment_state``. T
 context channels never mix in one dataset: one ``--context`` per conversion. ``--no_images``
 drops both image features (the privileged-state ceiling) and requires ``--context`` -- a
 dataset with neither images nor a context channel has nothing to condition the policy on.
+
+``--action_space delta`` (MS4 lever 2) replaces the joint part of ``action`` with target
+minus the measured joint position of the same frame; the gripper column is unchanged.
+The recorded target is recoverable as ``state + action``, and the policy server adds the
+measured position back before sending it on, so the arm still receives an absolute
+command the clamp accepts. A ``meta/action_space.json`` marker records which space a
+dataset was created with, and resuming into it with the other space is refused.
 """
 
 import argparse
@@ -72,6 +79,23 @@ IMAGE_FEATURES = {
     },
 }
 CONTEXT_CHANNELS = ("camera", "privileged")
+ACTION_SPACES = ("absolute", "delta")
+ACTION_SPACE_MARKER = "action_space.json"
+
+
+def write_action_space_marker(root: Path, action_space: str) -> None:
+    (root / "meta").mkdir(parents=True, exist_ok=True)
+    (root / "meta" / ACTION_SPACE_MARKER).write_text(json.dumps({"action_space": action_space}))
+
+
+def check_action_space_marker(root: Path, action_space: str) -> None:
+    """Refuse to append actions of one space to a dataset converted in the other."""
+    marker = root / "meta" / ACTION_SPACE_MARKER
+    recorded = json.loads(marker.read_text())["action_space"] if marker.exists() else "absolute"
+    if recorded != action_space:
+        raise RuntimeError(
+            f"{root} was converted with action_space={recorded}, refusing to append {action_space}"
+        )
 
 
 def build_features(context_names: list[str] | None, images: bool) -> dict:
@@ -155,6 +179,7 @@ def convert(
     lead_keep: int = 0,
     context: str | None = None,
     images: bool = True,
+    action_space: str = "absolute",
 ) -> tuple[int, int]:
     """Convert `shards` into (or append them onto) the LeRobot dataset at `root`.
 
@@ -169,6 +194,8 @@ def convert(
     itself -- do not feed it to `scene.reset_to()` expecting it to reproduce where the
     sub-episode begins.
     """
+    if action_space not in ACTION_SPACES:
+        raise ValueError(f"action_space must be one of {ACTION_SPACES}, got {action_space!r}")
     if sidecar_dir is not None and not split_cycles:
         raise ValueError("sidecar_dir requires split_cycles")
     if lead_keep and not split_cycles:
@@ -185,6 +212,7 @@ def convert(
     # local metadata at all -- LeRobotDataset.resume then falls back to querying the HuggingFace
     # Hub for repo_id, which 404s (RepositoryNotFoundError) for a repo that was never pushed.
     if (root / "meta" / "info.json").exists():
+        check_action_space_marker(root, action_space)
         dataset = LeRobotDataset.resume(repo_id, root=root)
     else:
         if root.exists():
@@ -221,6 +249,7 @@ def convert(
             robot_type="maker_arm",
             use_videos=True,
         )
+        write_action_space_marker(root, action_space)
     converted = 0
     for shard in shards:
         with h5py.File(shard, "r") as f:
@@ -267,10 +296,11 @@ def convert(
                     # index of the episode about to be saved
                     episode_index = dataset.meta.total_episodes
                     for t in seg:
+                        joints = targets[t, :6]
+                        if action_space == "delta":
+                            joints = targets[t, :6] - state[t, :6]
                         frame = {
-                            "action": np.concatenate([targets[t, :6], actions[t, 6:7]]).astype(
-                                np.float32
-                            ),
+                            "action": np.concatenate([joints, actions[t, 6:7]]).astype(np.float32),
                             "observation.state": state7[t].astype(np.float32),
                             "task": TASK,
                         }
@@ -345,6 +375,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="drop both image features (the privileged-state ceiling); requires --context",
     )
+    parser.add_argument(
+        "--action_space",
+        choices=ACTION_SPACES,
+        default="absolute",
+        help=(
+            "delta: joint part = target minus the measured joint position of the same "
+            "frame. the policy server adds the measured position back (MS4 lever 2)"
+        ),
+    )
     return parser
 
 
@@ -367,6 +406,7 @@ def main() -> int:
             sidecar_dir=args.sidecar_dir,
             context=args.context,
             images=not args.no_images,
+            action_space=args.action_space,
         )
     except Exception as exc:  # noqa: BLE001 -- any failure must become CONVERT_FAIL, not a crash.
         print(f"CONVERT_FAIL {type(exc).__name__}: {exc}", flush=True)

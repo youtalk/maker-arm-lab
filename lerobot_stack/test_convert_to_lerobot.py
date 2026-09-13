@@ -79,3 +79,26 @@ def test_a_shard_without_the_channel_is_refused(tmp_path):
 def test_no_images_needs_a_context():
     with pytest.raises(ValueError, match="images"):
         c2l.convert([], None, "t/x", 30, images=False)
+
+
+def test_delta_actions_are_target_minus_measured_and_leave_a_marker(tmp_path):
+    shard = _shard(tmp_path / "s.hdf5")
+    c2l.convert([shard], tmp_path / "ds", "t/x", 30, action_space="delta")
+    marker = json.loads((tmp_path / "ds" / "meta" / "action_space.json").read_text())
+    assert marker == {"action_space": "delta"}
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    ds = LeRobotDataset("t/x", root=tmp_path / "ds")
+    action = ds[3]["action"]
+    assert float(action[0]) == pytest.approx(0.5)  # target 3 minus measured 2.5
+    assert float(action[6]) == 0.0
+    with pytest.raises(RuntimeError, match="action_space"):
+        c2l.convert([shard], tmp_path / "ds", "t/x", 30, action_space="absolute")
+
+
+def test_absolute_is_the_default_and_leaves_a_marker(tmp_path):
+    shard = _shard(tmp_path / "s.hdf5")
+    c2l.convert([shard], tmp_path / "ds", "t/x", 30)
+    assert json.loads((tmp_path / "ds" / "meta" / "action_space.json").read_text()) == {
+        "action_space": "absolute"
+    }
