@@ -57,8 +57,9 @@ TRAIN_LAUNCHED=0
 emit_train_token() {
     local status=$?
     if [ "$TRAIN_LAUNCHED" -eq 1 ]; then
-        mkdir -p "$OUT"
-        printf '{"action_space": "%s"}\n' "$ACTION_SPACE" > "$OUT/action_space.json"
+        { mkdir -p "$OUT" && printf '{"action_space": "%s"}\n' "$ACTION_SPACE" \
+            > "$OUT/action_space.json"; } \
+            || echo "train_act.sh: could not write $OUT/action_space.json" >&2
     fi
     if [ "$status" -eq 0 ]; then
         echo "TRAIN_OK out=${OUT:-unset} steps=${STEPS:-unset}"

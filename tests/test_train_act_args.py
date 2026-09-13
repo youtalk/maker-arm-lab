@@ -129,3 +129,12 @@ def test_absolute_is_the_default_action_space(rig):
     assert json.loads((rig["out"] / "action_space.json").read_text()) == {
         "action_space": "absolute"
     }
+
+
+def test_a_marker_write_failure_still_prints_exactly_one_token(rig):
+    rig["out"].write_text("not a directory")  # mkdir -p "$OUT" fails on this in the exit trap
+    result = _run(rig, **_full_env(rig))
+    assert result.returncode == 0, result.stderr
+    assert "TRAIN_OK" in result.stdout
+    assert result.stdout.count("TRAIN_") == 1
+    assert "action_space.json" in result.stderr
