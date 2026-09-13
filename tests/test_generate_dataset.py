@@ -1223,3 +1223,36 @@ def test_batch_command_and_cfg_carry_the_episode_draw_flags(tmp_path):
     parsed = gd._build_cfg(gd._parse_args(base + ["--episode_draws", "--frame_jitter"]))
     assert parsed.episode_draws is True and parsed.frame_jitter is True
     assert gd._build_cfg(gd._parse_args(base)).episode_draws is False
+
+
+def test_keep_shards_leaves_every_converted_shard_on_disk(tmp_path):
+    """--keep_shards: the shard survives its CONVERT_OK (MS4 converts one campaign three times)."""
+    cfg = gd.CampaignCfg(
+        out_dir=tmp_path,
+        dataset_root=tmp_path / "ds",
+        target=90,
+        attempts_per_run=50,
+        num_envs=8,
+        seed=0,
+        keep_shards=True,
+    )
+    shards = []
+
+    def fake_batch(run_index, permutation, shard_path):
+        _hdf5_path(shard_path).write_bytes(b"x")
+        shards.append(_hdf5_path(shard_path))
+        return {"exported": 45, "attempts": 50, "meta": {}, "stats": {}}
+
+    def fake_convert(shard_path):
+        return {"episodes": 45}
+
+    gd.run_campaign(cfg, fake_batch, fake_convert)
+    assert shards and all(p.exists() for p in shards)
+    ledger = json.loads((tmp_path / "ledger.json").read_text())
+    assert all(run["deleted"] is False for run in ledger["runs"])
+
+
+def test_shards_are_deleted_by_default_and_the_flag_reaches_the_cfg(tmp_path):
+    base = ["--out_dir", str(tmp_path / "w"), "--dataset_root", str(tmp_path / "d")]
+    assert gd._build_cfg(gd._parse_args(base)).keep_shards is False
+    assert gd._build_cfg(gd._parse_args(base + ["--keep_shards"])).keep_shards is True

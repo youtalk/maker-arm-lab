@@ -213,6 +213,9 @@ class CampaignCfg:
     # Forwarded only when set, so the ledger's command record shows which corpora had them.
     episode_draws: bool = False
     frame_jitter: bool = False
+    # MS4: one campaign's shards are converted three times (images, context, delta), so the
+    # supervisor can leave every shard on disk after its CONVERT_OK instead of deleting it.
+    keep_shards: bool = False
     # Which simulator runs the batches: "isaac" spawns scripts/generate_batch.py under
     # isaaclab.sh, "mujoco" spawns scripts/mj_generate_batch.py under the project venv. Both
     # speak the same RUN_META / RUN_STATS / BATCH_OK contract, so nothing else here differs.
@@ -607,7 +610,7 @@ def run_campaign(
                 cfg, p_run_index, MARKER_PHASE_CONVERTED, p_permutation, p_shard_path.name
             )
         deleted = False
-        if p_shard_path.exists():
+        if not cfg.keep_shards and p_shard_path.exists():
             p_shard_path.unlink()
             deleted = True
         p_run_seed, p_layout_seed = _derive_seeds(cfg, p_run_index)
@@ -935,6 +938,7 @@ def _build_cfg(args: argparse.Namespace) -> CampaignCfg:
         hover_jitter_max=args.hover_jitter_max,
         episode_draws=args.episode_draws,
         frame_jitter=args.frame_jitter,
+        keep_shards=args.keep_shards,
         backend=args.backend,
         breaker_min_rate=None if args.breaker_min_rate < 0 else args.breaker_min_rate,
         breaker_min_runs=args.breaker_min_runs,
@@ -1024,6 +1028,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--frame_jitter",
         action="store_true",
         help="MuJoCo only: small overhead-camera jitter resampled per rendered frame",
+    )
+    parser.add_argument(
+        "--keep_shards",
+        action="store_true",
+        help="keep every shard .hdf5 after CONVERT_OK instead of deleting it "
+        "(MS4: one campaign is converted three times)",
     )
     parser.add_argument(
         "--breaker_min_rate",
