@@ -439,3 +439,31 @@ def test_handshake_carries_the_served_inference():
         recv_message(req)
         thread.join(timeout=5)
         req.close(0)
+
+
+def test_action_space_marker_is_found_up_the_checkpoint_tree(tmp_path):
+    from policy_server import find_action_space_marker
+
+    ckpt = tmp_path / "checkpoints" / "575000" / "pretrained_model"
+    ckpt.mkdir(parents=True)
+    assert find_action_space_marker(str(ckpt)) == "absolute"
+    (tmp_path / "action_space.json").write_text('{"action_space": "delta"}')
+    assert find_action_space_marker(str(ckpt)) == "delta"
+
+
+def test_integrate_delta_adds_the_measured_joints_and_keeps_the_gripper():
+    from policy_server import integrate_delta
+
+    action = np.zeros((2, 7), np.float32)
+    action[:, :6] = 0.1
+    action[:, 6] = -1.0
+    state = np.zeros((2, 7), np.float32)
+    state[:, :6] = 1.0
+    out = integrate_delta(action, state)
+    assert np.allclose(out[:, :6], 1.1) and out[:, 6].tolist() == [-1.0, -1.0]
+    assert np.allclose(action[:, :6], 0.1)  # the caller's array is untouched
+
+
+def test_policy_id_marks_delta_checkpoints():
+    assert inference_policy_id("ck", {}, action_space="delta").endswith("+delta")
+    assert "+delta" not in inference_policy_id("ck", {})

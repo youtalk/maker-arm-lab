@@ -242,6 +242,35 @@ def find_gripper_bce_marker(checkpoint_dir: str) -> dict | None:
     return None
 
 
+ACTION_SPACE_MARKER = "action_space.json"
+
+
+def find_action_space_marker(checkpoint_dir: str) -> str:
+    """The action space train_act.sh recorded next to the checkpoints, "absolute" if none.
+
+    Same walk as find_gripper_bce_marker: the checkpoint dir, then up to output_dir.
+    """
+    from pathlib import Path
+
+    directory = Path(checkpoint_dir)
+    for candidate in [directory, *directory.parents[:3]]:
+        marker = candidate / ACTION_SPACE_MARKER
+        if marker.is_file():
+            return json.loads(marker.read_text())["action_space"]
+    return "absolute"
+
+
+def integrate_delta(action: np.ndarray, state: np.ndarray) -> np.ndarray:
+    """A delta checkpoint's joint part plus the measured joints: an absolute target again.
+
+    The gripper column is a command, not a position, and is left alone. The result is
+    what a real driver consumes, so the wire never carries a delta.
+    """
+    out = action.copy()
+    out[:, :6] += state[:, :6]
+    return out
+
+
 def squash_gripper_logit(action: np.ndarray, raw_mean: float, raw_std: float) -> np.ndarray:
     """Turn the unnormalized BCE logit back into a unit gripper action. INACTIVE here.
 
@@ -298,6 +327,7 @@ def inference_policy_id(
     blank_camera: str | None = None,
     gripper_squash: bool = False,
     context_dim: int = 0,
+    action_space: str = "absolute",
 ) -> str:
     """Suffix the policy id with the active overrides so eval payloads are self-describing."""
     policy_id = f"act:{checkpoint_dir}"
@@ -311,6 +341,8 @@ def inference_policy_id(
         policy_id += f"+blank{blank_camera}"
     if context_dim:
         policy_id += f"+ctx{context_dim}"
+    if action_space == "delta":
+        policy_id += "+delta"
     return policy_id
 
 
@@ -363,6 +395,7 @@ def load_act(
         preprocessor_overrides={"device_processor": {"device": device}},
     )
     marker = find_gripper_bce_marker(checkpoint_dir)
+    action_space = find_action_space_marker(checkpoint_dir)
     if marker is not None and ("gripper_raw_mean" not in marker or "gripper_raw_std" not in marker):
         raise ValueError(
             "gripper_bce.json next to this checkpoint predates the logit-scale "
@@ -392,6 +425,8 @@ def load_act(
             action = squash_gripper_logit(
                 action, marker["gripper_raw_mean"], marker["gripper_raw_std"]
             )
+        if action_space == "delta":
+            action = integrate_delta(action, state)
         return action
 
     return (
@@ -403,6 +438,7 @@ def load_act(
             blank_camera,
             gripper_squash=marker is not None,
             context_dim=context_dim,
+            action_space=action_space,
         ),
         policy.config.n_action_steps,
         served_inference(policy.config),
