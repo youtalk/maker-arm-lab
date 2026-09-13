@@ -55,8 +55,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--spatial_scale",
         type=float,
         default=1.0,
-        help="multiplier on the camera-pose and bin_x jitter of every draw (1.0 = training) "
-        "(the run draw only; per-episode draws stay at 1.0)",
+        help="multiplier on the camera-pose and bin_x jitter of the run draw and of every "
+        "per-episode draw (1.0 = training)",
     )
     parser.add_argument("--server", type=str, default="tcp://127.0.0.1:5555")
     parser.add_argument(
@@ -112,6 +112,7 @@ def main(argv=None) -> int:
             cameras=not args.random_actions,
             episode_draws=args.episode_draws,
             frame_jitter=args.frame_jitter,
+            spatial_scale=args.spatial_scale,
         )
         env.reset(seed=args.run_seed)
         if args.viewer:

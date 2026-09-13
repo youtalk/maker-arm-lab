@@ -514,8 +514,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--spatial_scale",
         type=float,
         default=1.0,
-        help="MuJoCo only: multiplier on the run draw's camera-pose and bin_x jitter "
-        "(1.0 = training; the generalization ladder of the MS4 roadmap)",
+        help="MuJoCo only: multiplier on the camera-pose and bin_x jitter of the run draw "
+        "and of every per-episode draw (1.0 = training; the generalization ladder of the "
+        "MS4 roadmap)",
     )
     return parser.parse_args(argv)
 

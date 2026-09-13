@@ -196,9 +196,25 @@ def test_episode_draws_move_bins_lights_and_layouts_per_reset():
     assert not np.allclose(env.models[0].geom_pos[floor], env.models[1].geom_pos[floor])
     dome = env.models[0].light("dome").id
     assert not np.allclose(env.models[0].light_diffuse[dome], env.models[1].light_diffuse[dome])
-    before = env.bin_layouts[0]
+    before, before1 = env.bin_layouts[0], env.bin_layouts[1]
     env.reset(env_ids=torch.tensor([0]))
-    assert env.bin_layouts[0] != before and env.bin_layouts[1] != before
+    assert env.bin_layouts[0] != before and env.bin_layouts[1] == before1
+    env.close()
+
+
+def test_spatial_scale_widens_the_per_episode_draws():
+    env = MjLegoSortEnv(
+        8, _draw(), num_bricks=2, cameras=False, episode_draws=True, spatial_scale=3.0
+    )
+    assert env.cfg.spatial_scale == 3.0
+    env.reset(seed=21)
+    # At scale 1.0 no draw can leave these bounds, so one env past them proves the scale
+    # reaches the per-episode draw and not only the run draw.
+    assert any(
+        max(abs(v) for v in d["overhead_cam_drot_deg"]) > 2.0
+        or abs(d["bin_x"] - layout._BIN_X) > 0.02
+        for d in env.episode_draws
+    )
     env.close()
 
 

@@ -180,6 +180,7 @@ class MjLegoSortEnv:
         physics_dr: bool = True,
         episode_draws: bool = False,
         frame_jitter: bool = False,
+        spatial_scale: float = 1.0,
         episode_length_s: float = 180.0,
         export_dir: Path | str | None = None,
         shard_name: str = "shard",
@@ -201,6 +202,7 @@ class MjLegoSortEnv:
             physics_dr=physics_dr,
             episode_draws=episode_draws,
             frame_jitter=frame_jitter,
+            spatial_scale=spatial_scale,
             episode_length_s=episode_length_s,
             cameras=cameras,
         )
@@ -339,7 +341,7 @@ class MjLegoSortEnv:
     def _reset_env(self, i: int) -> None:
         m, d, h = self.models[i], self.datas[i], self.handles
         if self.cfg.episode_draws:
-            ep = layout.sample_run_draw(self._rng)
+            ep = layout.sample_run_draw(self._rng, self.cfg.spatial_scale)
             ep["slot_colors"] = self.run_draw["slot_colors"]  # the permutation is per run
             bl = layout.BinLayout(
                 bin_x=ep["bin_x"], bin_ys=tuple(ep["bin_ys"]), slot_colors=tuple(ep["slot_colors"])

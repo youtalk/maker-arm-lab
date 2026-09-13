@@ -242,6 +242,11 @@ def rollout(
         "n_action_steps": policy.n_action_steps,
         # Echoed off the handshake: what the server served with, not what was asked.
         "inference": policy.inference,
+        # The run settings this rollout was drawn under; defaulted so the frozen Isaac env,
+        # which has none of them on its cfg, still reports a well-formed payload.
+        "episode_draws": bool(getattr(env.cfg, "episode_draws", False)),
+        "frame_jitter": bool(getattr(env.cfg, "frame_jitter", False)),
+        "spatial_scale": float(getattr(env.cfg, "spatial_scale", 1.0)),
         "episodes": episodes,
         "steps_run": step_index,
         "clamp_fraction": (
