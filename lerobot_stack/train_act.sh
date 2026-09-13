@@ -101,6 +101,22 @@ if episodes < target:
     )
 print(f"train_act.sh: dataset {dataset_root} holds {episodes} episodes (target {target})")
 PY
+
+# MS4 lever 2: the action space the dataset was converted in. The policy server reads the
+# marker written next to the checkpoints and adds the measured joint position back for
+# "delta", so the wire and the real arm keep receiving absolute joint targets.
+ACTION_SPACE="${ACTION_SPACE:-absolute}"
+python3 - "$DATASET_ROOT" "$ACTION_SPACE" <<'PY'
+import json, pathlib, sys
+root, wanted = pathlib.Path(sys.argv[1]), sys.argv[2]
+marker = root / "meta" / "action_space.json"
+recorded = json.loads(marker.read_text())["action_space"] if marker.exists() else "absolute"
+if recorded != wanted:
+    sys.exit(f"train_act.sh: {root} holds {recorded} actions, ACTION_SPACE={wanted} disagrees")
+PY
+mkdir -p "$OUT"
+printf '{"action_space": "%s"}\n' "$ACTION_SPACE" > "$OUT/action_space.json"
+
 WANDB_ENABLE="${WANDB_ENABLE:-true}"
 WANDB_PROJECT="${WANDB_PROJECT:-maker-arm-lab}"
 WANDB_MODE="${WANDB_MODE:-online}"

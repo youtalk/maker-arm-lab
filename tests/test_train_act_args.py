@@ -111,3 +111,20 @@ def test_a_ledger_without_a_target_needs_an_explicit_minimum(rig):
 
     short = _run(rig, MIN_EPISODES=64, **_full_env(rig))
     assert short.returncode == 1 and "below the campaign target 64" in short.stderr
+
+
+def test_the_action_space_marker_is_written_next_to_the_checkpoints(rig):
+    result = _run(rig, **_full_env(rig), ACTION_SPACE="delta")
+    assert result.returncode == 1 and "action_space" in result.stderr  # dataset says absolute
+    (rig["dataset"] / "meta" / "action_space.json").write_text('{"action_space": "delta"}')
+    result = _run(rig, **_full_env(rig), ACTION_SPACE="delta")
+    assert result.returncode == 0, result.stderr
+    assert json.loads((rig["out"] / "action_space.json").read_text()) == {"action_space": "delta"}
+
+
+def test_absolute_is_the_default_action_space(rig):
+    result = _run(rig, **_full_env(rig))
+    assert result.returncode == 0, result.stderr
+    assert json.loads((rig["out"] / "action_space.json").read_text()) == {
+        "action_space": "absolute"
+    }
