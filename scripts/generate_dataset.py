@@ -530,8 +530,9 @@ def run_campaign(
     VRAM-bound and rejected), and a fresh run_convert is only submitted after the *previous*
     one's result() has already been collected, so at most one is ever in flight (converts
     target a single LeRobotDataset root and can't accept concurrent appends). Steady-state
-    disk footprint is therefore at most 2 shards: the one converting and the one generating;
-    on a crash, up to one further un-ledgered shard may also be left behind (see below).
+    disk footprint is therefore at most 2 shards, unless --keep_shards is set: the one
+    converting and the one generating; on a crash, up to one further un-ledgered shard may
+    also be left behind (see below).
 
     Ledger append (and this function's one progress line per run) happens in
     convert-completion order, immediately after each run's convert result() is collected --
