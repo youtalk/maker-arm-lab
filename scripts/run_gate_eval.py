@@ -75,6 +75,10 @@ class GateCfg:
     only_processes: tuple | None = None
     eval_timeout_s: float = 4 * 3600
     backend: str = "isaac"  # "mujoco" spawns scripts/mj_eval_policy.py under .venv/bin/python
+    episode_draws: bool = False  # MuJoCo only
+    frame_jitter: bool = False  # MuJoCo only
+    spatial_scale: float = 1.0  # MuJoCo only: the generalization ladder of the MS4 roadmap
+    context: str = "none"  # MuJoCo only: the context channel served to the policy
 
 
 def make_eval_draws(processes: int, seed: int) -> list[EvalDraw]:
@@ -301,6 +305,14 @@ def _isaaclab_eval_env(cfg: GateCfg) -> dict[str, str]:
 def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
     if cfg.backend == "mujoco":
         prefix = [MUJOCO_PYTHON, "scripts/mj_eval_policy.py"]
+        if cfg.episode_draws:
+            prefix.append("--episode_draws")
+        if cfg.frame_jitter:
+            prefix.append("--frame_jitter")
+        if cfg.spatial_scale != 1.0:
+            prefix += ["--spatial_scale", str(cfg.spatial_scale)]
+        if cfg.context != "none":
+            prefix += ["--context", cfg.context]
     else:
         prefix = [
             f"{cfg.isaaclab_path}/isaaclab.sh",
@@ -491,6 +503,31 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--only_processes", type=_process_list, default=None)
     parser.add_argument("--eval_timeout_s", type=float, default=4 * 3600)
     parser.add_argument("--backend", choices=("isaac", "mujoco"), default="isaac")
+    parser.add_argument(
+        "--episode_draws",
+        action="store_true",
+        help="MuJoCo only: bins, lights and cameras are redrawn per episode (MS4 lever 1)",
+    )
+    parser.add_argument(
+        "--frame_jitter",
+        action="store_true",
+        help="MuJoCo only: small overhead-camera jitter resampled per rendered frame",
+    )
+    parser.add_argument(
+        "--spatial_scale",
+        type=float,
+        default=1.0,
+        help="MuJoCo only: multiplier on the camera-pose and bin_x jitter of the run draw "
+        "and of every per-episode draw (1.0 = training; the generalization ladder of the "
+        "MS4 roadmap)",
+    )
+    parser.add_argument(
+        "--context",
+        choices=("none", "camera", "privileged"),
+        default="none",
+        help="MuJoCo only: which context channel the env serves to the policy "
+        "(observation.environment_state); must match the checkpoint",
+    )
     return parser.parse_args(argv)
 
 
@@ -512,6 +549,10 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         only_processes=args.only_processes,
         eval_timeout_s=args.eval_timeout_s,
         backend=args.backend,
+        episode_draws=args.episode_draws,
+        frame_jitter=args.frame_jitter,
+        spatial_scale=args.spatial_scale,
+        context=args.context,
     )
 
 

@@ -21,11 +21,14 @@ def _obs(batch: int):
 
 
 @pytest.fixture()
-def running_server():
-    calls = {"reset": 0, "steps": 0}
+def running_server(request):
+    """Serves a fake policy; parametrize indirectly with a context width to advertise one."""
+    context_dim = getattr(request, "param", 0)
+    calls = {"reset": 0, "steps": 0, "context_shape": None}
 
-    def fake_policy(state, wrist, overhead):
+    def fake_policy(state, wrist, overhead, context=None):
         calls["steps"] += 1
+        calls["context_shape"] = None if context is None else context.shape
         action = np.zeros((state.shape[0], *ACTION_SHAPE), dtype="float32")
         action[:, 0] = state[:, 0] + 1.0
         return action
@@ -37,6 +40,7 @@ def running_server():
         port=0,
         n_action_steps=1,
         inference={"n_action_steps": 1, "temporal_ensemble_coeff": 0.01, "chunk_size": 100},
+        context_dim=context_dim,
     )
     port = srv.bind()
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -72,6 +76,17 @@ def test_client_step_round_trips_a_batch(running_server):
     assert action.shape == (3, 7) and action.dtype == np.float32
     assert action[:, 0].tolist() == [1.0, 2.0, 3.0]
     assert calls["steps"] == 1
+    client.close()
+
+
+@pytest.mark.parametrize("running_server", [6], indirect=True)
+def test_client_sends_a_context_when_given_one(running_server):
+    endpoint, calls = running_server
+    client = ServerPolicy(endpoint)
+    assert client.context_dim == 6
+    action = client.step(*_obs(2), context=np.full((2, 6), 0.5, dtype="float32"))
+    assert calls["context_shape"] == (2, 6)
+    assert action.shape == (2, 7)
     client.close()
 
 

@@ -209,6 +209,13 @@ class CampaignCfg:
     # forwarded only when the range is non-empty, for the same ledger reason.
     hover_jitter_min: float = 0.0
     hover_jitter_max: float = 0.0
+    # Per-episode scene draws and per-frame camera jitter (MS4 lever 1), MuJoCo only.
+    # Forwarded only when set, so the ledger's command record shows which corpora had them.
+    episode_draws: bool = False
+    frame_jitter: bool = False
+    # MS4: one campaign's shards are converted three times (images, context, delta), so the
+    # supervisor can leave every shard on disk after its CONVERT_OK instead of deleting it.
+    keep_shards: bool = False
     # Which simulator runs the batches: "isaac" spawns scripts/generate_batch.py under
     # isaaclab.sh, "mujoco" spawns scripts/mj_generate_batch.py under the project venv. Both
     # speak the same RUN_META / RUN_STATS / BATCH_OK contract, so nothing else here differs.
@@ -523,8 +530,9 @@ def run_campaign(
     VRAM-bound and rejected), and a fresh run_convert is only submitted after the *previous*
     one's result() has already been collected, so at most one is ever in flight (converts
     target a single LeRobotDataset root and can't accept concurrent appends). Steady-state
-    disk footprint is therefore at most 2 shards: the one converting and the one generating;
-    on a crash, up to one further un-ledgered shard may also be left behind (see below).
+    disk footprint is therefore at most 2 shards, unless --keep_shards is set: the one
+    converting and the one generating; on a crash, up to one further un-ledgered shard may
+    also be left behind (see below).
 
     Ledger append (and this function's one progress line per run) happens in
     convert-completion order, immediately after each run's convert result() is collected --
@@ -603,7 +611,7 @@ def run_campaign(
                 cfg, p_run_index, MARKER_PHASE_CONVERTED, p_permutation, p_shard_path.name
             )
         deleted = False
-        if p_shard_path.exists():
+        if not cfg.keep_shards and p_shard_path.exists():
             p_shard_path.unlink()
             deleted = True
         p_run_seed, p_layout_seed = _derive_seeds(cfg, p_run_index)
@@ -803,6 +811,10 @@ def _batch_command(
             "--hover_jitter_max",
             str(cfg.hover_jitter_max),
         ]
+    if cfg.episode_draws:
+        cmd += ["--episode_draws"]
+    if cfg.frame_jitter:
+        cmd += ["--frame_jitter"]
     return cmd
 
 
@@ -925,6 +937,9 @@ def _build_cfg(args: argparse.Namespace) -> CampaignCfg:
         nearest_first_pick_order=args.nearest_first_pick_order,
         hover_jitter_min=args.hover_jitter_min,
         hover_jitter_max=args.hover_jitter_max,
+        episode_draws=args.episode_draws,
+        frame_jitter=args.frame_jitter,
+        keep_shards=args.keep_shards,
         backend=args.backend,
         breaker_min_rate=None if args.breaker_min_rate < 0 else args.breaker_min_rate,
         breaker_min_runs=args.breaker_min_runs,
@@ -1004,6 +1019,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "broken and the target becomes readable from the cameras. Off by default, and "
             "refused together with --randomize_pick_order"
         ),
+    )
+    parser.add_argument(
+        "--episode_draws",
+        action="store_true",
+        help="MuJoCo only: bins, lights and cameras are redrawn per episode (MS4 lever 1)",
+    )
+    parser.add_argument(
+        "--frame_jitter",
+        action="store_true",
+        help="MuJoCo only: small overhead-camera jitter resampled per rendered frame",
+    )
+    parser.add_argument(
+        "--keep_shards",
+        action="store_true",
+        help="keep every shard .hdf5 after CONVERT_OK instead of deleting it "
+        "(MS4: one campaign is converted three times)",
     )
     parser.add_argument(
         "--breaker_min_rate",

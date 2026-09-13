@@ -49,6 +49,21 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument("--layout_seed", type=int, default=0, help="seeds sample_run_draw")
     parser.add_argument("--permutation", type=str, default="0,1,2,3", help="bin-color permutation")
+    parser.add_argument("--episode_draws", action="store_true", help="per-episode scene draws")
+    parser.add_argument("--frame_jitter", action="store_true", help="per-frame camera jitter")
+    parser.add_argument(
+        "--spatial_scale",
+        type=float,
+        default=1.0,
+        help="multiplier on the camera-pose and bin_x jitter of the run draw and of every "
+        "per-episode draw (1.0 = training)",
+    )
+    parser.add_argument(
+        "--context",
+        choices=("none", "camera", "privileged"),
+        default="none",
+        help="which context channel the env serves to the policy (observation.environment_state)",
+    )
     parser.add_argument("--server", type=str, default="tcp://127.0.0.1:5555")
     parser.add_argument(
         "--out", type=str, default="", help="write the EVAL_OK payload JSON here too"
@@ -94,10 +109,17 @@ def main(argv=None) -> int:
     env = None
     viewer = None
     try:
-        draw = sample_run_draw(random.Random(args.layout_seed))
+        draw = sample_run_draw(random.Random(args.layout_seed), args.spatial_scale)
         draw["slot_colors"] = perm
         env = MjLegoSortEnv(
-            args.num_envs, draw, num_bricks=NUM_BRICKS, cameras=not args.random_actions
+            args.num_envs,
+            draw,
+            num_bricks=NUM_BRICKS,
+            cameras=not args.random_actions,
+            episode_draws=args.episode_draws,
+            frame_jitter=args.frame_jitter,
+            spatial_scale=args.spatial_scale,
+            context=args.context,
         )
         env.reset(seed=args.run_seed)
         if args.viewer:

@@ -111,3 +111,40 @@ def test_a_ledger_without_a_target_needs_an_explicit_minimum(rig):
 
     short = _run(rig, MIN_EPISODES=64, **_full_env(rig))
     assert short.returncode == 1 and "below the campaign target 64" in short.stderr
+
+
+def test_the_action_space_marker_is_written_next_to_the_checkpoints(rig):
+    result = _run(rig, **_full_env(rig), ACTION_SPACE="delta")
+    assert result.returncode == 1 and "action_space" in result.stderr  # dataset says absolute
+    assert not (rig["out"] / "action_space.json").exists()
+    (rig["dataset"] / "meta" / "action_space.json").write_text('{"action_space": "delta"}')
+    result = _run(rig, **_full_env(rig), ACTION_SPACE="delta")
+    assert result.returncode == 0, result.stderr
+    assert json.loads((rig["out"] / "action_space.json").read_text()) == {"action_space": "delta"}
+
+
+def test_absolute_is_the_default_action_space(rig):
+    result = _run(rig, **_full_env(rig))
+    assert result.returncode == 0, result.stderr
+    assert json.loads((rig["out"] / "action_space.json").read_text()) == {
+        "action_space": "absolute"
+    }
+
+
+def test_a_marker_write_failure_still_prints_exactly_one_token(rig):
+    rig["out"].write_text("not a directory")  # mkdir -p "$OUT" fails on this in the exit trap
+    result = _run(rig, **_full_env(rig))
+    assert result.returncode == 0, result.stderr
+    assert "TRAIN_OK" in result.stdout
+    assert result.stdout.count("TRAIN_") == 1
+    assert "action_space.json" in result.stderr
+
+
+def test_an_existing_marker_is_never_overwritten(rig):
+    # A delta run's $OUT, relaunched at the default absolute: LeRobot refuses the existing
+    # $OUT long after TRAIN_LAUNCHED is set, so the trap must leave the marker alone.
+    rig["out"].mkdir()
+    (rig["out"] / "action_space.json").write_text('{"action_space": "delta"}')
+    result = _run(rig, **_full_env(rig))
+    assert json.loads((rig["out"] / "action_space.json").read_text()) == {"action_space": "delta"}
+    assert result.stdout.count("TRAIN_") == 1

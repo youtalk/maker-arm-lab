@@ -24,11 +24,10 @@ from maker_arm_lab.core.gate import (
     policy_state,
 )
 from maker_arm_lab.core.stowed import (
-    _bin_centers_cached,
     _bin_half_extents_cached,
     _brick_states,
-    _env_bin_layout,
     brick_color_ids,
+    env_bin_centers,
     per_brick_stowed,
 )
 from maker_arm_lab.core.trace import RolloutTrace
@@ -98,11 +97,20 @@ def rollout(
     # than evaluate the policy on a permuted state.
     if list(arm_ids) != list(range(6)):
         raise EvalFailure("joint_order", f"arm joints are at {list(arm_ids)}, expected 0..5")
+    # The context channel the env serves (Isaac has none) has to be exactly as wide as the
+    # checkpoint's env-state input, or the policy would silently read a permuted vector.
+    context_mode = getattr(env, "context_mode", "none")
+    served_width = int(env.obs_buf["context"].shape[1]) if context_mode != "none" else 0
+    wants = int(getattr(policy, "context_dim", 0)) if policy is not None else 0
+    if not random_actions and wants != served_width:
+        raise EvalFailure(
+            "context",
+            f"policy takes a {wants}-wide context, the env serves {served_width} ({context_mode})",
+        )
     limits = robot.data.joint_pos_limits[:, arm_ids, :].to("cpu")  # (N,6,2)
     tracker = RolloutTracker(num_envs, num_bricks)
     trace = RolloutTrace(num_envs) if trace_dir else None
     device = str(env.device)
-    bin_centers = _bin_centers_cached(_env_bin_layout(env), device)
     bin_half_extents = _bin_half_extents_cached(device)
     target_bins = brick_color_ids(num_bricks)  # (B,) cpu long
     tool = robot.find_bodies(TOOL_BODY)[0][0]
@@ -120,6 +128,8 @@ def rollout(
             raise EvalFailure("wall_clock", f"exceeded {max_wall_minutes} min at step {step_index}")
         per_brick = per_brick_stowed(env)
         tracker.latch_pre_step(per_brick)
+        # Live, because a MuJoCo env with per-episode draws moves its bins at every reset.
+        bin_centers = env_bin_centers(env, device)
         state = policy_state(robot.data.joint_pos).to("cpu").numpy()
         if random_actions:
             span = limits[..., 1] - limits[..., 0]
@@ -129,7 +139,8 @@ def rollout(
         else:
             wrist = env.obs_buf["images"]["wrist_rgb"].to("cpu").numpy()
             overhead = env.obs_buf["images"]["overhead_rgb"].to("cpu").numpy()
-            action_cpu = torch.from_numpy(policy.step(state, wrist, overhead))
+            context = env.obs_buf["context"].to("cpu").numpy() if served_width else None
+            action_cpu = torch.from_numpy(policy.step(state, wrist, overhead, context=context))
         tracker.record_gripper(action_cpu[:, 6])
         grip_open = action_cpu[:, 6] >= 0.0
         # One contact read per step, pre-step, shared by the release detection and the
@@ -242,6 +253,12 @@ def rollout(
         "n_action_steps": policy.n_action_steps,
         # Echoed off the handshake: what the server served with, not what was asked.
         "inference": policy.inference,
+        "context": context_mode,
+        # The run settings this rollout was drawn under; defaulted so the frozen Isaac env,
+        # which has none of them on its cfg, still reports a well-formed payload.
+        "episode_draws": bool(getattr(env.cfg, "episode_draws", False)),
+        "frame_jitter": bool(getattr(env.cfg, "frame_jitter", False)),
+        "spatial_scale": float(getattr(env.cfg, "spatial_scale", 1.0)),
         "episodes": episodes,
         "steps_run": step_index,
         "clamp_fraction": (
@@ -260,13 +277,15 @@ def rollout(
 
 
 def _nearest_brick_cm(pos, tool_xy, held, bin_centers, bin_half_extents) -> list[float]:
-    """Per env: xy distance in cm from the tool to the nearest brick still on the desk, or -1.
+    """Per env: xy distance in cm from the tool to the nearest brick still on the desk, or -1;
+    bin centers are (4,3) or (N,4,3).
 
     A brick inside a bin's footprint, above the desk (lifted or on the shelf) or between the
     jaws right now is not a pick target, so it is left out.
     """
+    centers = bin_centers if bin_centers.dim() == 3 else bin_centers[None]  # (N or 1,4,3)
     in_bin = (
-        ((pos[:, :, None, :2] - bin_centers[None, None, :, :2]).abs() <= bin_half_extents[:2])
+        ((pos[:, :, None, :2] - centers[:, None, :, :2]).abs() <= bin_half_extents[:2])
         .all(dim=-1)
         .any(dim=-1)
     )

@@ -4,6 +4,7 @@ Real MuJoCo on CPU with cameras off (a few hundred control steps run in well und
 plus one cameras-on shard round trip so the HDF5 layout is pinned against the converter.
 """
 
+import json
 import random
 
 import h5py
@@ -34,7 +35,7 @@ def _hold_action(env) -> torch.Tensor:
 def _teleport_all_bricks_into_bins(env, i: int) -> None:
     """Rest every brick on its own color's bin floor, then let the physics settle."""
     h, d = env.handles, env.datas[i]
-    centers = layout.bin_interior_centers(env.cfg.bin_layout)
+    centers = layout.bin_interior_centers(env.bin_layouts[i])
     rest_z = -layout.BIN_INTERIOR[2] / 2 + layout.BRICK_SIZE[2] / 2 + 0.0005
     for b, adr in enumerate(h.brick_qpos):
         color = b % 4
@@ -180,7 +181,137 @@ def test_shard_layout_matches_the_converter(tmp_path):
         assert g["obs/clamped"].shape == (6,)
         assert g["initial_state/articulation/robot/joint_position"].shape == (1, 8)
         assert g["initial_state/rigid_object/brick_1/root_pose"].shape == (1, 7)
+        assert g["initial_state/bin_layout"].shape == (1, 5)
+        assert g["obs/context_camera"].shape == (6, 6)
+        assert g["obs/context_privileged"].shape == (6, 42)
+        assert json.loads(g["obs/context_camera"].attrs["names"])[0] == "overhead_cam_x"
+        assert json.loads(g["obs/context_privileged"].attrs["names"])[-1] == "brick_5_qz"
         assert "inflight" not in f
         # The action's arm columns are the pre-clamp command; joint_targets the applied ones.
         assert np.allclose(g["actions"][0, :6], action[0, :6].numpy(), atol=1e-6)
         assert g["obs/images/wrist_rgb"][0].mean() > 5.0  # a real render, not zeros
+
+
+def test_episode_draws_move_bins_lights_and_layouts_per_reset():
+    env = MjLegoSortEnv(2, _draw(), num_bricks=2, cameras=False, episode_draws=True)
+    env.reset(seed=21)
+    assert env.bin_layouts[0] != env.bin_layouts[1]
+    assert env.bin_layouts[0].slot_colors == env.run_draw["slot_colors"]
+    floor = env.models[0].geom("bin_red_floor").id
+    assert not np.allclose(env.models[0].geom_pos[floor], env.models[1].geom_pos[floor])
+    dome = env.models[0].light("dome").id
+    assert not np.allclose(env.models[0].light_diffuse[dome], env.models[1].light_diffuse[dome])
+    before, before1 = env.bin_layouts[0], env.bin_layouts[1]
+    env.reset(env_ids=torch.tensor([0]))
+    assert env.bin_layouts[0] != before and env.bin_layouts[1] == before1
+    env.close()
+
+
+def test_spatial_scale_widens_the_per_episode_draws():
+    env = MjLegoSortEnv(
+        8, _draw(), num_bricks=2, cameras=False, episode_draws=True, spatial_scale=3.0
+    )
+    assert env.cfg.spatial_scale == 3.0
+    env.reset(seed=21)
+    # At scale 1.0 no draw can leave these bounds, so one env past them proves the scale
+    # reaches the per-episode draw and not only the run draw.
+    assert any(
+        max(abs(v) for v in d["overhead_cam_drot_deg"]) > 2.0
+        or abs(d["bin_x"] - layout._BIN_X) > 0.02
+        for d in env.episode_draws
+    )
+    env.close()
+
+
+def test_without_episode_draws_every_env_keeps_the_run_layout():
+    env = MjLegoSortEnv(2, _draw(), num_bricks=2, cameras=False)
+    env.reset(seed=21)
+    assert env.bin_layouts == [env.cfg.bin_layout, env.cfg.bin_layout]
+    env.close()
+
+
+def test_per_brick_stowed_uses_each_envs_own_bins_under_episode_draws():
+    env = MjLegoSortEnv(2, _draw(), num_bricks=4, cameras=False, episode_draws=True)
+    env.reset(seed=21)
+    _teleport_all_bricks_into_bins(env, 0)
+    assert per_brick_stowed(env)[0].all()
+    # Move env 1's bins 10 cm away, then rest env 1's bricks where env 0's bins are.
+    far = layout.BinLayout(
+        bin_x=env.bin_layouts[1].bin_x + 0.10,
+        bin_ys=env.bin_layouts[1].bin_ys,
+        slot_colors=env.bin_layouts[1].slot_colors,
+    )
+    env.bin_layouts[1] = far
+    from maker_arm_lab.mj import scene as mj_scene
+
+    mj_scene.apply_bins(env.models[1], far)
+    h, d = env.handles, env.datas[1]
+    centers = layout.bin_interior_centers(env.bin_layouts[0])
+    rest_z = -layout.BIN_INTERIOR[2] / 2 + layout.BRICK_SIZE[2] / 2 + 0.0005
+    for b, adr in enumerate(h.brick_qpos):
+        d.qpos[adr : adr + 3] = centers[b % 4].numpy() + np.array([0.0, 0.0, rest_z])
+        d.qvel[h.brick_dof[b] : h.brick_dof[b] + 6] = 0.0
+    mujoco.mj_forward(env.models[1], d)
+    env._refresh([1], images=False)
+    assert not per_brick_stowed(env)[1].any()
+    env.close()
+
+
+@pytest.mark.skipif(not _can_render(), reason="no MuJoCo GL context on this host")
+def test_episode_draws_and_frame_jitter_move_the_cameras(tmp_path):
+    env = MjLegoSortEnv(
+        2,
+        _draw(),
+        num_bricks=1,
+        cameras=True,
+        episode_draws=True,
+        frame_jitter=True,
+        export_dir=tmp_path,
+    )
+    env.reset(seed=8)
+    cam = env.models[0].camera("overhead").id
+    assert not np.allclose(env.models[0].cam_pos[cam], env.models[1].cam_pos[cam])
+    first = env.models[0].cam_pos[cam].copy()
+    env.step(_hold_action(env))
+    second = env.models[0].cam_pos[cam].copy()
+    assert not np.allclose(first, second)
+    pos, _rot = mj_scene_overhead_pose(env.episode_draws[0])
+    assert np.abs(second - np.array(pos)).max() <= 0.005 + 1e-9
+    env.close()
+
+
+def mj_scene_overhead_pose(draw):
+    from maker_arm_lab.mj import scene as mj_scene
+
+    return mj_scene.overhead_camera_pose(draw)
+
+
+def test_context_channels_are_always_filled_and_the_served_one_follows_the_mode():
+    from maker_arm_lab.mj import env as mj_env
+
+    env = MjLegoSortEnv(
+        2, _draw(), num_bricks=2, cameras=False, episode_draws=True, context="camera"
+    )
+    env.reset(seed=4)
+    assert env.context_mode == "camera"
+    assert env.obs_buf["context"].shape == (2, 6) and env.obs_buf["context"].dtype == torch.float32
+    assert env.context_camera.shape == (2, 6) and env.context_privileged.shape == (2, 42)
+    assert not np.allclose(env.context_camera[0], env.context_camera[1])
+    # Bricks 0 and 1 fill the first 14 values; the missing bricks 2..5 are zeros.
+    assert np.abs(env.context_privileged[:, 14:]).max() == 0.0
+    pos0 = env.scene["brick_0"].data.root_pos_w[0].numpy()
+    assert np.allclose(env.context_privileged[0, :3], pos0, atol=1e-6)
+    env.step(_hold_action(env))
+    assert np.allclose(env.obs_buf["context"].numpy(), env.context_camera)
+    env.close()
+    plain = MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, context="privileged")
+    plain.reset(seed=4)
+    assert plain.obs_buf["context"].shape == (1, 42)
+    none = MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False)
+    none.reset(seed=4)
+    assert none.context_mode == "none" and none.obs_buf["context"].shape == (1, 0)
+    assert len(mj_env.CONTEXT_CAMERA_NAMES) == 6 and len(mj_env.CONTEXT_PRIVILEGED_NAMES) == 42
+    plain.close()
+    none.close()
+    with pytest.raises(ValueError, match="context"):
+        MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, context="wrong")

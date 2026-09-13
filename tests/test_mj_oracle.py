@@ -51,3 +51,33 @@ def test_oracle_sorts_two_bricks_on_mujoco():
     assert all(0.0055 <= p["stall"] <= 0.0085 for p in pinches), pinches
     assert all(min(p["left"], p["right"]) >= 4.0 for p in pinches), pinches
     assert steps < 2000, steps  # two bricks in well under half the six-brick budget
+
+
+def test_rearm_reads_each_envs_own_bin_layout():
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(2, draw, num_bricks=2, cameras=False, episode_draws=True)
+    env.reset(seed=11)
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
+    rig.rearm([0, 1])
+    assert rig.oracles[0].bl == env.bin_layouts[0]
+    assert rig.oracles[1].bl == env.bin_layouts[1]
+    assert rig.oracles[0].bl != rig.oracles[1].bl
+    env.close()
+
+
+def test_oracle_sorts_two_bricks_under_episode_draws():
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(1, draw, num_bricks=2, cameras=False, episode_draws=True)
+    env.reset(seed=11)
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
+    steps = 0
+    while steps < 4000:
+        out = rig.step()
+        steps += 1
+        if bool(out["dones"][0]) or bool(out["abandoned"][0]):
+            break
+    stats = rig.episode_stats(0)
+    env.close()
+    assert stats["succeeded"] is True, stats

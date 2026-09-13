@@ -8,7 +8,7 @@ import pytest
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from convert_to_lerobot import (  # noqa: F401 -- kept for parity
-    FEATURES,
+    BASE_FEATURES,
     TASK,
     convert,
     cycle_segments,

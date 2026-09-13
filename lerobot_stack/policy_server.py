@@ -28,6 +28,7 @@ import zmq
 from policy_protocol import (
     ACTION_DTYPE,
     ACTION_SHAPE,
+    CONTEXT_KEY,
     OBS_SCHEMA,
     PROTOCOL_VERSION,
     recv_message,
@@ -46,6 +47,7 @@ class PolicyServer:
         port: int,
         n_action_steps: int,
         inference: dict | None = None,
+        context_dim: int = 0,
     ):
         self._policy_fn = policy_fn
         self._reset_fn = reset_fn
@@ -57,6 +59,11 @@ class PolicyServer:
         # applied and echoed in SERVER_READY and hello_ack so an eval payload records what
         # was served rather than what the supervisor asked for.
         self._inference = dict(inference or {})
+        # Width of the optional context array this policy takes (0 = none). Echoed in the
+        # handshake so a client knows whether to send one, and a step's context width is
+        # checked against it -- a mismatch, including a missing context when this is > 0,
+        # is a bad_obs error rather than a shape exception surfacing inside the policy.
+        self._context_dim = context_dim
         self._socket = None
 
     def bind(self) -> int:
@@ -72,6 +79,7 @@ class PolicyServer:
             "n_action_steps": self._n_action_steps,
             "protocol": PROTOCOL_VERSION,
             "inference": self._inference,
+            "context_dim": self._context_dim,
         }
         print("SERVER_READY " + json.dumps(ready), flush=True)
         return self._port
@@ -83,6 +91,7 @@ class PolicyServer:
             "policy_id": self._policy_id,
             "n_action_steps": self._n_action_steps,
             "inference": self._inference,
+            "context_dim": self._context_dim,
             "obs_schema": {k: [list(shape), dtype] for k, (shape, dtype) in OBS_SCHEMA.items()},
             "action": [list(ACTION_SHAPE), ACTION_DTYPE],
         }
@@ -115,8 +124,20 @@ class PolicyServer:
                         self._socket, {"type": "error", "error": "bad_obs", "message": str(err)}
                     )
                     return True
+                context = arrays.get(CONTEXT_KEY)
+                width = 0 if context is None else int(context.shape[1])
+                if width != self._context_dim:
+                    send_message(
+                        self._socket,
+                        {
+                            "type": "error",
+                            "error": "bad_obs",
+                            "message": f"context width {width}, this policy takes {self._context_dim}",
+                        },
+                    )
+                    return True
                 action = np.asarray(
-                    self._policy_fn(arrays["state"], arrays["wrist"], arrays["overhead"]),
+                    self._policy_fn(arrays["state"], arrays["wrist"], arrays["overhead"], context),
                     dtype=np.float32,
                 )
                 validate_action(action, batch)
@@ -221,6 +242,35 @@ def find_gripper_bce_marker(checkpoint_dir: str) -> dict | None:
     return None
 
 
+ACTION_SPACE_MARKER = "action_space.json"
+
+
+def find_action_space_marker(checkpoint_dir: str) -> str:
+    """The action space train_act.sh recorded next to the checkpoints, "absolute" if none.
+
+    Same walk as find_gripper_bce_marker: the checkpoint dir, then up to output_dir.
+    """
+    from pathlib import Path
+
+    directory = Path(checkpoint_dir)
+    for candidate in [directory, *directory.parents[:3]]:
+        marker = candidate / ACTION_SPACE_MARKER
+        if marker.is_file():
+            return json.loads(marker.read_text())["action_space"]
+    return "absolute"
+
+
+def integrate_delta(action: np.ndarray, state: np.ndarray) -> np.ndarray:
+    """A delta checkpoint's joint part plus the measured joints: an absolute target again.
+
+    The gripper column is a command, not a position, and is left alone. The result is
+    what a real driver consumes, so the wire never carries a delta.
+    """
+    out = action.copy()
+    out[:, :6] += state[:, :6]
+    return out
+
+
 def squash_gripper_logit(action: np.ndarray, raw_mean: float, raw_std: float) -> np.ndarray:
     """Turn the unnormalized BCE logit back into a unit gripper action. INACTIVE here.
 
@@ -276,6 +326,8 @@ def inference_policy_id(
     overrides: dict,
     blank_camera: str | None = None,
     gripper_squash: bool = False,
+    context_dim: int = 0,
+    action_space: str = "absolute",
 ) -> str:
     """Suffix the policy id with the active overrides so eval payloads are self-describing."""
     policy_id = f"act:{checkpoint_dir}"
@@ -287,6 +339,10 @@ def inference_policy_id(
         policy_id += "+gbce"
     if blank_camera is not None:
         policy_id += f"+blank{blank_camera}"
+    if context_dim:
+        policy_id += f"+ctx{context_dim}"
+    if action_space == "delta":
+        policy_id += "+delta"
     return policy_id
 
 
@@ -297,7 +353,7 @@ def load_act(
     temporal_ensemble_coeff: float | None = None,
     blank_camera: str | None = None,
 ):
-    """Build (policy_fn, reset_fn, policy_id, n_action_steps) from a LeRobot checkpoint.
+    """Build (policy_fn, reset_fn, policy_id, n_action_steps, inference, context_dim).
 
     checkpoint_dir is a `pretrained_model` directory (e.g.
     <output_dir>/checkpoints/last/pretrained_model). The checkpoint's own
@@ -305,7 +361,9 @@ def load_act(
     the same way lerobot_eval loads them (verified against lerobot 0.5.1:
     `preprocessor_overrides={"device_processor": {"device": ...}}`).
     Image conversion (uint8 HWC -> float32 CHW / 255) mirrors
-    lerobot.envs.utils.preprocess_observation.
+    lerobot.envs.utils.preprocess_observation; images are sent to the policy only
+    when the checkpoint has image features. `context_dim` is the checkpoint's
+    `env_state_feature.shape[0]`, or 0 for a checkpoint that takes no context.
     Inference-config overrides (n_action_steps, temporal_ensemble_coeff) are applied
     at checkpoint load and reflected in the returned policy_id suffix.
     """
@@ -328,12 +386,16 @@ def load_act(
     policy = ACTPolicy.from_pretrained(checkpoint_dir, config=config)
     policy.to(device)
     policy.eval()
+    env_feature = policy.config.env_state_feature
+    context_dim = int(env_feature.shape[0]) if env_feature is not None else 0
+    uses_images = bool(policy.config.image_features)
     pre, post = make_pre_post_processors(
         policy_cfg=policy.config,
         pretrained_path=checkpoint_dir,
         preprocessor_overrides={"device_processor": {"device": device}},
     )
     marker = find_gripper_bce_marker(checkpoint_dir)
+    action_space = find_action_space_marker(checkpoint_dir)
     if marker is not None and ("gripper_raw_mean" not in marker or "gripper_raw_std" not in marker):
         raise ValueError(
             "gripper_bce.json next to this checkpoint predates the logit-scale "
@@ -344,13 +406,16 @@ def load_act(
     def _images(array: np.ndarray) -> torch.Tensor:
         return torch.from_numpy(array).permute(0, 3, 1, 2).to(torch.float32) / 255.0
 
-    def policy_fn(state: np.ndarray, wrist: np.ndarray, overhead: np.ndarray) -> np.ndarray:
-        wrist, overhead = blank_streams(wrist, overhead, blank_camera)
-        batch = {
-            "observation.state": torch.from_numpy(state),
-            "observation.images.wrist": _images(wrist),
-            "observation.images.overhead": _images(overhead),
-        }
+    def policy_fn(
+        state: np.ndarray, wrist: np.ndarray, overhead: np.ndarray, context: np.ndarray | None
+    ) -> np.ndarray:
+        batch = {"observation.state": torch.from_numpy(state)}
+        if uses_images:
+            wrist, overhead = blank_streams(wrist, overhead, blank_camera)
+            batch["observation.images.wrist"] = _images(wrist)
+            batch["observation.images.overhead"] = _images(overhead)
+        if context_dim:
+            batch["observation.environment_state"] = torch.from_numpy(context)
         batch = pre(batch)
         with torch.inference_mode():
             action = policy.select_action(batch)
@@ -360,16 +425,24 @@ def load_act(
             action = squash_gripper_logit(
                 action, marker["gripper_raw_mean"], marker["gripper_raw_std"]
             )
+        if action_space == "delta":
+            action = integrate_delta(action, state)
         return action
 
     return (
         policy_fn,
         policy.reset,
         inference_policy_id(
-            checkpoint_dir, overrides, blank_camera, gripper_squash=marker is not None
+            checkpoint_dir,
+            overrides,
+            blank_camera,
+            gripper_squash=marker is not None,
+            context_dim=context_dim,
+            action_space=action_space,
         ),
         policy.config.n_action_steps,
         served_inference(policy.config),
+        context_dim,
     )
 
 
@@ -432,7 +505,7 @@ def main() -> int:
     parser = build_parser()
     try:
         args = parser.parse_args()
-        policy_fn, reset_fn, policy_id, n_action_steps, inference = load_act(
+        policy_fn, reset_fn, policy_id, n_action_steps, inference, context_dim = load_act(
             args.checkpoint,
             args.device,
             n_action_steps=args.n_action_steps,
@@ -440,7 +513,13 @@ def main() -> int:
             blank_camera=args.blank_camera,
         )
         server = PolicyServer(
-            policy_fn, reset_fn, policy_id, args.port, n_action_steps, inference=inference
+            policy_fn,
+            reset_fn,
+            policy_id,
+            args.port,
+            n_action_steps,
+            inference=inference,
+            context_dim=context_dim,
         )
         server.bind()
         server.serve_forever()

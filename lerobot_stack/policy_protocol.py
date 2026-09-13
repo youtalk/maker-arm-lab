@@ -15,6 +15,11 @@ PROTOCOL_VERSION 2 (was 1 in the openyam-lab original): the observation state
 narrowed from 8 to the Maker Arm's 7. A version-1 peer's messages still frame
 correctly but carry the wrong state width, so the version is what rejects them --
 the handshake fails loudly instead of the shape error surfacing inside the policy.
+
+PROTOCOL_VERSION 3: an optional `context` array (batch, K) float32 rides beside the
+three observation arrays. It carries `observation.environment_state` for checkpoints
+that take one. a version-2 peer never sends it and a version-3 server with
+`context_dim` 0 never expects it.
 """
 
 import io
@@ -22,7 +27,7 @@ import json
 
 import numpy as np
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 OBS_SCHEMA = {
     # (7,) = the dataset's observation.state: 6 arm joint angles + the gripper
     # opening fraction (spec section 4.2), which is what convert_to_lerobot.py writes
@@ -54,6 +59,9 @@ STATE_GRIPPER_DIM = 6
 # The tolerance absorbs a client that computes the fraction without clipping (a hair over 1
 # from float division); anything past it is a swap or genuinely out of distribution.
 GRIPPER_FRACTION_TOL = 1e-3
+
+CONTEXT_KEY = "context"
+CONTEXT_DTYPE = "float32"
 
 
 def _pack(array: np.ndarray) -> bytes:
@@ -109,12 +117,25 @@ def _check_gripper_fraction(state: np.ndarray) -> None:
         )
 
 
+def validate_context(array: np.ndarray, batch_size: int) -> None:
+    """A (batch, K) float32 array with K >= 1."""
+    if array.ndim != 2 or array.shape[0] != batch_size or array.shape[1] < 1:
+        raise ValueError(f"context: shape {tuple(array.shape)}, want ({batch_size}, K>=1)")
+    if str(array.dtype) != CONTEXT_DTYPE:
+        raise ValueError(f"context: dtype {array.dtype}, want {CONTEXT_DTYPE}")
+
+
 def validate_obs(arrays: dict, batch_size: int) -> None:
-    if set(arrays) != set(OBS_SCHEMA):
-        raise ValueError(f"obs keys {sorted(arrays)}, want {sorted(OBS_SCHEMA)}")
+    keys = set(arrays) - {CONTEXT_KEY}
+    if keys != set(OBS_SCHEMA):
+        raise ValueError(
+            f"obs keys {sorted(arrays)}, want {sorted(OBS_SCHEMA)} (+ optional context)"
+        )
     for name, (sample_shape, dtype) in OBS_SCHEMA.items():
         _check(name, arrays[name], sample_shape, dtype, batch_size)
     _check_gripper_fraction(arrays["state"])
+    if CONTEXT_KEY in arrays:
+        validate_context(arrays[CONTEXT_KEY], batch_size)
 
 
 def validate_action(array: np.ndarray, batch_size: int) -> None:

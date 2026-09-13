@@ -17,6 +17,10 @@ unchanged on either backend:
     env.recorder_manager.exported_successful_episode_count
     env.step(action) -> (None, None, terminated, truncated, {}), env.reset(seed=, env_ids=)
 
+MuJoCo-only members (the Isaac env has none of these; core/ reads them through getattr):
+    env.bin_layouts (one core.layout.BinLayout per env), env.episode_draws, env.run_draw
+    env.context_mode, env.obs_buf["context"], env.context_camera, env.context_privileged
+
 Semantics carried over from ``ManagerBasedRLEnv`` because the rig depends on them: a done
 env is auto-reset INSIDE ``step`` (its state tensors already show the next episode when
 ``step`` returns, and the ``success`` term keeps the terminating step's value until the next
@@ -42,10 +46,17 @@ import numpy as np
 import torch
 
 from maker_arm_lab.assets.urdf_prep import gripper_velocity_limit
-from maker_arm_lab.core import layout
+from maker_arm_lab.core import cameras, layout
 from maker_arm_lab.core import profile as _profile
+from maker_arm_lab.core.quat import compose_offset_rot, quat_mul, rpy_from_quat
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.mj import scene
+from maker_arm_lab.mj.context_names import (
+    CONTEXT_CAMERA_NAMES,  # noqa: F401 -- re-exported as mj_env.CONTEXT_CAMERA_NAMES
+    CONTEXT_DIMS,
+    CONTEXT_MAX_BRICKS,
+    CONTEXT_PRIVILEGED_NAMES,  # noqa: F401 -- re-exported as mj_env.CONTEXT_PRIVILEGED_NAMES
+)
 from maker_arm_lab.mj.recorder import ShardRecorder
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_NAMES,
@@ -67,6 +78,12 @@ GRIPPER_RATE_M_PER_S = gripper_velocity_limit()
 DESK_COLOR_RANGE = {"r": (0.3, 0.7), "g": (0.25, 0.55), "b": (0.2, 0.45)}
 BRICK_MASS_SCALE = (0.7, 1.3)
 BRICK_FRICTION_SCALE = (0.8, 1.2)  # Isaac's static_friction_range; MuJoCo has one coefficient
+# Per-frame camera jitter (MS4 lever 1): resampled on every rendered frame, on top of the
+# per-episode camera draw, so the policy cannot read the camera pose off a static background.
+# The context feature reports the per-episode pose, not this jitter, which stands in for the
+# calibration error of the real rig.
+FRAME_CAM_JITTER_M = 0.005
+FRAME_CAM_JITTER_DEG = 1.0
 
 
 class _Robot:
@@ -169,6 +186,10 @@ class MjLegoSortEnv:
         start_pose_offset_rad: float = 0.05,
         desk_color: bool = True,
         physics_dr: bool = True,
+        episode_draws: bool = False,
+        frame_jitter: bool = False,
+        spatial_scale: float = 1.0,
+        context: str = "none",
         episode_length_s: float = 180.0,
         export_dir: Path | str | None = None,
         shard_name: str = "shard",
@@ -188,10 +209,30 @@ class MjLegoSortEnv:
             start_pose_offset_rad=start_pose_offset_rad,
             desk_color=desk_color,
             physics_dr=physics_dr,
+            episode_draws=episode_draws,
+            frame_jitter=frame_jitter,
+            spatial_scale=spatial_scale,
             episode_length_s=episode_length_s,
             cameras=cameras,
         )
+        if context not in CONTEXT_DIMS:
+            raise ValueError(f"context must be one of {sorted(CONTEXT_DIMS)}, got {context!r}")
+        if num_bricks > CONTEXT_MAX_BRICKS:
+            raise ValueError(f"context channels hold {CONTEXT_MAX_BRICKS} bricks, got {num_bricks}")
+        self.context_mode = context
+        self.context_camera = np.zeros((num_envs, CONTEXT_DIMS["camera"]), dtype=np.float32)
+        self.context_privileged = np.zeros((num_envs, CONTEXT_DIMS["privileged"]), dtype=np.float32)
+        served = {
+            "none": np.zeros((num_envs, 0), dtype=np.float32),
+            "camera": self.context_camera,
+            "privileged": self.context_privileged,
+        }[context]
         self.max_episode_length = round(episode_length_s * CONTROL_HZ)
+        # The run-level draw, and the draw in force per env: equal to run_draw for every env
+        # unless episode_draws redraws bins, lights and cameras at each reset.
+        self.run_draw = dict(draw)
+        self.episode_draws = [self.run_draw] * num_envs
+        self.bin_layouts: list[layout.BinLayout] = [bl] * num_envs
         base_model, self.handles = scene.build_model(draw, num_bricks, cameras)
         self.models = [base_model] + [copy.copy(base_model) for _ in range(num_envs - 1)]
         self.datas = [mujoco.MjData(m) for m in self.models]
@@ -218,7 +259,8 @@ class MjLegoSortEnv:
             "images": {
                 "wrist_rgb": torch.from_numpy(self._wrist),
                 "overhead_rgb": torch.from_numpy(self._overhead),
-            }
+            },
+            "context": torch.from_numpy(served),
         }
         self.episode_length_buf = np.zeros(num_envs, dtype=np.int64)
         self._grip_ctrl = np.full((num_envs, 2), GRIPPER_OPEN_POS)
@@ -283,6 +325,8 @@ class MjLegoSortEnv:
                     int(brick[i]) if brick is not None else -1,
                     self._wrist[i] if self.cameras else None,
                     self._overhead[i] if self.cameras else None,
+                    context_camera=self.context_camera[i],
+                    context_privileged=self.context_privileged[i],
                 )
         step_limit = GRIPPER_RATE_M_PER_S / CONTROL_HZ
         self._grip_ctrl += np.clip(targets[:, 6:] - self._grip_ctrl, -step_limit, step_limit)
@@ -320,6 +364,17 @@ class MjLegoSortEnv:
 
     def _reset_env(self, i: int) -> None:
         m, d, h = self.models[i], self.datas[i], self.handles
+        if self.cfg.episode_draws:
+            ep = layout.sample_run_draw(self._rng, self.cfg.spatial_scale)
+            ep["slot_colors"] = self.run_draw["slot_colors"]  # the permutation is per run
+            bl = layout.BinLayout(
+                bin_x=ep["bin_x"], bin_ys=tuple(ep["bin_ys"]), slot_colors=tuple(ep["slot_colors"])
+            )
+            self.episode_draws[i] = ep
+            self.bin_layouts[i] = bl
+            scene.apply_bins(m, bl)
+            scene.apply_lighting(m, ep)
+            scene.apply_cameras(m, ep)
         # Physics DR first: mj_setConst re-derives the model constants AT qpos0 and resets the
         # data to it, so it has to run before the pose below is written.
         if self.cfg.desk_color:
@@ -341,7 +396,7 @@ class MjLegoSortEnv:
             d.qpos[h.joint_qpos[k]] = min(max(q, lo), hi)
         for adr in h.joint_qpos[6:]:
             d.qpos[adr] = GRIPPER_OPEN_POS
-        bl = self.cfg.bin_layout
+        bl = self.bin_layouts[i]
         poses = layout.sample_brick_poses(
             self.cfg.num_bricks,
             layout.MIN_SEPARATION,
@@ -362,13 +417,15 @@ class MjLegoSortEnv:
         d.ctrl[list(h.arm_actuators)] = d.qpos[list(h.joint_qpos[:6])]
         d.ctrl[list(h.gripper_actuators)] = GRIPPER_OPEN_POS
         self._grip_ctrl[i] = GRIPPER_OPEN_POS
+        pos, rot = scene.overhead_camera_pose(self.episode_draws[i])
+        self.context_camera[i] = np.array([*pos, *rpy_from_quat(rot)], dtype=np.float32)
         mujoco.mj_forward(m, d)
         self.episode_length_buf[i] = 0
         if self.recorder is not None:
             self.recorder.begin(i, self._initial_state(i))
 
     def _initial_state(self, i: int) -> dict[str, np.ndarray]:
-        d, h = self.datas[i], self.handles
+        d, h, bl = self.datas[i], self.handles, self.bin_layouts[i]
         return {
             "robot_joint_position": d.qpos[list(h.joint_qpos)].astype(np.float32),
             "robot_joint_velocity": d.qvel[list(h.joint_dof)].astype(np.float32),
@@ -382,6 +439,7 @@ class MjLegoSortEnv:
             "brick_root_velocity": np.stack([d.qvel[a : a + 6] for a in h.brick_dof]).astype(
                 np.float32
             ),
+            "bin_layout": np.array([bl.bin_x, *bl.bin_ys], dtype=np.float32),
         }
 
     def _refresh(self, ids, images: bool) -> None:
@@ -398,6 +456,8 @@ class MjLegoSortEnv:
                 brick._pos[i] = d.xpos[body]
                 brick._quat[i] = d.xquat[body]
                 brick._vel[i] = d.qvel[h.brick_dof[b] : h.brick_dof[b] + 3]
+            for b, adr in enumerate(h.brick_qpos):
+                self.context_privileged[i, 7 * b : 7 * b + 7] = d.qpos[adr : adr + 7]
             left[i] = 0.0
             right[i] = 0.0
             for k in range(d.ncon):
@@ -413,6 +473,18 @@ class MjLegoSortEnv:
                                 world
                             )
             if images and self.cameras:
+                if self.cfg.frame_jitter:
+                    pos, rot = scene.overhead_camera_pose(self.episode_draws[i])
+                    jm, jd = FRAME_CAM_JITTER_M, FRAME_CAM_JITTER_DEG
+                    dpos = [self._rng.uniform(-jm, jm) for _ in range(3)]
+                    drot = [self._rng.uniform(-jd, jd) for _ in range(3)]
+                    m.cam_pos[self._cam_overhead] = [p + j for p, j in zip(pos, dpos)]
+                    m.cam_quat[self._cam_overhead] = quat_mul(
+                        compose_offset_rot(rot, drot), cameras.ROS_TO_MUJOCO_CAM
+                    )
+                    # Fixed-camera world poses are derived by mj_camlight, which mj_step already
+                    # ran before this edit; re-derive them or the renderer uses the old pose.
+                    mujoco.mj_camlight(m, d)
                 r = self.renderers[i]
                 r.update_scene(d, camera=self._cam_wrist)
                 self._wrist[i] = r.render()

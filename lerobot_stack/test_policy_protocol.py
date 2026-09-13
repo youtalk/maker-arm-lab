@@ -26,9 +26,10 @@ def _obs(batch=2):
 
 
 def test_schema_constants_match_the_dataset_features():
-    # Version 2, not the original 1: the state narrowed from 8 to 7 for the Maker Arm,
-    # a wire-schema change an unbumped version would have let two peers disagree about.
-    assert PROTOCOL_VERSION == 2
+    # Version 3, not the original 1: the state narrowed from 8 to 7 for the Maker Arm (2),
+    # then an optional context array rode in beside the observation (3) -- each a wire-schema
+    # change an unbumped version would have let two peers disagree about.
+    assert PROTOCOL_VERSION == 3
     assert OBS_SCHEMA["state"] == ((7,), "float32")
     assert OBS_SCHEMA["wrist"] == ((224, 224, 3), "uint8")
     assert ACTION_SHAPE == (7,) and ACTION_DTYPE == "float32"
@@ -114,6 +115,26 @@ def test_round_trip_over_a_real_socket():
         assert arrays[key].dtype == value.dtype
     req.close(0)
     rep.close(0)
+
+
+def test_optional_context_is_validated_when_present():
+    from policy_protocol import validate_obs
+
+    arrays = {
+        "state": np.zeros((2, 7), np.float32),
+        "wrist": np.zeros((2, 224, 224, 3), np.uint8),
+        "overhead": np.zeros((2, 224, 224, 3), np.uint8),
+    }
+    validate_obs(arrays, 2)
+    validate_obs({**arrays, "context": np.zeros((2, 6), np.float32)}, 2)
+    with pytest.raises(ValueError, match="context"):
+        validate_obs({**arrays, "context": np.zeros((3, 6), np.float32)}, 2)
+    with pytest.raises(ValueError, match="context"):
+        validate_obs({**arrays, "context": np.zeros((2, 6), np.float64)}, 2)
+    with pytest.raises(ValueError, match="context"):
+        validate_obs({**arrays, "context": np.zeros((2, 0), np.float32)}, 2)
+    with pytest.raises(ValueError, match="obs keys"):
+        validate_obs({**arrays, "extra": np.zeros(2)}, 2)
 
 
 def test_recv_message_rejects_malformed_frame_count():

@@ -38,6 +38,7 @@ class ServerPolicy:
         # chunk_size), echoed straight off the handshake so the eval payload records the
         # served config rather than the requested one. Empty from a server that predates it.
         self.inference: dict = dict(header.get("inference", {}))
+        self.context_dim: int = int(header.get("context_dim", 0))
         self.reset()
 
     def reset(self) -> None:
@@ -46,8 +47,16 @@ class ServerPolicy:
         if header.get("type") != "reset_ack":
             raise RuntimeError(f"reset refused: {header}")
 
-    def step(self, state: np.ndarray, wrist: np.ndarray, overhead: np.ndarray) -> np.ndarray:
+    def step(
+        self,
+        state: np.ndarray,
+        wrist: np.ndarray,
+        overhead: np.ndarray,
+        context: np.ndarray | None = None,
+    ) -> np.ndarray:
         arrays = {"state": state, "wrist": wrist, "overhead": overhead}
+        if context is not None:
+            arrays[policy_protocol.CONTEXT_KEY] = context
         policy_protocol.send_message(
             self._socket, {"type": "step", "batch": int(state.shape[0])}, arrays
         )

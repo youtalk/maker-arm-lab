@@ -71,6 +71,8 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         export_dir=args.out_dir,
         shard_name=args.shard_name,
         export_all=args.export_mode == "all",
+        episode_draws=args.episode_draws,
+        frame_jitter=args.frame_jitter,
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)

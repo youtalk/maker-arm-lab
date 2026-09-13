@@ -335,17 +335,18 @@ def build_spec(draw: dict, num_bricks: int = 6, cameras_on: bool = True) -> mujo
     dome_light.diffuse = (0.5 * dome).tolist()
     dome_light.ambient = (0.5 * dome).tolist()
     dome_light.specular = [0.05, 0.05, 0.05]
-    if draw["sun_intensity"] > 0.0:
-        sun = spec.worldbody.add_light(
-            name="sun",
-            pos=[0.3, 0.0, 2.0],
-            dir=_direction_from_rpy_deg(draw["sun_rpy_deg"]).tolist(),
-        )
-        sun.type = mujoco.mjtLightType.mjLIGHT_DIRECTIONAL
-        sun.castshadow = True
-        strength = SUN_GAIN * draw["sun_intensity"]
-        sun.diffuse = [strength] * 3
-        sun.specular = [0.1 * strength] * 3
+    # The sun is always present so a per-episode draw can turn it on or off in the compiled
+    # model (apply_lighting); at zero strength it adds nothing and casts nothing.
+    sun = spec.worldbody.add_light(
+        name="sun",
+        pos=[0.3, 0.0, 2.0],
+        dir=_direction_from_rpy_deg(draw["sun_rpy_deg"]).tolist(),
+    )
+    sun.type = mujoco.mjtLightType.mjLIGHT_DIRECTIONAL
+    sun.castshadow = True
+    strength = SUN_GAIN * draw["sun_intensity"]
+    sun.diffuse = [strength] * 3
+    sun.specular = [0.1 * strength] * 3
 
     # Actuators: arm from the Rust profile, gripper from robots.frames.
     gains = _profile.arm_gains(_profile.load_profile())
@@ -400,3 +401,45 @@ def build_model(
 ) -> tuple[mujoco.MjModel, SceneHandles]:
     """One call for callers that do not need to edit the spec."""
     return compile_model(build_spec(draw, num_bricks, cameras_on), num_bricks)
+
+
+# -- per-episode draws: the same numbers as build_spec, written into a compiled model ----------
+
+
+def overhead_camera_pose(draw: dict) -> tuple[list[float], tuple[float, float, float, float]]:
+    """The overhead camera's world position and ROS-convention quaternion for ``draw``."""
+    pos = [p + d for p, d in zip(cameras.OVERHEAD_CAM_POS, draw["overhead_cam_dpos"])]
+    rot = compose_offset_rot(cameras.OVERHEAD_CAM_ROT, draw["overhead_cam_drot_deg"])
+    return pos, rot
+
+
+def apply_bins(model: mujoco.MjModel, bl: layout.BinLayout) -> None:
+    """Move the 20 static bin geoms to ``bl``. Sizes and colors never change per episode."""
+    for name, center, _size in layout.bin_static_boxes(bl):
+        model.geom_pos[model.geom(name).id] = center
+
+
+def apply_lighting(model: mujoco.MjModel, draw: dict) -> None:
+    """Write ``draw``'s dome, sun and floor color into ``model`` (build_spec's formulas)."""
+    dome = dome_tint(draw["dome_color_temp"]) * min(DOME_CAP, DOME_GAIN * draw["dome_intensity"])
+    d = model.light("dome").id
+    model.light_diffuse[d] = 0.5 * dome
+    model.light_ambient[d] = 0.5 * dome
+    s = model.light("sun").id
+    strength = SUN_GAIN * draw["sun_intensity"]
+    model.light_diffuse[s] = strength
+    model.light_specular[s] = 0.1 * strength
+    model.light_dir[s] = _direction_from_rpy_deg(draw["sun_rpy_deg"])
+    model.geom_rgba[model.geom("floor").id, :3] = draw["floor_color"]
+
+
+def apply_cameras(model: mujoco.MjModel, draw: dict) -> None:
+    """Move both cameras to ``draw``'s jitter. A model built without cameras is left alone."""
+    if model.ncam == 0:
+        return
+    pos, rot = overhead_camera_pose(draw)
+    c = model.camera("overhead").id
+    model.cam_pos[c] = pos
+    model.cam_quat[c] = quat_mul(rot, cameras.ROS_TO_MUJOCO_CAM)
+    w = model.camera("wrist").id
+    model.cam_pos[w] = [p + d for p, d in zip(WRIST_CAM_POS_IN_WRIST, draw["wrist_cam_dpos"])]

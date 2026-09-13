@@ -64,7 +64,7 @@ uv run pytest tests/test_urdf_validation.py
 
 ## Registered task ids
 
-The last column is what each script's `--task` default actually selects, read off the scripts rather than off the spec's original assignment — the two diverged when the oracle migrated.
+The last column is what each script's `--task` default actually selects, read off the scripts rather than off the spec's original assignment — the two diverged when the oracle migrated. Since MS4 the Isaac task is frozen at its MS3 features and smoke-tested only; every new capability lands on the MuJoCo backend.
 
 | Task id | Arm action | Cameras | Runs on it today |
 | --- | --- | --- | --- |
@@ -126,6 +126,8 @@ setsid bash -c 'cd "$PWD" && python3 scripts/generate_dataset.py \
 
 Add `--resume` to continue an interrupted campaign; it refuses rather than duplicating if a run was killed between converting and ledgering.
 
+MS4 adds a set of corpus levers. They are MuJoCo-only. `--episode_draws` redraws the bins, the lights and the cameras at every episode reset instead of once per run. `--frame_jitter` resamples a small overhead-camera jitter on every rendered frame. Both are flags of `mj_generate_batch.py` and of `generate_dataset.py`, and the Isaac batch script accepts and ignores them. `--spatial_scale` multiplies the camera-pose and `bin_x` jitter of the run draw and of every per-episode draw, so `--spatial_scale 3.0` on `mj_eval_policy.py` or on `run_gate_eval.py` scores a policy well outside the distribution it trained on. `--context {none,camera,privileged}` on the same two picks which extra channel the env serves to the policy, the overhead camera pose or the six brick poses, and it has to match the checkpoint. On the conversion side `--context {camera,privileged}` writes that channel into the dataset, `--no_images` drops both image features for the privileged-state ceiling, and `--action_space {absolute,delta}` chooses what the six joint columns of `action` hold. The trainer takes the same choice as `ACTION_SPACE`, refuses a dataset that disagrees with it, and records it next to the checkpoints. Because one MS4 campaign is converted three times over, `generate_dataset.py --keep_shards` leaves every converted shard on disk instead of deleting it, so the later conversions have something to read.
+
 Dataset schema, both sides (spec section 4.2; `docs/ms1-maker-arm-sim.md`):
 
 | key | shape | content |
@@ -133,6 +135,9 @@ Dataset schema, both sides (spec section 4.2; `docs/ms1-maker-arm-sim.md`):
 | `observation.state` | (7,) | 6 URDF joint angles [rad] + gripper opening fraction (0 closed, 1 open) |
 | `action` | (7,) | 6 URDF joint targets [rad] + binary gripper (`>= 0` open, `< 0` close) |
 | `observation.images.wrist`, `observation.images.overhead` | 224x224x3 | uint8 RGB |
+| `observation.environment_state` | (6,) or (42,) | camera pose x, y, z, roll, pitch, yaw in the base frame, or six brick poses, only when converted with `--context` |
+
+Under `--action_space delta` the six joint columns of `action` are the target minus the measured joint position of the same frame. The converter records the choice in `meta/action_space.json` and the policy server adds the measured position back, so the wire and the real arm still carry absolute joint targets.
 
 To convert a shard by hand:
 

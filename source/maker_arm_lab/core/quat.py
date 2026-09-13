@@ -57,3 +57,12 @@ def quat_mul(a, b) -> tuple[float, float, float, float]:
 def compose_offset_rot(rot, drot_deg) -> tuple[float, float, float, float]:
     """Left-multiply a small rpy jitter (degrees) onto a camera offset quaternion."""
     return quat_mul(quat_from_rpy_deg(drot_deg), rot)
+
+
+def rpy_from_quat(quat) -> tuple[float, float, float]:
+    """Roll, pitch, yaw in radians (ZYX, the inverse of ``quat_from_rpy_deg``) from (w, x, y, z)."""
+    w, x, y, z = quat
+    roll = math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+    pitch = math.asin(max(-1.0, min(1.0, 2.0 * (w * y - z * x))))
+    yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    return roll, pitch, yaw
