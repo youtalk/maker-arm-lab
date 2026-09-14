@@ -25,6 +25,9 @@ lerobot_stack/.venv/bin/python -m pytest lerobot_stack/
 uv run python scripts/mj_generate_batch.py --out_dir /tmp/b0 --attempts 12 --num_envs 12 --probe
 uv run python scripts/mj_eval_policy.py --num_envs 12 --run_seed 1 --layout_seed 2 \
     --permutation 0,1,2,3 --server tcp://127.0.0.1:5555 --out /tmp/eval_000.json
+uv run python scripts/mj_dagger_batch.py --num_envs 12 --run_seed 1 --layout_seed 2 \
+    --permutation 0,1,2,3 --episode_draws --frame_jitter --context camera \
+    --server tcp://127.0.0.1:5700 --round 1 --out_dir /tmp/dag --shard_name proc_0
 
 # Isaac Lab scripts need the Isaac venv and isaaclab.sh (see README "Environment setup")
 export ISAACLAB_PATH="$HOME/src/IsaacLab"; export OMNI_KIT_ACCEPT_EULA=YES
@@ -50,10 +53,11 @@ The Isaac Lab task lives in `source/maker_arm_lab/tasks/manager_based/lego_sort/
 - `core/eval_loop.py` is the gate rollout. `scripts/eval_policy.py` and `scripts/mj_eval_policy.py` are the two thin clients.
 - `core/stowed.py` and `core/checker.py` are the grader. Driver bookkeeping is never the metric.
 - `core/gate.py` and `core/trace.py` are the rollout tracker and per-step trace.
+- `core/dagger_loop.py` is the DAgger rollout: the policy drives, and the oracle rig takes over on a trigger for one brick cycle. It records only takeover frames. `scripts/mj_dagger_batch.py` is its thin client.
 
 ### The oracle is split into WHAT and HOW
 
-`core/oracle.py` is the phase state machine and only says what to do next (a `Goal`). `tasks/manager_based/lego_sort/oracle_runtime.py` holds `OracleRig`, which turns a `Goal` into a joint-space plan. The plan comes from `core/global_ik.py` (a global multi-start solver) and `core/trajectory.py` (minimum-jerk walk). The solver's docstring records why it replaced differential IK. Both are torch-only and the MuJoCo scripts import `OracleRig` directly.
+`core/oracle.py` is the phase state machine and only says what to do next (a `Goal`). `tasks/manager_based/lego_sort/oracle_runtime.py` holds `OracleRig`, which turns a `Goal` into a joint-space plan. The plan comes from `core/global_ik.py` (a global multi-start solver) and `core/trajectory.py` (minimum-jerk walk). The solver's docstring records why it replaced differential IK. Both are torch-only and the MuJoCo scripts import `OracleRig` directly. `OracleRig.actions()` and `observe()` are the two halves of `step()`. An idle env belongs to another actor. `resume()` enters the machine from a policy's state: LIFT on a pinched brick, HOVER otherwise.
 
 ### The `core/` package is isaaclab-free
 
