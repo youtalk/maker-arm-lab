@@ -1275,3 +1275,9 @@ def test_batch_and_convert_commands_carry_the_camera_and_context_flags(tmp_path)
         gd._parse_args(base + ["--no_images"])
     with pytest.raises(SystemExit):
         gd._parse_args(base + ["--no_cameras"])
+    # Discriminating case: --context privileged --no_images (no --no_cameras) must succeed
+    parsed_ctx = gd._build_cfg(gd._parse_args(base + ["--context", "privileged", "--no_images"]))
+    assert not parsed_ctx.no_cameras and parsed_ctx.context == "privileged" and parsed_ctx.no_images
+    # Constraint case: --no_cameras --no_images (no --context) must fail
+    with pytest.raises(SystemExit):
+        gd._parse_args(base + ["--no_cameras", "--no_images"])
