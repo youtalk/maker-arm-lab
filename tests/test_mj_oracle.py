@@ -9,6 +9,8 @@ same code path six times over and is left to ``scripts/mj_generate_batch.py --pr
 
 import random
 
+import torch
+
 from maker_arm_lab.core import oracle
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj.env import MjLegoSortEnv
@@ -51,6 +53,61 @@ def test_oracle_sorts_two_bricks_on_mujoco():
     assert all(0.0055 <= p["stall"] <= 0.0085 for p in pinches), pinches
     assert all(min(p["left"], p["right"]) >= 4.0 for p in pinches), pinches
     assert steps < 2000, steps  # two bricks in well under half the six-brick budget
+
+
+def _run(rig, steps):
+    trace = []
+    for _ in range(steps):
+        rig.step()
+        goal = rig.goals[0]
+        trace.append((None if goal is None else goal.phase.name, rig.q_cmd[0].clone()))
+    return trace
+
+
+def test_step_is_actions_then_env_step_then_observe():
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(1, draw, num_bricks=2, cameras=False)
+    env.reset(seed=11)
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
+    whole = _run(rig, 300)
+    env.close()
+    env = MjLegoSortEnv(1, draw, num_bricks=2, cameras=False)
+    env.reset(seed=11)
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
+    split = []
+    for _ in range(300):
+        action = rig.actions()
+        _, _, terminated, truncated, _ = env.step(action)
+        out = rig.observe((terminated | truncated).cpu())
+        assert set(out) == {"dones", "abandoned"}
+        goal = rig.goals[0]
+        split.append((None if goal is None else goal.phase.name, rig.q_cmd[0].clone()))
+    env.close()
+    assert [p for p, _ in whole] == [p for p, _ in split]
+    assert all(torch.equal(a, b) for (_, a), (_, b) in zip(whole, split))
+
+
+def test_an_idle_env_coasts_and_stashes_minus_one():
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(2, draw, num_bricks=2, cameras=False)
+    env.reset(seed=11)
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
+    rig.rearm([0], idle=True)
+    assert rig.idle == [True, False] and rig.goals[0] is None and rig.oracles[0] is None
+    q0 = rig.q_arm(0).clone()
+    for _ in range(100):
+        action = rig.actions()
+        assert float(action[0, 6]) == 1.0
+        assert torch.allclose(action[0, :6].double(), q0, atol=1e-6)
+        assert int(env.oracle_cycle_phase[0]) == -1 and int(env.oracle_cycle_brick[0]) == -1
+        _, _, terminated, truncated, _ = env.step(action)
+        rig.observe((terminated | truncated).cpu())
+    assert rig.goals[0] is None and not bool(rig.abandoned[0])
+    assert rig.goals[1] is not None  # env 1 ran its oracle meanwhile
+    assert torch.allclose(rig.q_arm(0), q0, atol=0.02)
+    env.close()
 
 
 def test_rearm_reads_each_envs_own_bin_layout():
