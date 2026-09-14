@@ -20,6 +20,8 @@ unchanged on either backend:
 MuJoCo-only members (the Isaac env has none of these; core/ reads them through getattr):
     env.bin_layouts (one core.layout.BinLayout per env), env.episode_draws, env.run_draw
     env.context_mode, env.obs_buf["context"], env.context_camera, env.context_privileged
+    env.oracle_actor (N,) int16, set by the DAgger loop: 0 records nothing, k records the
+        frame as takeover k
 
 Semantics carried over from ``ManagerBasedRLEnv`` because the rig depends on them: a done
 env is auto-reset INSIDE ``step`` (its state tensors already show the next episode when
@@ -334,10 +336,16 @@ class MjLegoSortEnv:
         )
         h = self.handles
         robot = self.scene["robot"]
+        actor = getattr(self, "oracle_actor", None)
+        recorded = [False] * self.num_envs
         if self.recorder is not None:
             phase = getattr(self, "oracle_cycle_phase", None)
             brick = getattr(self, "oracle_cycle_brick", None)
             for i in range(self.num_envs):
+                who = 1 if actor is None else int(actor[i])
+                if who == 0:
+                    continue  # a policy-driven DAgger frame: not recorded (design 6.4)
+                recorded[i] = True
                 self.recorder.pre_step(
                     i,
                     robot._joint_pos[i],
@@ -348,6 +356,7 @@ class MjLegoSortEnv:
                     self._overhead[i] if self.cameras else None,
                     context_camera=self.context_camera[i],
                     context_privileged=self.context_privileged[i],
+                    actor=who,
                 )
         step_limit = GRIPPER_RATE_M_PER_S / CONTROL_HZ
         self._grip_ctrl += np.clip(targets[:, 6:] - self._grip_ctrl, -step_limit, step_limit)
@@ -365,7 +374,8 @@ class MjLegoSortEnv:
         if self.recorder is not None:
             clamped = self._arm_term.clamped.numpy()
             for i in range(self.num_envs):
-                self.recorder.post_step(i, targets[i], bool(clamped[i]))
+                if recorded[i]:
+                    self.recorder.post_step(i, targets[i], bool(clamped[i]))
         done = (terminated | truncated).nonzero().flatten().tolist()
         for i in done:
             if self.recorder is not None:

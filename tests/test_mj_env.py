@@ -384,3 +384,64 @@ def test_the_privileged_target_one_hot_follows_the_held_brick_not_the_nearest_on
     assert priv[0, 54 + held_brick] == 1.0
     assert priv[0, 54 + other] == 0.0
     env.close()
+
+
+def test_only_nonzero_actors_are_recorded_and_a_failed_takeover_is_negated(tmp_path):
+    env = MjLegoSortEnv(
+        3,
+        _draw(),
+        num_bricks=2,
+        cameras=False,
+        episode_length_s=0.5,
+        export_dir=tmp_path,
+        shard_name="actors",
+        export_all=True,
+    )
+    env.reset(seed=3)
+    env.oracle_actor = torch.tensor([0, 2, 1], dtype=torch.int16)
+    for _ in range(5):
+        env.step(_hold_action(env))
+    env.recorder.negate_actor(1, 2)
+    # negate_actor must flip only frames matching the given ordinal, not every buffered frame.
+    # Env 0 never buffers a real frame in this test (its actor is 0 throughout), so its slot
+    # is free to hold a synthetic mixed-ordinal buffer for this one check.
+    env.recorder._scalars[0]["actor"] = [np.int16(v) for v in (1, 2, 2, 3)]
+    env.recorder.negate_actor(0, 2)
+    assert [int(v) for v in env.recorder._scalars[0]["actor"]] == [1, -2, -2, 3]
+    env.oracle_actor = torch.tensor([0, 0, 1], dtype=torch.int16)
+    for _ in range(9):
+        env.step(_hold_action(env))
+    # env 1 is actor-0 (skipped) for this whole second block: its buffered pre_step and
+    # post_step columns must stay exactly as long as they were after the first block, or a
+    # post_step write that ignores the skip would silently misalign every later column.
+    buffered = env.recorder._scalars[1]
+    assert len(buffered["actions"]) == len(buffered["joint_targets"]) == 5
+    env.step(_hold_action(env))  # the 15th step truncates every env
+    assert env.recorder.exported_episode_count == 2
+    env.close()
+    with h5py.File(tmp_path / "actors.hdf5", "r") as f:
+        demos = {int(g.attrs["num_samples"]): g for g in f["data"].values()}
+        assert set(demos) == {5, 15}
+        assert demos[5]["obs/actor"][:].tolist() == [-2] * 5
+        assert demos[15]["obs/actor"][:].tolist() == [1] * 15
+        assert demos[5]["obs/actor"].dtype == np.int16
+        assert demos[5]["joint_targets"].shape == (5, 8)
+
+
+def test_without_an_actor_tensor_every_frame_is_recorded_as_the_oracle(tmp_path):
+    env = MjLegoSortEnv(
+        1,
+        _draw(),
+        num_bricks=2,
+        cameras=False,
+        episode_length_s=0.5,
+        export_dir=tmp_path,
+        shard_name="plain",
+        export_all=True,
+    )
+    env.reset(seed=3)
+    for _ in range(15):
+        env.step(_hold_action(env))
+    env.close()
+    with h5py.File(tmp_path / "plain.hdf5", "r") as f:
+        assert f["data/demo_0/obs/actor"][:].tolist() == [1] * 15
