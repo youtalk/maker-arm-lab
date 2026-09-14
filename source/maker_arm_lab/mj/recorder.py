@@ -11,7 +11,7 @@ consumers and are unchanged):
     obs/images/wrist_rgb, obs/images/overhead_rgb (T,224,224,3) u8   pre-step frames
     obs/cycle_phase (T,) i8, obs/cycle_brick (T,) i8                  the rig's stash
     obs/clamped (T,) bool        the Rust clamp changed this step's target
-    obs/context_camera (T,6) f32, obs/context_privileged (T,42) f32   the two context
+    obs/context_camera (T,6) f32, obs/context_privileged (T,66) f32   the two context
         channels (MS4 levers 1 and 3), always recorded; each carries a JSON `names` attr
     initial_state/articulation/robot/{joint_position,joint_velocity,root_pose,root_velocity}
     initial_state/rigid_object/brick_N/{root_pose,root_velocity}     one leading axis of 1

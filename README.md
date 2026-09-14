@@ -135,7 +135,7 @@ Dataset schema, both sides (spec section 4.2; `docs/ms1-maker-arm-sim.md`):
 | `observation.state` | (7,) | 6 URDF joint angles [rad] + gripper opening fraction (0 closed, 1 open) |
 | `action` | (7,) | 6 URDF joint targets [rad] + binary gripper (`>= 0` open, `< 0` close) |
 | `observation.images.wrist`, `observation.images.overhead` | 224x224x3 | uint8 RGB |
-| `observation.environment_state` | (6,) or (42,) | camera pose x, y, z, roll, pitch, yaw in the base frame, or six brick poses, only when converted with `--context` |
+| `observation.environment_state` | (6,) or (66,) | camera pose x, y, z, roll, pitch, yaw, or per brick position, rotation, target, and stowed mask, only with `--context` |
 
 Under `--action_space delta_prev` the six joint columns of `action` are this frame's post-clamp target minus the previous frame's target, and the measured joints on the first frame of a sub-episode. The converter records the choice in `meta/action_space.json`. At inference the eval client sends its previous clamped command as the `anchor` array and the policy server adds it back, so the wire and the real arm still carry absolute joint targets. The c1 definition (`delta`, target minus the measured joints of the same frame) is refused by both sides.
 

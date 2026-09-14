@@ -183,9 +183,9 @@ def test_shard_layout_matches_the_converter(tmp_path):
         assert g["initial_state/rigid_object/brick_1/root_pose"].shape == (1, 7)
         assert g["initial_state/bin_layout"].shape == (1, 5)
         assert g["obs/context_camera"].shape == (6, 6)
-        assert g["obs/context_privileged"].shape == (6, 42)
+        assert g["obs/context_privileged"].shape == (6, 66)
         assert json.loads(g["obs/context_camera"].attrs["names"])[0] == "overhead_cam_x"
-        assert json.loads(g["obs/context_privileged"].attrs["names"])[-1] == "brick_5_qz"
+        assert json.loads(g["obs/context_privileged"].attrs["names"])[-1] == "stowed_5"
         assert "inflight" not in f
         # The action's arm columns are the pre-clamp command; joint_targets the applied ones.
         assert np.allclose(g["actions"][0, :6], action[0, :6].numpy(), atol=1e-6)
@@ -295,22 +295,43 @@ def test_context_channels_are_always_filled_and_the_served_one_follows_the_mode(
     env.reset(seed=4)
     assert env.context_mode == "camera"
     assert env.obs_buf["context"].shape == (2, 6) and env.obs_buf["context"].dtype == torch.float32
-    assert env.context_camera.shape == (2, 6) and env.context_privileged.shape == (2, 42)
+    assert env.context_camera.shape == (2, 6) and env.context_privileged.shape == (2, 66)
     assert not np.allclose(env.context_camera[0], env.context_camera[1])
-    # Bricks 0 and 1 fill the first 14 values; the missing bricks 2..5 are zeros.
-    assert np.abs(env.context_privileged[:, 14:]).max() == 0.0
+    # Bricks 0 and 1 fill the first 18 pose values; bricks 2..5 are zeros, and so are their
+    # target and stowed columns.
+    priv = env.context_privileged
+    assert np.abs(priv[:, 18:54]).max() == 0.0
+    assert np.abs(priv[:, 56:60]).max() == 0.0 and np.abs(priv[:, 62:66]).max() == 0.0
     pos0 = env.scene["brick_0"].data.root_pos_w[0].numpy()
-    assert np.allclose(env.context_privileged[0, :3], pos0, atol=1e-6)
+    assert np.allclose(priv[0, :3], pos0, atol=1e-6)
+    # A brick spawned flat at yaw psi has rotation columns (cos, sin, 0, -sin, cos, 0).
+    w, _, _, z = env.scene["brick_0"].data.root_quat_w[0].tolist()
+    psi = 2.0 * np.arctan2(z, w)
+    assert np.allclose(
+        priv[0, 3:9], [np.cos(psi), np.sin(psi), 0.0, -np.sin(psi), np.cos(psi), 0.0], atol=2e-3
+    )
+    # Nothing is held after a reset: the target is the nearest brick to the tool, one-hot.
+    assert priv[:, 54:56].sum(axis=1).tolist() == [1.0, 1.0]
+    tool = env.scene["robot"].data.body_pos_w[0, env.handles.tool_body, :2]
+    d = [(env.scene[f"brick_{b}"].data.root_pos_w[0, :2] - tool).norm().item() for b in (0, 1)]
+    assert int(priv[0, 54:56].argmax()) == int(np.argmin(d))
+    assert priv[:, 60:62].tolist() == [[0.0, 0.0], [0.0, 0.0]]
     env.step(_hold_action(env))
     assert np.allclose(env.obs_buf["context"].numpy(), env.context_camera)
     env.close()
     plain = MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, context="privileged")
     plain.reset(seed=4)
-    assert plain.obs_buf["context"].shape == (1, 42)
+    assert plain.obs_buf["context"].shape == (1, 66)
+    _teleport_all_bricks_into_bins(plain, 0)
+    assert plain.context_privileged[0, 60:62].tolist() == [1.0, 1.0]  # stowed mask
+    assert np.abs(plain.context_privileged[0, 54:60]).max() == 0.0  # no target left
     none = MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False)
     none.reset(seed=4)
     assert none.context_mode == "none" and none.obs_buf["context"].shape == (1, 0)
-    assert len(mj_env.CONTEXT_CAMERA_NAMES) == 6 and len(mj_env.CONTEXT_PRIVILEGED_NAMES) == 42
+    assert len(mj_env.CONTEXT_CAMERA_NAMES) == 6 and len(mj_env.CONTEXT_PRIVILEGED_NAMES) == 66
+    assert mj_env.CONTEXT_PRIVILEGED_NAMES[3] == "brick_0_r00"
+    assert mj_env.CONTEXT_PRIVILEGED_NAMES[54] == "target_0"
+    assert mj_env.CONTEXT_PRIVILEGED_NAMES[65] == "stowed_5"
     plain.close()
     none.close()
     with pytest.raises(ValueError, match="context"):
