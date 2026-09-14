@@ -324,6 +324,23 @@ def sample_episode_draw(rng: random.Random, noise: OracleNoise) -> EpisodeDraw:
     )
 
 
+def nominal_draw() -> EpisodeDraw:
+    """The draw a DAgger takeover plans with (MS4 c2 design 6.2): the middle hover height,
+    no offsets, no noise, no hover jitter, no induction, and the nearest-first pick order the
+    corpus recipe uses."""
+    return EpisodeDraw(
+        hover_height=0.12,
+        lateral_dx=0.0,
+        lateral_dy=0.0,
+        yaw_offset=0.0,
+        gain_scale=1.0,
+        action_noise_std=0.0,
+        via_dx=0.0,
+        via_dy=0.0,
+        nearest_first_pick_order=True,
+    )
+
+
 @dataclass(frozen=True)
 class FailureInduction:
     """Deliberate first-attempt grasp failures, recovered by the existing retry.
@@ -599,6 +616,9 @@ class EnvOracle:
         self.retries_used = 0
         self._brick_start: torch.Tensor | None = None
         self._sorted: set[int] = set()
+        # Set by `resume()` when it enters LIFT directly; consumed by `next_goal()`'s LIFT
+        # branch on the very next call, which is that same entry (see its comment).
+        self._resumed_lift = False
         self.induction = induction
         self.rng = rng
         self._induced_style: str | None = None
@@ -664,6 +684,32 @@ class EnvOracle:
         ):
             return self.induction.noise_boost
         return 1.0
+
+    @property
+    def sorted_bricks(self) -> frozenset[int]:
+        return frozenset(self._sorted)
+
+    def resume(self, scene: SceneSnapshot, held: int) -> None:
+        """Enter the machine mid-episode from a state a policy reached (MS4 c2 design 6.2).
+
+        Two rows. A pinched brick resumes at LIFT, with the brick start at its live pose so
+        the rise gate measures from now; LIFT's own pinch and rise gate then routes a bad
+        pinch into the normal REOPEN retry. Anything else resumes at HOVER with no target,
+        and HOVER's entry picks the nearest candidate, or answers DONE or ABANDON.
+        """
+        self._sorted = self._stowed(scene)
+        self.retries_used = 0
+        self._induced_style = None
+        if held >= 0:
+            self.target_brick = held
+            self._brick_start = scene.brick_pos[held].clone()
+            self.pick_order.append(held)
+            self.phase = Phase.LIFT
+            # Flags this one LIFT entry for next_goal()'s live-height clamp; see its comment.
+            self._resumed_lift = True
+        else:
+            self.target_brick = None
+            self.phase = Phase.HOVER
 
     # -- brick bookkeeping ---------------------------------------------------
 
@@ -882,7 +928,27 @@ class EnvOracle:
             )
         if self.phase == Phase.LIFT:
             target = scene.pick_point.clone()
-            target[2] += LIFT_HEIGHT
+            if self._resumed_lift:
+                # `resume` (MS4 c2 design 6.2) can enter LIFT directly, with the brick
+                # already carried PARTWAY up by the policy it took over from -- and only
+                # partway: the runtime declines a takeover whose brick is already above
+                # LIFT_HEIGHT (ruling P32, `OracleRig.resume`), because from there this
+                # clamp would command a DESCENT with the jaws closed, fail the rise gate
+                # below and drop the brick into the corpus as an expert demonstration. So
+                # this branch only ever lowers a target that is still under the clearance.
+                # The plain "live height plus LIFT_HEIGHT" rule below would then ask
+                # for a second rise stacked on top of that already-raised height, past the
+                # solver's reach. Only THIS entry into LIFT -- the one `resume()` just
+                # requested -- gets the clamp, read as an absolute clearance above the desk
+                # (layout.py: "desk top surface at z = 0") instead of a further rise. The
+                # normal CLOSE->LIFT transition is untouched: the tool is at the brick's
+                # near-zero resting height there, by construction, so this branch would
+                # resolve to the same number anyway, and a repository-wide switch to
+                # "clearance above the desk" as LIFT's rule belongs to its own change.
+                target[2] = min(target[2] + LIFT_HEIGHT, LIFT_HEIGHT)
+                self._resumed_lift = False  # one-shot: consumed at this LIFT entry
+            else:
+                target[2] += LIFT_HEIGHT
             return self._goal(
                 Phase.LIFT, target, None, 0.0, -1.0, 0.002, 0, DEFAULT_MAX_STEPS, hold=30
             )

@@ -128,6 +128,14 @@ Add `--resume` to continue an interrupted campaign; it refuses rather than dupli
 
 MS4 adds a set of corpus levers. They are MuJoCo-only. `--episode_draws` redraws the bins, the lights and the cameras at every episode reset instead of once per run. `--frame_jitter` resamples a small overhead-camera jitter on every rendered frame. Both are flags of `mj_generate_batch.py` and of `generate_dataset.py`, and the Isaac batch script accepts and ignores them. `--spatial_scale` multiplies the camera-pose and `bin_x` jitter of the run draw and of every per-episode draw, so `--spatial_scale 3.0` on `mj_eval_policy.py` or on `run_gate_eval.py` scores a policy well outside the distribution it trained on. `--context {none,camera,privileged}` on the same two picks which extra channel the env serves to the policy, the overhead camera pose or the six brick poses, and it has to match the checkpoint. On the conversion side `--context {camera,privileged}` writes that channel into the dataset, `--no_images` drops both image features for the privileged-state ceiling, and `--action_space {absolute,delta_prev}` chooses what the six joint columns of `action` hold. The trainer takes the same choice as `ACTION_SPACE`, refuses a dataset that disagrees with it, and records it next to the checkpoints. Because one MS4 campaign is converted three times over, `generate_dataset.py --keep_shards` leaves every converted shard on disk instead of deleting it, so the later conversions have something to read.
 
+MS4 round c2 adds DAgger with the oracle as expert. `scripts/mj_dagger_batch.py` rolls a policy out and lets the oracle rig take an env over on a trigger. Two triggers watch the jaws: no close for 400 steps, or a close far from every brick. Two more watch the grasp: closed jaws with no pinch, or the grasp center outside the workspace. A fifth fires at random, at a mean interval of 300 steps that doubles each round. A takeover runs one brick cycle from the state the policy reached, then hands the env back. The recorder keeps only takeover frames. `obs/actor` holds the takeover ordinal for each kept frame. When a cycle does not stow its brick, its ordinal goes negative. `convert_to_lerobot.py --dagger --split_cycles` keeps the positive-actor cycles. `lerobot_stack/probe_held.py` is the realizability probe that gates round 1. The ceiling lanes of c2 record with `generate_dataset.py --no_cameras --context privileged --no_images`.
+
+```bash
+uv run python scripts/mj_dagger_batch.py --num_envs 12 --run_seed 1 --layout_seed 2 \
+    --permutation 0,1,2,3 --episode_draws --frame_jitter --context camera \
+    --server tcp://127.0.0.1:5700 --round 1 --out_dir /tmp/dag --shard_name proc_0
+```
+
 Dataset schema, both sides (spec section 4.2; `docs/ms1-maker-arm-sim.md`):
 
 | key | shape | content |
@@ -135,7 +143,7 @@ Dataset schema, both sides (spec section 4.2; `docs/ms1-maker-arm-sim.md`):
 | `observation.state` | (7,) | 6 URDF joint angles [rad] + gripper opening fraction (0 closed, 1 open) |
 | `action` | (7,) | 6 URDF joint targets [rad] + binary gripper (`>= 0` open, `< 0` close) |
 | `observation.images.wrist`, `observation.images.overhead` | 224x224x3 | uint8 RGB |
-| `observation.environment_state` | (6,) or (42,) | camera pose x, y, z, roll, pitch, yaw in the base frame, or six brick poses, only when converted with `--context` |
+| `observation.environment_state` | (6,) or (66,) | camera pose x, y, z, roll, pitch, yaw, or per brick position, rotation, target, and stowed mask, only with `--context` |
 
 Under `--action_space delta_prev` the six joint columns of `action` are this frame's post-clamp target minus the previous frame's target, and the measured joints on the first frame of a sub-episode. The converter records the choice in `meta/action_space.json`. At inference the eval client sends its previous clamped command as the `anchor` array and the policy server adds it back, so the wire and the real arm still carry absolute joint targets. The c1 definition (`delta`, target minus the measured joints of the same frame) is refused by both sides.
 

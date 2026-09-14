@@ -68,9 +68,11 @@ import torch
 from maker_arm_lab.core import layout, oracle, trajectory
 from maker_arm_lab.core.action_scale import IK_SCALE
 from maker_arm_lab.core.checker import (
+    HELD_MIN_FORCE,
     PINCH_MAX_ASYMMETRY,
     PINCH_MIN_FORCE,
     PINCH_MIN_STALL,
+    held_brick_from_forces,
 )
 from maker_arm_lab.core.global_ik import (
     ARM_DOF,
@@ -233,6 +235,11 @@ ROT_CONVERGED = 0.02
 # remains inherited from OpenYAM. Read core.checker for which is which.
 LIFT_MIN_RISE = 0.05  # m
 LIFT_MAX_XY_ERROR = 0.03  # m
+
+# `resume` calls a brick pinched at core.checker.HELD_MIN_FORCE (imported above), the
+# attribution threshold the eval loop and the privileged channel read it at. It is under
+# PINCH_MIN_FORCE on purpose: a takeover on a weak pinch still enters LIFT, whose gate then
+# decides.
 
 # Idle action for an env whose oracle has nothing left to do this step (DONE or ABANDON):
 # jaws open, arm holding its last commanded joint target. The arm channel is NOT zeroed --
@@ -478,6 +485,16 @@ class OracleRig:
         self._outcome: list[dict | None] = [None] * self.num_envs
         self.abandoned = torch.zeros(self.num_envs, dtype=torch.bool)
         self.stats = [self._fresh_stats() for _ in range(self.num_envs)]
+        # MS4 c2 design 6.1: an idle env is under another actor (the DAgger policy). Its row in
+        # `actions()` is the coast row, its stash reads -1, and `observe()` leaves it alone.
+        self.idle = [False] * self.num_envs
+        # MS4 c2 design 6.2: a `resume()` takeover runs exactly one brick cycle. `single_cycle`
+        # marks an env mid-takeover so `_advance_phases`/`_enter_phase` know to hand it back
+        # at RETREAT instead of entering the next HOVER; `takeover_result` is None while that
+        # takeover runs, then whether the cycle's brick reached its bin.
+        self.single_cycle = [False] * self.num_envs
+        self.takeover_result: list[bool | None] = [None] * self.num_envs
+        self._planned: list[torch.Tensor] = []
         self.rearm(list(range(self.num_envs)))
 
     @staticmethod
@@ -531,20 +548,21 @@ class OracleRig:
 
     # -- control loop ----------------------------------------------------
 
-    def step(self) -> dict:
-        """One control step for the whole batch. Returns ``{"dones", "abandoned"}``."""
+    def actions(self) -> torch.Tensor:
+        """The batch action for this control step. Refreshes the cycle stash and the stowed
+        sample, so it must run once per step, before ``env.step``."""
         action = torch.zeros(self.num_envs, 7, device=self.device)
-        planned: list[torch.Tensor] = []
+        self._planned = []
         for i in range(self.num_envs):
             goal = self.goals[i]
             if goal is None:
-                # DONE/ABANDON envs coast: jaws open, arm holding its last joint target.
+                # DONE/ABANDON/idle envs coast: jaws open, arm holding its last joint target.
                 action[i, 6] = GRIPPER_OPEN_ACTION
             else:
                 action[i, 6] = goal.gripper
                 self._advance_plan(i)
             target = self.q_cmd[i]
-            planned.append(target)
+            self._planned.append(target)
             command = self.trims[i].command(target) + self._command_noise(i)
             # NOT clamped to the joint limits here, deliberately. The action term clamps the
             # target through maker_arm_rs and RECORDS that it did
@@ -563,6 +581,21 @@ class OracleRig:
         # describes the NEXT episode's scatter. Device-side and never synced here; the one
         # host read is in episode_stats.
         self._stowed_sample = per_brick_stowed(self.env)
+        return action
+
+    def observe(self, dones: torch.Tensor) -> dict:
+        """Read the env after ``env.step``: trims, the NaN guard, phase transitions, the
+        watchdog, the outcome freeze. ``dones`` is ``(terminated | truncated).cpu()``."""
+        self._update_trims(self._planned, dones)
+        self._abandon_nan_envs(dones)
+        self._advance_phases(dones)
+        self._run_watchdog(dones)
+        self._freeze_outcomes(dones)
+        return {"dones": dones, "abandoned": self.abandoned.clone()}
+
+    def step(self) -> dict:
+        """One control step for the whole batch. Returns ``{"dones", "abandoned"}``."""
+        action = self.actions()
         _, _, terminated, truncated, _ = self.env.step(action)
         # Isaac Lab's ManagerBasedRLEnv.step() resets terminated|truncated envs to their NEXT
         # episode's initial state before returning, so for those envs every read below
@@ -571,13 +604,7 @@ class OracleRig:
         # and _advance_phases/_run_watchdog, precisely so all three can skip those envs for
         # this step; their stats/goal freeze at the completed episode's values and stay
         # readable via episode_stats() until the caller calls rearm().
-        dones = (terminated | truncated).cpu()
-        self._update_trims(planned, dones)
-        self._abandon_nan_envs(dones)
-        self._advance_phases(dones)
-        self._run_watchdog(dones)
-        self._freeze_outcomes(dones)
-        return {"dones": dones, "abandoned": self.abandoned.clone()}
+        return self.observe((terminated | truncated).cpu())
 
     def _freeze_outcomes(self, dones: torch.Tensor) -> None:
         """Snapshot the outcome of every env that just finished, before the env moves on.
@@ -652,7 +679,7 @@ class OracleRig:
         measured = self.robot.data.joint_pos[:, self.arm_ids].double().cpu()
         saturated = self._joint_saturated()
         for i in range(self.num_envs):
-            if dones[i]:
+            if dones[i] or self.idle[i]:
                 continue  # post-auto-reset state this step; rearm() resets the trim
             self.trims[i].update(planned[i], measured[i], saturated=saturated[i])
 
@@ -682,14 +709,14 @@ class OracleRig:
             )
         for i in range(self.num_envs):
             goal_i, orc_i = self.goals[i], self.oracles[i]
-            if goal_i is not None:
-                phase_int = PHASE_TO_INT[goal_i.phase.name]
-            elif orc_i is not None:
-                phase_int = PHASE_TO_INT[orc_i.phase.name]  # DONE/ABANDON coast
-            else:
+            if self.idle[i] or orc_i is None:
                 phase_int = -1
+            elif goal_i is not None:
+                phase_int = PHASE_TO_INT[goal_i.phase.name]
+            else:
+                phase_int = PHASE_TO_INT[orc_i.phase.name]  # DONE/ABANDON coast
             self.env.oracle_cycle_phase[i] = phase_int
-            brick_i = orc_i.target_brick if orc_i is not None else None
+            brick_i = orc_i.target_brick if orc_i is not None and not self.idle[i] else None
             self.env.oracle_cycle_brick[i] = brick_i if brick_i is not None else -1
 
     def _advance_phases(self, dones: torch.Tensor) -> None:
@@ -711,7 +738,13 @@ class OracleRig:
                 self.stats[i]["sort_attempts"] += 1
             orc = self.oracles[i]
             scene = self.snapshot(i)
+            brick = orc.target_brick
             orc.report(result, scene)
+            if self.single_cycle[i] and goal.phase == oracle.Phase.RETREAT:
+                # MS4 c2 design 6.2: a takeover is one brick cycle. RETREAT's report marked
+                # the brick sorted if it arrived; hand the env back instead of the next HOVER.
+                self._go_idle(i, brick in orc.sorted_bricks)
+                continue
             self._enter_phase(i, scene, ending_phase=goal.phase)
 
     def _phase_result(self, i: int, goal: oracle.Goal) -> oracle.PhaseResult | None:
@@ -804,6 +837,11 @@ class OracleRig:
         # REOPEN/RELEASE gap it trades in for it.
         self.watchdog_strikes[i] = 0
         if goal is None:
+            if self.single_cycle[i]:
+                # A takeover that ends in DONE or ABANDON hands the env back; the cycle did
+                # not stow its brick, and the DAgger loop drops its frames.
+                self._go_idle(i, False)
+                return
             if orc.phase == oracle.Phase.ABANDON:
                 self.abandoned[i] = True
                 if self.stats[i]["abandon"] is None:
@@ -1218,17 +1256,27 @@ class OracleRig:
 
     # -- episode lifecycle -------------------------------------------------
 
-    def rearm(self, env_ids: list[int]) -> None:
-        """Re-seed the envs in ``env_ids`` after their caller has reset them."""
+    def rearm(self, env_ids: list[int], idle: bool = False) -> None:
+        """Re-seed the envs in ``env_ids`` after their caller has reset them.
+
+        ``idle=True`` leaves the env under another actor (the DAgger policy): no oracle, no
+        goal, and ``actions()``/``_stash_cycle_state`` treat it as coasting.
+        """
         for i in env_ids:
-            draw = oracle.sample_episode_draw(self.rng, self.noise)
-            # MuJoCo with per-episode draws moves the bins at every reset: the oracle for env
-            # i must plan for env i's bins. Every other env carries the rig's one layout.
-            layouts = getattr(self.env, "bin_layouts", None)
-            bl = self.bl if layouts is None else layouts[i]
-            self.oracles[i] = oracle.EnvOracle(
-                bl, self.num_bricks, draw, induction=self.induction, rng=self.rng
-            )
+            self.idle[i] = idle
+            if idle:
+                self.oracles[i] = None
+                self.goals[i] = None
+            else:
+                draw = oracle.sample_episode_draw(self.rng, self.noise)
+                # MuJoCo with per-episode draws moves the bins at every reset: the oracle for
+                # env i must plan for env i's bins. Every other env carries the rig's one
+                # layout.
+                layouts = getattr(self.env, "bin_layouts", None)
+                bl = self.bl if layouts is None else layouts[i]
+                self.oracles[i] = oracle.EnvOracle(
+                    bl, self.num_bricks, draw, induction=self.induction, rng=self.rng
+                )
             self.commanded_yaw[i] = self.jaw_yaw(i)
             self.commanded_tilt[i] = self.tool_tilt(i)
             self.pick_offset[i] = torch.tensor(PICK_OFFSET_MEASURED, device=self.device)
@@ -1251,7 +1299,79 @@ class OracleRig:
             self.abandoned[i] = False
             self._outcome[i] = None
             self.stats[i] = self._fresh_stats()
-            self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE
+            self.single_cycle[i] = False
+            self.takeover_result[i] = None
+            if not idle:
+                self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE
+
+    def resume(self, i: int) -> bool:
+        """Take idle env ``i`` over from the policy for one brick cycle (MS4 c2 design 6.2).
+
+        Returns False, and leaves the env idle, when the oracle answers DONE or ABANDON at
+        entry or the first leg cannot be planned.
+        """
+        if not self.idle[i]:
+            raise RuntimeError(f"env {i} is not idle")
+        layouts = getattr(self.env, "bin_layouts", None)
+        bl = self.bl if layouts is None else layouts[i]
+        orc = oracle.EnvOracle(bl, self.num_bricks, oracle.nominal_draw())
+        self.oracles[i] = orc
+        self.commanded_yaw[i] = self.jaw_yaw(i)
+        self.commanded_tilt[i] = self.tool_tilt(i)
+        self.pick_offset[i] = torch.tensor(PICK_OFFSET_MEASURED, device=self.device)
+        self.q_cmd[i] = self.q_arm(i)
+        self.trims[i].reset()
+        self.plans[i] = []
+        self.walk_steps[i] = 1
+        self.walk_step[i] = 0
+        self.previous_pick_point[i] = None
+        self.steps_in_phase[i] = 0
+        self.quiet[i] = 0
+        self.holding[i] = False
+        self.watchdog_strikes[i] = 0
+        self.unplanned[i] = False
+        self.abandoned[i] = False
+        self.stats[i] = self._fresh_stats()
+        left = self.left_brick.data.force_matrix_w[i, 0].norm(dim=-1)
+        right = self.right_brick.data.force_matrix_w[i, 0].norm(dim=-1)
+        held = int(held_brick_from_forces(left[None], right[None], HELD_MIN_FORCE)[0])
+        scene = self.snapshot(i)
+        if held >= 0 and float(scene.brick_pos[held, 2]) > oracle.LIFT_HEIGHT - LIFT_MIN_RISE:
+            # RULING P32, tightened on re-review: decline a carry the clamped LIFT target
+            # cannot clear LIFT_MIN_RISE from. A takeover may only enter LIFT from a carry low
+            # enough that the clamped target still clears the rise gate -- the LIFT entry this
+            # resume would take reads its target as an absolute clearance of LIFT_HEIGHT above
+            # the desk, so a carry any higher plans a walk DOWN with the jaws closed. Above
+            # LIFT_HEIGHT that walk is a negative rise outright; in the band between
+            # LIFT_HEIGHT - LIFT_MIN_RISE and LIFT_HEIGHT it still clamps to LIFT_HEIGHT, so
+            # the commanded rise from the live `brick_start` lands under LIFT_MIN_RISE and
+            # `_lift_result` returns `lifted=False` with `pinch_ok=True` -- core.oracle routes
+            # that to REOPEN, whose jaws open and drop a brick that was genuinely held. Either
+            # way the normal retry usually re-picks it off the desk, so the cycle scores as a
+            # stowed takeover and every one of its frames is KEPT: an expert demonstration of
+            # opening the jaws on a held brick, which is far worse than a missed takeover. It
+            # is learned rather than crashed on. Declining costs a takeover and nothing else --
+            # the policy keeps the env and a later trigger catches it once the brick is back
+            # down. Design 6.2's own escape hatch: return False, leave the env idle.
+            self._go_idle(i, None)
+            return False
+        orc.resume(scene, held)
+        self.brick_start[i] = self._brick_pos(i, held) if held >= 0 else None
+        self.idle[i] = False
+        self.single_cycle[i] = True
+        self.takeover_result[i] = None
+        self._enter_phase(i, scene)
+        if self.goals[i] is None or self.unplanned[i]:
+            self._go_idle(i, None)
+            return False
+        return True
+
+    def _go_idle(self, i: int, stowed: bool | None) -> None:
+        """End env ``i``'s takeover: the policy has it again."""
+        self.idle[i] = True
+        self.single_cycle[i] = False
+        self.goals[i] = None
+        self.takeover_result[i] = stowed
 
     def episode_stats(self, env_id: int) -> dict:
         """Everything a metadata sidecar needs about the finished episode.
@@ -1291,19 +1411,21 @@ class OracleRig:
         outcome = self._outcome[env_id]
         if outcome is None:  # still running: the live values are this episode's own
             outcome = self._episode_outcome(env_id)
-        return {
-            **self.stats[env_id],
-            **outcome,
-            "induced_offset": orc.induced_offset,
-            "induced_noise": orc.induced_noise,
-            "hover_jitters": orc.hover_jitters,
-            # The brick indices this episode targeted, in order (retries are not repeated
-            # entries). The acceptance discriminator for --randomize_pick_order: run_meta
-            # can only say the flag was set, while a campaign whose episodes all read
-            # [0, 1, 2, 3, 4, 5] here shipped the fixed R,B,Y,G,R,B schedule regardless.
-            # Also readable with the flag off, as the positive record that it WAS fixed.
-            "pick_order": list(orc.pick_order),
-        }
+        # The brick indices this episode targeted, in order (retries are not repeated
+        # entries). The acceptance discriminator for --randomize_pick_order: run_meta can
+        # only say the flag was set, while a campaign whose episodes all read
+        # [0, 1, 2, 3, 4, 5] here shipped the fixed R,B,Y,G,R,B schedule regardless. Also
+        # readable with the flag off, as the positive record that it WAS fixed. An idle env
+        # has no oracle, so it reads zeros and an empty pick order.
+        induced = {"induced_offset": 0, "induced_noise": 0, "hover_jitters": 0, "pick_order": []}
+        if orc is not None:
+            induced = {
+                "induced_offset": orc.induced_offset,
+                "induced_noise": orc.induced_noise,
+                "hover_jitters": orc.hover_jitters,
+                "pick_order": list(orc.pick_order),
+            }
+        return {**self.stats[env_id], **outcome, **induced}
 
     def _succeeded(self, env_id: int) -> bool | None:
         """The env's own ``success`` termination for the step that ended the episode.

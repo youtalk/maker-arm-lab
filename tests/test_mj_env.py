@@ -15,9 +15,18 @@ import torch
 
 from maker_arm_lab.core import layout
 from maker_arm_lab.core.layout import sample_run_draw
+from maker_arm_lab.core.quat import quat_apply
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.robots import frames
+
+
+def _pick_point_xy(env, i: int) -> torch.Tensor:
+    """The tool's PICK POINT in the desk plane, as ``OracleRig.pick_point`` builds it."""
+    h = env.handles
+    tool = env.scene["robot"].data.body_pos_w[i, h.tool_body]
+    quat = env.scene["robot"].data.body_quat_w[i, h.tool_body]
+    return (tool + quat_apply(quat, torch.tensor(frames.PICK_OFFSET_MEASURED)))[:2]
 
 
 def _draw(seed: int = 5):
@@ -183,9 +192,9 @@ def test_shard_layout_matches_the_converter(tmp_path):
         assert g["initial_state/rigid_object/brick_1/root_pose"].shape == (1, 7)
         assert g["initial_state/bin_layout"].shape == (1, 5)
         assert g["obs/context_camera"].shape == (6, 6)
-        assert g["obs/context_privileged"].shape == (6, 42)
+        assert g["obs/context_privileged"].shape == (6, 66)
         assert json.loads(g["obs/context_camera"].attrs["names"])[0] == "overhead_cam_x"
-        assert json.loads(g["obs/context_privileged"].attrs["names"])[-1] == "brick_5_qz"
+        assert json.loads(g["obs/context_privileged"].attrs["names"])[-1] == "stowed_5"
         assert "inflight" not in f
         # The action's arm columns are the pre-clamp command; joint_targets the applied ones.
         assert np.allclose(g["actions"][0, :6], action[0, :6].numpy(), atol=1e-6)
@@ -295,23 +304,182 @@ def test_context_channels_are_always_filled_and_the_served_one_follows_the_mode(
     env.reset(seed=4)
     assert env.context_mode == "camera"
     assert env.obs_buf["context"].shape == (2, 6) and env.obs_buf["context"].dtype == torch.float32
-    assert env.context_camera.shape == (2, 6) and env.context_privileged.shape == (2, 42)
+    assert env.context_camera.shape == (2, 6) and env.context_privileged.shape == (2, 66)
     assert not np.allclose(env.context_camera[0], env.context_camera[1])
-    # Bricks 0 and 1 fill the first 14 values; the missing bricks 2..5 are zeros.
-    assert np.abs(env.context_privileged[:, 14:]).max() == 0.0
+    # Bricks 0 and 1 fill the first 18 pose values; bricks 2..5 are zeros, and so are their
+    # target and stowed columns.
+    priv = env.context_privileged
+    assert np.abs(priv[:, 18:54]).max() == 0.0
+    assert np.abs(priv[:, 56:60]).max() == 0.0 and np.abs(priv[:, 62:66]).max() == 0.0
     pos0 = env.scene["brick_0"].data.root_pos_w[0].numpy()
-    assert np.allclose(env.context_privileged[0, :3], pos0, atol=1e-6)
+    assert np.allclose(priv[0, :3], pos0, atol=1e-6)
+    # A brick spawned flat at yaw psi has rotation columns (cos, sin, 0, -sin, cos, 0).
+    w, _, _, z = env.scene["brick_0"].data.root_quat_w[0].tolist()
+    psi = 2.0 * np.arctan2(z, w)
+    assert np.allclose(
+        priv[0, 3:9], [np.cos(psi), np.sin(psi), 0.0, -np.sin(psi), np.cos(psi), 0.0], atol=2e-3
+    )
+    # Nothing is held after a reset: the target is the brick nearest the PICK POINT, one-hot
+    # (the tool body plus the rotated pick offset, which is what the oracle's own selection
+    # measures from -- see test_the_privileged_target_measures_from_the_pick_point).
+    assert priv[:, 54:56].sum(axis=1).tolist() == [1.0, 1.0]
+    d = [
+        (env.scene[f"brick_{b}"].data.root_pos_w[0, :2] - _pick_point_xy(env, 0)).norm().item()
+        for b in (0, 1)
+    ]
+    assert int(priv[0, 54:56].argmax()) == int(np.argmin(d))
+    assert priv[:, 60:62].tolist() == [[0.0, 0.0], [0.0, 0.0]]
     env.step(_hold_action(env))
     assert np.allclose(env.obs_buf["context"].numpy(), env.context_camera)
     env.close()
     plain = MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, context="privileged")
     plain.reset(seed=4)
-    assert plain.obs_buf["context"].shape == (1, 42)
+    assert plain.obs_buf["context"].shape == (1, 66)
+    _teleport_all_bricks_into_bins(plain, 0)
+    assert plain.context_privileged[0, 60:62].tolist() == [1.0, 1.0]  # stowed mask
+    assert np.abs(plain.context_privileged[0, 54:60]).max() == 0.0  # no target left
     none = MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False)
     none.reset(seed=4)
     assert none.context_mode == "none" and none.obs_buf["context"].shape == (1, 0)
-    assert len(mj_env.CONTEXT_CAMERA_NAMES) == 6 and len(mj_env.CONTEXT_PRIVILEGED_NAMES) == 42
+    assert len(mj_env.CONTEXT_CAMERA_NAMES) == 6 and len(mj_env.CONTEXT_PRIVILEGED_NAMES) == 66
+    assert mj_env.CONTEXT_PRIVILEGED_NAMES[3] == "brick_0_r00"
+    assert mj_env.CONTEXT_PRIVILEGED_NAMES[54] == "target_0"
+    assert mj_env.CONTEXT_PRIVILEGED_NAMES[65] == "stowed_5"
     plain.close()
     none.close()
     with pytest.raises(ValueError, match="context"):
         MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, context="wrong")
+
+
+def test_the_privileged_target_measures_from_the_pick_point_not_the_tool_body():
+    """Design 5.3: the rule is the choice the oracle's HOVER entry makes, and that choice
+    measures from ``SceneSnapshot.pick_point`` -- the tool body plus the rotated
+    PICK_OFFSET_MEASURED -- not from the tool body itself. The two points coincide only with
+    a level tool and part by up to ~3 cm at a tilted approach, which flips this one-hot on
+    near ties. Each brick is teleported onto one of the two points, so the two rules disagree
+    by construction and the one-hot says which one the env used.
+    """
+    env = MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, context="privileged")
+    env.reset(seed=4)
+    h, d = env.handles, env.datas[0]
+    tool_xy = env.scene["robot"].data.body_pos_w[0, h.tool_body, :2].numpy()
+    pick_xy = _pick_point_xy(env, 0).numpy()
+    assert np.linalg.norm(pick_xy - tool_xy) > 1e-3, "a level tool cannot separate the rules"
+    # Both points sit well inside the top-down x limit, so both bricks stay candidates.
+    assert max(tool_xy[0], pick_xy[0]) < layout.top_down_x_limit(env.bin_layouts[0])
+    for b, xy in ((0, tool_xy), (1, pick_xy)):
+        d.qpos[h.brick_qpos[b] : h.brick_qpos[b] + 2] = xy
+    mujoco.mj_forward(env.models[0], d)
+    env._refresh([0], images=False)
+    priv = env.context_privileged
+    assert priv[0, 54] == 0.0 and priv[0, 55] == 1.0
+    env.close()
+
+
+def test_the_privileged_target_one_hot_follows_the_held_brick_not_the_nearest_one():
+    """The one-hot must come from ``held_brick_from_forces`` feeding ``target_brick``'s held
+    branch, not a re-derived "nearest unstowed brick" shortcut that ignores the grasp.
+
+    ``tests/test_target.py::test_a_held_brick_wins`` already covers the rule's own held
+    precedence; this test is the integration seam it cannot reach: whether the env reads
+    ``held`` from the real finger contact forces and passes it in. The oracle rig drives a
+    genuine pinch (real contact physics, not a mock of ``target_brick``), then the other,
+    un-held brick is teleported directly under the tool so it is nearer in the desk plane
+    than the held brick -- the condition that would flip a nearest-only rule but must not
+    flip the real one.
+    """
+    from maker_arm_lab.core import oracle
+    from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
+
+    draw = _draw()
+    env = MjLegoSortEnv(1, draw, num_bricks=2, cameras=False)
+    env.reset(seed=11)
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
+    steps = 0
+    reached_lift = False
+    while steps < 4000:
+        goal = rig.goals[0]
+        if goal is not None and goal.phase is oracle.Phase.LIFT and not rig.plans[0]:
+            held_brick = rig.oracles[0].target_brick
+            if rig.pinch_evidence(0, held_brick)["ok"]:
+                reached_lift = True
+                break
+        out = rig.step()
+        steps += 1
+        if bool(out["dones"][0]) or bool(out["abandoned"][0]):
+            break
+    assert reached_lift, "the oracle never reached a good LIFT pinch inside the step budget"
+    other = 1 - held_brick
+    # Move the other, un-held brick to sit directly under the tool in the desk plane, nearer
+    # to the tool's (x, y) than the held brick can be. mj_forward only recomputes kinematics
+    # and contacts at the frozen qpos; mj_step would integrate time and could disturb the grasp.
+    h, d = env.handles, env.datas[0]
+    tool_xy = env.scene["robot"].data.body_pos_w[0, h.tool_body, :2].numpy()
+    d.qpos[h.brick_qpos[other] : h.brick_qpos[other] + 2] = tool_xy
+    mujoco.mj_forward(env.models[0], d)
+    env._refresh([0], images=False)
+    priv = env.context_privileged
+    assert priv[0, 54 + held_brick] == 1.0
+    assert priv[0, 54 + other] == 0.0
+    env.close()
+
+
+def test_only_nonzero_actors_are_recorded_and_a_failed_takeover_is_negated(tmp_path):
+    env = MjLegoSortEnv(
+        3,
+        _draw(),
+        num_bricks=2,
+        cameras=False,
+        episode_length_s=0.5,
+        export_dir=tmp_path,
+        shard_name="actors",
+        export_all=True,
+    )
+    env.reset(seed=3)
+    env.oracle_actor = torch.tensor([0, 2, 1], dtype=torch.int16)
+    for _ in range(5):
+        env.step(_hold_action(env))
+    env.recorder.negate_actor(1, 2)
+    # negate_actor must flip only frames matching the given ordinal, not every buffered frame.
+    # Env 0 never buffers a real frame in this test (its actor is 0 throughout), so its slot
+    # is free to hold a synthetic mixed-ordinal buffer for this one check.
+    env.recorder._scalars[0]["actor"] = [np.int16(v) for v in (1, 2, 2, 3)]
+    env.recorder.negate_actor(0, 2)
+    assert [int(v) for v in env.recorder._scalars[0]["actor"]] == [1, -2, -2, 3]
+    env.oracle_actor = torch.tensor([0, 0, 1], dtype=torch.int16)
+    for _ in range(9):
+        env.step(_hold_action(env))
+    # env 1 is actor-0 (skipped) for this whole second block: its buffered pre_step and
+    # post_step columns must stay exactly as long as they were after the first block, or a
+    # post_step write that ignores the skip would silently misalign every later column.
+    buffered = env.recorder._scalars[1]
+    assert len(buffered["actions"]) == len(buffered["joint_targets"]) == 5
+    env.step(_hold_action(env))  # the 15th step truncates every env
+    assert env.recorder.exported_episode_count == 2
+    env.close()
+    with h5py.File(tmp_path / "actors.hdf5", "r") as f:
+        demos = {int(g.attrs["num_samples"]): g for g in f["data"].values()}
+        assert set(demos) == {5, 15}
+        assert demos[5]["obs/actor"][:].tolist() == [-2] * 5
+        assert demos[15]["obs/actor"][:].tolist() == [1] * 15
+        assert demos[5]["obs/actor"].dtype == np.int16
+        assert demos[5]["joint_targets"].shape == (5, 8)
+
+
+def test_without_an_actor_tensor_every_frame_is_recorded_as_the_oracle(tmp_path):
+    env = MjLegoSortEnv(
+        1,
+        _draw(),
+        num_bricks=2,
+        cameras=False,
+        episode_length_s=0.5,
+        export_dir=tmp_path,
+        shard_name="plain",
+        export_all=True,
+    )
+    env.reset(seed=3)
+    for _ in range(15):
+        env.step(_hold_action(env))
+    env.close()
+    with h5py.File(tmp_path / "plain.hdf5", "r") as f:
+        assert f["data/demo_0/obs/actor"][:].tolist() == [1] * 15

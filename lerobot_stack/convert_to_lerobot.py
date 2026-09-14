@@ -130,7 +130,9 @@ def read_context_names(shard: Path, context: str) -> list[str]:
 SETTLE_INT, DONE_INT, ABANDON_INT = 0, 10, 11
 
 
-def cycle_segments(phase: np.ndarray, brick: np.ndarray, lead_keep: int = 0) -> list[np.ndarray]:
+def cycle_segments(
+    phase: np.ndarray, brick: np.ndarray, lead_keep: int = 0, actor: np.ndarray | None = None
+) -> list[np.ndarray]:
     """Frame-index segments, one per brick cycle.
 
     ``lead_keep`` attaches the LAST that many SETTLE frames to the first cycle (openyam-lab's
@@ -146,18 +148,30 @@ def cycle_segments(phase: np.ndarray, brick: np.ndarray, lead_keep: int = 0) -> 
     same post-step pass that ends the previous phase) stay with the open cycle
     if one is open, and kept frames before the first target attach to the
     first cycle.
+
+    ``actor`` (MS4 c2 design 6.5, ``--dagger``) is the recorder's ``obs/actor``: frames whose
+    actor is not positive are dropped, and a segment is cut wherever the actor changes, so
+    two takeovers on the same brick never share a chunk horizon across the policy's missing
+    frames.
     """
     keep = ~np.isin(phase, (SETTLE_INT, DONE_INT, ABANDON_INT))
+    if actor is not None:
+        keep &= actor > 0
     segments: list[list[int]] = []
     current: list[int] = []
     last_brick: int | None = None
+    last_actor: int | None = None
     for t in np.nonzero(keep)[0]:
         b = int(brick[t])
-        if b >= 0 and last_brick is not None and b != last_brick:
+        a = None if actor is None else int(actor[t])
+        new_brick = b >= 0 and last_brick is not None and b != last_brick
+        new_actor = a is not None and last_actor is not None and a != last_actor
+        if new_brick or new_actor:
             segments.append(current)
             current = []
         if b >= 0:
             last_brick = b
+        last_actor = a
         current.append(int(t))
     if current and last_brick is not None:
         segments.append(current)
@@ -180,6 +194,7 @@ def convert(
     context: str | None = None,
     images: bool = True,
     action_space: str = "absolute",
+    dagger: bool = False,
 ) -> tuple[int, int]:
     """Convert `shards` into (or append them onto) the LeRobot dataset at `root`.
 
@@ -200,6 +215,10 @@ def convert(
         raise ValueError("sidecar_dir requires split_cycles")
     if lead_keep and not split_cycles:
         raise ValueError("lead_keep requires split_cycles")
+    if dagger and not split_cycles:
+        raise ValueError("dagger requires split_cycles")
+    if dagger and lead_keep:
+        raise ValueError("dagger refuses lead_keep: takeover frames have no SETTLE lead")
     if context is not None and context not in CONTEXT_CHANNELS:
         raise ValueError(f"context must be one of {CONTEXT_CHANNELS}, got {context!r}")
     if not images and context is None:
@@ -284,7 +303,12 @@ def convert(
                         )
                     phase = grp["obs/cycle_phase"][:steps]
                     brick = grp["obs/cycle_brick"][:steps]
-                    segments = cycle_segments(phase, brick, lead_keep)
+                    actor = None
+                    if dagger:
+                        if "obs/actor" not in grp:
+                            raise RuntimeError(f"{shard}:{demo} has no obs/actor dataset")
+                        actor = grp["obs/actor"][:steps]
+                    segments = cycle_segments(phase, brick, lead_keep, actor)
                 else:
                     segments = [np.arange(steps)]
                 # Hoisted out of the segment loop: read+stack once per demo instead of once
@@ -393,6 +417,12 @@ def build_parser() -> argparse.ArgumentParser:
             "client's anchor back."
         ),
     )
+    parser.add_argument(
+        "--dagger",
+        action="store_true",
+        help="keep only the oracle takeover cycles of a DAgger shard (positive obs/actor), "
+        "cut on actor change",
+    )
     return parser
 
 
@@ -416,6 +446,7 @@ def main() -> int:
             context=args.context,
             images=not args.no_images,
             action_space=args.action_space,
+            dagger=args.dagger,
         )
     except Exception as exc:  # noqa: BLE001 -- any failure must become CONVERT_FAIL, not a crash.
         print(f"CONVERT_FAIL {type(exc).__name__}: {exc}", flush=True)

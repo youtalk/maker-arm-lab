@@ -20,6 +20,8 @@ unchanged on either backend:
 MuJoCo-only members (the Isaac env has none of these; core/ reads them through getattr):
     env.bin_layouts (one core.layout.BinLayout per env), env.episode_draws, env.run_draw
     env.context_mode, env.obs_buf["context"], env.context_camera, env.context_privileged
+    env.oracle_actor (N,) int16, set by the DAgger loop: 0 records nothing, k records the
+        frame as takeover k
 
 Semantics carried over from ``ManagerBasedRLEnv`` because the rig depends on them: a done
 env is auto-reset INSIDE ``step`` (its state tensors already show the next episode when
@@ -48,8 +50,10 @@ import torch
 from maker_arm_lab.assets.urdf_prep import gripper_velocity_limit
 from maker_arm_lab.core import cameras, layout
 from maker_arm_lab.core import profile as _profile
-from maker_arm_lab.core.quat import compose_offset_rot, quat_mul, rpy_from_quat
+from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
+from maker_arm_lab.core.quat import compose_offset_rot, quat_apply, quat_mul, rpy_from_quat
 from maker_arm_lab.core.stowed import per_brick_stowed
+from maker_arm_lab.core.target import target_brick
 from maker_arm_lab.mj import scene
 from maker_arm_lab.mj.context_names import (
     CONTEXT_CAMERA_NAMES,  # noqa: F401 -- re-exported as mj_env.CONTEXT_CAMERA_NAMES
@@ -63,6 +67,7 @@ from maker_arm_lab.robots.frames import (
     GRIPPER_CLOSED_POS,
     GRIPPER_OPEN_POS,
     HOME_JOINT_POS,
+    PICK_OFFSET_MEASURED,
 )
 
 CONTROL_HZ = 30
@@ -84,6 +89,26 @@ BRICK_FRICTION_SCALE = (0.8, 1.2)  # Isaac's static_friction_range; MuJoCo has o
 # calibration error of the real rig.
 FRAME_CAM_JITTER_M = 0.005
 FRAME_CAM_JITTER_DEG = 1.0
+# The point on the tool axis a desk-resting brick occupies, as OracleRig.pick_point builds it.
+# The privileged channel's target rule measures from THIS point, not from the tool body, so it
+# is the same distance `EnvOracle._next_brick` takes its nearest candidate by.
+_PICK_OFFSET = torch.tensor(PICK_OFFSET_MEASURED)
+
+
+def _rot6(q: np.ndarray) -> np.ndarray:
+    """First two columns of the rotation matrix of a MuJoCo (w, x, y, z) quaternion."""
+    w, x, y, z = (float(v) for v in q)
+    return np.array(
+        [
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y + w * z),
+            2.0 * (x * z - w * y),
+            2.0 * (x * y - w * z),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z + w * x),
+        ],
+        dtype=np.float32,
+    )
 
 
 class _Robot:
@@ -313,10 +338,16 @@ class MjLegoSortEnv:
         )
         h = self.handles
         robot = self.scene["robot"]
+        actor = getattr(self, "oracle_actor", None)
+        recorded = [False] * self.num_envs
         if self.recorder is not None:
             phase = getattr(self, "oracle_cycle_phase", None)
             brick = getattr(self, "oracle_cycle_brick", None)
             for i in range(self.num_envs):
+                who = 1 if actor is None else int(actor[i])
+                if who == 0:
+                    continue  # a policy-driven DAgger frame: not recorded (design 6.4)
+                recorded[i] = True
                 self.recorder.pre_step(
                     i,
                     robot._joint_pos[i],
@@ -327,6 +358,7 @@ class MjLegoSortEnv:
                     self._overhead[i] if self.cameras else None,
                     context_camera=self.context_camera[i],
                     context_privileged=self.context_privileged[i],
+                    actor=who,
                 )
         step_limit = GRIPPER_RATE_M_PER_S / CONTROL_HZ
         self._grip_ctrl += np.clip(targets[:, 6:] - self._grip_ctrl, -step_limit, step_limit)
@@ -344,7 +376,8 @@ class MjLegoSortEnv:
         if self.recorder is not None:
             clamped = self._arm_term.clamped.numpy()
             for i in range(self.num_envs):
-                self.recorder.post_step(i, targets[i], bool(clamped[i]))
+                if recorded[i]:
+                    self.recorder.post_step(i, targets[i], bool(clamped[i]))
         done = (terminated | truncated).nonzero().flatten().tolist()
         for i in done:
             if self.recorder is not None:
@@ -456,8 +489,6 @@ class MjLegoSortEnv:
                 brick._pos[i] = d.xpos[body]
                 brick._quat[i] = d.xquat[body]
                 brick._vel[i] = d.qvel[h.brick_dof[b] : h.brick_dof[b] + 3]
-            for b, adr in enumerate(h.brick_qpos):
-                self.context_privileged[i, 7 * b : 7 * b + 7] = d.qpos[adr : adr + 7]
             left[i] = 0.0
             right[i] = 0.0
             for k in range(d.ncon):
@@ -490,3 +521,41 @@ class MjLegoSortEnv:
                 self._wrist[i] = r.render()
                 r.update_scene(d, camera=self._cam_overhead)
                 self._overhead[i] = r.render()
+        # MS4 c2 design 5.2 and 5.3: the privileged channel after the forces and the brick
+        # states are current, because the target rule reads both.
+        stowed = per_brick_stowed(self)
+        held = held_brick_from_forces(
+            torch.from_numpy(left).norm(dim=-1).squeeze(1),
+            torch.from_numpy(right).norm(dim=-1).squeeze(1),
+            min_force=HELD_MIN_FORCE,
+        )
+        nb = self.cfg.num_bricks
+        for i in ids:
+            d = self.datas[i]
+            row = self.context_privileged[i]
+            row[:] = 0.0
+            for b, adr in enumerate(h.brick_qpos):
+                row[9 * b : 9 * b + 3] = d.qpos[adr : adr + 3]
+                row[9 * b + 3 : 9 * b + 9] = _rot6(d.qpos[adr + 3 : adr + 7])
+            brick_pos = torch.stack(
+                [self.scene[f"brick_{b}"].data.root_pos_w[i] for b in range(nb)]
+            )
+            # The PICK POINT, not the tool body: `EnvOracle._next_brick` takes its nearest
+            # candidate by the distance from `SceneSnapshot.pick_point`, which is the tool
+            # body plus the rotated PICK_OFFSET_MEASURED. The two agree only with a level
+            # tool and part by ~3 cm at a tilted approach, which flips this one-hot on near
+            # ties -- a mislabelled target in the channel the policy is asked to read.
+            pick_point_xy = (
+                robot.data.body_pos_w[i, h.tool_body]
+                + quat_apply(robot.data.body_quat_w[i, h.tool_body], _PICK_OFFSET)
+            )[:2]
+            target = target_brick(
+                int(held[i]),
+                brick_pos,
+                pick_point_xy,
+                stowed[i],
+                layout.top_down_x_limit(self.bin_layouts[i]),
+            )
+            if target >= 0:
+                row[54 + target] = 1.0
+            row[60 : 60 + nb] = stowed[i].numpy().astype(np.float32)

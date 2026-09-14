@@ -11,8 +11,11 @@ consumers and are unchanged):
     obs/images/wrist_rgb, obs/images/overhead_rgb (T,224,224,3) u8   pre-step frames
     obs/cycle_phase (T,) i8, obs/cycle_brick (T,) i8                  the rig's stash
     obs/clamped (T,) bool        the Rust clamp changed this step's target
-    obs/context_camera (T,6) f32, obs/context_privileged (T,42) f32   the two context
+    obs/context_camera (T,6) f32, obs/context_privileged (T,66) f32   the two context
         channels (MS4 levers 1 and 3), always recorded; each carries a JSON `names` attr
+    obs/actor (T,) i16           who commanded the frame: 1 the oracle (batch loop), k the
+        k-th DAgger takeover of the episode, negative when that takeover's cycle did not
+        stow its brick
     initial_state/articulation/robot/{joint_position,joint_velocity,root_pose,root_velocity}
     initial_state/rigid_object/brick_N/{root_pose,root_velocity}     one leading axis of 1
     initial_state/bin_layout (1,5) f32: bin_x and the four slot y values of this episode's
@@ -79,6 +82,7 @@ class ShardRecorder:
             "clamped": [],
             "context_camera": [],
             "context_privileged": [],
+            "actor": [],
         }
 
     # -- episode lifecycle --------------------------------------------------
@@ -115,6 +119,7 @@ class ShardRecorder:
         overhead: np.ndarray | None,
         context_camera: np.ndarray | None = None,
         context_privileged: np.ndarray | None = None,
+        actor: int = 1,
     ) -> None:
         s = self._scalars[env_index]
         s["joint_pos_abs"].append(np.asarray(joint_pos, dtype=np.float32).copy())
@@ -125,6 +130,7 @@ class ShardRecorder:
             s["context_camera"].append(np.asarray(context_camera, dtype=np.float32).copy())
         if context_privileged is not None:
             s["context_privileged"].append(np.asarray(context_privileged, dtype=np.float32).copy())
+        s["actor"].append(np.int16(actor))
         if self.cameras:
             imgs = self._images[env_index]
             imgs["wrist_rgb"].append(np.asarray(wrist, dtype=np.uint8).copy())
@@ -136,6 +142,12 @@ class ShardRecorder:
         s = self._scalars[env_index]
         s["joint_targets"].append(np.asarray(joint_targets, dtype=np.float32).copy())
         s["clamped"].append(bool(clamped))
+
+    def negate_actor(self, env_index: int, ordinal: int) -> None:
+        """Mark the buffered frames of takeover ``ordinal`` as a cycle that did not stow its
+        brick (MS4 c2 design 6.4): the converter's ``--dagger`` keeps positive actors only."""
+        s = self._scalars[env_index]
+        s["actor"] = [np.int16(-v) if v == ordinal else v for v in s["actor"]]
 
     def end(self, env_index: int, success: bool) -> bool:
         """Close env ``env_index``'s episode; returns whether it reached the shard."""
@@ -158,6 +170,7 @@ class ShardRecorder:
         obs.create_dataset("cycle_phase", data=np.asarray(s["cycle_phase"][:steps], dtype=np.int8))
         obs.create_dataset("cycle_brick", data=np.asarray(s["cycle_brick"][:steps], dtype=np.int8))
         obs.create_dataset("clamped", data=np.asarray(s["clamped"][:steps], dtype=bool))
+        obs.create_dataset("actor", data=np.asarray(s["actor"][:steps], dtype=np.int16))
         for key, names in (
             ("context_camera", CONTEXT_CAMERA_NAMES),
             ("context_privileged", CONTEXT_PRIVILEGED_NAMES),

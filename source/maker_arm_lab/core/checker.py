@@ -37,10 +37,10 @@ argument PINCH_MIN_STALL's derivation makes for using min(BRICK_SIZE). 2.0 sits
 3.8x below the observed grip and three orders of magnitude above a jaw holding
 nothing.
 
-NOT the only force threshold in the codebase, and deliberately so: scripts/
-eval_policy.py's HELD_MIN_FORCE is looser (1.0) because it answers a different
-question -- which brick was between the jaws mid-transport, where the normal load
-dips as the arm decelerates -- and it is single-copy where it is used.
+NOT the only force threshold in the codebase, and deliberately so: HELD_MIN_FORCE
+below is looser (1.0) because it answers a different question -- which brick was
+between the jaws mid-transport, where the normal load dips as the arm decelerates
+-- and it now sits beside the function it is an argument to, as one definition.
 """
 
 
@@ -188,10 +188,23 @@ def containing_bin(
     return torch.where(resting_in_any, bin_idx, torch.full_like(bin_idx, -1))
 
 
+HELD_MIN_FORCE = 1.0
+"""Newtons on the weaker jaw for `held_brick_from_forces` to call a brick held: the loose
+ATTRIBUTION threshold ("which brick was between the jaws"), deliberately under the quality
+gate PINCH_MIN_FORCE = 2.0 that `core.gate.grade_grasp_attempts` scores strictly.
+
+THE ONE DEFINITION, and it lives here because it used to be three. `core.eval_loop`
+(attribution), `mj.env` (the privileged channel's target rule) and the oracle runtime's
+resume entry (LIFT versus HOVER) each declared their own 1.0 and each named one of the
+others as the authority, so retuning it would have left the corpus's labels, the resume
+decision and the gate's attribution silently disagreeing. Import it; do not re-declare it.
+"""
+
+
 def held_brick_from_forces(
     left_mag: torch.Tensor,
     right_mag: torch.Tensor,
-    min_force: float = 1.0,
+    min_force: float = HELD_MIN_FORCE,
 ) -> torch.Tensor:
     """(N,) int64: index of the brick pinched between the jaws, or -1.
 

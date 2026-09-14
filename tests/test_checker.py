@@ -156,3 +156,17 @@ class TestPinchMinStall:
         # too, and pinning to the tighter number would make this test fail for a future
         # arm that merely grips a little softer.
         assert checker.PINCH_MIN_STALL < 0.005797
+
+
+def test_the_held_attribution_threshold_has_one_definition():
+    """``core.eval_loop`` (attribution), ``mj.env`` (the privileged channel's target rule) and
+    the oracle runtime's resume entry (LIFT versus HOVER) each used to declare their own 1.0
+    and name one of the others as the authority. Retuning it would have left the corpus's
+    labels, the resume decision and the gate's attribution silently disagreeing."""
+    from maker_arm_lab.core import dagger_loop, eval_loop
+    from maker_arm_lab.mj import env as mj_env
+    from maker_arm_lab.tasks.manager_based.lego_sort import oracle_runtime
+
+    for module in (eval_loop, dagger_loop, mj_env, oracle_runtime):
+        assert module.HELD_MIN_FORCE is checker.HELD_MIN_FORCE, module.__name__
+    assert checker.HELD_MIN_FORCE < checker.PINCH_MIN_FORCE  # attribution under the quality gate
