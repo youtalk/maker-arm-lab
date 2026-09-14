@@ -20,6 +20,28 @@ def _obs(batch: int):
     return state, wrist, overhead
 
 
+def _serve(**kwargs):
+    """Bind and start a PolicyServer thread; return (endpoint, shutdown) for a fixture to yield
+    from and tear down with. Factored out so every server-backed fixture in this file shares
+    one construction and one shutdown block instead of copying both.
+    """
+    srv = PolicyServer(port=0, n_action_steps=1, **kwargs)
+    port = srv.bind()
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+
+    def shutdown():
+        req = zmq.Context.instance().socket(zmq.REQ)
+        req.setsockopt(zmq.RCVTIMEO, 10_000)
+        req.connect(f"tcp://127.0.0.1:{port}")
+        send_message(req, {"type": "shutdown"})
+        recv_message(req)
+        thread.join(timeout=5)
+        req.close(0)
+
+    return f"tcp://127.0.0.1:{port}", shutdown
+
+
 @pytest.fixture()
 def running_server(request):
     """Serves a fake policy; parametrize indirectly with a context width to advertise one."""
@@ -33,26 +55,32 @@ def running_server(request):
         action[:, 0] = state[:, 0] + 1.0
         return action
 
-    srv = PolicyServer(
+    endpoint, shutdown = _serve(
         policy_fn=fake_policy,
         reset_fn=lambda: calls.__setitem__("reset", calls["reset"] + 1),
         policy_id="fake:client-test",
-        port=0,
-        n_action_steps=1,
         inference={"n_action_steps": 1, "temporal_ensemble_coeff": 0.01, "chunk_size": 100},
         context_dim=context_dim,
     )
-    port = srv.bind()
-    thread = threading.Thread(target=srv.serve_forever, daemon=True)
-    thread.start()
-    yield f"tcp://127.0.0.1:{port}", calls
-    req = zmq.Context.instance().socket(zmq.REQ)
-    req.setsockopt(zmq.RCVTIMEO, 10_000)
-    req.connect(f"tcp://127.0.0.1:{port}")
-    send_message(req, {"type": "shutdown"})
-    recv_message(req)
-    thread.join(timeout=5)
-    req.close(0)
+    yield endpoint, calls
+    shutdown()
+
+
+@pytest.fixture()
+def delta_prev_server():
+    def fake_policy(state, wrist, overhead, context=None):
+        action = np.zeros((state.shape[0], *ACTION_SHAPE), dtype="float32")
+        action[:, 0] = 0.25
+        return action
+
+    endpoint, shutdown = _serve(
+        policy_fn=fake_policy,
+        reset_fn=lambda: None,
+        policy_id="fake:dprev",
+        action_space="delta_prev",
+    )
+    yield endpoint
+    shutdown()
 
 
 def test_client_handshakes_resets_and_records_the_served_inference(running_server):
@@ -97,4 +125,15 @@ def test_client_reports_a_server_side_validation_error(running_server):
     state[:, 6] = 2.0  # not an opening fraction
     with pytest.raises(RuntimeError, match="server error"):
         client.step(state, wrist, overhead)
+    client.close()
+
+
+def test_client_reads_the_action_space_and_sends_an_anchor(delta_prev_server):
+    client = ServerPolicy(delta_prev_server)
+    assert client.action_space == "delta_prev"
+    anchor = np.full((2, 6), 2.0, dtype="float32")
+    action = client.step(*_obs(2), anchor=anchor)
+    assert action[:, 0].tolist() == [2.25, 2.25]
+    with pytest.raises(RuntimeError, match="server error"):
+        client.step(*_obs(2))
     client.close()

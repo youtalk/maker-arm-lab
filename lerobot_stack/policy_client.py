@@ -39,6 +39,7 @@ class ServerPolicy:
         # served config rather than the requested one. Empty from a server that predates it.
         self.inference: dict = dict(header.get("inference", {}))
         self.context_dim: int = int(header.get("context_dim", 0))
+        self.action_space: str = str(header.get("action_space", "absolute"))
         self.reset()
 
     def reset(self) -> None:
@@ -53,10 +54,13 @@ class ServerPolicy:
         wrist: np.ndarray,
         overhead: np.ndarray,
         context: np.ndarray | None = None,
+        anchor: np.ndarray | None = None,
     ) -> np.ndarray:
         arrays = {"state": state, "wrist": wrist, "overhead": overhead}
         if context is not None:
             arrays[policy_protocol.CONTEXT_KEY] = context
+        if anchor is not None:
+            arrays[policy_protocol.ANCHOR_KEY] = anchor
         policy_protocol.send_message(
             self._socket, {"type": "step", "batch": int(state.shape[0])}, arrays
         )
