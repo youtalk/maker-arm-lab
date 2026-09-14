@@ -616,6 +616,9 @@ class EnvOracle:
         self.retries_used = 0
         self._brick_start: torch.Tensor | None = None
         self._sorted: set[int] = set()
+        # Set by `resume()` when it enters LIFT directly; consumed by `next_goal()`'s LIFT
+        # branch on the very next call, which is that same entry (see its comment).
+        self._resumed_lift = False
         self.induction = induction
         self.rng = rng
         self._induced_style: str | None = None
@@ -702,6 +705,8 @@ class EnvOracle:
             self._brick_start = scene.brick_pos[held].clone()
             self.pick_order.append(held)
             self.phase = Phase.LIFT
+            # Flags this one LIFT entry for next_goal()'s live-height clamp; see its comment.
+            self._resumed_lift = True
         else:
             self.target_brick = None
             self.phase = Phase.HOVER
@@ -922,15 +927,23 @@ class EnvOracle:
                 Phase.CLOSE, None, None, 0.0, -1.0, None, 0, CLOSE_STEPS, hold=CLOSE_STEPS
             )
         if self.phase == Phase.LIFT:
-            # z is a clearance ABOVE THE DESK (layout.py: "desk top surface at z = 0"), not
-            # a rise added on top of wherever the tool now is. On a normal CLOSE->LIFT
-            # transition the two read the same, since the tool is still at the brick's
-            # near-zero resting height; `resume` (MS4 c2 design 6.2) can enter LIFT with the
-            # brick already carried partway or all the way up, and adding LIFT_HEIGHT to
-            # that live height would ask for a second rise stacked on the first, well
-            # outside the arm's reach.
             target = scene.pick_point.clone()
-            target[2] = min(target[2] + LIFT_HEIGHT, LIFT_HEIGHT)
+            if self._resumed_lift:
+                # `resume` (MS4 c2 design 6.2) can enter LIFT directly, with the brick
+                # already carried partway or all the way up by the policy it took over
+                # from. The plain "live height plus LIFT_HEIGHT" rule below would then ask
+                # for a second rise stacked on top of that already-raised height, past the
+                # solver's reach. Only THIS entry into LIFT -- the one `resume()` just
+                # requested -- gets the clamp, read as an absolute clearance above the desk
+                # (layout.py: "desk top surface at z = 0") instead of a further rise. The
+                # normal CLOSE->LIFT transition is untouched: the tool is at the brick's
+                # near-zero resting height there, by construction, so this branch would
+                # resolve to the same number anyway, and a repository-wide switch to
+                # "clearance above the desk" as LIFT's rule belongs to its own change.
+                target[2] = min(target[2] + LIFT_HEIGHT, LIFT_HEIGHT)
+                self._resumed_lift = False  # one-shot: consumed at this LIFT entry
+            else:
+                target[2] += LIFT_HEIGHT
             return self._goal(
                 Phase.LIFT, target, None, 0.0, -1.0, 0.002, 0, DEFAULT_MAX_STEPS, hold=30
             )

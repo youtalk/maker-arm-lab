@@ -992,6 +992,46 @@ def test_resume_on_a_finished_desk_is_done():
     assert orc.next_goal(scene) is None and orc.phase is oracle.Phase.DONE
 
 
+def test_resume_replaces_the_sorted_set_instead_of_merging_it():
+    """Design 6.2: `resume()` sets `self._sorted = self._stowed(scene)`, a replace. A brick
+    the oracle itself watched arrive and marked sorted, earlier in this same episode, must
+    drop back out of `sorted_bricks` if the resumed scene no longer shows it at rest in its
+    bin -- the case a policy takeover can leave behind, for instance a later knock that sends
+    a delivered brick back onto the desk while the policy held the env. A union
+    (`self._sorted |= self._stowed(scene)`) would keep the stale membership, and this test
+    would not catch it.
+    """
+    orc = oracle.EnvOracle(layout.DEFAULT_BIN_LAYOUT, num_bricks=2, draw=_draw())
+    scene = _desk_snapshot(2)
+    _full_cycle_to_retreat(orc, scene)  # picks brick 0, the lowest-index default target
+    _stow(scene, 0)
+    _run_phase(orc, scene)  # RETREAT sees brick 0 stowed -> `_sorted` gains 0
+    assert orc.sorted_bricks == frozenset({0})
+    knocked_out = _desk_snapshot(2)  # brick 0 back on the desk, out of its bin
+    orc.resume(knocked_out, held=-1)
+    assert orc.sorted_bricks == frozenset()
+
+
+def test_normal_lift_target_is_the_live_height_plus_lift_height_uncapped():
+    """The resume-only clamp (MS4 c2 fix round) must leave a normal CLOSE->LIFT transition
+    bit-for-bit unchanged: target z is `scene.pick_point[2] + LIFT_HEIGHT`, with no ceiling
+    at `LIFT_HEIGHT` itself. `_snapshot()`'s fixed `pick_point` z (0.20) sits well above
+    `LIFT_HEIGHT` (0.10) on its own, so a target that was wrongly clamped to `LIFT_HEIGHT`
+    would read 0.10 here instead of 0.30, and this assertion would catch it.
+    """
+    orc = _oracle()
+    scene = _snapshot()
+    _run_phase(orc, scene)  # SETTLE
+    _run_phase(orc, scene)  # HOVER
+    _run_phase(orc, scene, outcome="stalled")  # DESCEND
+    _run_phase(orc, scene)  # CLOSE -> LIFT
+    lift = orc.next_goal(scene)
+    assert lift.phase is oracle.Phase.LIFT
+    assert lift.target_pos[2].item() == pytest.approx(
+        scene.pick_point[2].item() + oracle.LIFT_HEIGHT
+    )
+
+
 def test_nominal_draw_has_no_noise_and_nearest_first():
     draw = oracle.nominal_draw()
     assert draw.hover_jitter_range == (0.0, 0.0) and draw.action_noise_std == 0.0
