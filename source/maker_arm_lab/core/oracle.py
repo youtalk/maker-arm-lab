@@ -930,8 +930,13 @@ class EnvOracle:
             target = scene.pick_point.clone()
             if self._resumed_lift:
                 # `resume` (MS4 c2 design 6.2) can enter LIFT directly, with the brick
-                # already carried partway or all the way up by the policy it took over
-                # from. The plain "live height plus LIFT_HEIGHT" rule below would then ask
+                # already carried PARTWAY up by the policy it took over from -- and only
+                # partway: the runtime declines a takeover whose brick is already above
+                # LIFT_HEIGHT (ruling P32, `OracleRig.resume`), because from there this
+                # clamp would command a DESCENT with the jaws closed, fail the rise gate
+                # below and drop the brick into the corpus as an expert demonstration. So
+                # this branch only ever lowers a target that is still under the clearance.
+                # The plain "live height plus LIFT_HEIGHT" rule below would then ask
                 # for a second rise stacked on top of that already-raised height, past the
                 # solver's reach. Only THIS entry into LIFT -- the one `resume()` just
                 # requested -- gets the clamp, read as an absolute clearance above the desk

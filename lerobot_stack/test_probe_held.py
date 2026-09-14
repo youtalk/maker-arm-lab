@@ -122,3 +122,33 @@ def test_load_lane_raises_when_sidecar_and_dataset_frame_counts_disagree(monkeyp
         raise AssertionError("expected RuntimeError on a sidecar/dataset frame count mismatch")
     except RuntimeError as err:
         assert "999" in str(err)
+
+
+def test_the_token_reports_the_verdict_and_carries_the_accuracy_either_way(
+    monkeypatch, capsys, tmp_path
+):
+    """Design 6.6: a probe that ran but read under THRESHOLD is a PROBE_FAIL. Supervisors in
+    this repository parse the token, so a miss signalled only by the exit code reads as a
+    pass; the accuracy stays visible on both tokens."""
+    import torch
+
+    monkeypatch.setattr(
+        probe_held,
+        "load_lane",
+        lambda lane, frames, rng: (
+            torch.zeros(2, 3, 64, 64),
+            torch.zeros(2, 7),
+            torch.tensor([0, 1]),
+        ),
+    )
+    argv = ["--lanes", str(tmp_path / "a"), "--test_lanes", str(tmp_path / "b"), "--device", "cpu"]
+
+    monkeypatch.setattr(probe_held, "fit", lambda *args, **kwargs: 0.95)
+    assert probe_held.main(argv) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("PROBE_OK accuracy=0.9500") and "PROBE_FAIL" not in out
+
+    monkeypatch.setattr(probe_held, "fit", lambda *args, **kwargs: 0.5)
+    assert probe_held.main(argv) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("PROBE_FAIL accuracy=0.5000") and "PROBE_OK" not in out

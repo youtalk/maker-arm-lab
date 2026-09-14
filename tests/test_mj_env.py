@@ -15,9 +15,18 @@ import torch
 
 from maker_arm_lab.core import layout
 from maker_arm_lab.core.layout import sample_run_draw
+from maker_arm_lab.core.quat import quat_apply
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.robots import frames
+
+
+def _pick_point_xy(env, i: int) -> torch.Tensor:
+    """The tool's PICK POINT in the desk plane, as ``OracleRig.pick_point`` builds it."""
+    h = env.handles
+    tool = env.scene["robot"].data.body_pos_w[i, h.tool_body]
+    quat = env.scene["robot"].data.body_quat_w[i, h.tool_body]
+    return (tool + quat_apply(quat, torch.tensor(frames.PICK_OFFSET_MEASURED)))[:2]
 
 
 def _draw(seed: int = 5):
@@ -310,10 +319,14 @@ def test_context_channels_are_always_filled_and_the_served_one_follows_the_mode(
     assert np.allclose(
         priv[0, 3:9], [np.cos(psi), np.sin(psi), 0.0, -np.sin(psi), np.cos(psi), 0.0], atol=2e-3
     )
-    # Nothing is held after a reset: the target is the nearest brick to the tool, one-hot.
+    # Nothing is held after a reset: the target is the brick nearest the PICK POINT, one-hot
+    # (the tool body plus the rotated pick offset, which is what the oracle's own selection
+    # measures from -- see test_the_privileged_target_measures_from_the_pick_point).
     assert priv[:, 54:56].sum(axis=1).tolist() == [1.0, 1.0]
-    tool = env.scene["robot"].data.body_pos_w[0, env.handles.tool_body, :2]
-    d = [(env.scene[f"brick_{b}"].data.root_pos_w[0, :2] - tool).norm().item() for b in (0, 1)]
+    d = [
+        (env.scene[f"brick_{b}"].data.root_pos_w[0, :2] - _pick_point_xy(env, 0)).norm().item()
+        for b in (0, 1)
+    ]
     assert int(priv[0, 54:56].argmax()) == int(np.argmin(d))
     assert priv[:, 60:62].tolist() == [[0.0, 0.0], [0.0, 0.0]]
     env.step(_hold_action(env))
@@ -336,6 +349,31 @@ def test_context_channels_are_always_filled_and_the_served_one_follows_the_mode(
     none.close()
     with pytest.raises(ValueError, match="context"):
         MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, context="wrong")
+
+
+def test_the_privileged_target_measures_from_the_pick_point_not_the_tool_body():
+    """Design 5.3: the rule is the choice the oracle's HOVER entry makes, and that choice
+    measures from ``SceneSnapshot.pick_point`` -- the tool body plus the rotated
+    PICK_OFFSET_MEASURED -- not from the tool body itself. The two points coincide only with
+    a level tool and part by up to ~3 cm at a tilted approach, which flips this one-hot on
+    near ties. Each brick is teleported onto one of the two points, so the two rules disagree
+    by construction and the one-hot says which one the env used.
+    """
+    env = MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, context="privileged")
+    env.reset(seed=4)
+    h, d = env.handles, env.datas[0]
+    tool_xy = env.scene["robot"].data.body_pos_w[0, h.tool_body, :2].numpy()
+    pick_xy = _pick_point_xy(env, 0).numpy()
+    assert np.linalg.norm(pick_xy - tool_xy) > 1e-3, "a level tool cannot separate the rules"
+    # Both points sit well inside the top-down x limit, so both bricks stay candidates.
+    assert max(tool_xy[0], pick_xy[0]) < layout.top_down_x_limit(env.bin_layouts[0])
+    for b, xy in ((0, tool_xy), (1, pick_xy)):
+        d.qpos[h.brick_qpos[b] : h.brick_qpos[b] + 2] = xy
+    mujoco.mj_forward(env.models[0], d)
+    env._refresh([0], images=False)
+    priv = env.context_privileged
+    assert priv[0, 54] == 0.0 and priv[0, 55] == 1.0
+    env.close()
 
 
 def test_the_privileged_target_one_hot_follows_the_held_brick_not_the_nearest_one():

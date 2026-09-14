@@ -50,8 +50,8 @@ import torch
 from maker_arm_lab.assets.urdf_prep import gripper_velocity_limit
 from maker_arm_lab.core import cameras, layout
 from maker_arm_lab.core import profile as _profile
-from maker_arm_lab.core.checker import held_brick_from_forces
-from maker_arm_lab.core.quat import compose_offset_rot, quat_mul, rpy_from_quat
+from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
+from maker_arm_lab.core.quat import compose_offset_rot, quat_apply, quat_mul, rpy_from_quat
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.core.target import target_brick
 from maker_arm_lab.mj import scene
@@ -67,6 +67,7 @@ from maker_arm_lab.robots.frames import (
     GRIPPER_CLOSED_POS,
     GRIPPER_OPEN_POS,
     HOME_JOINT_POS,
+    PICK_OFFSET_MEASURED,
 )
 
 CONTROL_HZ = 30
@@ -88,9 +89,10 @@ BRICK_FRICTION_SCALE = (0.8, 1.2)  # Isaac's static_friction_range; MuJoCo has o
 # calibration error of the real rig.
 FRAME_CAM_JITTER_M = 0.005
 FRAME_CAM_JITTER_DEG = 1.0
-# Newtons on the weaker jaw for the privileged channel's target rule to call a brick held: the
-# eval loop's attribution threshold (core.eval_loop.HELD_MIN_FORCE), not the pinch quality gate.
-HELD_MIN_FORCE = 1.0
+# The point on the tool axis a desk-resting brick occupies, as OracleRig.pick_point builds it.
+# The privileged channel's target rule measures from THIS point, not from the tool body, so it
+# is the same distance `EnvOracle._next_brick` takes its nearest candidate by.
+_PICK_OFFSET = torch.tensor(PICK_OFFSET_MEASURED)
 
 
 def _rot6(q: np.ndarray) -> np.ndarray:
@@ -538,10 +540,19 @@ class MjLegoSortEnv:
             brick_pos = torch.stack(
                 [self.scene[f"brick_{b}"].data.root_pos_w[i] for b in range(nb)]
             )
+            # The PICK POINT, not the tool body: `EnvOracle._next_brick` takes its nearest
+            # candidate by the distance from `SceneSnapshot.pick_point`, which is the tool
+            # body plus the rotated PICK_OFFSET_MEASURED. The two agree only with a level
+            # tool and part by ~3 cm at a tilted approach, which flips this one-hot on near
+            # ties -- a mislabelled target in the channel the policy is asked to read.
+            pick_point_xy = (
+                robot.data.body_pos_w[i, h.tool_body]
+                + quat_apply(robot.data.body_quat_w[i, h.tool_body], _PICK_OFFSET)
+            )[:2]
             target = target_brick(
                 int(held[i]),
                 brick_pos,
-                robot.data.body_pos_w[i, h.tool_body, :2],
+                pick_point_xy,
                 stowed[i],
                 layout.top_down_x_limit(self.bin_layouts[i]),
             )

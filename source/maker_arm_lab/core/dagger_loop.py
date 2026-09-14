@@ -16,8 +16,8 @@ from collections import Counter
 
 import torch
 
-from maker_arm_lab.core.checker import held_brick_from_forces
-from maker_arm_lab.core.eval_loop import HELD_MIN_FORCE, EvalFailure, _nearest_brick_cm
+from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
+from maker_arm_lab.core.eval_loop import EvalFailure, _nearest_brick_cm
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
 from maker_arm_lab.core.stowed import (
     _bin_half_extents_cached,
@@ -39,6 +39,15 @@ WORKSPACE = ((0.0, 0.50), (-0.35, 0.35), (-0.03, 0.45))
 """Trouble: the grasp center outside this base-frame box (x, y, z ranges in m)."""
 MAX_TAKEOVERS = 12
 """Takeovers per episode at most: two per brick."""
+DECLINE_COOLDOWN = 60
+"""Control steps before a declined env is offered to the oracle again.
+
+A decline is a NORMAL outcome, not an error: the oracle answers DONE or ABANDON at entry once
+the desk is clear, and ruling P32 declines a brick the policy is carrying above LIFT_HEIGHT.
+Three of the five triggers do not read the counters below -- ``close_far`` in particular
+fires on an empty desk, where ``_nearest_brick_cm`` returns -1 -- so without a cooldown a
+declined env rebuilds an ``EnvOracle``, snapshots the scene, recomputes the stowed set and
+wipes ``rig.stats[i]`` on every remaining step of the episode."""
 
 
 def inside_workspace(point) -> bool:
@@ -112,6 +121,8 @@ def rollout(
     closed_no_pinch = [0] * num_envs
     ordinal = [0] * num_envs
     takeovers = [0] * num_envs
+    cooldown = [0] * num_envs
+    declined = 0
     triggers: Counter = Counter()
     stowed_takeovers = 0
     failed_takeovers = 0
@@ -153,6 +164,11 @@ def rollout(
             since_open[i] = since_open[i] + 1 if open_i else 0
             no_pinch = not open_i and int(held[i]) < 0
             closed_no_pinch[i] = closed_no_pinch[i] + 1 if no_pinch else 0
+            if cooldown[i] > 0:
+                # The counters above still run through a cooldown: they describe what the
+                # policy is doing, not what the oracle answered.
+                cooldown[i] -= 1
+                continue
             reason = trigger_reason(
                 grip_open=open_i,
                 closed_now=closed_now,
@@ -166,13 +182,18 @@ def rollout(
             )
             if reason is None or takeovers[i] >= MAX_TAKEOVERS:
                 continue
+            # Reset on BOTH branches: a trigger that has been answered -- taken or declined --
+            # must not fire again off the same stale count on the very next step.
+            since_open[i] = 0
+            closed_no_pinch[i] = 0
             if rig.resume(i):
                 takeovers[i] += 1
                 ordinal[i] += 1
                 env.oracle_actor[i] = ordinal[i]
                 triggers[reason] += 1
-                since_open[i] = 0
-                closed_no_pinch[i] = 0
+            else:
+                declined += 1
+                cooldown[i] = DECLINE_COOLDOWN
         grip_open_prev = grip_open
         rig_action = rig.actions().to("cpu")
         idle = torch.tensor(rig.idle)
@@ -275,6 +296,7 @@ def rollout(
         "takeovers": sum(takeovers),
         "takeovers_per_env": takeovers,
         "triggers": dict(triggers),
+        "takeovers_declined": declined,
         "takeovers_stowed": stowed_takeovers,
         "takeovers_failed": failed_takeovers,
         "takeovers_failed_unnegated": takeovers_failed_unnegated,

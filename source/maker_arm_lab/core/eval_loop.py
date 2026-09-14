@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 from maker_arm_lab.core import layout
-from maker_arm_lab.core.checker import containing_bin, held_brick_from_forces
+from maker_arm_lab.core.checker import HELD_MIN_FORCE, containing_bin, held_brick_from_forces
 from maker_arm_lab.core.gate import (
     RolloutTracker,
     clamp_arm_actions,
@@ -52,11 +52,6 @@ holds on the MS3 t2 checkpoint (2026-09-11 visual inspection): the policy's clos
 flickers while the 0.1 m/s jaw ramp is still in transit, so the pinch is often not yet formed
 at +20 and is there by +60. The window read is an instrument beside `grasp_successes`, not a
 replacement: the pre-registered field keeps its definition."""
-
-HELD_MIN_FORCE = 1.0
-"""Newtons on the weaker jaw for `held_brick_from_forces` to call a brick held: the loose
-ATTRIBUTION threshold ("which brick was between the jaws"), deliberately under the quality
-gate core.checker.PINCH_MIN_FORCE = 2.0 that grade_grasp_attempts scores strictly."""
 
 
 class EvalFailure(Exception):

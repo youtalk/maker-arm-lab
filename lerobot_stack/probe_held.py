@@ -139,8 +139,16 @@ def main(argv=None) -> int:
         print(f"PROBE_FAIL {type(err).__name__}: {err}", flush=True)
         return 1
     verdict = {"accuracy": round(acc, 4), "held": held, "free": free, "threshold": THRESHOLD}
-    print(f"PROBE_OK accuracy={acc:.4f} held={held} free={free} {json.dumps(verdict)}", flush=True)
-    return 0 if acc >= THRESHOLD else 1
+    # A probe that ran but read under THRESHOLD is a FAIL, not an OK with a bad number in it
+    # (design 6.6): supervisors parse the token, and only the accuracy tells them how far off
+    # the bar it landed, so both are printed either way.
+    passed = acc >= THRESHOLD
+    token = "PROBE_OK" if passed else "PROBE_FAIL"
+    print(
+        f"{token} accuracy={acc:.4f} held={held} free={free} {json.dumps(verdict)}",
+        flush=True,
+    )
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

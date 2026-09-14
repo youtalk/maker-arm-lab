@@ -252,3 +252,43 @@ def test_the_takeover_cap_blocks_a_second_takeover(tmp_path, monkeypatch):
     with h5py.File(tmp_path / "c.hdf5", "r") as f:
         actor = f["data/demo_0/obs/actor"][:]
         assert set(actor.tolist()) == {1}
+
+
+def test_a_declined_takeover_is_not_reoffered_on_the_very_next_step(tmp_path):
+    """A decline is a normal outcome (ruling P32, and DONE/ABANDON at entry once the desk is
+    clear), and three of the five triggers do not read the step counters -- the ``random`` one
+    at p = 1 fires on every step. Every offer rebuilds an ``EnvOracle``, snapshots the scene,
+    recomputes the stowed set and wipes ``rig.stats[i]``, so a declined env must be left alone
+    for a cooldown instead of being offered again the next step, for the rest of the episode.
+    """
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(
+        1, draw, num_bricks=2, cameras=False, export_dir=tmp_path, shard_name="n", export_all=True
+    )
+    env.reset(seed=11)
+    env.max_episode_length = 300
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
+    calls = []
+
+    def _decline(i):
+        calls.append(i)
+        return False
+
+    rig.resume = _decline
+    payload = dl.rollout(
+        env,
+        rig,
+        _HoldPolicy(),
+        run_seed=11,
+        layout_seed=5,
+        permutation=(0, 1, 2, 3),
+        random_interval=1.0,  # p = 1.0: the random trigger fires on every single step
+        max_wall_minutes=5.0,
+    )
+    env.close()
+    assert payload["takeovers"] == 0 and payload["takeovers_declined"] == len(calls)
+    # One offer, then one per cooldown window -- not one per step, which is what the
+    # every-step trigger would produce without the cooldown.
+    assert 1 <= len(calls) <= payload["steps_run"] // dl.DECLINE_COOLDOWN + 2
+    assert len(calls) < payload["steps_run"] // 4

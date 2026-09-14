@@ -68,6 +68,7 @@ import torch
 from maker_arm_lab.core import layout, oracle, trajectory
 from maker_arm_lab.core.action_scale import IK_SCALE
 from maker_arm_lab.core.checker import (
+    HELD_MIN_FORCE,
     PINCH_MAX_ASYMMETRY,
     PINCH_MIN_FORCE,
     PINCH_MIN_STALL,
@@ -235,10 +236,10 @@ ROT_CONVERGED = 0.02
 LIFT_MIN_RISE = 0.05  # m
 LIFT_MAX_XY_ERROR = 0.03  # m
 
-# Newtons on the weaker jaw for `resume` to call a brick pinched: the eval loop's attribution
-# threshold (core.eval_loop.HELD_MIN_FORCE), under PINCH_MIN_FORCE on purpose, because a
-# takeover on a weak pinch still enters LIFT, whose gate then decides.
-RESUME_HELD_MIN_FORCE = 1.0
+# `resume` calls a brick pinched at core.checker.HELD_MIN_FORCE (imported above), the
+# attribution threshold the eval loop and the privileged channel read it at. It is under
+# PINCH_MIN_FORCE on purpose: a takeover on a weak pinch still enters LIFT, whose gate then
+# decides.
 
 # Idle action for an env whose oracle has nothing left to do this step (DONE or ABANDON):
 # jaws open, arm holding its last commanded joint target. The arm channel is NOT zeroed --
@@ -1333,8 +1334,23 @@ class OracleRig:
         self.stats[i] = self._fresh_stats()
         left = self.left_brick.data.force_matrix_w[i, 0].norm(dim=-1)
         right = self.right_brick.data.force_matrix_w[i, 0].norm(dim=-1)
-        held = int(held_brick_from_forces(left[None], right[None], RESUME_HELD_MIN_FORCE)[0])
+        held = int(held_brick_from_forces(left[None], right[None], HELD_MIN_FORCE)[0])
         scene = self.snapshot(i)
+        if held >= 0 and float(scene.brick_pos[held, 2]) > oracle.LIFT_HEIGHT:
+            # RULING P32: decline a brick the policy is already carrying ABOVE LIFT_HEIGHT.
+            # The LIFT entry this resume would take reads its target as an absolute clearance
+            # of LIFT_HEIGHT above the desk, so from a carry at, say, 0.22 m it plans a walk
+            # DOWN 12 cm with the jaws closed on the brick. LIFT's rise gate then measures
+            # that against a `brick_start` set to the live pose, sees a negative rise, fails,
+            # and REOPEN drops the brick -- after which the normal retry usually re-picks it
+            # off the desk, so the cycle scores as a stowed takeover and every one of its
+            # frames is KEPT. That is an expert demonstration of descending and opening the
+            # jaws while carrying a brick, which is far worse than a missed takeover: it is
+            # learned rather than crashed on. Declining costs a takeover and nothing else --
+            # the policy keeps the env and a later trigger catches it once the brick is back
+            # down. Design 6.2's own escape hatch: return False, leave the env idle.
+            self._go_idle(i, None)
+            return False
         orc.resume(scene, held)
         self.brick_start[i] = self._brick_pos(i, held) if held >= 0 else None
         self.idle[i] = False

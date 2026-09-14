@@ -234,6 +234,9 @@ def test_resume_after_a_drop_hovers_again():
 
 
 def test_resume_from_a_pinch_that_holds_enters_lift():
+    """The brick is still UNDER LIFT_HEIGHT here -- a pinch the policy has closed on but not
+    yet raised, which is the only carry a takeover may enter LIFT from. The carry above the
+    clearance is ruling P32's decline; see its own test below."""
     draw = sample_run_draw(random.Random(5))
     draw["slot_colors"] = (0, 1, 2, 3)
     env = MjLegoSortEnv(1, draw, num_bricks=2, cameras=False)
@@ -241,13 +244,57 @@ def test_resume_from_a_pinch_that_holds_enters_lift():
     rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
     for _ in range(4000):
         rig.step()
-        goal = rig.goals[0]
-        if goal is not None and goal.phase is oracle.Phase.LIFT and not rig.plans[0]:
+        goal, brick = rig.goals[0], rig.oracles[0].target_brick
+        if (
+            goal is not None
+            and goal.phase is oracle.Phase.LIFT
+            and brick is not None
+            and rig.pinch_evidence(0, brick)["ok"]
+            and float(rig._brick_pos(0, brick)[2]) <= oracle.LIFT_HEIGHT
+        ):
             break
-    held = rig.oracles[0].target_brick
+    else:
+        raise AssertionError("never reached a held LIFT below LIFT_HEIGHT")
+    held = brick
     rig.idle[0], rig.goals[0], rig.oracles[0] = True, None, None
     assert rig.resume(0) is True
     assert rig.goals[0].phase is oracle.Phase.LIFT and rig.oracles[0].target_brick == held
     out = _until_takeover_ends(rig, env, 2000)
     assert rig.takeover_result[0] is True and not bool(out["dones"][0])
+    env.close()
+
+
+def test_resume_declines_a_brick_carried_above_lift_height():
+    """RULING P32. The ``random`` and ``workspace`` triggers are evaluated without reading
+    ``held``, so a takeover can be offered while the policy is carrying a brick aloft. The
+    LIFT entry ``resume`` would take reads its target as an absolute clearance of LIFT_HEIGHT
+    above the desk, so from a carry at 0.2 m it plans a walk DOWN with the jaws closed, fails
+    LIFT's rise gate against the live ``brick_start``, and drops the brick in REOPEN -- after
+    which the retry re-picks it, the cycle scores as stowed, and every frame of the descent
+    and the deliberate release is kept in the corpus. The takeover must be declined instead:
+    the env stays idle, nothing is scored, and a later trigger catches it once the brick is
+    back on the desk.
+    """
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(1, draw, num_bricks=2, cameras=False)
+    env.reset(seed=11)
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
+    for _ in range(4000):
+        rig.step()
+        goal, carried = rig.goals[0], rig.oracles[0].target_brick
+        if (
+            goal is not None
+            and goal.phase in (oracle.Phase.RAISE, oracle.Phase.EXTEND)
+            and carried is not None
+            and float(rig._brick_pos(0, carried)[2]) > oracle.LIFT_HEIGHT
+        ):
+            break
+    else:
+        raise AssertionError("the oracle never carried a brick above LIFT_HEIGHT")
+    rig.idle[0], rig.goals[0] = True, None
+    assert rig.resume(0) is False
+    assert rig.idle[0] is True and rig.goals[0] is None  # never entered LIFT
+    assert rig.single_cycle[0] is False
+    assert rig.takeover_result[0] is None  # nothing to score: the takeover never started
     env.close()

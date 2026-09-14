@@ -81,6 +81,7 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     policy = None
     env = None
+    close_error = None
     try:
         # Parsed here, inside the try, because a non-integer element (say "0,1,x,3") raises
         # ValueError -- a bad --permutation must become DAGGER_FAIL like any other bad input,
@@ -128,10 +129,22 @@ def main(argv=None) -> int:
         )
         return 1
     finally:
-        if policy is not None:
-            policy.close()
-        if env is not None:
-            env.close()
+        try:
+            if policy is not None:
+                policy.close()
+            if env is not None:
+                env.close()
+        except Exception as err:  # noqa: BLE001 -- the token contract
+            # ``env.close()`` flushes the recorder and writes the shard, the most
+            # failure-prone step in this process. Raising here would exit with no token at
+            # all, which the supervisor reads as a hang. The token is printed AFTER the
+            # try/except/finally, not here: a body that already returned printed its own
+            # token and that return wins over this block, so exactly one token is printed
+            # on either path.
+            close_error = f"{err}\n{traceback.format_exc()}"
+    if close_error is not None:
+        print("DAGGER_FAIL " + json.dumps({"reason": "close", "detail": close_error}), flush=True)
+        return 1
     try:
         if args.out:
             Path(args.out).write_text(json.dumps(payload, indent=2))
