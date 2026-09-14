@@ -25,12 +25,12 @@ context channels never mix in one dataset: one ``--context`` per conversion. ``-
 drops both image features (the privileged-state ceiling) and requires ``--context`` -- a
 dataset with neither images nor a context channel has nothing to condition the policy on.
 
-``--action_space delta`` (MS4 lever 2) replaces the joint part of ``action`` with target
-minus the measured joint position of the same frame; the gripper column is unchanged.
-The recorded target is recoverable as ``state + action``, and the policy server adds the
-measured position back before sending it on, so the arm still receives an absolute
-command the clamp accepts. A ``meta/action_space.json`` marker records which space a
-dataset was created with, and resuming into it with the other space is refused.
+``--action_space delta_prev`` (MS4 c2 design 4.2) replaces the joint part of ``action`` with
+this frame's target minus the previous frame's target; the gripper column is unchanged.
+On a segment's first frame, the anchor is the measured joint position. The policy server
+adds the client's anchor back before sending an absolute command the clamp accepts.
+A ``meta/action_space.json`` marker records which space a dataset was created with, and
+resuming into it with the other space is refused.
 """
 
 import argparse
