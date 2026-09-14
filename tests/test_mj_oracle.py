@@ -88,6 +88,45 @@ def test_step_is_actions_then_env_step_then_observe():
     assert all(torch.equal(a, b) for (_, a), (_, b) in zip(whole, split))
 
 
+def test_observe_does_not_touch_the_actions_snapshot():
+    """``actions()`` freezes ``_stowed_sample`` and the cycle stash before ``env.step()``.
+
+    Neither value may change again until the next call to ``actions()`` -- that is the whole
+    point of sampling them before the step rather than after (see the comments carried over
+    under Ruling P15). ``env.step()`` auto-resets a finished env, and ``observe()`` advances
+    phases, so if either value were instead read inside ``observe()`` it would silently pick
+    up the next episode's scatter or the post-transition phase.
+
+    The run goes all the way to the episode's last step, on purpose: for most of a run,
+    nothing about brick poses or the phase changes within a single physics step, so a
+    snapshot taken before ``env.step()`` matches a fresh read taken after it even when the
+    fresh read runs too late. The one step that always differs is the last one, where
+    ``env.step()`` auto-resets a finished env: a fresh post-reset read sees the next
+    episode's scatter and phase -1, not the episode that just finished.
+    """
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(1, draw, num_bricks=2, cameras=False)
+    env.reset(seed=11)
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
+    steps = 0
+    while steps < 4000:
+        action = rig.actions()
+        stowed_snapshot = rig._stowed_sample.clone()
+        phase_snapshot = env.oracle_cycle_phase.clone()
+        brick_snapshot = env.oracle_cycle_brick.clone()
+        _, _, terminated, truncated, _ = env.step(action)
+        out = rig.observe((terminated | truncated).cpu())
+        steps += 1
+        assert torch.equal(rig._stowed_sample, stowed_snapshot)
+        assert torch.equal(env.oracle_cycle_phase, phase_snapshot)
+        assert torch.equal(env.oracle_cycle_brick, brick_snapshot)
+        if bool(out["dones"][0]) or bool(out["abandoned"][0]):
+            break
+    assert steps < 4000, steps  # the episode actually ended, so the reset step ran
+    env.close()
+
+
 def test_an_idle_env_coasts_and_stashes_minus_one():
     draw = sample_run_draw(random.Random(5))
     draw["slot_colors"] = (0, 1, 2, 3)
