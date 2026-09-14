@@ -47,6 +47,13 @@ def test_dagger_ok_does_not_print_inside_the_try_clause():
     in this file (the token string exists, the required except handlers exist), so this test
     reads the source of the ``try`` clause specifically (excluding its except/finally, where
     DAGGER_OK does not belong either) and requires the token to be absent from it.
+
+    A second variant of the same mutation is a DAGGER_OK print inserted as the FIRST statement
+    of the ``finally`` block itself, ahead of ``env.close()``. That also claims the shard is on
+    disk before it is, and the check above alone misses it (the print sits in ``finalbody``,
+    not in the ``try`` clause). So this test also locates the ``finally`` statement that calls
+    ``env.close()`` and requires no DAGGER_OK print at or before it, among the statements
+    preceding and including it.
     """
     text = SCRIPT.read_text()
     tree = ast.parse(text)
@@ -54,4 +61,13 @@ def test_dagger_ok_does_not_print_inside_the_try_clause():
     try_node = next(n for n in main.body if isinstance(n, ast.Try))
     try_clause = "\n".join(ast.get_source_segment(text, stmt) or "" for stmt in try_node.body)
     assert "DAGGER_OK" not in try_clause
+    close_idx = next(
+        i
+        for i, stmt in enumerate(try_node.finalbody)
+        if "env.close()" in (ast.get_source_segment(text, stmt) or "")
+    )
+    finally_prefix = "\n".join(
+        ast.get_source_segment(text, stmt) or "" for stmt in try_node.finalbody[: close_idx + 1]
+    )
+    assert "DAGGER_OK" not in finally_prefix
     assert "DAGGER_OK " in text  # still printed somewhere -- after the try/except/finally

@@ -32,8 +32,24 @@ from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 NUM_BRICKS = 6
 
 
+class _TokenEmittingParser(argparse.ArgumentParser):
+    """A parser whose usage errors still honour the DAGGER_OK / DAGGER_FAIL contract.
+
+    argparse's own ``error()`` exits 2 with a usage message on stderr and no token. This
+    script's own range checks below call the same method. Both paths run before ``main``'s
+    ``try``, so left alone they leave the supervisor with a silent, tokenless exit -- the same
+    fix ``scripts/scripted_grasp_check.py`` applies to its own parser, for the same reason.
+    """
+
+    def error(self, message: str):
+        self.print_usage(sys.stderr)
+        print(f"{self.prog}: error: {message}", file=sys.stderr, flush=True)
+        print("DAGGER_FAIL " + json.dumps({"reason": "usage", "detail": message}), flush=True)
+        raise SystemExit(2)
+
+
 def parse_args(argv=None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _TokenEmittingParser(description=__doc__)
     parser.add_argument("--num_envs", type=int, default=12)
     parser.add_argument(
         "--run_seed", type=int, default=0, help="env.reset seed and the trigger rng"
@@ -63,13 +79,15 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    perm = tuple(int(v) for v in args.permutation.split(","))
-    if sorted(perm) != [0, 1, 2, 3]:
-        print("DAGGER_FAIL " + json.dumps({"reason": "permutation", "detail": args.permutation}))
-        return 1
     policy = None
     env = None
     try:
+        # Parsed here, inside the try, because a non-integer element (say "0,1,x,3") raises
+        # ValueError -- a bad --permutation must become DAGGER_FAIL like any other bad input,
+        # not an uncaught traceback with no token.
+        perm = tuple(int(v) for v in args.permutation.split(","))
+        if sorted(perm) != [0, 1, 2, 3]:
+            raise EvalFailure("permutation", args.permutation)
         draw = sample_run_draw(random.Random(args.layout_seed), args.spatial_scale)
         draw["slot_colors"] = perm
         env = MjLegoSortEnv(
@@ -114,8 +132,12 @@ def main(argv=None) -> int:
             policy.close()
         if env is not None:
             env.close()
-    if args.out:
-        Path(args.out).write_text(json.dumps(payload, indent=2))
+    try:
+        if args.out:
+            Path(args.out).write_text(json.dumps(payload, indent=2))
+    except Exception as err:  # noqa: BLE001 -- shard is already on disk; still print a token
+        print("DAGGER_FAIL " + json.dumps({"reason": "write_out", "detail": str(err)}), flush=True)
+        return 1
     print("DAGGER_OK " + json.dumps(payload), flush=True)
     return 0
 
