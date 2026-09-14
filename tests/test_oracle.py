@@ -964,3 +964,35 @@ def test_nearest_first_and_randomize_pick_order_together_are_refused():
             draw=oracle.sample_episode_draw(random.Random(0), noise),
             rng=random.Random(0),
         )
+
+
+def test_resume_with_a_held_brick_enters_lift_then_raise():
+    orc = _oracle()
+    scene = _snapshot()
+    orc.resume(scene, held=0)
+    assert orc.phase is oracle.Phase.LIFT and orc.target_brick == 0
+    goal = _run_phase(orc, scene, pinch_ok=True, lifted=True)
+    assert goal.phase is oracle.Phase.LIFT and goal.gripper == -1.0
+    assert orc.phase is oracle.Phase.RAISE and orc.pick_order == [0]
+
+
+def test_resume_without_a_held_brick_enters_hover_on_the_nearest_candidate():
+    orc = _oracle()
+    orc.resume(_snapshot(), held=-1)
+    assert orc.phase is oracle.Phase.HOVER and orc.target_brick is None
+    goal = orc.next_goal(_snapshot())
+    assert goal.phase is oracle.Phase.HOVER and orc.target_brick == 0
+
+
+def test_resume_on_a_finished_desk_is_done():
+    orc = _oracle()
+    scene = _snapshot(stowed=(0,))
+    orc.resume(scene, held=-1)
+    assert orc.sorted_bricks == frozenset({0})
+    assert orc.next_goal(scene) is None and orc.phase is oracle.Phase.DONE
+
+
+def test_nominal_draw_has_no_noise_and_nearest_first():
+    draw = oracle.nominal_draw()
+    assert draw.hover_jitter_range == (0.0, 0.0) and draw.action_noise_std == 0.0
+    assert draw.lateral_dx == 0.0 and draw.yaw_offset == 0.0 and draw.nearest_first_pick_order

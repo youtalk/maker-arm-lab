@@ -324,6 +324,23 @@ def sample_episode_draw(rng: random.Random, noise: OracleNoise) -> EpisodeDraw:
     )
 
 
+def nominal_draw() -> EpisodeDraw:
+    """The draw a DAgger takeover plans with (MS4 c2 design 6.2): the middle hover height,
+    no offsets, no noise, no hover jitter, no induction, and the nearest-first pick order the
+    corpus recipe uses."""
+    return EpisodeDraw(
+        hover_height=0.12,
+        lateral_dx=0.0,
+        lateral_dy=0.0,
+        yaw_offset=0.0,
+        gain_scale=1.0,
+        action_noise_std=0.0,
+        via_dx=0.0,
+        via_dy=0.0,
+        nearest_first_pick_order=True,
+    )
+
+
 @dataclass(frozen=True)
 class FailureInduction:
     """Deliberate first-attempt grasp failures, recovered by the existing retry.
@@ -665,6 +682,30 @@ class EnvOracle:
             return self.induction.noise_boost
         return 1.0
 
+    @property
+    def sorted_bricks(self) -> frozenset[int]:
+        return frozenset(self._sorted)
+
+    def resume(self, scene: SceneSnapshot, held: int) -> None:
+        """Enter the machine mid-episode from a state a policy reached (MS4 c2 design 6.2).
+
+        Two rows. A pinched brick resumes at LIFT, with the brick start at its live pose so
+        the rise gate measures from now; LIFT's own pinch and rise gate then routes a bad
+        pinch into the normal REOPEN retry. Anything else resumes at HOVER with no target,
+        and HOVER's entry picks the nearest candidate, or answers DONE or ABANDON.
+        """
+        self._sorted = self._stowed(scene)
+        self.retries_used = 0
+        self._induced_style = None
+        if held >= 0:
+            self.target_brick = held
+            self._brick_start = scene.brick_pos[held].clone()
+            self.pick_order.append(held)
+            self.phase = Phase.LIFT
+        else:
+            self.target_brick = None
+            self.phase = Phase.HOVER
+
     # -- brick bookkeeping ---------------------------------------------------
 
     def _stowed(self, scene: SceneSnapshot) -> set[int]:
@@ -881,8 +922,15 @@ class EnvOracle:
                 Phase.CLOSE, None, None, 0.0, -1.0, None, 0, CLOSE_STEPS, hold=CLOSE_STEPS
             )
         if self.phase == Phase.LIFT:
+            # z is a clearance ABOVE THE DESK (layout.py: "desk top surface at z = 0"), not
+            # a rise added on top of wherever the tool now is. On a normal CLOSE->LIFT
+            # transition the two read the same, since the tool is still at the brick's
+            # near-zero resting height; `resume` (MS4 c2 design 6.2) can enter LIFT with the
+            # brick already carried partway or all the way up, and adding LIFT_HEIGHT to
+            # that live height would ask for a second rise stacked on the first, well
+            # outside the arm's reach.
             target = scene.pick_point.clone()
-            target[2] += LIFT_HEIGHT
+            target[2] = min(target[2] + LIFT_HEIGHT, LIFT_HEIGHT)
             return self._goal(
                 Phase.LIFT, target, None, 0.0, -1.0, 0.002, 0, DEFAULT_MAX_STEPS, hold=30
             )

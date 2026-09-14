@@ -13,6 +13,7 @@ import torch
 
 from maker_arm_lab.core import oracle
 from maker_arm_lab.core.layout import sample_run_draw
+from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 
@@ -177,3 +178,76 @@ def test_oracle_sorts_two_bricks_under_episode_draws():
     stats = rig.episode_stats(0)
     env.close()
     assert stats["succeeded"] is True, stats
+
+
+def _until_takeover_ends(rig, env, budget):
+    for _ in range(budget):
+        out = rig.step()
+        if rig.takeover_result[0] is not None or bool(out["dones"][0]):
+            return out
+    raise AssertionError("the takeover did not end")
+
+
+def test_resume_without_a_pinch_hovers_and_stows_one_brick_then_idles():
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(1, draw, num_bricks=2, cameras=False)
+    env.reset(seed=11)
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
+    rig.rearm([0], idle=True)
+    for _ in range(30):
+        rig.step()
+    assert rig.resume(0) is True
+    assert rig.idle[0] is False and rig.goals[0].phase is oracle.Phase.HOVER
+    assert rig.single_cycle[0] and rig.takeover_result[0] is None
+    out = _until_takeover_ends(rig, env, 2000)
+    assert rig.takeover_result[0] is True and rig.idle[0] and rig.goals[0] is None
+    assert not bool(out["dones"][0])  # one brick of two: the episode goes on
+    assert int(per_brick_stowed(env)[0].sum()) == 1
+    assert rig.resume(0) is True
+    out = _until_takeover_ends(rig, env, 2000)
+    assert bool(out["dones"][0]) and rig.episode_stats(0)["succeeded"] is True
+    env.close()
+
+
+def test_resume_after_a_drop_hovers_again():
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(1, draw, num_bricks=2, cameras=False)
+    env.reset(seed=11)
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
+    for _ in range(4000):
+        rig.step()
+        goal = rig.goals[0]
+        if goal is not None and goal.phase is oracle.Phase.LIFT and not rig.plans[0]:
+            break
+    else:
+        raise AssertionError("never reached a walked LIFT")
+    held = rig.oracles[0].target_brick
+    assert rig.pinch_evidence(0, held)["ok"]
+    rig._go_idle(0, None)
+    for _ in range(10):
+        rig.step()  # the coast row keeps the jaws OPEN, so the brick drops back to the desk
+    assert rig.resume(0) is True
+    assert rig.goals[0].phase is oracle.Phase.HOVER  # dropped brick: nothing pinched now
+    env.close()
+
+
+def test_resume_from_a_pinch_that_holds_enters_lift():
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(1, draw, num_bricks=2, cameras=False)
+    env.reset(seed=11)
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
+    for _ in range(4000):
+        rig.step()
+        goal = rig.goals[0]
+        if goal is not None and goal.phase is oracle.Phase.LIFT and not rig.plans[0]:
+            break
+    held = rig.oracles[0].target_brick
+    rig.idle[0], rig.goals[0], rig.oracles[0] = True, None, None
+    assert rig.resume(0) is True
+    assert rig.goals[0].phase is oracle.Phase.LIFT and rig.oracles[0].target_brick == held
+    out = _until_takeover_ends(rig, env, 2000)
+    assert rig.takeover_result[0] is True and not bool(out["dones"][0])
+    env.close()

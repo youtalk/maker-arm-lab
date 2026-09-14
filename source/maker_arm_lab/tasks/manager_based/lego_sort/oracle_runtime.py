@@ -71,6 +71,7 @@ from maker_arm_lab.core.checker import (
     PINCH_MAX_ASYMMETRY,
     PINCH_MIN_FORCE,
     PINCH_MIN_STALL,
+    held_brick_from_forces,
 )
 from maker_arm_lab.core.global_ik import (
     ARM_DOF,
@@ -233,6 +234,11 @@ ROT_CONVERGED = 0.02
 # remains inherited from OpenYAM. Read core.checker for which is which.
 LIFT_MIN_RISE = 0.05  # m
 LIFT_MAX_XY_ERROR = 0.03  # m
+
+# Newtons on the weaker jaw for `resume` to call a brick pinched: the eval loop's attribution
+# threshold (core.eval_loop.HELD_MIN_FORCE), under PINCH_MIN_FORCE on purpose, because a
+# takeover on a weak pinch still enters LIFT, whose gate then decides.
+RESUME_HELD_MIN_FORCE = 1.0
 
 # Idle action for an env whose oracle has nothing left to do this step (DONE or ABANDON):
 # jaws open, arm holding its last commanded joint target. The arm channel is NOT zeroed --
@@ -481,6 +487,12 @@ class OracleRig:
         # MS4 c2 design 6.1: an idle env is under another actor (the DAgger policy). Its row in
         # `actions()` is the coast row, its stash reads -1, and `observe()` leaves it alone.
         self.idle = [False] * self.num_envs
+        # MS4 c2 design 6.2: a `resume()` takeover runs exactly one brick cycle. `single_cycle`
+        # marks an env mid-takeover so `_advance_phases`/`_enter_phase` know to hand it back
+        # at RETREAT instead of entering the next HOVER; `takeover_result` is None while that
+        # takeover runs, then whether the cycle's brick reached its bin.
+        self.single_cycle = [False] * self.num_envs
+        self.takeover_result: list[bool | None] = [None] * self.num_envs
         self._planned: list[torch.Tensor] = []
         self.rearm(list(range(self.num_envs)))
 
@@ -725,7 +737,13 @@ class OracleRig:
                 self.stats[i]["sort_attempts"] += 1
             orc = self.oracles[i]
             scene = self.snapshot(i)
+            brick = orc.target_brick
             orc.report(result, scene)
+            if self.single_cycle[i] and goal.phase == oracle.Phase.RETREAT:
+                # MS4 c2 design 6.2: a takeover is one brick cycle. RETREAT's report marked
+                # the brick sorted if it arrived; hand the env back instead of the next HOVER.
+                self._go_idle(i, brick in orc.sorted_bricks)
+                continue
             self._enter_phase(i, scene, ending_phase=goal.phase)
 
     def _phase_result(self, i: int, goal: oracle.Goal) -> oracle.PhaseResult | None:
@@ -818,6 +836,11 @@ class OracleRig:
         # REOPEN/RELEASE gap it trades in for it.
         self.watchdog_strikes[i] = 0
         if goal is None:
+            if self.single_cycle[i]:
+                # A takeover that ends in DONE or ABANDON hands the env back; the cycle did
+                # not stow its brick, and the DAgger loop drops its frames.
+                self._go_idle(i, False)
+                return
             if orc.phase == oracle.Phase.ABANDON:
                 self.abandoned[i] = True
                 if self.stats[i]["abandon"] is None:
@@ -1275,8 +1298,60 @@ class OracleRig:
             self.abandoned[i] = False
             self._outcome[i] = None
             self.stats[i] = self._fresh_stats()
+            self.single_cycle[i] = False
+            self.takeover_result[i] = None
             if not idle:
                 self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE
+
+    def resume(self, i: int) -> bool:
+        """Take idle env ``i`` over from the policy for one brick cycle (MS4 c2 design 6.2).
+
+        Returns False, and leaves the env idle, when the oracle answers DONE or ABANDON at
+        entry or the first leg cannot be planned.
+        """
+        if not self.idle[i]:
+            raise RuntimeError(f"env {i} is not idle")
+        layouts = getattr(self.env, "bin_layouts", None)
+        bl = self.bl if layouts is None else layouts[i]
+        orc = oracle.EnvOracle(bl, self.num_bricks, oracle.nominal_draw())
+        self.oracles[i] = orc
+        self.commanded_yaw[i] = self.jaw_yaw(i)
+        self.commanded_tilt[i] = self.tool_tilt(i)
+        self.pick_offset[i] = torch.tensor(PICK_OFFSET_MEASURED, device=self.device)
+        self.q_cmd[i] = self.q_arm(i)
+        self.trims[i].reset()
+        self.plans[i] = []
+        self.walk_steps[i] = 1
+        self.walk_step[i] = 0
+        self.previous_pick_point[i] = None
+        self.steps_in_phase[i] = 0
+        self.quiet[i] = 0
+        self.holding[i] = False
+        self.watchdog_strikes[i] = 0
+        self.unplanned[i] = False
+        self.abandoned[i] = False
+        self.stats[i] = self._fresh_stats()
+        left = self.left_brick.data.force_matrix_w[i, 0].norm(dim=-1)
+        right = self.right_brick.data.force_matrix_w[i, 0].norm(dim=-1)
+        held = int(held_brick_from_forces(left[None], right[None], RESUME_HELD_MIN_FORCE)[0])
+        scene = self.snapshot(i)
+        orc.resume(scene, held)
+        self.brick_start[i] = self._brick_pos(i, held) if held >= 0 else None
+        self.idle[i] = False
+        self.single_cycle[i] = True
+        self.takeover_result[i] = None
+        self._enter_phase(i, scene)
+        if self.goals[i] is None or self.unplanned[i]:
+            self._go_idle(i, None)
+            return False
+        return True
+
+    def _go_idle(self, i: int, stowed: bool | None) -> None:
+        """End env ``i``'s takeover: the policy has it again."""
+        self.idle[i] = True
+        self.single_cycle[i] = False
+        self.goals[i] = None
+        self.takeover_result[i] = stowed
 
     def episode_stats(self, env_id: int) -> dict:
         """Everything a metadata sidecar needs about the finished episode.
