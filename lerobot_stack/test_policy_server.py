@@ -27,14 +27,15 @@ def _obs(batch=2):
     }
 
 
-def _start_server(policy_fn, calls, context_dim=0):
+def _start_server(policy_fn, calls, context_dim=0, policy_id="fake:test", action_space="absolute"):
     srv = PolicyServer(
         policy_fn=policy_fn,
         reset_fn=lambda: calls.__setitem__("reset", calls["reset"] + 1),
-        policy_id="fake:test",
+        policy_id=policy_id,
         port=0,
         n_action_steps=100,
         context_dim=context_dim,
+        action_space=action_space,
     )
     port = srv.bind()
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -82,6 +83,23 @@ def server_ctx():
 
     req, thread = _start_server(fake_policy, calls, context_dim=6)
     yield req, calls
+    _stop_server(req, thread)
+
+
+@pytest.fixture()
+def server_delta_prev():
+    calls = {"reset": 0}
+
+    def fake_policy(state, wrist, overhead, context=None):
+        action = np.zeros((state.shape[0], 7), dtype=np.float32)
+        action[:, :6] = 0.1
+        action[:, 6] = -1.0
+        return action
+
+    req, thread = _start_server(
+        fake_policy, calls, policy_id="fake:test+dprev", action_space="delta_prev"
+    )
+    yield req
     _stop_server(req, thread)
 
 
@@ -148,6 +166,34 @@ def test_hello_ack_reports_the_context_width(server_ctx):
     req, _ = server_ctx
     header, _ = _rpc(req, {"type": "hello", "protocol": PROTOCOL_VERSION})
     assert header["context_dim"] == 6
+
+
+def test_a_delta_prev_server_needs_an_anchor_and_adds_it(server_delta_prev):
+    req = server_delta_prev
+    send_message(req, {"type": "hello", "protocol": PROTOCOL_VERSION})
+    header, _ = recv_message(req)
+    assert header["action_space"] == "delta_prev"
+    send_message(req, {"type": "step", "batch": 2}, _obs())
+    header, _ = recv_message(req)
+    assert (
+        header["type"] == "error" and header["error"] == "bad_obs" and "anchor" in header["message"]
+    )
+    anchor = np.full((2, 6), 1.0, dtype=np.float32)
+    send_message(req, {"type": "step", "batch": 2}, {**_obs(), "anchor": anchor})
+    header, out = recv_message(req)
+    assert header["type"] == "action"
+    assert np.allclose(out["action"][:, :6], 1.1) and out["action"][:, 6].tolist() == [-1.0, -1.0]
+
+
+def test_an_absolute_server_ignores_an_anchor(server):
+    req, _ = server
+    send_message(req, {"type": "hello", "protocol": PROTOCOL_VERSION})
+    header, _ = recv_message(req)
+    assert header["action_space"] == "absolute"
+    anchor = np.full((2, 6), 5.0, dtype=np.float32)
+    send_message(req, {"type": "step", "batch": 2}, {**_obs(), "anchor": anchor})
+    header, out = recv_message(req)
+    assert header["type"] == "action" and float(np.abs(out["action"]).max()) < 5.0
 
 
 def test_nan_action_is_flagged():
@@ -368,6 +414,7 @@ def test_bind_announces_readiness_with_the_port_protocol_and_identity(capsys):
             "protocol": PROTOCOL_VERSION,
             "inference": {},  # nothing was loaded, so nothing is served
             "context_dim": 0,
+            "action_space": "absolute",
         }
     finally:
         # PolicyServer has no public teardown (the serve loop owns its socket for the
@@ -447,23 +494,22 @@ def test_action_space_marker_is_found_up_the_checkpoint_tree(tmp_path):
     ckpt = tmp_path / "checkpoints" / "575000" / "pretrained_model"
     ckpt.mkdir(parents=True)
     assert find_action_space_marker(str(ckpt)) == "absolute"
-    (tmp_path / "action_space.json").write_text('{"action_space": "delta"}')
-    assert find_action_space_marker(str(ckpt)) == "delta"
+    (tmp_path / "action_space.json").write_text('{"action_space": "delta_prev"}')
+    assert find_action_space_marker(str(ckpt)) == "delta_prev"
 
 
-def test_integrate_delta_adds_the_measured_joints_and_keeps_the_gripper():
+def test_integrate_delta_adds_the_anchor_and_keeps_the_gripper():
     from policy_server import integrate_delta
 
     action = np.zeros((2, 7), np.float32)
     action[:, :6] = 0.1
     action[:, 6] = -1.0
-    state = np.zeros((2, 7), np.float32)
-    state[:, :6] = 1.0
-    out = integrate_delta(action, state)
+    anchor = np.full((2, 6), 1.0, np.float32)
+    out = integrate_delta(action, anchor)
     assert np.allclose(out[:, :6], 1.1) and out[:, 6].tolist() == [-1.0, -1.0]
     assert np.allclose(action[:, :6], 0.1)  # the caller's array is untouched
 
 
-def test_policy_id_marks_delta_checkpoints():
-    assert inference_policy_id("ck", {}, action_space="delta").endswith("+delta")
-    assert "+delta" not in inference_policy_id("ck", {})
+def test_policy_id_marks_delta_prev_checkpoints():
+    assert inference_policy_id("ck", {}, action_space="delta_prev").endswith("+dprev")
+    assert "+d" not in inference_policy_id("ck", {})

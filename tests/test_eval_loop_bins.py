@@ -39,7 +39,7 @@ class _HoldPolicy:
         self.inference = {}
         self.widths = []
 
-    def step(self, state, wrist, overhead, context=None):
+    def step(self, state, wrist, overhead, context=None, anchor=None):
         self.widths.append(None if context is None else context.shape[1])
         action = np.zeros((state.shape[0], 7), dtype=np.float32)
         action[:, :6] = state[:, :6]
@@ -76,3 +76,88 @@ def test_the_loop_sends_the_served_context_and_checks_its_width():
             max_wall_minutes=1.0,
         )
     env.close()
+
+
+class _DeltaPrevPolicy(_HoldPolicy):
+    """Pretends to be a delta_prev checkpoint: records the anchors the loop sends."""
+
+    action_space = "delta_prev"
+
+    def __init__(self):
+        super().__init__(context_dim=0)
+        self.anchors = []
+
+    def step(self, state, wrist, overhead, context=None, anchor=None):
+        self.anchors.append(None if anchor is None else anchor.copy())
+        action = super().step(state, wrist, overhead, context)
+        action[:, 0] += 0.01  # the command walks joint 0 by 10 mrad per step
+        return action
+
+
+def test_the_loop_anchors_a_delta_prev_policy_on_the_previous_clamped_command():
+    env = _env("none")
+    q0 = env.scene["robot"].data.joint_pos[0, :6].numpy().copy()
+    policy = _DeltaPrevPolicy()
+    rollout(env, policy, run_seed=1, layout_seed=2, permutation=(0, 1, 2, 3), max_wall_minutes=1.0)
+    env.close()
+    assert len(policy.anchors) >= 2 and policy.anchors[0].shape == (1, 6)
+    assert np.allclose(policy.anchors[0][0], q0, atol=1e-6)  # step 0: the measured joints
+    # step 1: step 0's command, which is the measured joints plus the 10 mrad walk on joint 0
+    assert np.allclose(policy.anchors[1][0, 0], q0[0] + 0.01, atol=1e-6)
+    assert np.allclose(policy.anchors[1][0, 1:], q0[1:], atol=1e-6)
+
+
+class _OvershootPolicy(_HoldPolicy):
+    """A delta_prev checkpoint whose first command drives joint 0 far past its upper limit.
+
+    The anchor the loop sends on the NEXT step has to be the CLAMPED command
+    (`clamp_arm_actions`'s output), not the raw one the policy returned -- design section 4.3
+    defines the anchor as the previous CLAMPED arm command, and a raw-action anchor would
+    silently diverge from what training saw.
+    """
+
+    action_space = "delta_prev"
+
+    def __init__(self):
+        super().__init__(context_dim=0)
+        self.anchors = []
+        self.calls = 0
+
+    def step(self, state, wrist, overhead, context=None, anchor=None):
+        self.anchors.append(None if anchor is None else anchor.copy())
+        action = super().step(state, wrist, overhead, context)
+        if self.calls == 0:
+            action[:, 0] = 999.0  # far outside any real joint's range
+        self.calls += 1
+        return action
+
+
+def test_the_loop_anchors_on_the_clamped_command_not_the_raw_one():
+    env = _env("none")
+    upper = float(env.scene["robot"].data.joint_pos_limits[0, 0, 1])
+    policy = _OvershootPolicy()
+    rollout(env, policy, run_seed=1, layout_seed=2, permutation=(0, 1, 2, 3), max_wall_minutes=1.0)
+    env.close()
+    assert len(policy.anchors) >= 2
+    # step 1's anchor is step 0's command, clamped to joint 0's upper limit.
+    assert np.isclose(policy.anchors[1][0, 0], upper, atol=1e-6)
+    # The point of this test: a pre-clamp anchor would carry the raw 999.0 through instead.
+    assert not np.isclose(policy.anchors[1][0, 0], 999.0, atol=1e-3)
+
+
+def test_an_absolute_policy_gets_no_anchor():
+    env = _env("none")
+    policy = _AbsolutePolicy()
+    rollout(env, policy, run_seed=1, layout_seed=2, permutation=(0, 1, 2, 3), max_wall_minutes=1.0)
+    env.close()
+    assert set(policy.anchors) == {None}
+
+
+class _AbsolutePolicy(_HoldPolicy):
+    def __init__(self):
+        super().__init__(context_dim=0)
+        self.anchors = []
+
+    def step(self, state, wrist, overhead, context=None, anchor=None):
+        self.anchors.append(anchor)
+        return super().step(state, wrist, overhead, context)

@@ -28,6 +28,7 @@ import zmq
 from policy_protocol import (
     ACTION_DTYPE,
     ACTION_SHAPE,
+    ANCHOR_KEY,
     CONTEXT_KEY,
     OBS_SCHEMA,
     PROTOCOL_VERSION,
@@ -48,12 +49,14 @@ class PolicyServer:
         n_action_steps: int,
         inference: dict | None = None,
         context_dim: int = 0,
+        action_space: str = "absolute",
     ):
         self._policy_fn = policy_fn
         self._reset_fn = reset_fn
         self._policy_id = policy_id
         self._port = port
         self._n_action_steps = n_action_steps
+        self._action_space = action_space
         # The inference config the loaded policy actually runs with (n_action_steps,
         # temporal_ensemble_coeff, chunk_size), read off the policy after the overrides were
         # applied and echoed in SERVER_READY and hello_ack so an eval payload records what
@@ -80,6 +83,7 @@ class PolicyServer:
             "protocol": PROTOCOL_VERSION,
             "inference": self._inference,
             "context_dim": self._context_dim,
+            "action_space": self._action_space,
         }
         print("SERVER_READY " + json.dumps(ready), flush=True)
         return self._port
@@ -92,6 +96,7 @@ class PolicyServer:
             "n_action_steps": self._n_action_steps,
             "inference": self._inference,
             "context_dim": self._context_dim,
+            "action_space": self._action_space,
             "obs_schema": {k: [list(shape), dtype] for k, (shape, dtype) in OBS_SCHEMA.items()},
             "action": [list(ACTION_SHAPE), ACTION_DTYPE],
         }
@@ -136,11 +141,25 @@ class PolicyServer:
                         },
                     )
                     return True
+                anchor = arrays.get(ANCHOR_KEY)
+                if self._action_space == "delta_prev" and anchor is None:
+                    send_message(
+                        self._socket,
+                        {
+                            "type": "error",
+                            "error": "bad_obs",
+                            "message": "a delta_prev checkpoint needs the anchor array "
+                            "(the previous clamped arm command)",
+                        },
+                    )
+                    return True
                 action = np.asarray(
                     self._policy_fn(arrays["state"], arrays["wrist"], arrays["overhead"], context),
                     dtype=np.float32,
                 )
                 validate_action(action, batch)
+                if self._action_space == "delta_prev":
+                    action = integrate_delta(action, anchor)
                 if not np.isfinite(action).all():
                     send_message(
                         self._socket,
@@ -261,10 +280,9 @@ def find_action_space_marker(checkpoint_dir: str) -> str:
 
 
 def integrate_delta(action: np.ndarray, state: np.ndarray) -> np.ndarray:
-    """A delta checkpoint's joint part plus the measured joints: an absolute target again.
-
-    The gripper column is a command, not a position, and is left alone. The result is
-    what a real driver consumes, so the wire never carries a delta.
+    """A delta_prev checkpoint's joint part plus the client's anchor, the previous clamped
+    arm command: an absolute target again. The gripper column is a command, not a position,
+    and is left alone.
     """
     out = action.copy()
     out[:, :6] += state[:, :6]
@@ -341,8 +359,8 @@ def inference_policy_id(
         policy_id += f"+blank{blank_camera}"
     if context_dim:
         policy_id += f"+ctx{context_dim}"
-    if action_space == "delta":
-        policy_id += "+delta"
+    if action_space == "delta_prev":
+        policy_id += "+dprev"
     return policy_id
 
 
@@ -353,7 +371,7 @@ def load_act(
     temporal_ensemble_coeff: float | None = None,
     blank_camera: str | None = None,
 ):
-    """Build (policy_fn, reset_fn, policy_id, n_action_steps, inference, context_dim).
+    """Build (policy_fn, reset_fn, policy_id, n_action_steps, inference, context_dim, action_space).
 
     checkpoint_dir is a `pretrained_model` directory (e.g.
     <output_dir>/checkpoints/last/pretrained_model). The checkpoint's own
@@ -396,6 +414,11 @@ def load_act(
     )
     marker = find_gripper_bce_marker(checkpoint_dir)
     action_space = find_action_space_marker(checkpoint_dir)
+    if action_space == "delta":
+        raise ValueError(
+            "this checkpoint was trained on the c1 delta definition (target minus the measured "
+            "joints of the same frame), which MS4 c2 removed; only absolute and delta_prev serve"
+        )
     if marker is not None and ("gripper_raw_mean" not in marker or "gripper_raw_std" not in marker):
         raise ValueError(
             "gripper_bce.json next to this checkpoint predates the logit-scale "
@@ -425,8 +448,6 @@ def load_act(
             action = squash_gripper_logit(
                 action, marker["gripper_raw_mean"], marker["gripper_raw_std"]
             )
-        if action_space == "delta":
-            action = integrate_delta(action, state)
         return action
 
     return (
@@ -443,6 +464,7 @@ def load_act(
         policy.config.n_action_steps,
         served_inference(policy.config),
         context_dim,
+        action_space,
     )
 
 
@@ -505,12 +527,14 @@ def main() -> int:
     parser = build_parser()
     try:
         args = parser.parse_args()
-        policy_fn, reset_fn, policy_id, n_action_steps, inference, context_dim = load_act(
-            args.checkpoint,
-            args.device,
-            n_action_steps=args.n_action_steps,
-            temporal_ensemble_coeff=args.temporal_ensemble_coeff,
-            blank_camera=args.blank_camera,
+        policy_fn, reset_fn, policy_id, n_action_steps, inference, context_dim, action_space = (
+            load_act(
+                args.checkpoint,
+                args.device,
+                n_action_steps=args.n_action_steps,
+                temporal_ensemble_coeff=args.temporal_ensemble_coeff,
+                blank_camera=args.blank_camera,
+            )
         )
         server = PolicyServer(
             policy_fn,
@@ -520,6 +544,7 @@ def main() -> int:
             n_action_steps,
             inference=inference,
             context_dim=context_dim,
+            action_space=action_space,
         )
         server.bind()
         server.serve_forever()

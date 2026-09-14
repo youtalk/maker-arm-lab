@@ -9,7 +9,9 @@ import pytest
 import convert_to_lerobot as c2l
 
 
-def _shard(path, frames=8, context=True):
+def _shard(path, frames=8, context=True, bricks=None):
+    if bricks is None:
+        bricks = np.zeros(frames, np.int8)
     with h5py.File(path, "w") as f:
         g = f.create_group("data/demo_0")
         g.attrs["success"] = True
@@ -25,7 +27,7 @@ def _shard(path, frames=8, context=True):
         g.create_dataset("obs/images/wrist_rgb", data=np.zeros((frames, 224, 224, 3), np.uint8))
         g.create_dataset("obs/images/overhead_rgb", data=np.zeros((frames, 224, 224, 3), np.uint8))
         g.create_dataset("obs/cycle_phase", data=np.ones(frames, np.int8))
-        g.create_dataset("obs/cycle_brick", data=np.zeros(frames, np.int8))
+        g.create_dataset("obs/cycle_brick", data=bricks)
         g.create_dataset("obs/clamped", data=np.zeros(frames, bool))
         if context:
             cam = g.create_dataset(
@@ -81,19 +83,54 @@ def test_no_images_needs_a_context():
         c2l.convert([], None, "t/x", 30, images=False)
 
 
-def test_delta_actions_are_target_minus_measured_and_leave_a_marker(tmp_path):
+def test_delta_prev_actions_anchor_on_the_previous_target(tmp_path):
     shard = _shard(tmp_path / "s.hdf5")
-    c2l.convert([shard], tmp_path / "ds", "t/x", 30, action_space="delta")
+    c2l.convert([shard], tmp_path / "ds", "t/x", 30, action_space="delta_prev")
     marker = json.loads((tmp_path / "ds" / "meta" / "action_space.json").read_text())
-    assert marker == {"action_space": "delta"}
+    assert marker == {"action_space": "delta_prev"}
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     ds = LeRobotDataset("t/x", root=tmp_path / "ds")
-    action = ds[3]["action"]
-    assert float(action[0]) == pytest.approx(0.5)  # target 3 minus measured 2.5
-    assert float(action[6]) == 0.0
+    # Frame 0 anchors on the measured joints: target 0 minus measured -0.5.
+    assert float(ds[0]["action"][0]) == pytest.approx(0.5)
+    # Later frames anchor on the previous frame's target: target 3 minus target 2.
+    assert float(ds[3]["action"][0]) == pytest.approx(1.0)
+    assert float(ds[3]["action"][6]) == 0.0
     with pytest.raises(RuntimeError, match="action_space"):
         c2l.convert([shard], tmp_path / "ds", "t/x", 30, action_space="absolute")
+
+
+def test_the_c1_delta_definition_is_refused():
+    with pytest.raises(ValueError, match="action_space"):
+        c2l.convert([], None, "t/x", 30, action_space="delta")
+
+
+def test_delta_prev_resets_anchor_on_segment_boundary(tmp_path):
+    # Regression test: each segment's first frame must anchor on measured joints,
+    # not on the previous segment's last target. Create a 2-segment shard by
+    # varying the brick column so cycle_segments splits on the brick change.
+    bricks = np.array([0, 0, 0, 0, 1, 1, 1, 1], np.int8)
+    shard = _shard(tmp_path / "s.hdf5", frames=8, bricks=bricks)
+    c2l.convert(
+        [shard],
+        tmp_path / "ds",
+        "t/x",
+        30,
+        split_cycles=True,
+        action_space="delta_prev",
+    )
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    ds = LeRobotDataset("t/x", root=tmp_path / "ds")
+    # Episode 0 (segment 0, frames 0-3): first frame anchors on measured.
+    # target[0] - measured[0] = 0 - (-0.5) = 0.5
+    assert float(ds[0]["action"][0]) == pytest.approx(0.5)
+    # Episode 1 (segment 1, frames 4-7, starting at shard frame 4):
+    # First frame of segment must also anchor on measured, not on previous
+    # segment's last target. target[4] - measured[4] = 4 - 3.5 = 0.5
+    # (If it incorrectly anchored on previous segment's last target[3]=3,
+    # it would give 4 - 3 = 1.0, which would fail this test.)
+    assert float(ds[4]["action"][0]) == pytest.approx(0.5)
 
 
 def test_absolute_is_the_default_and_leaves_a_marker(tmp_path):

@@ -13,6 +13,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from maker_arm_lab.core import layout
@@ -123,6 +124,10 @@ def rollout(
     started = time.monotonic()
     max_steps = smoke_steps if random_actions else int(env.max_episode_length)
     step_index = 0
+    # MS4 c2 design 4.3: a delta_prev checkpoint's anchor is the previous clamped arm command,
+    # the measured joints before step 0. Absolute checkpoints get none.
+    delta_prev = getattr(policy, "action_space", "absolute") == "delta_prev"
+    prev_cmd: np.ndarray | None = None
     while step_index < max_steps and not tracker.all_done:
         if (time.monotonic() - started) / 60.0 > max_wall_minutes:
             raise EvalFailure("wall_clock", f"exceeded {max_wall_minutes} min at step {step_index}")
@@ -140,7 +145,12 @@ def rollout(
             wrist = env.obs_buf["images"]["wrist_rgb"].to("cpu").numpy()
             overhead = env.obs_buf["images"]["overhead_rgb"].to("cpu").numpy()
             context = env.obs_buf["context"].to("cpu").numpy() if served_width else None
-            action_cpu = torch.from_numpy(policy.step(state, wrist, overhead, context=context))
+            anchor = None
+            if delta_prev:
+                anchor = (state[:, :6] if prev_cmd is None else prev_cmd).astype(np.float32)
+            action_cpu = torch.from_numpy(
+                policy.step(state, wrist, overhead, context=context, anchor=anchor)
+            )
         tracker.record_gripper(action_cpu[:, 6])
         grip_open = action_cpu[:, 6] >= 0.0
         # One contact read per step, pre-step, shared by the release detection and the
@@ -219,6 +229,7 @@ def rollout(
             loose, strict = grade_grasp_attempts(left_mag, right_mag, graded, HELD_MIN_FORCE)
             tracker.record_grasp_outcome(graded, loose, strict)
         arm_clamped, overshoot = clamp_arm_actions(action_cpu[:, :6], limits)
+        prev_cmd = arm_clamped.numpy().copy()
         tracker.record_clamps(overshoot)
         clamped_action = torch.cat([arm_clamped, action_cpu[:, 6:7]], dim=-1)
         if trace is not None:

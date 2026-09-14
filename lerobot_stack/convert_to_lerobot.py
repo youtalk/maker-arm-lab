@@ -25,12 +25,12 @@ context channels never mix in one dataset: one ``--context`` per conversion. ``-
 drops both image features (the privileged-state ceiling) and requires ``--context`` -- a
 dataset with neither images nor a context channel has nothing to condition the policy on.
 
-``--action_space delta`` (MS4 lever 2) replaces the joint part of ``action`` with target
-minus the measured joint position of the same frame; the gripper column is unchanged.
-The recorded target is recoverable as ``state + action``, and the policy server adds the
-measured position back before sending it on, so the arm still receives an absolute
-command the clamp accepts. A ``meta/action_space.json`` marker records which space a
-dataset was created with, and resuming into it with the other space is refused.
+``--action_space delta_prev`` (MS4 c2 design 4.2) replaces the joint part of ``action`` with
+this frame's target minus the previous frame's target; the gripper column is unchanged.
+On a segment's first frame, the anchor is the measured joint position. The policy server
+adds the client's anchor back before sending an absolute command the clamp accepts.
+A ``meta/action_space.json`` marker records which space a dataset was created with, and
+resuming into it with the other space is refused.
 """
 
 import argparse
@@ -79,7 +79,7 @@ IMAGE_FEATURES = {
     },
 }
 CONTEXT_CHANNELS = ("camera", "privileged")
-ACTION_SPACES = ("absolute", "delta")
+ACTION_SPACES = ("absolute", "delta_prev")
 ACTION_SPACE_MARKER = "action_space.json"
 
 
@@ -295,10 +295,18 @@ def convert(
                 for seg in segments:
                     # index of the episode about to be saved
                     episode_index = dataset.meta.total_episodes
+                    previous = None
                     for t in seg:
                         joints = targets[t, :6]
-                        if action_space == "delta":
-                            joints = targets[t, :6] - state[t, :6]
+                        if action_space == "delta_prev":
+                            # MS4 c2 design 4.2: a per-step velocity of the COMMAND. The first
+                            # frame of a segment anchors on the measured joints, every later
+                            # frame on the previous frame's post-clamp target, so the command
+                            # gap keeps growing when the arm lags (the c1 delta hugged the
+                            # measured pose and stalled the arm).
+                            anchor = state[t, :6] if previous is None else targets[previous, :6]
+                            joints = targets[t, :6] - anchor
+                        previous = t
                         frame = {
                             "action": np.concatenate([joints, actions[t, 6:7]]).astype(np.float32),
                             "observation.state": state7[t].astype(np.float32),
@@ -380,8 +388,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=ACTION_SPACES,
         default="absolute",
         help=(
-            "delta: joint part = target minus the measured joint position of the same "
-            "frame. the policy server adds the measured position back (MS4 lever 2)"
+            "delta_prev: joint part = this frame's target minus the previous frame's target "
+            "(the measured joints on a segment's first frame). The policy server adds the "
+            "client's anchor back."
         ),
     )
     return parser
