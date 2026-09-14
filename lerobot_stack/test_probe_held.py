@@ -19,7 +19,12 @@ def test_a_tiny_model_fits_a_separable_batch():
     images = torch.zeros(16, 3, 64, 64)
     images[8:] = 1.0
     state = torch.zeros(16, 7)
-    labels = torch.tensor([0] * 8 + [1] * 8)
+    state[4:8] = 1.0
+    state[12:16] = 1.0
+    # The label is the XOR of the image half and the state half, so neither input alone
+    # separates the classes: a model that ignores images, or that ignores state, cannot
+    # beat 50% on this batch. Fitting it to 1.0 needs both.
+    labels = torch.tensor([0] * 4 + [1] * 4 + [1] * 4 + [0] * 4)
     acc = probe_held.fit(model, images, state, labels, images, state, labels, epochs=30)
     assert acc == 1.0
 

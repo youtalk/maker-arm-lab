@@ -91,8 +91,22 @@ def load_lane(lane: Path, frames: int, rng: np.random.Generator):
     return torch.stack(images), torch.stack(state), torch.from_numpy(labels_all[pick]).long()
 
 
+class TokenArgumentParser(argparse.ArgumentParser):
+    """An ArgumentParser whose usage errors still print a token.
+
+    argparse's own ``error()`` writes usage to stderr and exits 2 with nothing on stdout, so a
+    missing --lanes or a bad --epochs would look like a hang to the campaign chain that waits
+    on this script's token, the same failure mode ``policy_server.py``'s own
+    ``TokenArgumentParser`` fixes.
+    """
+
+    def error(self, message: str) -> None:
+        print(f"PROBE_FAIL usage: {message}", flush=True)
+        super().error(message)
+
+
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = TokenArgumentParser(description=__doc__)
     parser.add_argument("--lanes", type=Path, nargs="+", required=True)
     parser.add_argument("--test_lanes", type=Path, nargs="+", required=True)
     parser.add_argument("--frames_per_lane", type=int, default=3000)
