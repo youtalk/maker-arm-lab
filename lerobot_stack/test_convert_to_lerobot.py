@@ -81,19 +81,26 @@ def test_no_images_needs_a_context():
         c2l.convert([], None, "t/x", 30, images=False)
 
 
-def test_delta_actions_are_target_minus_measured_and_leave_a_marker(tmp_path):
+def test_delta_prev_actions_anchor_on_the_previous_target(tmp_path):
     shard = _shard(tmp_path / "s.hdf5")
-    c2l.convert([shard], tmp_path / "ds", "t/x", 30, action_space="delta")
+    c2l.convert([shard], tmp_path / "ds", "t/x", 30, action_space="delta_prev")
     marker = json.loads((tmp_path / "ds" / "meta" / "action_space.json").read_text())
-    assert marker == {"action_space": "delta"}
+    assert marker == {"action_space": "delta_prev"}
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     ds = LeRobotDataset("t/x", root=tmp_path / "ds")
-    action = ds[3]["action"]
-    assert float(action[0]) == pytest.approx(0.5)  # target 3 minus measured 2.5
-    assert float(action[6]) == 0.0
+    # Frame 0 anchors on the measured joints: target 0 minus measured -0.5.
+    assert float(ds[0]["action"][0]) == pytest.approx(0.5)
+    # Later frames anchor on the previous frame's target: target 3 minus target 2.
+    assert float(ds[3]["action"][0]) == pytest.approx(1.0)
+    assert float(ds[3]["action"][6]) == 0.0
     with pytest.raises(RuntimeError, match="action_space"):
         c2l.convert([shard], tmp_path / "ds", "t/x", 30, action_space="absolute")
+
+
+def test_the_c1_delta_definition_is_refused():
+    with pytest.raises(ValueError, match="action_space"):
+        c2l.convert([], None, "t/x", 30, action_space="delta")
 
 
 def test_absolute_is_the_default_and_leaves_a_marker(tmp_path):
