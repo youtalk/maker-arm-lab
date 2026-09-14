@@ -216,6 +216,12 @@ class CampaignCfg:
     # MS4: one campaign's shards are converted three times (images, context, delta), so the
     # supervisor can leave every shard on disk after its CONVERT_OK instead of deleting it.
     keep_shards: bool = False
+    # MS4 c2 ceiling lanes (design 5.4): record without cameras and convert the privileged
+    # channel without images. `context` and `no_images` go to the converter, `no_cameras` to
+    # the batch script.
+    no_cameras: bool = False
+    context: str | None = None
+    no_images: bool = False
     # Which simulator runs the batches: "isaac" spawns scripts/generate_batch.py under
     # isaaclab.sh, "mujoco" spawns scripts/mj_generate_batch.py under the project venv. Both
     # speak the same RUN_META / RUN_STATS / BATCH_OK contract, so nothing else here differs.
@@ -815,6 +821,8 @@ def _batch_command(
         cmd += ["--episode_draws"]
     if cfg.frame_jitter:
         cmd += ["--frame_jitter"]
+    if cfg.no_cameras:
+        cmd += ["--no_cameras"]
     return cmd
 
 
@@ -835,6 +843,10 @@ def _convert_command(cfg: CampaignCfg, shard_path: Path) -> list[str]:
         if not cfg.split_cycles:
             raise ValueError("lead_keep requires split_cycles")
         cmd += ["--lead_keep", str(cfg.lead_keep)]
+    if cfg.context is not None:
+        cmd += ["--context", cfg.context]
+    if cfg.no_images:
+        cmd.append("--no_images")
     return cmd
 
 
@@ -940,6 +952,9 @@ def _build_cfg(args: argparse.Namespace) -> CampaignCfg:
         episode_draws=args.episode_draws,
         frame_jitter=args.frame_jitter,
         keep_shards=args.keep_shards,
+        no_cameras=args.no_cameras,
+        context=args.context,
+        no_images=args.no_images,
         backend=args.backend,
         breaker_min_rate=None if args.breaker_min_rate < 0 else args.breaker_min_rate,
         breaker_min_runs=args.breaker_min_runs,
@@ -1037,6 +1052,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "(MS4: one campaign is converted three times)",
     )
     parser.add_argument(
+        "--no_cameras",
+        action="store_true",
+        help="MuJoCo only: record without cameras (needs --no_images; the ceiling lanes)",
+    )
+    parser.add_argument(
+        "--context",
+        choices=("camera", "privileged"),
+        default=None,
+        help="convert this context channel into observation.environment_state",
+    )
+    parser.add_argument(
+        "--no_images",
+        action="store_true",
+        help="convert without the image features (needs --context)",
+    )
+    parser.add_argument(
         "--breaker_min_rate",
         type=float,
         default=0.70,
@@ -1076,6 +1107,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         # script to completion, exit 0, and produce no sidecars, silently defeating the
         # only reason --sidecar_dir was passed.
         parser.error("--sidecar_dir requires --split_cycles")
+    if args.no_images and args.context is None:
+        parser.error("--no_images needs --context")
+    if args.no_cameras and not args.no_images:
+        parser.error("--no_cameras records no images, so it needs --no_images")
     return args
 
 

@@ -1256,3 +1256,22 @@ def test_shards_are_deleted_by_default_and_the_flag_reaches_the_cfg(tmp_path):
     base = ["--out_dir", str(tmp_path / "w"), "--dataset_root", str(tmp_path / "d")]
     assert gd._build_cfg(gd._parse_args(base)).keep_shards is False
     assert gd._build_cfg(gd._parse_args(base + ["--keep_shards"])).keep_shards is True
+
+
+def test_batch_and_convert_commands_carry_the_camera_and_context_flags(tmp_path):
+    base = ["--out_dir", str(tmp_path / "w"), "--dataset_root", str(tmp_path / "d")]
+    plain = _cmd_cfg(tmp_path)
+    assert "--no_cameras" not in gd._batch_command(plain, 0, (0, 1, 2, 3), tmp_path / "s")
+    assert "--context" not in gd._convert_command(plain, tmp_path / "s.hdf5")
+    cfg = _cmd_cfg(tmp_path, no_cameras=True, context="privileged", no_images=True)
+    assert "--no_cameras" in gd._batch_command(cfg, 0, (0, 1, 2, 3), tmp_path / "s")
+    conv = gd._convert_command(cfg, tmp_path / "s.hdf5")
+    assert conv[conv.index("--context") + 1] == "privileged" and "--no_images" in conv
+    parsed = gd._build_cfg(
+        gd._parse_args(base + ["--no_cameras", "--context", "privileged", "--no_images"])
+    )
+    assert parsed.no_cameras and parsed.context == "privileged" and parsed.no_images
+    with pytest.raises(SystemExit):
+        gd._parse_args(base + ["--no_images"])
+    with pytest.raises(SystemExit):
+        gd._parse_args(base + ["--no_cameras"])
