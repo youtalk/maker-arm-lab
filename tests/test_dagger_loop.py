@@ -56,6 +56,28 @@ def test_each_trigger_fires_on_its_condition_only():
         )
         == "close_far"
     )
+    # closed_no_pinch and workspace are not mutually exclusive: an env can sit closed with
+    # nothing pinched while its pick point is also outside the box, so this pair needs its own
+    # pin (unlike the pairs above, where one row's condition rules the other row's condition
+    # out).
+    assert (
+        _reason(
+            grip_open=False,
+            closed_no_pinch=dl.CLOSED_NO_PINCH_STEPS,
+            pick_point=(0.6, 0.0, 0.2),
+        )
+        == "closed_no_pinch"
+    )
+    # close_far and workspace are not mutually exclusive either, for the same reason.
+    assert (
+        _reason(
+            grip_open=False,
+            closed_now=True,
+            nearest_cm=9.0,
+            pick_point=(0.6, 0.0, 0.2),
+        )
+        == "close_far"
+    )
 
 
 class _HoldPolicy:
@@ -141,6 +163,62 @@ def test_a_time_out_mid_takeover_leaves_no_positive_actor_frame(tmp_path):
         assert -1 in actor.tolist()
         assert not any(v > 0 for v in actor.tolist())
         assert not bool(demo.attrs["success"])
+
+
+class _MaxLenBombPolicy(_HoldPolicy):
+    """Wraps ``_HoldPolicy``. Real per-env truncation can only land on the rollout's global last
+    step, already negated and zeroed by ruling P7's block before ``dagger_loop``'s ``done_ids``
+    branch runs. To reach that branch at all, this policy shrinks ``env.max_episode_length`` a
+    few steps past the point a takeover starts, so this env truncates on its own, independent of
+    the rollout's ``max_steps`` bound (frozen before this mutation, at the top of ``rollout``)."""
+
+    def __init__(self, env):
+        super().__init__()
+        self._env = env
+        self._armed = False
+
+    def step(self, state, wrist, overhead, context=None, anchor=None):
+        if not self._armed and int(self._env.oracle_actor[0]) > 0:
+            self._armed = True
+            # 5 steps is nowhere near a full pick-and-place cycle (hundreds of steps), so the
+            # takeover is still running, and the episode still unsuccessful, when this fires.
+            self._env.max_episode_length = int(self._env.episode_length_buf[0]) + 5
+        return super().step(state, wrist, overhead, context=context, anchor=anchor)
+
+
+def test_an_episode_ending_mid_takeover_off_the_final_step_cannot_be_negated(tmp_path):
+    """Finding 1: a takeover still running when its env's episode ends can only be negated before
+    ``env.step()`` flushes that env's buffer (``mj/env.py``'s ``recorder.end`` call, inside
+    ``step()``). By the time ``dagger_loop``'s ``done_ids`` branch runs, the frame is already on
+    disk. This is reachable only by forcing this env's own truncation off the rollout's global
+    last step, so the test does that with ``_MaxLenBombPolicy`` rather than by editing
+    ``dagger_loop.py`` itself."""
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(
+        1, draw, num_bricks=2, cameras=False, export_dir=tmp_path, shard_name="u", export_all=True
+    )
+    env.reset(seed=11)
+    env.max_episode_length = 3000
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
+    payload = dl.rollout(
+        env,
+        rig,
+        _MaxLenBombPolicy(env),
+        run_seed=11,
+        layout_seed=5,
+        permutation=(0, 1, 2, 3),
+        random_interval=None,
+        max_wall_minutes=5.0,
+    )
+    env.close()
+    assert payload["takeovers_failed_unnegated"] == 1
+    assert payload["episodes"][0]["success"] is False
+    with h5py.File(tmp_path / "u.hdf5", "r") as f:
+        actor = f["data/demo_0/obs/actor"][:]
+        # The branch this test reaches cannot negate: the frame is already committed with a
+        # positive actor. This is exactly the contamination the counter exists to surface.
+        assert any(v > 0 for v in actor.tolist())
 
 
 def test_the_takeover_cap_blocks_a_second_takeover(tmp_path, monkeypatch):

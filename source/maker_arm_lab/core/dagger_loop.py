@@ -115,6 +115,7 @@ def rollout(
     triggers: Counter = Counter()
     stowed_takeovers = 0
     failed_takeovers = 0
+    takeovers_failed_unnegated = 0
     grip_open_prev = None
 
     started = time.monotonic()
@@ -219,6 +220,22 @@ def rollout(
                         stowed_takeovers += 1
                     else:
                         failed_takeovers += 1
+                        # This branch cannot negate the frames it counts: env.step() above
+                        # already called recorder.end(i, ...) and flushed this env's buffer, so
+                        # the positive-actor frames of this cycle are already on disk (ruling
+                        # P7's defect class, one step too late to fix here). The invariant that
+                        # is meant to keep this branch unreachable: a slot's FIRST episode can
+                        # only truncate on the global last step (episode_length_buf starts at 0
+                        # on env.reset() and max_steps is env.max_episode_length itself), which
+                        # the time-out block above already negates and zeros before env.step()
+                        # runs. A LATER episode in the same slot resets episode_length_buf to 0
+                        # again, so its own truncation lands max_episode_length steps after that
+                        # reset -- past max_steps, outside this rollout's window. Success is
+                        # handled above. If this still fires, something broke that invariant, so
+                        # it is counted separately instead of raised: a mid-rollout crash costs
+                        # hours of GPU time, and the count surfaces the corpus contamination in
+                        # the campaign ledger instead of hiding it.
+                        takeovers_failed_unnegated += 1
             # The env auto-reset these; the rig must not carry a takeover into the next
             # episode, and nothing of it is recorded (one episode per env, as in the eval loop).
             rig.rearm(done_ids, idle=True)
@@ -260,6 +277,7 @@ def rollout(
         "triggers": dict(triggers),
         "takeovers_stowed": stowed_takeovers,
         "takeovers_failed": failed_takeovers,
+        "takeovers_failed_unnegated": takeovers_failed_unnegated,
         "clamp_fraction": (
             sum(e["clamp_steps"] for e in episodes) / steps_total if steps_total else 0.0
         ),
