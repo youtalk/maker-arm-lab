@@ -20,6 +20,11 @@ PROTOCOL_VERSION 3: an optional `context` array (batch, K) float32 rides beside 
 three observation arrays. It carries `observation.environment_state` for checkpoints
 that take one. a version-2 peer never sends it and a version-3 server with
 `context_dim` 0 never expects it.
+
+PROTOCOL_VERSION 4: an optional `anchor` array (batch, 6) float32 rides beside the
+observation. It is the client's previous clamped arm command (the measured joints before
+step 0), and a `delta_prev` checkpoint's server adds it to the six joint columns of the
+action. An absolute checkpoint's server ignores it.
 """
 
 import io
@@ -27,7 +32,7 @@ import json
 
 import numpy as np
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 OBS_SCHEMA = {
     # (7,) = the dataset's observation.state: 6 arm joint angles + the gripper
     # opening fraction (spec section 4.2), which is what convert_to_lerobot.py writes
@@ -62,6 +67,10 @@ GRIPPER_FRACTION_TOL = 1e-3
 
 CONTEXT_KEY = "context"
 CONTEXT_DTYPE = "float32"
+
+ANCHOR_KEY = "anchor"
+ANCHOR_SHAPE = (6,)
+ANCHOR_DTYPE = "float32"
 
 
 def _pack(array: np.ndarray) -> bytes:
@@ -125,17 +134,24 @@ def validate_context(array: np.ndarray, batch_size: int) -> None:
         raise ValueError(f"context: dtype {array.dtype}, want {CONTEXT_DTYPE}")
 
 
+def validate_anchor(array: np.ndarray, batch_size: int) -> None:
+    """A (batch, 6) float32 array: the previous clamped arm command."""
+    _check(ANCHOR_KEY, array, ANCHOR_SHAPE, ANCHOR_DTYPE, batch_size)
+
+
 def validate_obs(arrays: dict, batch_size: int) -> None:
-    keys = set(arrays) - {CONTEXT_KEY}
+    keys = set(arrays) - {CONTEXT_KEY, ANCHOR_KEY}
     if keys != set(OBS_SCHEMA):
         raise ValueError(
-            f"obs keys {sorted(arrays)}, want {sorted(OBS_SCHEMA)} (+ optional context)"
+            f"obs keys {sorted(arrays)}, want {sorted(OBS_SCHEMA)} (+ optional context, anchor)"
         )
     for name, (sample_shape, dtype) in OBS_SCHEMA.items():
         _check(name, arrays[name], sample_shape, dtype, batch_size)
     _check_gripper_fraction(arrays["state"])
     if CONTEXT_KEY in arrays:
         validate_context(arrays[CONTEXT_KEY], batch_size)
+    if ANCHOR_KEY in arrays:
+        validate_anchor(arrays[ANCHOR_KEY], batch_size)
 
 
 def validate_action(array: np.ndarray, batch_size: int) -> None:

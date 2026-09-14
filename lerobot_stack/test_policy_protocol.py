@@ -29,7 +29,8 @@ def test_schema_constants_match_the_dataset_features():
     # Version 3, not the original 1: the state narrowed from 8 to 7 for the Maker Arm (2),
     # then an optional context array rode in beside the observation (3) -- each a wire-schema
     # change an unbumped version would have let two peers disagree about.
-    assert PROTOCOL_VERSION == 3
+    # Version 4: an optional anchor array (batch, 6) float32 rides beside the observation.
+    assert PROTOCOL_VERSION == 4
     assert OBS_SCHEMA["state"] == ((7,), "float32")
     assert OBS_SCHEMA["wrist"] == ((224, 224, 3), "uint8")
     assert ACTION_SHAPE == (7,) and ACTION_DTYPE == "float32"
@@ -162,3 +163,19 @@ def test_recv_message_rejects_malformed_frame_count():
     t.join(timeout=5)
     req.close(0)
     rep.close(0)
+
+
+def test_optional_anchor_is_validated_when_present():
+    from policy_protocol import ANCHOR_KEY, PROTOCOL_VERSION, validate_obs
+
+    assert PROTOCOL_VERSION == 4
+    arrays = {
+        "state": np.zeros((2, 7), np.float32),
+        "wrist": np.zeros((2, 224, 224, 3), np.uint8),
+        "overhead": np.zeros((2, 224, 224, 3), np.uint8),
+    }
+    validate_obs({**arrays, ANCHOR_KEY: np.zeros((2, 6), np.float32)}, 2)
+    with pytest.raises(ValueError, match="anchor"):
+        validate_obs({**arrays, ANCHOR_KEY: np.zeros((2, 7), np.float32)}, 2)
+    with pytest.raises(ValueError, match="anchor"):
+        validate_obs({**arrays, ANCHOR_KEY: np.zeros((2, 6), np.float64)}, 2)
