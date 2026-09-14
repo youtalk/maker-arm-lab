@@ -9,7 +9,7 @@ import pytest
 import convert_to_lerobot as c2l
 
 
-def _shard(path, frames=8, context=True, bricks=None):
+def _shard(path, frames=8, context=True, bricks=None, actor=None):
     if bricks is None:
         bricks = np.zeros(frames, np.int8)
     with h5py.File(path, "w") as f:
@@ -29,6 +29,8 @@ def _shard(path, frames=8, context=True, bricks=None):
         g.create_dataset("obs/cycle_phase", data=np.ones(frames, np.int8))
         g.create_dataset("obs/cycle_brick", data=bricks)
         g.create_dataset("obs/clamped", data=np.zeros(frames, bool))
+        if actor is not None:
+            g.create_dataset("obs/actor", data=np.asarray(actor, np.int16))
         if context:
             cam = g.create_dataset(
                 "obs/context_camera", data=np.full((frames, 6), 0.25, np.float32)
@@ -139,3 +141,42 @@ def test_absolute_is_the_default_and_leaves_a_marker(tmp_path):
     assert json.loads((tmp_path / "ds" / "meta" / "action_space.json").read_text()) == {
         "action_space": "absolute"
     }
+
+
+def test_cycle_segments_cut_on_actor_changes_and_drop_nonpositive_actors():
+    phase = np.ones(8, np.int8)
+    brick = np.zeros(8, np.int8)
+    actor = np.array([1, 1, 1, 0, 0, 2, 2, 2], np.int16)
+    segs = c2l.cycle_segments(phase, brick, actor=actor)
+    assert [s.tolist() for s in segs] == [[0, 1, 2], [5, 6, 7]]
+    actor = np.array([1, 1, -2, -2, 3, 3, 3, 3], np.int16)
+    segs = c2l.cycle_segments(phase, brick, actor=actor)
+    assert [s.tolist() for s in segs] == [[0, 1], [4, 5, 6, 7]]
+    # Without an actor column nothing changes.
+    assert [s.tolist() for s in c2l.cycle_segments(phase, brick)] == [list(range(8))]
+    # The actor value returning to its earlier number across a dropped run must NOT cut: the
+    # cut test is against the last KEPT frame's actor, not against whatever the dropped frames
+    # in between happened to carry. (Catches a last_actor that updates on every visited frame,
+    # dropped ones included, instead of only on frames that survive the actor>0 filter.)
+    actor = np.array([1, 1, 0, 0, 1, 1], np.int16)
+    segs = c2l.cycle_segments(np.ones(6, np.int8), np.zeros(6, np.int8), actor=actor)
+    assert [s.tolist() for s in segs] == [[0, 1, 4, 5]]
+
+
+def test_dagger_conversion_keeps_takeover_cycles_only(tmp_path):
+    shard = _shard(tmp_path / "s.hdf5", actor=[1, 1, 1, 0, 0, -2, -2, -2])
+    converted, total = c2l.convert(
+        [shard], tmp_path / "ds", "t/x", 30, split_cycles=True, dagger=True, context="camera"
+    )
+    assert (converted, total) == (1, 1)
+    info = json.loads((tmp_path / "ds" / "meta" / "info.json").read_text())
+    assert info["total_frames"] == 3
+    with pytest.raises(ValueError, match="split_cycles"):
+        c2l.convert([shard], tmp_path / "ds2", "t/x", 30, dagger=True)
+    with pytest.raises(ValueError, match="lead_keep"):
+        c2l.convert(
+            [shard], tmp_path / "ds3", "t/x", 30, split_cycles=True, lead_keep=5, dagger=True
+        )
+    plain = _shard(tmp_path / "p.hdf5")
+    with pytest.raises(RuntimeError, match="obs/actor"):
+        c2l.convert([plain], tmp_path / "ds4", "t/x", 30, split_cycles=True, dagger=True)
