@@ -336,3 +336,51 @@ def test_context_channels_are_always_filled_and_the_served_one_follows_the_mode(
     none.close()
     with pytest.raises(ValueError, match="context"):
         MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, context="wrong")
+
+
+def test_the_privileged_target_one_hot_follows_the_held_brick_not_the_nearest_one():
+    """The one-hot must come from ``held_brick_from_forces`` feeding ``target_brick``'s held
+    branch, not a re-derived "nearest unstowed brick" shortcut that ignores the grasp.
+
+    ``tests/test_target.py::test_a_held_brick_wins`` already covers the rule's own held
+    precedence; this test is the integration seam it cannot reach: whether the env reads
+    ``held`` from the real finger contact forces and passes it in. The oracle rig drives a
+    genuine pinch (real contact physics, not a mock of ``target_brick``), then the other,
+    un-held brick is teleported directly under the tool so it is nearer in the desk plane
+    than the held brick -- the condition that would flip a nearest-only rule but must not
+    flip the real one.
+    """
+    from maker_arm_lab.core import oracle
+    from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
+
+    draw = _draw()
+    env = MjLegoSortEnv(1, draw, num_bricks=2, cameras=False)
+    env.reset(seed=11)
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
+    steps = 0
+    reached_lift = False
+    while steps < 4000:
+        goal = rig.goals[0]
+        if goal is not None and goal.phase is oracle.Phase.LIFT and not rig.plans[0]:
+            held_brick = rig.oracles[0].target_brick
+            if rig.pinch_evidence(0, held_brick)["ok"]:
+                reached_lift = True
+                break
+        out = rig.step()
+        steps += 1
+        if bool(out["dones"][0]) or bool(out["abandoned"][0]):
+            break
+    assert reached_lift, "the oracle never reached a good LIFT pinch inside the step budget"
+    other = 1 - held_brick
+    # Move the other, un-held brick to sit directly under the tool in the desk plane, nearer
+    # to the tool's (x, y) than the held brick can be. mj_forward only recomputes kinematics
+    # and contacts at the frozen qpos; mj_step would integrate time and could disturb the grasp.
+    h, d = env.handles, env.datas[0]
+    tool_xy = env.scene["robot"].data.body_pos_w[0, h.tool_body, :2].numpy()
+    d.qpos[h.brick_qpos[other] : h.brick_qpos[other] + 2] = tool_xy
+    mujoco.mj_forward(env.models[0], d)
+    env._refresh([0], images=False)
+    priv = env.context_privileged
+    assert priv[0, 54 + held_brick] == 1.0
+    assert priv[0, 54 + other] == 0.0
+    env.close()
