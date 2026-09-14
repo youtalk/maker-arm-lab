@@ -15,7 +15,7 @@ from maker_arm_lab.core import oracle
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.mj.env import MjLegoSortEnv
-from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
+from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import LIFT_MIN_RISE, OracleRig
 
 
 def test_oracle_sorts_two_bricks_on_mujoco():
@@ -297,4 +297,40 @@ def test_resume_declines_a_brick_carried_above_lift_height():
     assert rig.idle[0] is True and rig.goals[0] is None  # never entered LIFT
     assert rig.single_cycle[0] is False
     assert rig.takeover_result[0] is None  # nothing to score: the takeover never started
+    env.close()
+
+
+def test_resume_declines_a_brick_carried_in_the_unreachable_rise_band():
+    """Re-review of RULING P32: the line belongs at LIFT_HEIGHT - LIFT_MIN_RISE, not at
+    LIFT_HEIGHT. A carry at, say, 0.08 m is not above LIFT_HEIGHT, so the old guard let it
+    through -- but the LIFT entry still clamps its target to the absolute LIFT_HEIGHT, so the
+    commanded rise from that live start is only ~0.02 m, under LIFT_MIN_RISE. LIFT's rise gate
+    then reads `lifted=False` with `pinch_ok=True`, which core.oracle routes to REOPEN: the
+    jaws open on a brick that is genuinely held, dropping it from up to 10 cm. Declining this
+    band is the same fix as the original ruling, just drawn at the bound the rise gate
+    actually needs.
+    """
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(1, draw, num_bricks=2, cameras=False)
+    env.reset(seed=11)
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1))
+    # This band only exists mid-climb, inside LIFT's own walk toward LIFT_HEIGHT -- RAISE and
+    # EXTEND target a clearance well above it, so a carry there is already past LIFT_HEIGHT.
+    lo, hi = oracle.LIFT_HEIGHT - LIFT_MIN_RISE, oracle.LIFT_HEIGHT
+    for _ in range(4000):
+        rig.step()
+        goal, carried = rig.goals[0], rig.oracles[0].target_brick
+        if (
+            goal is not None
+            and goal.phase is oracle.Phase.LIFT
+            and carried is not None
+            and lo < float(rig._brick_pos(0, carried)[2]) <= hi
+        ):
+            break
+    else:
+        raise AssertionError("the oracle never carried a brick in the unreachable rise band")
+    rig.idle[0], rig.goals[0] = True, None
+    assert rig.resume(0) is False
+    assert rig.idle[0] is True and rig.goals[0] is None  # never entered LIFT
     env.close()

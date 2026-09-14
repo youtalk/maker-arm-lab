@@ -1336,17 +1336,21 @@ class OracleRig:
         right = self.right_brick.data.force_matrix_w[i, 0].norm(dim=-1)
         held = int(held_brick_from_forces(left[None], right[None], HELD_MIN_FORCE)[0])
         scene = self.snapshot(i)
-        if held >= 0 and float(scene.brick_pos[held, 2]) > oracle.LIFT_HEIGHT:
-            # RULING P32: decline a brick the policy is already carrying ABOVE LIFT_HEIGHT.
-            # The LIFT entry this resume would take reads its target as an absolute clearance
-            # of LIFT_HEIGHT above the desk, so from a carry at, say, 0.22 m it plans a walk
-            # DOWN 12 cm with the jaws closed on the brick. LIFT's rise gate then measures
-            # that against a `brick_start` set to the live pose, sees a negative rise, fails,
-            # and REOPEN drops the brick -- after which the normal retry usually re-picks it
-            # off the desk, so the cycle scores as a stowed takeover and every one of its
-            # frames is KEPT. That is an expert demonstration of descending and opening the
-            # jaws while carrying a brick, which is far worse than a missed takeover: it is
-            # learned rather than crashed on. Declining costs a takeover and nothing else --
+        if held >= 0 and float(scene.brick_pos[held, 2]) > oracle.LIFT_HEIGHT - LIFT_MIN_RISE:
+            # RULING P32, tightened on re-review: decline a carry the clamped LIFT target
+            # cannot clear LIFT_MIN_RISE from. A takeover may only enter LIFT from a carry low
+            # enough that the clamped target still clears the rise gate -- the LIFT entry this
+            # resume would take reads its target as an absolute clearance of LIFT_HEIGHT above
+            # the desk, so a carry any higher plans a walk DOWN with the jaws closed. Above
+            # LIFT_HEIGHT that walk is a negative rise outright; in the band between
+            # LIFT_HEIGHT - LIFT_MIN_RISE and LIFT_HEIGHT it still clamps to LIFT_HEIGHT, so
+            # the commanded rise from the live `brick_start` lands under LIFT_MIN_RISE and
+            # `_lift_result` returns `lifted=False` with `pinch_ok=True` -- core.oracle routes
+            # that to REOPEN, whose jaws open and drop a brick that was genuinely held. Either
+            # way the normal retry usually re-picks it off the desk, so the cycle scores as a
+            # stowed takeover and every one of its frames is KEPT: an expert demonstration of
+            # opening the jaws on a held brick, which is far worse than a missed takeover. It
+            # is learned rather than crashed on. Declining costs a takeover and nothing else --
             # the policy keeps the env and a later trigger catches it once the brick is back
             # down. Design 6.2's own escape hatch: return False, leave the env idle.
             self._go_idle(i, None)

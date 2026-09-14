@@ -44,10 +44,11 @@ DECLINE_COOLDOWN = 60
 
 A decline is a NORMAL outcome, not an error: the oracle answers DONE or ABANDON at entry once
 the desk is clear, and ruling P32 declines a brick the policy is carrying above LIFT_HEIGHT.
-Three of the five triggers do not read the counters below -- ``close_far`` in particular
-fires on an empty desk, where ``_nearest_brick_cm`` returns -1 -- so without a cooldown a
-declined env rebuilds an ``EnvOracle``, snapshots the scene, recomputes the stowed set and
-wipes ``rig.stats[i]`` on every remaining step of the episode."""
+Three of the five triggers do not read the counters below -- ``workspace`` in particular has
+no counter and no open-to-closed edge to wait on, so it fires on every idle step the pick
+point sits outside the box -- so without a cooldown a declined env rebuilds an ``EnvOracle``,
+snapshots the scene, recomputes the stowed set and wipes ``rig.stats[i]`` on every remaining
+step of the episode."""
 
 
 def inside_workspace(point) -> bool:
