@@ -24,7 +24,7 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
         frame as takeover k
     heap mode (MS6, ``parts`` given): env.parts, env.destination_bins (N,) long,
         env.stow_half_extents, env.target_part (N,) int16 (the overhead marker), env.context_box,
-        env.obs_buf["images"]["overhead_depth"] (N,224,224) uint16
+        env.context_camera_box (N,9), env.obs_buf["images"]["overhead_depth"] (N,224,224) uint16
 
 Semantics carried over from ``ManagerBasedRLEnv`` because the rig depends on them: a done
 env is auto-reset INSIDE ``step`` (its state tensors already show the next episode when
@@ -405,7 +405,7 @@ class MjLegoSortEnv:
                     self._wrist[i] if self.cameras else None,
                     self._overhead[i] if self.cameras else None,
                     context_camera=self.context_camera[i],
-                    context_privileged=self.context_privileged[i],
+                    context_privileged=None if heap else self.context_privileged[i],
                     actor=who,
                     depth=self._depth[i] if heap and self.cameras else None,
                     target_part=int(self.target_part[i]) if heap else -1,
@@ -563,7 +563,7 @@ class MjLegoSortEnv:
     def _drop_heap(self, i: int) -> None:
         """Design section 6: a destination, a color per part, a drop into the tray, a settle."""
         m, d, h = self.models[i], self.datas[i], self.handles
-        self.destination_bins[i] = self._rng.randrange(len(layout.BRICK_COLOR_ORDER))
+        self.destination_bins[i] = self._rng.randrange(len(self.bin_layouts[i].bin_ys))
         (x0, x1), (y0, y1) = layout.tray_bounds()
         k = self.cfg.num_bricks
         z_top = layout.HEAP_DROP_Z_MIN + layout.HEAP_DROP_Z_PER_PART * k
@@ -654,18 +654,22 @@ class MjLegoSortEnv:
                 self._overhead[i] = r.render()
                 if self.parts is not None:
                     r.enable_depth_rendering()
-                    r.update_scene(d, camera=self._cam_overhead)
-                    depth_m = r.render()
-                    r.disable_depth_rendering()
+                    try:
+                        r.update_scene(d, camera=self._cam_overhead)
+                        depth_m = r.render()
+                    finally:
+                        r.disable_depth_rendering()
                     self._depth[i] = noisy_depth_mm(depth_m, self._overhead[i], self._np_rng)
-        # MS4 c2 design 5.2 and 5.3: the privileged channel after the forces and the brick
-        # states are current, because the target rule reads both.
-        stowed = per_brick_stowed(self)
-        held = held_brick_from_forces(
-            torch.from_numpy(left).norm(dim=-1).squeeze(1),
-            torch.from_numpy(right).norm(dim=-1).squeeze(1),
-            min_force=HELD_MIN_FORCE,
-        )
+        if self.parts is None:
+            # MS4 c2 design 5.2 and 5.3: the privileged channel after the forces and the brick
+            # states are current, because the target rule reads both. A heap has no privileged
+            # channel (the loop below is a no-op for it), so skip these two grader passes.
+            stowed = per_brick_stowed(self)
+            held = held_brick_from_forces(
+                torch.from_numpy(left).norm(dim=-1).squeeze(1),
+                torch.from_numpy(right).norm(dim=-1).squeeze(1),
+                min_force=HELD_MIN_FORCE,
+            )
         nb = self.cfg.num_bricks
         for i in [] if self.parts is not None else ids:
             d = self.datas[i]
