@@ -11,6 +11,12 @@ script. Runs under the project's own venv:
 Everything that decides what gets recorded is in ``maker_arm_lab.core.batch_loop``; this file
 only builds the environment. ``--headless`` and ``--enable_cameras`` are accepted and ignored
 so a command line written for the Isaac script still runs here.
+
+MS6 heap runs (``--heap_k`` > 0) build the heap env and drive it with ``HeapOracle`` instead
+of the six-brick oracle:
+
+    uv run python scripts/mj_generate_batch.py --out_dir /tmp/h0 --attempts 12 --num_envs 12 \\
+        --heap_k 50 --parts_split heldout --probe
 """
 
 import argparse
@@ -25,16 +31,20 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 from maker_arm_lab.core.batch_loop import (
     add_batch_arguments,
     build_run,
+    heap_episode_length_s,
+    heap_parts,
     make_induction,
     run_batch,
     run_meta,
     run_stats,
     write_meta,
 )
+from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 
 TASK = "MakerArm-LegoSort-Datagen-mujoco"
+HEAP_TASK = "MakerArm-LegoHeap-Datagen-mujoco"
 NUM_BRICKS = 6
 
 
@@ -60,44 +70,78 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
     """Returns ``(ok, exported, attempts)``."""
     os.makedirs(args.out_dir, exist_ok=True)
     draw, bl, noise = build_run(args)
+    parts = heap_parts(args)
+    episode_length_s = args.episode_length_s
+    if episode_length_s is None:
+        episode_length_s = (
+            heap_episode_length_s(len(parts), args.cycle_budget) if parts is not None else 180.0
+        )
     env = MjLegoSortEnv(
         args.num_envs,
         draw,
-        num_bricks=NUM_BRICKS,
+        num_bricks=NUM_BRICKS if parts is None else len(parts),
+        parts=parts,
         cameras=not args.no_cameras,
         start_pose_offset_rad=0.05
         if args.start_pose_offset_rad is None
         else args.start_pose_offset_rad,
+        episode_length_s=episode_length_s,
         export_dir=args.out_dir,
         shard_name=args.shard_name,
-        export_all=args.export_mode == "all",
+        # Heap runs export every episode: the actor channel marks the cycles to keep (design H7).
+        export_all=args.export_mode == "all" or parts is not None,
         episode_draws=args.episode_draws,
         frame_jitter=args.frame_jitter,
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)
+    rig_rng = random.Random(args.run_seed)
+    factory = None
+    if parts is not None:
+
+        def factory(i, layout_i, episode_draw):
+            return HeapOracle(
+                layout_i,
+                env.parts,
+                int(env.destination_bins[i]),
+                episode_draw,
+                induction=induction,
+                rng=rig_rng,
+                cycle_budget=args.cycle_budget,
+            )
+
     rig = OracleRig(
         env,
         bl,
         noise,
-        random.Random(args.run_seed),
+        rig_rng,
         induction=induction,
         transport_speed=args.transport_speed,
+        oracle_factory=factory,
     )
     meta = run_meta(
         args,
         draw,
         noise,
         induction,
-        num_bricks=NUM_BRICKS,
-        export_mode="EXPORT_ALL" if args.export_mode == "all" else "EXPORT_SUCCEEDED_ONLY",
+        num_bricks=NUM_BRICKS if parts is None else len(parts),
+        export_mode="EXPORT_ALL"
+        if (args.export_mode == "all" or parts is not None)
+        else "EXPORT_SUCCEEDED_ONLY",
         backend="mujoco",
-        task=TASK,
+        task=HEAP_TASK if parts is not None else TASK,
+        parts=parts,
     )
     print("RUN_META " + json.dumps(meta), flush=True)
     counters = run_batch(env, rig, args.attempts, args.max_wall_minutes)
     stats = run_stats(
-        counters, target_attempts=args.attempts, num_envs=args.num_envs, probe=args.probe
+        counters,
+        target_attempts=args.attempts,
+        num_envs=args.num_envs,
+        probe=args.probe,
+        # None on the six-brick task: keeps RUN_STATS byte-for-byte with today's script.
+        # run_stats's heap-counter block only fires when this is not None.
+        num_bricks=env.cfg.num_bricks if parts is not None else None,
     )
     print("RUN_STATS " + json.dumps(stats), flush=True)
     write_meta(args.out_dir, args.shard_name, meta, stats, counters["episodes"])
