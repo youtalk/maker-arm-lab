@@ -23,9 +23,52 @@ from pathlib import Path
 import torch
 
 from maker_arm_lab.core import layout, oracle, trajectory
+from maker_arm_lab.core import parts as _parts
 from maker_arm_lab.core.layout import sample_run_draw
 
 CAMPAIGN_TARGET_SUCCESSES = 50
+
+PARTS_SPLITS = ("train", "heldout", "all")
+LEGACY_EPISODE_LENGTH_S = 180.0
+
+
+def heap_episode_length_s(k: int, cycle_budget: int) -> float:
+    """Design section 9: 30 s of settle and slack plus 20 s per pick the budget allows."""
+    return 30.0 + 20.0 * min(k, cycle_budget)
+
+
+def heap_parts(args) -> list[_parts.Part] | None:
+    """The run's part set, or None on the six-brick task (``--heap_k 0``).
+
+    The split is seeded by ``--parts_seed`` so the held-out set is reproducible, and the
+    run's draw from it by ``--layout_seed``, so two lanes never share a part set (design H4).
+    """
+    if args.heap_k <= 0:
+        return None
+    train, heldout = _parts.split(_parts.catalog(), args.parts_seed)
+    pool = {"train": train, "heldout": heldout, "all": train + heldout}[args.parts_split]
+    return _parts.sample_parts(random.Random(args.layout_seed), pool, args.heap_k)
+
+
+def cycle_actor(orc) -> int:
+    """The actor ordinal of the frame about to be recorded (design H7).
+
+    The pick cycle ordinal, which is the length of the oracle's pick order once HOVER has
+    selected. A push belongs to the pick that follows it, so it carries that pick's ordinal.
+    SETTLE, DONE and ABANDON frames read 0 and are not recorded.
+    """
+    if orc is None or orc.phase in (oracle.Phase.SETTLE, oracle.Phase.DONE, oracle.Phase.ABANDON):
+        return 0
+    return len(orc.pick_order) + (1 if orc.phase in oracle.PUSH_PHASES else 0)
+
+
+def negate_new_failures(recorder, env_index: int, outcomes: list, seen: int) -> int:
+    """Negate the frames of every cycle since ``seen`` that did not stow; returns the new count."""
+    while seen < len(outcomes):
+        if not outcomes[seen]:
+            recorder.negate_actor(env_index, seen + 1)
+        seen += 1
+    return seen
 
 
 def build_run(args) -> tuple[dict, layout.BinLayout, oracle.OracleNoise]:
@@ -92,6 +135,7 @@ def run_meta(
     export_mode: str,
     backend: str,
     task: str,
+    parts: list | None = None,
 ) -> dict:
     return {
         "task": task,
@@ -112,6 +156,17 @@ def run_meta(
         "hover_jitter": list(noise.hover_jitter),
         "episode_draws": bool(getattr(args, "episode_draws", False)),
         "frame_jitter": bool(getattr(args, "frame_jitter", False)),
+        # MS6 heap runs (design section 9). heap_k 0 is the six-brick task.
+        "heap_k": int(getattr(args, "heap_k", 0)),
+        "parts_seed": int(getattr(args, "parts_seed", 0)),
+        "parts_split": getattr(args, "parts_split", "train"),
+        "cycle_budget": int(getattr(args, "cycle_budget", 0)),
+        "parts": None if parts is None else [p.name for p in parts],
+        "episode_length_s": (
+            heap_episode_length_s(len(parts), int(getattr(args, "cycle_budget", 50)))
+            if parts is not None
+            else LEGACY_EPISODE_LENGTH_S
+        ),
         "induction": None
         if induction is None
         else {
@@ -165,11 +220,32 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
     cycle_bricks: list[set[int]] = [set() for _ in range(rig.num_envs)]
     motion = trajectory.MotionStats(rig.num_envs)
     start = time.time()
+    heap = getattr(env, "parts", None) is not None
+    recorder = getattr(env, "recorder", None)
+    seen_outcomes = [0] * rig.num_envs
+    if heap:
+        env.oracle_actor = torch.zeros(rig.num_envs, dtype=torch.int16)
     deadline = start + max_wall_minutes * 60
     try:
         while attempts < target_attempts and time.time() < deadline:
+            if heap:
+                last_step = env.episode_length_buf >= env.max_episode_length - 1
+                for i in range(rig.num_envs):
+                    actor = cycle_actor(rig.oracles[i])
+                    if actor > 0 and bool(last_step[i]) and recorder is not None:
+                        # The time-out cuts this cycle short of its RETREAT (design H7).
+                        recorder.negate_actor(i, actor)
+                        actor = 0
+                    env.oracle_actor[i] = actor
             out = rig.step()
             control_steps += 1
+            if heap and recorder is not None:
+                for i in range(rig.num_envs):
+                    orc = rig.oracles[i]
+                    if orc is not None:
+                        seen_outcomes[i] = negate_new_failures(
+                            recorder, i, orc.cycle_outcomes, seen_outcomes[i]
+                        )
             for i in range(rig.num_envs):
                 motion.observe(i, rig.q_cmd[i])
             # Per-env flag: on how many envs the arm's command had to be clamped this step.
@@ -194,6 +270,7 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
                         {"env": i, "outcome": outcome, "cycles": len(cycle_bricks[i]), **stats}
                     )
                     cycle_bricks[i] = set()
+                    seen_outcomes[i] = 0
                 attempts += len(env_ids)
                 abandoned_ids = out["abandoned"].nonzero(as_tuple=False).squeeze(-1).tolist()
                 if abandoned_ids:
@@ -219,7 +296,14 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
     }
 
 
-def run_stats(counters: dict, *, target_attempts: int, num_envs: int, probe: bool) -> dict:
+def run_stats(
+    counters: dict,
+    *,
+    target_attempts: int,
+    num_envs: int,
+    probe: bool,
+    num_bricks: int | None = None,
+) -> dict:
     episodes = counters["episodes"]
     abandon_reasons = counters["abandon_reasons"]
     control_steps = counters["control_steps"]
@@ -265,6 +349,15 @@ def run_stats(counters: dict, *, target_attempts: int, num_envs: int, probe: boo
         "env_steps_per_episode": control_steps * num_envs / attempts if attempts else None,
         "motion": counters.get("motion", {}),
     }
+    if num_bricks is not None and any("cycles" in e for e in episodes):
+        # MS6 heap runs (design section 8).
+        stowed = sum(int(e.get("bricks_delivered", 0)) for e in episodes)
+        stats["parts_total"] = num_bricks * len(episodes)
+        stats["parts_stowed"] = stowed
+        stats["parts_outside_tray"] = sum(int(e.get("parts_outside_tray", 0)) for e in episodes)
+        stats["cycles"] = sum(int(e.get("cycles", 0)) for e in episodes)
+        stats["pushes"] = sum(int(e.get("pushes", 0)) for e in episodes)
+        stats["cycles_per_stowed"] = stats["cycles"] / stowed if stowed else None
     if probe:
         success_rate = exported / attempts if attempts else 0.0
         wall_sec_per_episode = wall_seconds / attempts if attempts else 0.0
@@ -347,6 +440,31 @@ def add_batch_arguments(parser) -> None:
         "--frame_jitter",
         action="store_true",
         help="MuJoCo only: resample a small overhead-camera jitter on every rendered frame.",
+    )
+    parser.add_argument(
+        "--heap_k",
+        type=int,
+        default=0,
+        help="MuJoCo only: replace the six bricks with a heap of K mixed parts in a tray (MS6). "
+        "0 is the six-brick task.",
+    )
+    parser.add_argument(
+        "--parts_seed", type=int, default=20260915, help="seeds the held-out split of the catalog"
+    )
+    parser.add_argument(
+        "--parts_split",
+        choices=PARTS_SPLITS,
+        default="train",
+        help="which side of the split a heap run draws its parts from",
+    )
+    parser.add_argument(
+        "--cycle_budget", type=int, default=50, help="pick cycles a heap episode may spend"
+    )
+    parser.add_argument(
+        "--episode_length_s",
+        type=float,
+        default=None,
+        help="override the episode length; the default is 180 s, or 30 + 20 * min(K, budget) on a heap",
     )
     parser.add_argument(
         "--probe",
