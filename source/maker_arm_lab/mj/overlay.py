@@ -1,4 +1,9 @@
-"""Target marker overlay: project a world point through a camera and stamp it on an image."""
+"""Target marker overlay: project a world point through a camera and stamp it on an image.
+
+Expects `project_point` to receive the camera position and rotation from MjData.cam_xpos and
+MjData.cam_xmat, read after `mj_camlight`. These fields propagate the camera state through the scene
+to the rendering pipeline.
+"""
 
 from __future__ import annotations
 

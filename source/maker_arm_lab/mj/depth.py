@@ -1,4 +1,9 @@
-"""Overhead depth noise model with block-correlated noise and drop-out holes."""
+"""Overhead depth noise model with block-correlated noise and drop-out holes (design section 9).
+
+Adds Gaussian noise at the block level (4×4 pixels per block, one noise sample per block)
+and drops out dark surfaces (low RGB luminance) with a fixed probability. Every noise
+constant below is a placeholder that MS5 measures on the real iPhone LiDAR mounted on the rig.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +17,10 @@ DEPTH_MAX_MM = 65535
 
 
 def noisy_depth_mm(depth_m: np.ndarray, rgb: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """(H, W) uint16 millimeters from a rendered depth and the RGB frame it pairs with."""
+    """(H, W) uint16 millimeters from a rendered depth and the RGB frame it pairs with.
+
+    H and W must be multiples of DEPTH_BLOCK_PX (reshape raises ValueError otherwise).
+    """
     h, w = depth_m.shape
     b = DEPTH_BLOCK_PX
     blocks = depth_m.reshape(h // b, b, w // b, b).mean(axis=(1, 3))
