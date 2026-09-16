@@ -175,7 +175,7 @@ def test_the_held_attribution_threshold_has_one_definition():
 def test_pinch_min_stall_keeps_the_brick_floor_and_scales_down_for_narrow_parts():
     assert checker.pinch_min_stall(layout.BRICK_SIZE[1]) == checker.PINCH_MIN_STALL
     assert checker.pinch_min_stall(0.0318) == checker.PINCH_MIN_STALL
-    assert checker.pinch_min_stall(0.0078) == pytest.approx(0.0039 - checker.PINCH_COMPLIANCE)
+    assert checker.pinch_min_stall(0.0078) == pytest.approx(0.0014)
     assert checker.pinch_min_stall(0.0032) == 0.001
 
 

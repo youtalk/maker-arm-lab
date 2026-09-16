@@ -100,8 +100,11 @@ re-measured.
 PINCH_COMPLIANCE = 0.0025
 """Metres the measured stall falls short of half the grasp width under contact compliance.
 
-MuJoCo carries stalled 5.8 to 7.5 mm against 7.9 mm ideal on the 15.8 mm brick width
-(tests/test_mj_oracle.py pins 5.5 to 8.5), so the shortfall is up to 2.1 mm; 2.5 leaves margin.
+MuJoCo's own pin, tests/test_mj_oracle.py, asserts stall in 5.5 to 8.5 mm on the 15.8 mm
+brick width, against a 7.9 mm ideal grip. The worst case in that range is a 7.9 - 5.5 =
+2.4 mm shortfall, so 2.5 mm leaves 0.1 mm of margin. Isaac's carries measured a tighter
+5.797 to 7.487 mm (recorded on PINCH_MIN_STALL above); that is a different backend's
+number and does not set this margin.
 """
 
 
@@ -131,9 +134,10 @@ def bin_targets(bin_centers_w: torch.Tensor, brick_color_ids: torch.Tensor) -> t
     if bin_centers_w.dim() == 3:
         if brick_color_ids.dim() == 1:
             return bin_centers_w[:, brick_color_ids]
-        # (N,B) ids: one destination per env and brick (MS6 heap grading).
-        index = brick_color_ids.unsqueeze(-1).expand(-1, -1, 3)
-        return torch.gather(bin_centers_w, 1, index)
+        if brick_color_ids.dim() == 2:
+            # (N,B) ids: one destination per env and brick (MS6 heap grading).
+            index = brick_color_ids.unsqueeze(-1).expand(-1, -1, 3)
+            return torch.gather(bin_centers_w, 1, index)
     raise ValueError(f"bin_centers_w must be (4,3) or (N,4,3), got {tuple(bin_centers_w.shape)}")
 
 
@@ -145,7 +149,10 @@ def bricks_at_rest_in_bins(
     brick_color_ids: torch.Tensor,
     max_speed: float = 0.02,
 ) -> torch.Tensor:
-    """(N,B) bool: brick b in env n is at rest inside its correct-color bin.
+    """(N,B) bool: brick b in env n is at rest inside its target bin.
+
+    The target is the brick's correct-color bin, or, with (N,4,3) centers and (N,B) ids,
+    its episode's own destination bin (MS6 heap grading, see ``bin_targets``).
 
     Args:
         brick_pos_w: (N,B,3) brick centers, world frame.
@@ -153,7 +160,8 @@ def bricks_at_rest_in_bins(
         bin_centers_w: (4,3) bin interior AABB centers shared by every env, or (N,4,3)
             centers per env (see ``bin_targets``).
         bin_half_extents: (3,) bin interior half extents.
-        brick_color_ids: (B,) long, target bin index per brick.
+        brick_color_ids: (B,) long, target bin index per brick, or (N,B) long, one target
+            bin index per env and brick (see ``bin_targets``).
         max_speed: "at rest" linear speed threshold [m/s].
     """
     targets = bin_targets(bin_centers_w, brick_color_ids)  # (B,3) or (N,B,3)

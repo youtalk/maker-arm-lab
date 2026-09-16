@@ -5,6 +5,10 @@ These used to live in ``tasks/manager_based/lego_sort/mdp/terminations.py`` and
 ``env.cfg`` and ``env.device`` only, so any backend that exposes those members -- the Isaac
 ``ManagerBasedRLEnv`` or ``maker_arm_lab.mj.MjLegoSortEnv`` -- is graded by the same code.
 The mdp modules re-export them so the Isaac cfgs are unchanged.
+
+``per_brick_stowed`` also reads ``env.num_envs``, and, when present, ``env.destination_bins``
+and ``env.stow_half_extents`` (MuJoCo heap mode, MS6). Both are read with ``getattr(env, name,
+None)``, so a backend without them keeps grading by color, as before.
 """
 
 from functools import cache
@@ -85,9 +89,15 @@ def per_brick_stowed(env) -> torch.Tensor:
     if destination is None:
         ids = _brick_color_ids_cached(env.cfg.num_bricks, device)
     else:
+        destination = torch.as_tensor(destination).to(device)
+        if destination.shape[0] != env.num_envs:
+            raise ValueError(
+                f"destination_bins has {destination.shape[0]} entries, "
+                f"env.num_envs is {env.num_envs}"
+            )
         if centers.dim() == 2:
             centers = centers.unsqueeze(0).expand(env.num_envs, -1, -1)
-        ids = destination.to(device).long().unsqueeze(1).expand(-1, env.cfg.num_bricks)
+        ids = destination.long().unsqueeze(1).expand(-1, env.cfg.num_bricks)
     half = getattr(env, "stow_half_extents", None)
     half = _bin_half_extents_cached(device) if half is None else torch.as_tensor(half).to(device)
     return checker.bricks_at_rest_in_bins(pos, vel, centers, half, ids)

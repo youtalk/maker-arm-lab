@@ -74,7 +74,7 @@ def test_destination_bins_replace_the_color_rule():
 def test_stow_half_extents_count_a_part_piled_over_the_rim():
     centers = layout.bin_interior_centers()
     pos = torch.zeros(1, 1, 3)
-    pos[0, 0] = centers[0] + torch.tensor([0.0, 0.0, 0.05])  # 1 cm over the rim
+    pos[0, 0] = centers[0] + torch.tensor([0.0, 0.0, 0.05])  # 3 cm over the rim
     env = _env(pos)
     assert stowed.per_brick_stowed(env).tolist() == [[False]]
     env.stow_half_extents = torch.tensor([0.045, 0.045, 0.08])
