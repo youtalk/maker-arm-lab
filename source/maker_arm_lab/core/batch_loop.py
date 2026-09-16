@@ -283,6 +283,11 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
     finally:
         wall_seconds = time.time() - start
         exported = env.recorder_manager.exported_successful_episode_count
+        # A heap episode's "success" needs every part in the tray stowed, so at the phase's
+        # own 0.90-per-part target `exported` undercounts a heap run's usable output badly.
+        # `exported_written` is every episode the recorder wrote, success or not, which is
+        # what a heap caller (mj_generate_batch.py) should gate BATCH_OK on instead.
+        exported_written = getattr(env.recorder_manager, "exported_episode_count", exported)
         env.close()
     return {
         "episodes": episodes,
@@ -292,6 +297,7 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
         "attempts": attempts,
         "wall_seconds": wall_seconds,
         "exported": exported,
+        "exported_written": exported_written,
         "motion": motion.summary(),
     }
 

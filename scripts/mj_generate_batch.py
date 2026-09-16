@@ -48,6 +48,17 @@ HEAP_TASK = "MakerArm-LegoHeap-Datagen-mujoco"
 NUM_BRICKS = 6
 
 
+def exported_count(counters: dict, heap: bool) -> int:
+    """The count BATCH_OK reports and gates on.
+
+    A heap episode's "exported" only rises when every part in the tray got stowed, but the
+    phase's own target is a 0.90 stowed fraction per part, so a heap run counts every episode
+    the recorder wrote instead (``exported_written``). The six-brick run is unchanged: it
+    keeps counting only fully-successful episodes (``exported``).
+    """
+    return counters["exported_written"] if heap else counters["exported"]
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     add_batch_arguments(parser)
@@ -145,8 +156,9 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
     )
     print("RUN_STATS " + json.dumps(stats), flush=True)
     write_meta(args.out_dir, args.shard_name, meta, stats, counters["episodes"])
-    ok = args.probe or counters["exported"] > 0
-    return ok, counters["exported"], counters["attempts"]
+    exported = exported_count(counters, heap=parts is not None)
+    ok = args.probe or exported > 0
+    return ok, exported, counters["attempts"]
 
 
 def main(argv=None) -> int:

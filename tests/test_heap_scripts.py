@@ -33,6 +33,14 @@ def test_the_batch_script_builds_the_heap_env_and_installs_the_heap_oracle():
     )
 
 
+def test_a_heap_batch_counts_written_episodes_not_only_fully_stowed_ones():
+    batch = _load(BATCH)
+    counters = {"exported": 0, "exported_written": 3}
+    assert batch.exported_count(counters, heap=True) == 3
+    # The six-brick path is unchanged: it still counts only fully-successful episodes.
+    assert batch.exported_count(counters, heap=False) == 0
+
+
 def _meta(path, parts, episodes):
     path.write_text(
         json.dumps(
