@@ -184,7 +184,7 @@ Round 1 started from the c1 ctx checkpoint, which is the policy lever 1 adopted.
 
 ### 7.2 Round 1
 
-The rollouts read 84 of 84 `DAGGER_OK` in 68 minutes, over 1008 episodes. The mixed per-brick rate reads 0.991, which is the policy plus the oracle takeovers and not the policy alone. There were 4841 takeovers. Of those, 4725 stowed their brick and 108 failed, a takeover success rate of 97.6 percent.
+The rollouts read 84 of 84 `DAGGER_OK` in 68 minutes, over 1008 episodes. The mixed per-brick rate reads 0.991, which is the policy plus the oracle takeovers and not the policy alone. There were 4841 takeovers. Of those, 4725 stowed their brick and 108 failed, a takeover success rate of 97.6 percent. Those two outcomes come to 4833, eight short of the total. The loop counts a takeover at its start, and counts stowed or failed only at the moment a result resolves. Eight takeovers were still running at the end of the rollout. Declined takeovers are counted in a separate field and sit outside the total, at 1241 for this round.
 
 The trigger mix says where the policy gets stuck: `random` 4069, `close_far` 529, `no_close` 129 and `closed_no_pinch` 114. So 772 takeovers fired on a real failure signal rather than on the timed interval. `close_far` leads that group, which agrees with the c1 finding that this policy closes its jaws too far from the brick.
 
@@ -215,7 +215,7 @@ The two eval seeds disagree by a useful margin. The check step on selection seed
 
 ### 7.3 Round 2
 
-The rollouts again read 84 of 84 `DAGGER_OK`, over 1008 episodes, at a mixed per-brick rate of 0.990. There were 2970 takeovers, of which 2925 stowed and 44 failed.
+The rollouts again read 84 of 84 `DAGGER_OK`, over 1008 episodes, at a mixed per-brick rate of 0.990. There were 2970 takeovers, of which 2925 stowed and 44 failed. One takeover was still running at the end, by the same accounting. This round declined 1018.
 
 Takeovers fell by 39 percent, which is what an improving loop looks like. Round 1 needed 4841 takeovers on the ctx policy. Round 2 needed 2970 on the round 1 policy. The rig rescued the newer policy far less often.
 
