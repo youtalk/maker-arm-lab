@@ -45,7 +45,16 @@ TIP_BELOW_CENTER = 0.003
 PUSH_CELL_M = 0.05
 """Grid cell of the failure memory and of the densest-cell push (design 7.2)."""
 PUSH_HALF_LENGTH_M = 0.04
-WALL_SPHERE_SPACING = 0.02
+WALL_SPHERE_SPACING = 0.005
+"""Spacing (m) between the discs ``tray_wall_obstacles`` lines each tray wall with.
+
+Each disc's radius has to cover half the spacing, or the row would leave gaps between
+discs, so this spacing sets how much the modelled wall is inflated over the real one.
+0.005 matches ``layout.TRAY_WALL`` (the real wall's thickness) and gives a radius of
+``0.5 * hypot(0.005, 0.005)`` ~= 3.5 mm, a reasonable model of a 5 mm wall. The previous
+0.02 gave a 10.3 mm radius, inflating each wall by about 10 mm on a side and costing
+roughly a fifth of the tray's pickable width.
+"""
 
 
 @dataclass(frozen=True)
