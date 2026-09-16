@@ -26,10 +26,17 @@ AXIS_MAX_TILT_RAD = math.radians(15.0)
 CLEARANCE_MIN = 0.003
 """Jaw-box clearance (m) a grasp needs to be selected."""
 # The virtual jaw box, in the grasp frame: x along the closing axis, origin at the part
-# center. The finger body is 30 mm along jaw travel and reaches 62.5 mm across the tool axis
-# (the collision box robots/frames.py quotes). Its footprint is what a neighbor can foul.
+# center. The finger body is 30 mm along jaw travel. Its footprint is what a neighbor can foul.
 JAW_BOX_THICKNESS = 0.030
-JAW_BOX_HALF_FACE = 0.0625
+JAW_BOX_HALF_FACE = 0.020
+"""Half the jaw plate's face, perpendicular to the closing axis.
+
+The vendored URDF's jaw meshes (``part_034_solid_034.stl``, ``part_041_solid_041.stl``)
+measure at most 17.07 x 40.52 x 22.50 mm, so the plate's half extent is about 20 mm. The
+MS6 design table's 0.0625 m modelled a 125 mm face, which no jaw on this arm has: against
+the 130 mm tray interior it left only a 10 mm band of x pickable for a y-closing grasp.
+Corrected on the owner's decision, 2026-09-16, with the measurement above as the authority.
+"""
 # How far under the pick point the finger tips reach at the shipped pick offset: 34.2 mm of
 # tip reach against a 32.1 mm offset (robots.frames), rounded up. A neighbor whose top is under
 # this depth is the surface the descend stalls on, not an obstacle the jaws have to clear.
