@@ -37,7 +37,7 @@ The plan expects one commit per stage. All four branches merged together instead
 
 Every stage ran from the detached worktree `~/src/maker-arm-lab-ms4` at 654332e, with symlinked venvs and `PYTHONPATH` on the worktree's `source`. One chain driver, `c2/run_chain.sh`, took a stage letter and ran that stage's steps in order. Every finished step skips itself on a relaunch. Stage A converted the delta_prev corpus, generated the ceiling lanes, and trained and laddered both runs. Stage B ran the realizability probe and then the DAgger rounds.
 
-Each stage ran its own preflight at toy size first, and both passed on four toy jobs. Stage A's preflight measured the one result that stops the campaign before a 600k run. The toy ceiling dataset carries an empty image list and an `observation.environment_state` of `[66]`, where c1 measured 42. Stage B's preflight ran one 2-env DAgger rollout on the c1 ctx checkpoint, then its conversion, merge and smoke. That rollout took over 11 times and stowed all 11 bricks, so the takeover mechanism does real work.
+Each stage ran its own preflight at toy size first, and both passed on four toy jobs. Stage A's preflight measured the one result that stops the campaign before a 600k run. The toy ceiling dataset carries an empty image list and an `observation.environment_state` of `[66]`, where c1 measured 42. Stage B's preflight ran one 2-env DAgger rollout on the c1 ctx checkpoint, then its conversion, merge and smoke. That rollout took over 11 times. All 11 takeovers stowed their brick, so the takeover mechanism does real work.
 
 Two rulings kept the preflights out of the campaign's own results. The preflight smokes never ran through `run_train.sh <run> smoke`. That script writes the marker the chain reads. The marker decides whether stage A still needs its own smoke on the merged corpus. The toy ceiling lane 90 went before stage A launched. The chain waits on a count of ten `done` files, and a leftover toy lane makes that count reach ten early.
 
@@ -66,14 +66,16 @@ The stage B preflight had no way to catch this. Plan step 3 asks for one rollout
 
 ### 3.4 The shape of a round
 
-Each round runs five steps in order. First come 84 rollout processes against ten policy servers. Then a conversion takes one lane at a time. Then a merge runs with a video decode. A 600k training and the selection ladder close the round.
+Each round runs five steps in order. First come 84 rollout processes against ten policy servers. Then a conversion takes one lane at a time. Then a merge runs with a video decode. MS3 lost two 600k runs to two bad AV1 frames, so that decode gates the deletion of the raw shards. A 600k training and the selection ladder close the round.
 
 | step | round 1 | round 2 |
 | --- | --- | --- |
 | rollouts, 84 processes | 68 min | 41 min for the 41 resumed processes |
 | conversion | 3 h 6 min | 1 h 41 min |
 | 600k training | 3 h 47 min | 3 h 47 min |
-| ladder | 70 min | not in the record |
+| ladder | 70 min | 55 min |
+
+The ledger states the round 1 ladder time as a duration. The round 2 time comes from its timestamps, a start at 19 14 PDT and a gated rung at 20 09 PDT.
 
 Round 2 paused mid-rollout at 43 of 84 shards, to free the machine for other work. Seven half-written shards went, each an hdf5 file with no matching json. The resume kept the 43 finished shards and ran only the 41 missing processes. A run seed is a function of the process index alone, so the resumed shards match the ones already on disk. The resume cost no completed work.
 
@@ -90,7 +92,7 @@ Each run trained alone on the GPU, 600k steps, checkpoints every 25k, the MS3 pr
 
 c1 measured base 0.068, ctx 0.071, delta 0.142 and ceiling 0.176. Rule L3 read rungs 250k to 600k on draws 0 to 2 of seed 20261017. The check step read the top two rungs on draws 0 to 4. Every eval used `--temporal_ensemble_coeff 0.01 --n_action_steps 1 --episode_draws --frame_jitter`. The ceiling run added `--context privileged`, and the DAgger runs added `--context camera`.
 
-The two DAgger runs fit their corpora about as well as c1's ctx run fits the plain one. Round 1 read 0.074 on a corpus 73 percent larger than c1 ctx's. Round 2 read about 0.080 on a corpus 26 percent larger again, across a wider spread of 0.075 to 0.085. The added episodes are takeover segments that start from states the policy itself reached. That distribution is harder than scripted demonstrations, so a fit level with ctx is the good case and not a neutral one.
+The two DAgger runs fit their corpora about as well as c1's ctx run fits the plain one. Round 1 read 0.074 on a corpus 73 percent larger than c1 ctx's. Round 2 read about 0.080 on a corpus 26 percent larger again, across a wider spread of 0.075 to 0.085. The added episodes are takeover segments that start from states the policy itself reached. A reading, marked as one. That distribution is harder than scripted demonstrations, so a fit level with ctx is the good case and not a neutral one.
 
 The ceiling ladder read every rung between 0.000 and 0.032, and its L3 candidate rung275k came back flagged as an isolated spike. The delta_prev ladder gated rung550k at 17/216 = 0.079 on draws 0 to 2, which is not an isolated spike. The 600k step budget is fixed, so a training duration tracks steps and not corpus size.
 
@@ -133,11 +135,11 @@ Not a gate read. Two rollouts, one per policy, each on its own gated rung, 4 env
 | total steps over 4 envs | 18238 | 21600 |
 | bricks stowed | 23 | 3 |
 
-**The anchor was never the problem.** The delta_prev command sits closer to the measured pose than base's does.
+**What the trace measured.** The delta_prev command sits closer to the measured pose than base's does, not further.
 
 More than half of its steps command a target within 5 mrad of the current pose, against a quarter for base. Its commanded acceleration is about eight times smaller at the median. That is the direction c1's delta pointed as well. The anchor change did not break the coupling the design set out to break. For reference, the c1 traces read a base acceleration median of 0.00052 and a c1 delta median of 0.00005.
 
-An interpretation, marked as one. The collapse looks like the size of the predicted delta, not the choice of anchor. The corpus action std reads 0.012 per joint for delta_prev, against 0.31 to 1.18 for the absolute runs. A policy that predicts a near-zero delta produces a target that barely advances, on either anchor. The arm tracks its target closely, so target and pose converge either way. On this reading lever 2 fails for one cause in both of its forms.
+An interpretation, marked as one. The collapse looks like the size of the predicted delta, not the choice of anchor. The corpus action std reads 0.012 per joint for delta_prev, against 0.31 to 1.18 for the absolute runs. A policy that predicts a near-zero delta produces a target that barely advances, on either anchor. The arm tracks its target closely, so target and pose converge either way. On this reading the anchor was never the problem, and lever 2 fails for one cause in both of its forms.
 
 One more number is worth keeping. delta_prev ran its full 21600 step budget with no episode ending early, and it stowed 3 bricks against base's 23. The run does not fail fast. It runs out the clock.
 
@@ -184,11 +186,11 @@ Round 1 started from the c1 ctx checkpoint, which is the policy lever 1 adopted.
 
 ### 7.2 Round 1
 
-The rollouts read 84 of 84 `DAGGER_OK` in 68 minutes, over 1008 episodes. The mixed per-brick rate reads 0.991, which is the policy plus the oracle takeovers and not the policy alone. There were 4841 takeovers. Of those, 4725 stowed their brick and 108 failed, a takeover success rate of 97.6 percent. Those two outcomes come to 4833, eight short of the total. The loop counts a takeover at its start, and counts stowed or failed only at the moment a result resolves. Eight takeovers were still running at the end of the rollout. Declined takeovers are counted in a separate field and sit outside the total, at 1241 for this round.
+The rollouts read 84 of 84 `DAGGER_OK` in 68 minutes, over 1008 episodes. The mixed per-brick rate reads 0.991, which is the policy plus the oracle takeovers and not the policy alone. There were 4841 takeovers. Of those, 4725 stowed their brick and 108 failed, a takeover success rate of 97.6 percent. Those two outcomes come to 4833, eight short of the total. The loop counts a takeover at its start, and counts stowed or failed only at the moment a result resolves. Eight takeovers were still running at the end of the rollout, which is a reading of that gap and not an observation. Declined takeovers are counted in a separate field and sit outside the total, at 1241 for this round. No read depends on these counters.
 
 The trigger mix says where the policy gets stuck: `random` 4069, `close_far` 529, `no_close` 129 and `closed_no_pinch` 114. So 772 takeovers fired on a real failure signal rather than on the timed interval. `close_far` leads that group, which agrees with the c1 finding that this policy closes its jaws too far from the brick.
 
-The conversion kept 4571 episodes and 1458733 frames from 4841 takeovers, a ratio of 0.944. Every lane reported both image keys and an `observation.environment_state` of `[6]`, so no lane took the wrong context. The merge read `MERGE_OK roots=85 episodes=10805 frames=4469581`, and the prediction written before it matched to the digit. The corpus grew 73 percent over c1 ctx's 6234 episodes.
+The conversion kept 4571 episodes and 1458733 frames from 4841 takeovers, a ratio of 0.944. Every lane reported both image keys and an `observation.environment_state` of `[6]`, so no lane took the wrong context. The merge read `MERGE_OK roots=85 episodes=10805 frames=4469581`, and the prediction written before it matched to the digit. The corpus grew 73 percent over c1 ctx's 6234 episodes. The merge passed its video decode at `CHECK_OK videos=223`, and the round then deleted its 55 GB of raw shards.
 
 A reading of the 270 missing cycles, marked as inference. 116 takeovers did not stow. A takeover that starts near the end of an episode has no room to finish its cycle, and `--split_cycles` keeps complete cycles only. Across 1008 episodes that is about 0.27 dropped cycles per episode. The split between those two causes is not measured.
 
@@ -215,7 +217,7 @@ The two eval seeds disagree by a useful margin. The check step on selection seed
 
 ### 7.3 Round 2
 
-The rollouts again read 84 of 84 `DAGGER_OK`, over 1008 episodes, at a mixed per-brick rate of 0.990. There were 2970 takeovers, of which 2925 stowed and 44 failed. One takeover was still running at the end, by the same accounting. This round declined 1018.
+The rollouts again read 84 of 84 `DAGGER_OK`, over 1008 episodes, at a mixed per-brick rate of 0.990. There were 2970 takeovers, of which 2925 stowed and 44 failed. One takeover was still running at the end, by the same reading of that gap. This round declined 1018.
 
 Takeovers fell by 39 percent, which is what an improving loop looks like. Round 1 needed 4841 takeovers on the ctx policy. Round 2 needed 2970 on the round 1 policy. The rig rescued the newer policy far less often.
 
@@ -226,9 +228,9 @@ Takeovers fell by 39 percent, which is what an improving loop looks like. Round 
 | `no_close` | 129 | 243 | +114 |
 | `closed_no_pinch` | 114 | 171 | +57 |
 
-The failure mix moved, and that is the useful part. `close_far` fell by 80 percent. That trigger fires on a policy that shuts its jaws too far from the brick, which is the failure the close distance diagnostic named. Round 1's data fixed most of it. The residual failures moved to `no_close`, up 88 percent, and to `closed_no_pinch`, up 50 percent.
+The failure mix moved, and that is the useful part. `close_far` fell by 80 percent. That trigger fires on a policy that shuts its jaws too far from the brick, which is the failure the close distance diagnostic named. A reading, marked as one. Round 1's data fixed most of it. The two rounds differ in more than one way, because the checkpoint, the corpus size and the driving policy all changed. The residual failures moved to `no_close`, up 88 percent, and to `closed_no_pinch`, up 50 percent.
 
-The conversion kept 2797 episodes and 875801 frames, a ratio of 0.942 against this round's takeovers. Round 1 kept 0.944. That stability makes the ratio a planning number rather than a single observation. Every lane again reported an `observation.environment_state` of `[6]` with both image keys. The merge read `MERGE_OK roots=169 episodes=13602 frames=5345382`, and the narrowed prediction written before it was 13602. The 169 roots are the c1 ctx corpus plus 84 lanes from each round.
+The conversion kept 2797 episodes and 875801 frames, a ratio of 0.942 against this round's takeovers. Round 1 kept 0.944. That stability makes the ratio a planning number rather than a single observation. Every lane again reported an `observation.environment_state` of `[6]` with both image keys. The merge read `MERGE_OK roots=169 episodes=13602 frames=5345382`, and the narrowed prediction written before it was 13602. The 169 roots are the c1 ctx corpus plus 84 lanes from each round. This merge passed its video decode at `CHECK_OK videos=391`, and the round then deleted its 33 GB of raw shards.
 
 **Round 2 read: not adopted. The rounds stop.** The official gate returned `GATE_OK` at 680/720 = 0.9444.
 
