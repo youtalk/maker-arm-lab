@@ -34,6 +34,8 @@ PUSH_Z = layout.BRICK_SIZE[2] / 2
 """Pick-point height of the sweep: the plate tips skim the desk at the brick pick offset."""
 PUSH_HALF_HEIGHT = layout.BRICK_SIZE[2] / 2
 PUSH_SWEEP_STEPS = 150
+PUSH_HEADING_MIN_HALF_ARC = math.pi / 2
+"""Narrowest half-arc a push heading is drawn from, right at a tray wall (see ``_push_heading``)."""
 # Design H6: the bin footprint, and twice the interior height so a pile over the rim counts.
 STOW_HALF_EXTENTS = (
     layout.BIN_INTERIOR[0] / 2,
@@ -137,6 +139,36 @@ class HeapOracle(oracle.EnvOracle):
             self.wall_hz,
         )
 
+    def _push_heading(self, center: tuple[float, float]) -> float:
+        """A push heading from ``self._push_rng``, biased away from the tray's nearest wall.
+
+        Design H8 fixes the push's GEOMETRY -- two near-level legs, jaws closed, through the
+        densest cell -- and says nothing about the heading's distribution, so biasing that
+        distribution is an improvement on H8, not a violation of it. A plain uniform draw
+        sends about half of all pushes near a wall further into it, the opposite of what a
+        push is for.
+
+        The draw stays a random ``uniform`` call on ``self._push_rng`` and nothing else, so a
+        seeded episode stays reproducible. It is centered on the heading that points straight
+        away from the tray wall nearest ``center`` (from ``layout.tray_bounds()``), within a
+        half-arc that shrinks toward ``PUSH_HEADING_MIN_HALF_ARC`` as the cell nears that wall
+        and grows back to a full circle -- the original uniform draw, unchanged -- once the
+        cell is at least half the tray's narrow span from every wall. A cell in the middle of
+        the tray is that far from every wall, so it keeps the old uniform behavior exactly.
+        """
+        (x0, x1), (y0, y1) = layout.tray_bounds()
+        cx, cy = center
+        nearest_dist, away = min(
+            (cx - x0, 0.0),
+            (x1 - cx, math.pi),
+            (cy - y0, math.pi / 2),
+            (y1 - cy, -math.pi / 2),
+        )
+        half_span = min(layout.TRAY_INTERIOR) / 2
+        bias = max(0.0, 1.0 - nearest_dist / half_span)
+        half_arc = math.pi - bias * (math.pi - PUSH_HEADING_MIN_HALF_ARC)
+        return away + self._push_rng.uniform(-half_arc, half_arc)
+
     def _next_brick(self, scene: oracle.SceneSnapshot) -> int | None:
         """The highest clear grasp; schedules a push and returns None when nothing clears."""
         if self.cycles >= self.cycle_budget:
@@ -149,7 +181,7 @@ class HeapOracle(oracle.EnvOracle):
             if self.pushes_in_a_row >= MAX_PUSHES_IN_A_ROW:
                 return None
             center = grasp.densest_cell(scene.brick_pos[mask, :2])
-            heading = self._push_rng.uniform(-math.pi, math.pi)
+            heading = self._push_heading(center)
             self.push = Push(*grasp.push_segment(center, heading))
             return None
         self.grasp = chosen

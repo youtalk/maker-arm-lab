@@ -103,6 +103,26 @@ def test_a_blocked_heap_pushes_through_the_densest_cell_then_selects_again():
     assert orc.pushes_in_a_row == 0
 
 
+def test_push_heading_matches_the_old_uniform_draw_at_the_tray_center():
+    # At TRAY_CENTER, x and y are both exactly half the (smaller) span from their walls, so
+    # bias == 0 and away == 0.0 (the x0 candidate), leaving heading == a plain uniform draw.
+    orc = heap_oracle.HeapOracle(BL, [BRICK], 1, oracle.nominal_draw(), rng=random.Random(0))
+    mirror = random.Random(0)
+    for _ in range(20):
+        assert orc._push_heading(layout.TRAY_CENTER) == pytest.approx(
+            mirror.uniform(-math.pi, math.pi)
+        )
+
+
+def test_push_heading_never_points_into_a_wall_it_sits_against():
+    (x0, _), _ = layout.tray_bounds()
+    at_the_wall = (x0, layout.TRAY_CENTER[1])  # nearest_dist == 0, so bias == 1 (max narrowing)
+    orc = heap_oracle.HeapOracle(BL, [BRICK], 1, oracle.nominal_draw(), rng=random.Random(1))
+    headings = [orc._push_heading(at_the_wall) for _ in range(200)]
+    assert all(math.cos(h) >= -1e-9 for h in headings)  # never more than 90 deg from away (0.0)
+    assert len({round(h, 6) for h in headings}) > 1  # still random, not collapsed to one value
+
+
 def test_three_pushes_in_a_row_end_the_episode_done():
     orc = _oracle([BRICK, BRICK])
     scene = _snapshot([[0.20, -0.006, 0.0048], [0.20, 0.006, 0.0048]])
