@@ -142,6 +142,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         backend="mujoco",
         task=HEAP_TASK if parts is not None else TASK,
         parts=parts,
+        episode_length_s=episode_length_s,
     )
     print("RUN_META " + json.dumps(meta), flush=True)
     counters = run_batch(env, rig, args.attempts, args.max_wall_minutes)

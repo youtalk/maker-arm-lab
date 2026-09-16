@@ -671,32 +671,33 @@ class MjLegoSortEnv:
                 min_force=HELD_MIN_FORCE,
             )
         nb = self.cfg.num_bricks
-        for i in [] if self.parts is not None else ids:
-            d = self.datas[i]
-            row = self.context_privileged[i]
-            row[:] = 0.0
-            for b, adr in enumerate(h.brick_qpos):
-                row[9 * b : 9 * b + 3] = d.qpos[adr : adr + 3]
-                row[9 * b + 3 : 9 * b + 9] = _rot6(d.qpos[adr + 3 : adr + 7])
-            brick_pos = torch.stack(
-                [self.scene[f"brick_{b}"].data.root_pos_w[i] for b in range(nb)]
-            )
-            # The PICK POINT, not the tool body: `EnvOracle._next_brick` takes its nearest
-            # candidate by the distance from `SceneSnapshot.pick_point`, which is the tool
-            # body plus the rotated PICK_OFFSET_MEASURED. The two agree only with a level
-            # tool and part by ~3 cm at a tilted approach, which flips this one-hot on near
-            # ties -- a mislabelled target in the channel the policy is asked to read.
-            pick_point_xy = (
-                robot.data.body_pos_w[i, h.tool_body]
-                + quat_apply(robot.data.body_quat_w[i, h.tool_body], _PICK_OFFSET)
-            )[:2]
-            target = target_brick(
-                int(held[i]),
-                brick_pos,
-                pick_point_xy,
-                stowed[i],
-                layout.top_down_x_limit(self.bin_layouts[i]),
-            )
-            if target >= 0:
-                row[54 + target] = 1.0
-            row[60 : 60 + nb] = stowed[i].numpy().astype(np.float32)
+        if self.parts is None:
+            for i in ids:
+                d = self.datas[i]
+                row = self.context_privileged[i]
+                row[:] = 0.0
+                for b, adr in enumerate(h.brick_qpos):
+                    row[9 * b : 9 * b + 3] = d.qpos[adr : adr + 3]
+                    row[9 * b + 3 : 9 * b + 9] = _rot6(d.qpos[adr + 3 : adr + 7])
+                brick_pos = torch.stack(
+                    [self.scene[f"brick_{b}"].data.root_pos_w[i] for b in range(nb)]
+                )
+                # The PICK POINT, not the tool body: `EnvOracle._next_brick` takes its nearest
+                # candidate by the distance from `SceneSnapshot.pick_point`, which is the tool
+                # body plus the rotated PICK_OFFSET_MEASURED. The two agree only with a level
+                # tool and part by ~3 cm at a tilted approach, which flips this one-hot on near
+                # ties -- a mislabelled target in the channel the policy is asked to read.
+                pick_point_xy = (
+                    robot.data.body_pos_w[i, h.tool_body]
+                    + quat_apply(robot.data.body_quat_w[i, h.tool_body], _PICK_OFFSET)
+                )[:2]
+                target = target_brick(
+                    int(held[i]),
+                    brick_pos,
+                    pick_point_xy,
+                    stowed[i],
+                    layout.top_down_x_limit(self.bin_layouts[i]),
+                )
+                if target >= 0:
+                    row[54 + target] = 1.0
+                row[60 : 60 + nb] = stowed[i].numpy().astype(np.float32)

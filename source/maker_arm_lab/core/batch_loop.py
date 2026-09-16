@@ -136,6 +136,7 @@ def run_meta(
     backend: str,
     task: str,
     parts: list | None = None,
+    episode_length_s: float | None = None,
 ) -> dict:
     return {
         "task": task,
@@ -163,9 +164,13 @@ def run_meta(
         "cycle_budget": int(getattr(args, "cycle_budget", 0)),
         "parts": None if parts is None else [p.name for p in parts],
         "episode_length_s": (
-            heap_episode_length_s(len(parts), int(getattr(args, "cycle_budget", 50)))
-            if parts is not None
-            else LEGACY_EPISODE_LENGTH_S
+            episode_length_s
+            if episode_length_s is not None
+            else (
+                heap_episode_length_s(len(parts), int(getattr(args, "cycle_budget", 50)))
+                if parts is not None
+                else LEGACY_EPISODE_LENGTH_S
+            )
         ),
         "induction": None
         if induction is None
@@ -232,9 +237,17 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
                 last_step = env.episode_length_buf >= env.max_episode_length - 1
                 for i in range(rig.num_envs):
                     actor = cycle_actor(rig.oracles[i])
-                    if actor > 0 and bool(last_step[i]) and recorder is not None:
-                        # The time-out cuts this cycle short of its RETREAT (design H7).
-                        recorder.negate_actor(i, actor)
+                    orc = rig.oracles[i]
+                    if bool(last_step[i]) and recorder is not None and orc is not None:
+                        # The time-out cuts this cycle short of its RETREAT (design H7). When
+                        # a cycle is actually in flight `actor` IS its ordinal; when the
+                        # oracle already went idle (DONE/ABANDON reads 0) a trailing push
+                        # that hit its cap left the NEXT ordinal dangling with no pick ever
+                        # following it (no cycle_outcomes entry, so negate_new_failures never
+                        # sees it either). Negating unconditionally is safe: negate_actor only
+                        # flips frames that still carry that exact ordinal, so it is a no-op
+                        # once a cycle already resolved or never happened.
+                        recorder.negate_actor(i, actor if actor > 0 else len(orc.pick_order) + 1)
                         actor = 0
                     env.oracle_actor[i] = actor
             out = rig.step()
@@ -365,7 +378,11 @@ def run_stats(
         stats["pushes"] = sum(int(e.get("pushes", 0)) for e in episodes)
         stats["cycles_per_stowed"] = stats["cycles"] / stowed if stowed else None
     if probe:
-        success_rate = exported / attempts if attempts else 0.0
+        # A heap probe grades on every episode the recorder wrote, not the fully-stowed
+        # count: the same "exported_written" gate `exported_count` (mj_generate_batch.py)
+        # uses, because a heap episode's own success bar is much higher than one probe run.
+        probe_successes = counters["exported_written"] if num_bricks is not None else exported
+        success_rate = probe_successes / attempts if attempts else 0.0
         wall_sec_per_episode = wall_seconds / attempts if attempts else 0.0
         stats["success_rate"] = success_rate
         stats["wall_sec_per_episode"] = wall_sec_per_episode
@@ -385,6 +402,27 @@ def write_meta(
         json.dumps({"run_meta": meta, "run_stats": stats, "episodes": episodes}, indent=2)
     )
     return path
+
+
+MAX_HEAP_K = 127
+"""mj/recorder.py writes obs/cycle_brick and oracle_runtime.py's env.oracle_cycle_brick are
+int8; a part index above this wraps negative in both, silently mislabeling the corpus. Bounded
+here rather than widened: widening changes the on-disk schema for six-brick shards too."""
+
+
+def _heap_k_type(parser):
+    """A ``type=`` for ``--heap_k`` that rejects a value the int8 cycle_brick channel cannot hold."""
+
+    def parse(value: str) -> int:
+        k = int(value)
+        if k > MAX_HEAP_K:
+            parser.error(
+                f"--heap_k {k} exceeds {MAX_HEAP_K}: mj/recorder.py's obs/cycle_brick channel "
+                "is int8 and wraps negative above that, silently mislabeling the corpus"
+            )
+        return k
+
+    return parse
 
 
 def add_batch_arguments(parser) -> None:
@@ -449,10 +487,11 @@ def add_batch_arguments(parser) -> None:
     )
     parser.add_argument(
         "--heap_k",
-        type=int,
+        type=_heap_k_type(parser),
         default=0,
         help="MuJoCo only: replace the six bricks with a heap of K mixed parts in a tray (MS6). "
-        "0 is the six-brick task.",
+        f"0 is the six-brick task; K must be <= {MAX_HEAP_K} (mj/recorder.py's obs/cycle_brick "
+        "and obs/target_part are int8).",
     )
     parser.add_argument(
         "--parts_seed", type=int, default=20260915, help="seeds the held-out split of the catalog"

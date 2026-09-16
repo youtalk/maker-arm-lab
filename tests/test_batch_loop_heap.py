@@ -2,8 +2,10 @@
 
 import argparse
 import types
+from typing import ClassVar
 
 import pytest
+import torch
 
 from maker_arm_lab.core import batch_loop, oracle, parts
 
@@ -129,3 +131,165 @@ def test_run_stats_sums_the_heap_counters():
     assert stats["parts_total"] == 10 and stats["parts_stowed"] == 9
     assert stats["parts_outside_tray"] == 1 and stats["cycles"] == 10 and stats["pushes"] == 1
     assert stats["cycles_per_stowed"] == pytest.approx(10 / 9)
+
+
+def test_run_stats_probe_uses_the_written_count_on_a_heap_run():
+    counters = {
+        "episodes": [],
+        "abandon_reasons": {},
+        "control_steps": 10,
+        "clamped_steps": 0,
+        "attempts": 2,
+        "wall_seconds": 10.0,
+        "exported": 0,  # no episode was fully stowed
+        "exported_written": 2,  # both were written under --export_mode all
+        "motion": {},
+    }
+    heap_stats = batch_loop.run_stats(
+        counters, target_attempts=2, num_envs=2, probe=True, num_bricks=5
+    )
+    assert heap_stats["success_rate"] == pytest.approx(1.0)
+    assert heap_stats["extrapolated_50_success_wall_hours"] is not None
+    # The six-brick path is unaffected: it still grades on the fully-stowed count.
+    six_brick_stats = batch_loop.run_stats(
+        counters, target_attempts=2, num_envs=2, probe=True, num_bricks=None
+    )
+    assert six_brick_stats["success_rate"] == 0.0
+    assert six_brick_stats["extrapolated_50_success_wall_hours"] is None
+
+
+def test_run_meta_carries_the_effective_episode_length_over_the_computed_one():
+    args = _args(heap_k=3, parts_split="heldout", cycle_budget=7)
+    draw, _bl, noise = batch_loop.build_run(args)
+    chosen = parts.catalog()[:3]
+    computed = batch_loop.heap_episode_length_s(3, 7)
+    meta = batch_loop.run_meta(
+        args,
+        draw,
+        noise,
+        None,
+        num_bricks=3,
+        export_mode="EXPORT_ALL",
+        backend="mujoco",
+        task="t",
+        parts=chosen,
+        episode_length_s=600.0,
+    )
+    # --episode_length_s 600 must land in the sidecar even though it disagrees with the
+    # length the heap formula would have picked for this K and budget (I1).
+    assert meta["episode_length_s"] == 600.0
+    assert meta["episode_length_s"] != computed
+
+
+def test_heap_k_above_the_int8_cycle_brick_bound_is_rejected():
+    parser = argparse.ArgumentParser()
+    batch_loop.add_batch_arguments(parser)
+    parser.parse_args(["--out_dir", "/tmp/x", "--heap_k", str(batch_loop.MAX_HEAP_K)])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--out_dir", "/tmp/x", "--heap_k", str(batch_loop.MAX_HEAP_K + 1)])
+
+
+class _FakeRecorder:
+    """The one method ``run_batch`` calls on a recorder in the heap branch, with the same
+    flip-only-matching-frames semantics as ``mj.recorder.ShardRecorder.negate_actor``."""
+
+    def __init__(self, num_envs: int):
+        self.actors: list[list[int]] = [[] for _ in range(num_envs)]
+
+    def record(self, i: int, actor: int) -> None:
+        self.actors[i].append(actor)
+
+    def negate_actor(self, i: int, ordinal: int) -> None:
+        self.actors[i] = [-v if v == ordinal else v for v in self.actors[i]]
+
+
+class _PushCapOracle:
+    """A HeapOracle stand-in that sweeps three push legs, hits ``MAX_PUSHES_IN_A_ROW`` and goes
+    idle -- ``pick_order`` and ``cycle_outcomes`` never gain an entry, exactly the shape the
+    reviewer reproduced (three push legs under actor 1, both lists empty)."""
+
+    # Phase AT THE START of control step k (0-indexed): three push legs, then idle for good.
+    _SCHEDULE: ClassVar[dict] = {
+        0: oracle.Phase.PUSH_HOVER,
+        1: oracle.Phase.PUSH_DESCEND,
+        2: oracle.Phase.PUSH_SWEEP,
+    }
+
+    def __init__(self):
+        self.pick_order: list[int] = []
+        self.cycle_outcomes: list[bool] = []
+        self.phase = self._SCHEDULE[0]
+        self._step = 0
+
+    def advance(self) -> None:
+        self._step += 1
+        self.phase = self._SCHEDULE.get(self._step, oracle.Phase.DONE)
+
+
+class _FakeRig:
+    """Enough of ``OracleRig``'s surface for ``run_batch`` to drive one heap env through the
+    push-cap-then-timeout scenario, without a real MuJoCo env or physics."""
+
+    def __init__(self, env, orc):
+        self.num_envs = 1
+        self.env = env
+        self.oracles = [orc]
+        self.q_cmd = [torch.zeros(6)]
+
+    def step(self) -> dict:
+        actor = int(self.env.oracle_actor[0])
+        if actor != 0:
+            self.env.recorder.record(0, actor)
+        self.oracles[0].advance()
+        self.env.episode_length_buf[0] += 1
+        buf = int(self.env.episode_length_buf[0])
+        return {
+            "dones": torch.tensor([buf >= self.env.max_episode_length]),
+            "abandoned": torch.zeros(1, dtype=torch.bool),
+        }
+
+    def episode_stats(self, i: int) -> dict:
+        return {"succeeded": False, "abandon": None, "bricks_delivered": 0}
+
+    def rearm(self, env_ids) -> None:
+        pass
+
+
+class _FakeEnv:
+    """Enough of ``MjLegoSortEnv``'s duck-typed surface for ``run_batch``'s heap branch."""
+
+    def __init__(self, max_episode_length: int):
+        self.parts = [object()]  # heap flag: run_batch reads `env.parts is not None`
+        self.episode_length_buf = torch.zeros(1, dtype=torch.int64)
+        self.max_episode_length = max_episode_length
+        self.device = "cpu"
+        self.recorder = _FakeRecorder(1)
+        self.recorder_manager = types.SimpleNamespace(
+            exported_successful_episode_count=0, exported_episode_count=1
+        )
+        self.oracle_cycle_brick = torch.tensor([-1])
+        self.action_manager = types.SimpleNamespace(
+            get_term=lambda name: types.SimpleNamespace(clamped=torch.zeros(1, dtype=torch.bool))
+        )
+
+    def close(self) -> None:
+        pass
+
+    def reset(self, env_ids) -> None:
+        pass
+
+
+def test_a_trailing_push_leg_with_no_following_pick_is_negated_at_timeout():
+    """C1: three push legs hit the push cap (MAX_PUSHES_IN_A_ROW) and the episode goes DONE
+    with no pick ever selected -- pick_order and cycle_outcomes both stay empty, so
+    negate_new_failures never runs. Only run_batch's own last-step check can still catch it,
+    and only if it computes the dangling ordinal instead of trusting the (by-then-idle)
+    live `actor`. Without the fix this assertion fails: the three push frames stay positive."""
+    env = _FakeEnv(max_episode_length=5)
+    orc = _PushCapOracle()
+    rig = _FakeRig(env, orc)
+    counters = batch_loop.run_batch(env, rig, target_attempts=1, max_wall_minutes=5.0)
+    assert orc.pick_order == [] and orc.cycle_outcomes == []
+    assert env.recorder.actors[0] == [-1, -1, -1]
+    assert counters["attempts"] == 1
+    assert counters["episodes"][0]["outcome"] == "time_out"
