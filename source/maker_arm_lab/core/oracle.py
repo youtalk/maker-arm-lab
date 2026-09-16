@@ -375,6 +375,9 @@ class SceneSnapshot:
     brick_yaw: torch.Tensor  # (B,)
     brick_lin_vel: torch.Tensor  # (B, 3)
     pick_point: torch.Tensor  # (3,)
+    # (B, 4) wxyz part orientations. None on the six-brick task, which reads only the yaw;
+    # the heap teacher's grasp synthesis needs the full rotation (MS6 design 7.1).
+    brick_quat: torch.Tensor | None = None
 
 
 class Phase(enum.Enum):
@@ -390,6 +393,9 @@ class Phase(enum.Enum):
     RETREAT = enum.auto()
     DONE = enum.auto()
     ABANDON = enum.auto()
+    PUSH_HOVER = enum.auto()
+    PUSH_DESCEND = enum.auto()
+    PUSH_SWEEP = enum.auto()
 
 
 # Explicit pin, NOT Phase.value: the recorded integers are a dataset schema
@@ -410,7 +416,14 @@ PHASE_TO_INT = {
     "RETREAT": 9,
     "DONE": 10,
     "ABANDON": 11,
+    # MS6 heap teacher (design 7.3). Appended, never renumbered: the converter drops 0/10/11
+    # by pinned integer and keeps everything else as in-cycle frames.
+    "PUSH_HOVER": 12,
+    "PUSH_DESCEND": 13,
+    "PUSH_SWEEP": 14,
 }
+
+PUSH_PHASES = frozenset({Phase.PUSH_HOVER, Phase.PUSH_DESCEND, Phase.PUSH_SWEEP})
 
 
 @dataclass
@@ -434,6 +447,10 @@ class Goal:
     # the plan -- which bin this brick is bound for, and that nothing re-yaws
     # between here and RETREAT.
     yaw_hold_xy: tuple[tuple[float, float], ...] = ()
+    # Half the target's vertical extent (m). The runtime's descend ladder derives its pick
+    # offset from it (core.global_ik.descend_pick_offset). The six-brick task always grasps a
+    # resting 2x4; a heap part supplies its own (MS6 design 7.5).
+    half_height: float = layout.BRICK_SIZE[2] / 2
 
 
 @dataclass
@@ -638,6 +655,13 @@ class EnvOracle:
         # episode actually did, and only the second can catch a campaign that advertises a
         # randomized schedule and shipped the fixed one.
         self.pick_order: list[int] = []
+        # The width the jaws close across for the current pick (m). The runtime's LIFT gate
+        # derives the pinch stall floor from it (core.checker.pinch_min_stall); the six-brick
+        # task always squares the jaws to the 2x4's short side. A heap subclass sets it per pick.
+        self.grasp_width = layout.BRICK_SIZE[1]
+        # One entry per completed pick cycle: did the brick reach its bin (RETREAT's read).
+        # The heap batch loop negates the recorded frames of a False cycle (MS6 design H7).
+        self.cycle_outcomes: list[bool] = []
         if draw.randomize_pick_order and draw.nearest_first_pick_order:
             # Two orders cannot both be the order, and a run_meta advertising both would
             # leave no reader able to say which one the episodes carried.
@@ -761,9 +785,37 @@ class EnvOracle:
         slot = layout.color_slot(self.bl, color)
         return torch.tensor([self.bl.bin_x - RELEASE_X_SETBACK, self.bl.bin_ys[slot], RELEASE_Z])
 
+    # -- hooks a subclass overrides (MS6 heap teacher) -------------------------
+
+    def _target_yaw(self, scene: SceneSnapshot) -> float:
+        """The long-axis heading HOVER and DESCEND square the jaws to, plus the draw offset."""
+        return scene.brick_yaw[self.target_brick].item() + self.draw.yaw_offset
+
+    def _target_half_height(self) -> float:
+        return layout.BRICK_SIZE[2] / 2
+
+    def _no_target_phase(self, scene: SceneSnapshot) -> Phase:
+        """Where HOVER goes when no target is left: done if everything is stowed, else abandon."""
+        if self._stowed(scene) | self._sorted >= set(range(self.num_bricks)):
+            return Phase.DONE
+        return Phase.ABANDON
+
     # -- goal construction ---------------------------------------------------
 
-    def _goal(self, phase, target, yaw, tilt, gripper, stop, stall, steps, hold=0, hold_xy=()):
+    def _goal(
+        self,
+        phase,
+        target,
+        yaw,
+        tilt,
+        gripper,
+        stop,
+        stall,
+        steps,
+        hold=0,
+        hold_xy=(),
+        half_height=None,
+    ):
         return Goal(
             phase=phase,
             target_pos=target,
@@ -775,6 +827,7 @@ class EnvOracle:
             max_steps=steps,
             hold_steps=hold,
             yaw_hold_xy=hold_xy,
+            half_height=self._target_half_height() if half_height is None else half_height,
         )
 
     def _sabotage_offset(self, yaw: float) -> tuple[float, float]:
@@ -872,11 +925,7 @@ class EnvOracle:
                 if self.target_brick is None:
                     # Nothing reachable left: done if everything is stowed,
                     # abandoned if an unreachable/lost brick remains.
-                    self.phase = (
-                        Phase.DONE
-                        if self._stowed(scene) | self._sorted >= set(range(self.num_bricks))
-                        else Phase.ABANDON
-                    )
+                    self.phase = self._no_target_phase(scene)
                     return None
                 self.pick_order.append(self.target_brick)
                 self._brick_start = scene.brick_pos[self.target_brick].clone()
@@ -903,7 +952,7 @@ class EnvOracle:
             target[0] += self.draw.lateral_dx + self._hover_dx
             target[1] += self.draw.lateral_dy + self._hover_dy
             target[2] += self.draw.hover_height
-            yaw = scene.brick_yaw[self.target_brick].item() + self.draw.yaw_offset
+            yaw = self._target_yaw(scene)
             if self._induced_style == "offset" and self.retries_used == 0:
                 sdx, sdy = self._sabotage_offset(yaw)
                 target[0] += sdx
@@ -920,8 +969,7 @@ class EnvOracle:
                 hold_xy=self._yaw_hold_xy(target),
             )
         if self.phase == Phase.DESCEND:
-            yaw = scene.brick_yaw[self.target_brick].item() + self.draw.yaw_offset
-            return self.descend_goal(yaw)
+            return self.descend_goal(self._target_yaw(scene))
         if self.phase == Phase.CLOSE:
             return self._goal(
                 Phase.CLOSE, None, None, 0.0, -1.0, None, 0, CLOSE_STEPS, hold=CLOSE_STEPS
@@ -1041,7 +1089,9 @@ class EnvOracle:
             # band, and the episode is abandoned at once ("no reachable brick") if not.
             # `_sorted` still records the bricks that did arrive, so a later delivery that
             # jostles one -- momentarily not at rest -- cannot un-sort it.
-            if self.target_brick in self._stowed(scene):
+            arrived = self.target_brick in self._stowed(scene)
+            if arrived:
                 self._sorted.add(self.target_brick)
+            self.cycle_outcomes.append(arrived)
             self.target_brick = None
             self.phase = Phase.HOVER  # HOVER's entry selects the next brick

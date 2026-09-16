@@ -22,6 +22,9 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
     env.context_mode, env.obs_buf["context"], env.context_camera, env.context_privileged
     env.oracle_actor (N,) int16, set by the DAgger loop: 0 records nothing, k records the
         frame as takeover k
+    heap mode (MS6, ``parts`` given): env.parts, env.destination_bins (N,) long,
+        env.stow_half_extents, env.target_part (N,) int16 (the overhead marker), env.context_box,
+        env.context_camera_box (N,9), env.obs_buf["images"]["overhead_depth"] (N,224,224) uint16
 
 Semantics carried over from ``ManagerBasedRLEnv`` because the rig depends on them: a done
 env is auto-reset INSIDE ``step`` (its state tensors already show the next episode when
@@ -41,6 +44,7 @@ import math
 import random
 import re
 import types
+from collections.abc import Sequence
 from pathlib import Path
 
 import mujoco
@@ -51,16 +55,19 @@ from maker_arm_lab.assets.urdf_prep import gripper_velocity_limit
 from maker_arm_lab.core import cameras, layout
 from maker_arm_lab.core import profile as _profile
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
+from maker_arm_lab.core.heap_oracle import STOW_HALF_EXTENTS
+from maker_arm_lab.core.parts import Part
 from maker_arm_lab.core.quat import compose_offset_rot, quat_apply, quat_mul, rpy_from_quat
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.core.target import target_brick
-from maker_arm_lab.mj import scene
+from maker_arm_lab.mj import overlay, scene
 from maker_arm_lab.mj.context_names import (
     CONTEXT_CAMERA_NAMES,  # noqa: F401 -- re-exported as mj_env.CONTEXT_CAMERA_NAMES
     CONTEXT_DIMS,
     CONTEXT_MAX_BRICKS,
     CONTEXT_PRIVILEGED_NAMES,  # noqa: F401 -- re-exported as mj_env.CONTEXT_PRIVILEGED_NAMES
 )
+from maker_arm_lab.mj.depth import noisy_depth_mm
 from maker_arm_lab.mj.recorder import ShardRecorder
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_NAMES,
@@ -108,6 +115,18 @@ def _rot6(q: np.ndarray) -> np.ndarray:
             2.0 * (y * z + w * x),
         ],
         dtype=np.float32,
+    )
+
+
+def _random_quat(rng: random.Random) -> tuple[float, float, float, float]:
+    """A uniformly random (w, x, y, z) rotation (Shoemake's subgroup algorithm)."""
+    u1, u2, u3 = rng.random(), rng.random(), rng.random()
+    a, b = math.sqrt(1.0 - u1), math.sqrt(u1)
+    return (
+        a * math.sin(2.0 * math.pi * u2),
+        a * math.cos(2.0 * math.pi * u2),
+        b * math.sin(2.0 * math.pi * u3),
+        b * math.cos(2.0 * math.pi * u3),
     )
 
 
@@ -207,6 +226,7 @@ class MjLegoSortEnv:
         draw: dict,
         *,
         num_bricks: int = 6,
+        parts: Sequence[Part] | None = None,
         cameras: bool = True,
         start_pose_offset_rad: float = 0.05,
         desk_color: bool = True,
@@ -242,15 +262,26 @@ class MjLegoSortEnv:
         )
         if context not in CONTEXT_DIMS:
             raise ValueError(f"context must be one of {sorted(CONTEXT_DIMS)}, got {context!r}")
-        if num_bricks > CONTEXT_MAX_BRICKS:
+        self.parts = tuple(parts) if parts is not None else None
+        if self.parts is not None:
+            num_bricks = len(self.parts)
+            self.cfg.num_bricks = num_bricks
+            if context == "privileged":
+                raise ValueError(
+                    "the privileged channel holds six bricks; a heap serves camera or camera_box"
+                )
+        elif num_bricks > CONTEXT_MAX_BRICKS:
             raise ValueError(f"context channels hold {CONTEXT_MAX_BRICKS} bricks, got {num_bricks}")
         self.context_mode = context
         self.context_camera = np.zeros((num_envs, CONTEXT_DIMS["camera"]), dtype=np.float32)
         self.context_privileged = np.zeros((num_envs, CONTEXT_DIMS["privileged"]), dtype=np.float32)
+        self.context_box = np.zeros((num_envs, 3), dtype=np.float32)
+        self.context_camera_box = np.zeros((num_envs, CONTEXT_DIMS["camera_box"]), dtype=np.float32)
         served = {
             "none": np.zeros((num_envs, 0), dtype=np.float32),
             "camera": self.context_camera,
             "privileged": self.context_privileged,
+            "camera_box": self.context_camera_box,
         }[context]
         self.max_episode_length = round(episode_length_s * CONTROL_HZ)
         # The run-level draw, and the draw in force per env: equal to run_draw for every env
@@ -258,10 +289,13 @@ class MjLegoSortEnv:
         self.run_draw = dict(draw)
         self.episode_draws = [self.run_draw] * num_envs
         self.bin_layouts: list[layout.BinLayout] = [bl] * num_envs
-        base_model, self.handles = scene.build_model(draw, num_bricks, cameras)
+        base_model, self.handles = scene.build_model(
+            draw, num_bricks, cameras, parts=self.parts, tray=self.parts is not None
+        )
         self.models = [base_model] + [copy.copy(base_model) for _ in range(num_envs - 1)]
         self.datas = [mujoco.MjData(m) for m in self.models]
         self._nominal_inertia = base_model.body_inertia[list(self.handles.brick_bodies)].copy()
+        self._nominal_mass = base_model.body_mass[list(self.handles.brick_bodies)].copy()
         self.renderers = [mujoco.Renderer(m, 224, 224) for m in self.models] if cameras else []
         self._cam_wrist = base_model.camera("wrist").id if cameras else -1
         self._cam_overhead = base_model.camera("overhead").id if cameras else -1
@@ -287,6 +321,14 @@ class MjLegoSortEnv:
             },
             "context": torch.from_numpy(served),
         }
+        self._np_rng = np.random.default_rng(0)
+        if self.parts is not None:
+            self.destination_bins = torch.zeros(num_envs, dtype=torch.long)
+            self.stow_half_extents = torch.tensor(STOW_HALF_EXTENTS)
+            self.target_part = torch.full((num_envs,), -1, dtype=torch.int16)
+            if cameras:
+                self._depth = np.zeros((num_envs, 224, 224), dtype=np.uint16)
+                self.obs_buf["images"]["overhead_depth"] = torch.from_numpy(self._depth)
         self.episode_length_buf = np.zeros(num_envs, dtype=np.int64)
         self._grip_ctrl = np.full((num_envs, 2), GRIPPER_OPEN_POS)
         self.recorder = (
@@ -295,6 +337,7 @@ class MjLegoSortEnv:
                 num_envs,
                 export_all=export_all,
                 cameras=cameras,
+                depth=self.parts is not None,
             )
             if export_dir is not None
             else None
@@ -316,6 +359,7 @@ class MjLegoSortEnv:
             np.random.seed(seed % 2**32)
             torch.manual_seed(seed)
             self._rng = random.Random(seed)
+            self._np_rng = np.random.default_rng(seed % 2**32)
         ids = range(self.num_envs) if env_ids is None else [int(i) for i in env_ids.tolist()]
         for i in ids:
             self._reset_env(i)
@@ -340,6 +384,10 @@ class MjLegoSortEnv:
         robot = self.scene["robot"]
         actor = getattr(self, "oracle_actor", None)
         recorded = [False] * self.num_envs
+        heap = self.parts is not None
+        if heap:
+            self._update_target_parts(actor)
+            self._stamp_markers()
         if self.recorder is not None:
             phase = getattr(self, "oracle_cycle_phase", None)
             brick = getattr(self, "oracle_cycle_brick", None)
@@ -357,8 +405,11 @@ class MjLegoSortEnv:
                     self._wrist[i] if self.cameras else None,
                     self._overhead[i] if self.cameras else None,
                     context_camera=self.context_camera[i],
-                    context_privileged=self.context_privileged[i],
+                    context_privileged=None if heap else self.context_privileged[i],
                     actor=who,
+                    depth=self._depth[i] if heap and self.cameras else None,
+                    target_part=int(self.target_part[i]) if heap else -1,
+                    context_box=self.context_box[i] if heap else None,
                 )
         step_limit = GRIPPER_RATE_M_PER_S / CONTROL_HZ
         self._grip_ctrl += np.clip(targets[:, 6:] - self._grip_ctrl, -step_limit, step_limit)
@@ -385,6 +436,40 @@ class MjLegoSortEnv:
             self._reset_env(i)
         self._refresh(range(self.num_envs), images=True)
         return None, None, terminated, truncated, {}
+
+    def _update_target_parts(self, actor) -> None:
+        """Heap mode: the rig's cycle stash names the marker's part on the envs it drives."""
+        brick = getattr(self, "oracle_cycle_brick", None)
+        if brick is None:
+            return
+        for i in range(self.num_envs):
+            if actor is None or int(actor[i]) > 0:
+                self.target_part[i] = int(brick[i])
+
+    def _stamp_markers(self) -> None:
+        """Draw the target marker into the overhead frame about to be observed (design 9).
+
+        Projected through the pose the frame was rendered with: ``cam_xpos``/``cam_xmat`` are
+        those ``_refresh`` left after the per-frame jitter, and no physics ran since.
+        """
+        if not self.cameras:
+            return
+        h, c = self.handles, self._cam_overhead
+        for i in range(self.num_envs):
+            t = int(self.target_part[i])
+            if t < 0:
+                continue
+            m, d = self.models[i], self.datas[i]
+            uv = overlay.project_point(
+                d.cam_xpos[c],
+                d.cam_xmat[c],
+                float(m.cam_fovy[c]),
+                224,
+                224,
+                d.xpos[h.brick_bodies[t]],
+            )
+            if uv is not None:
+                overlay.stamp_marker(self._overhead[i], *uv)
 
     def close(self) -> None:
         for r in self.renderers:
@@ -415,7 +500,7 @@ class MjLegoSortEnv:
         if self.cfg.physics_dr:
             for b, body in enumerate(h.brick_bodies):
                 scale = random.uniform(*BRICK_MASS_SCALE)
-                m.body_mass[body] = layout.BRICK_MASS * scale
+                m.body_mass[body] = self._nominal_mass[b] * scale
                 m.body_inertia[body] = self._nominal_inertia[b] * scale
                 m.geom_friction[h.brick_geoms[b], 0] = scene.BRICK_FRICTION[0] * random.uniform(
                     *BRICK_FRICTION_SCALE
@@ -429,37 +514,80 @@ class MjLegoSortEnv:
             d.qpos[h.joint_qpos[k]] = min(max(q, lo), hi)
         for adr in h.joint_qpos[6:]:
             d.qpos[adr] = GRIPPER_OPEN_POS
-        bl = self.bin_layouts[i]
-        poses = layout.sample_brick_poses(
-            self.cfg.num_bricks,
-            layout.MIN_SEPARATION,
-            {
-                "x": layout.scatter_x(bl),
-                "y": layout.SCATTER_Y,
-                "z": (layout.SPAWN_Z, layout.SPAWN_Z),
-                "yaw": (-math.pi, math.pi),
-            },
-            max_radius=layout.SCATTER_MAX_RADIUS,
-        )
-        for b, pose in enumerate(poses):
-            adr = h.brick_qpos[b]
-            d.qpos[adr : adr + 3] = pose[:3]
-            d.qpos[adr + 3 : adr + 7] = (math.cos(pose[5] / 2.0), 0.0, 0.0, math.sin(pose[5] / 2.0))
-            d.qvel[h.brick_dof[b] : h.brick_dof[b] + 6] = 0.0
+        if self.parts is None:
+            bl = self.bin_layouts[i]
+            poses = layout.sample_brick_poses(
+                self.cfg.num_bricks,
+                layout.MIN_SEPARATION,
+                {
+                    "x": layout.scatter_x(bl),
+                    "y": layout.SCATTER_Y,
+                    "z": (layout.SPAWN_Z, layout.SPAWN_Z),
+                    "yaw": (-math.pi, math.pi),
+                },
+                max_radius=layout.SCATTER_MAX_RADIUS,
+            )
+            for b, pose in enumerate(poses):
+                adr = h.brick_qpos[b]
+                d.qpos[adr : adr + 3] = pose[:3]
+                d.qpos[adr + 3 : adr + 7] = (
+                    math.cos(pose[5] / 2.0),
+                    0.0,
+                    0.0,
+                    math.sin(pose[5] / 2.0),
+                )
+                d.qvel[h.brick_dof[b] : h.brick_dof[b] + 6] = 0.0
+        else:
+            self._drop_heap(i)
         # Hold the pose the reset left: the first command the rig sends is this same pose.
         d.ctrl[list(h.arm_actuators)] = d.qpos[list(h.joint_qpos[:6])]
         d.ctrl[list(h.gripper_actuators)] = GRIPPER_OPEN_POS
         self._grip_ctrl[i] = GRIPPER_OPEN_POS
         pos, rot = scene.overhead_camera_pose(self.episode_draws[i])
         self.context_camera[i] = np.array([*pos, *rpy_from_quat(rot)], dtype=np.float32)
+        if self.parts is not None:
+            bl = self.bin_layouts[i]
+            dest = int(self.destination_bins[i])
+            self.context_box[i] = np.array([bl.bin_x, bl.bin_ys[dest], 0.0], dtype=np.float32)
+            self.context_camera_box[i, :6] = self.context_camera[i]
+            self.context_camera_box[i, 6:] = self.context_box[i]
         mujoco.mj_forward(m, d)
         self.episode_length_buf[i] = 0
         if self.recorder is not None:
-            self.recorder.begin(i, self._initial_state(i))
+            self.recorder.begin(
+                i,
+                self._initial_state(i),
+                parts=[p.name for p in self.parts] if self.parts is not None else None,
+            )
+
+    def _drop_heap(self, i: int) -> None:
+        """Design section 6: a destination, a color per part, a drop into the tray, a settle."""
+        m, d, h = self.models[i], self.datas[i], self.handles
+        self.destination_bins[i] = self._rng.randrange(len(self.bin_layouts[i].bin_ys))
+        (x0, x1), (y0, y1) = layout.tray_bounds()
+        k = self.cfg.num_bricks
+        z_top = layout.HEAP_DROP_Z_MIN + layout.HEAP_DROP_Z_PER_PART * k
+        for b, part in enumerate(self.parts):
+            rgba = layout.BRICK_RGBA[self._rng.choice(layout.BRICK_COLOR_ORDER)]
+            for g in h.body_geoms[b]:
+                m.geom_rgba[g] = rgba
+            r = part.half_diagonal
+            x = self._rng.uniform(x0 + r, x1 - r)
+            y = self._rng.uniform(y0 + r, y1 - r)
+            z = self._rng.uniform(layout.HEAP_DROP_Z_MIN, z_top)
+            adr = h.brick_qpos[b]
+            d.qpos[adr : adr + 3] = (x, y, z)
+            d.qpos[adr + 3 : adr + 7] = _random_quat(self._rng)
+            d.qvel[h.brick_dof[b] : h.brick_dof[b] + 6] = 0.0
+        # Hold the arm where the reset left it while the heap settles; nothing is recorded.
+        d.ctrl[list(h.arm_actuators)] = d.qpos[list(h.joint_qpos[:6])]
+        d.ctrl[list(h.gripper_actuators)] = GRIPPER_OPEN_POS
+        mujoco.mj_forward(m, d)
+        mujoco.mj_step(m, d, nstep=layout.HEAP_SETTLE_STEPS)
 
     def _initial_state(self, i: int) -> dict[str, np.ndarray]:
         d, h, bl = self.datas[i], self.handles, self.bin_layouts[i]
-        return {
+        state = {
             "robot_joint_position": d.qpos[list(h.joint_qpos)].astype(np.float32),
             "robot_joint_velocity": d.qvel[list(h.joint_dof)].astype(np.float32),
             "robot_root_pose": np.concatenate([d.xpos[h.base_body], d.xquat[h.base_body]]).astype(
@@ -474,6 +602,9 @@ class MjLegoSortEnv:
             ),
             "bin_layout": np.array([bl.bin_x, *bl.bin_ys], dtype=np.float32),
         }
+        if self.parts is not None:
+            state["destination_bin"] = np.array([int(self.destination_bins[i])], dtype=np.int64)
+        return state
 
     def _refresh(self, ids, images: bool) -> None:
         h = self.handles
@@ -521,41 +652,52 @@ class MjLegoSortEnv:
                 self._wrist[i] = r.render()
                 r.update_scene(d, camera=self._cam_overhead)
                 self._overhead[i] = r.render()
-        # MS4 c2 design 5.2 and 5.3: the privileged channel after the forces and the brick
-        # states are current, because the target rule reads both.
-        stowed = per_brick_stowed(self)
-        held = held_brick_from_forces(
-            torch.from_numpy(left).norm(dim=-1).squeeze(1),
-            torch.from_numpy(right).norm(dim=-1).squeeze(1),
-            min_force=HELD_MIN_FORCE,
-        )
+                if self.parts is not None:
+                    r.enable_depth_rendering()
+                    try:
+                        r.update_scene(d, camera=self._cam_overhead)
+                        depth_m = r.render()
+                    finally:
+                        r.disable_depth_rendering()
+                    self._depth[i] = noisy_depth_mm(depth_m, self._overhead[i], self._np_rng)
+        if self.parts is None:
+            # MS4 c2 design 5.2 and 5.3: the privileged channel after the forces and the brick
+            # states are current, because the target rule reads both. A heap has no privileged
+            # channel (the loop below is a no-op for it), so skip these two grader passes.
+            stowed = per_brick_stowed(self)
+            held = held_brick_from_forces(
+                torch.from_numpy(left).norm(dim=-1).squeeze(1),
+                torch.from_numpy(right).norm(dim=-1).squeeze(1),
+                min_force=HELD_MIN_FORCE,
+            )
         nb = self.cfg.num_bricks
-        for i in ids:
-            d = self.datas[i]
-            row = self.context_privileged[i]
-            row[:] = 0.0
-            for b, adr in enumerate(h.brick_qpos):
-                row[9 * b : 9 * b + 3] = d.qpos[adr : adr + 3]
-                row[9 * b + 3 : 9 * b + 9] = _rot6(d.qpos[adr + 3 : adr + 7])
-            brick_pos = torch.stack(
-                [self.scene[f"brick_{b}"].data.root_pos_w[i] for b in range(nb)]
-            )
-            # The PICK POINT, not the tool body: `EnvOracle._next_brick` takes its nearest
-            # candidate by the distance from `SceneSnapshot.pick_point`, which is the tool
-            # body plus the rotated PICK_OFFSET_MEASURED. The two agree only with a level
-            # tool and part by ~3 cm at a tilted approach, which flips this one-hot on near
-            # ties -- a mislabelled target in the channel the policy is asked to read.
-            pick_point_xy = (
-                robot.data.body_pos_w[i, h.tool_body]
-                + quat_apply(robot.data.body_quat_w[i, h.tool_body], _PICK_OFFSET)
-            )[:2]
-            target = target_brick(
-                int(held[i]),
-                brick_pos,
-                pick_point_xy,
-                stowed[i],
-                layout.top_down_x_limit(self.bin_layouts[i]),
-            )
-            if target >= 0:
-                row[54 + target] = 1.0
-            row[60 : 60 + nb] = stowed[i].numpy().astype(np.float32)
+        if self.parts is None:
+            for i in ids:
+                d = self.datas[i]
+                row = self.context_privileged[i]
+                row[:] = 0.0
+                for b, adr in enumerate(h.brick_qpos):
+                    row[9 * b : 9 * b + 3] = d.qpos[adr : adr + 3]
+                    row[9 * b + 3 : 9 * b + 9] = _rot6(d.qpos[adr + 3 : adr + 7])
+                brick_pos = torch.stack(
+                    [self.scene[f"brick_{b}"].data.root_pos_w[i] for b in range(nb)]
+                )
+                # The PICK POINT, not the tool body: `EnvOracle._next_brick` takes its nearest
+                # candidate by the distance from `SceneSnapshot.pick_point`, which is the tool
+                # body plus the rotated PICK_OFFSET_MEASURED. The two agree only with a level
+                # tool and part by ~3 cm at a tilted approach, which flips this one-hot on near
+                # ties -- a mislabelled target in the channel the policy is asked to read.
+                pick_point_xy = (
+                    robot.data.body_pos_w[i, h.tool_body]
+                    + quat_apply(robot.data.body_quat_w[i, h.tool_body], _PICK_OFFSET)
+                )[:2]
+                target = target_brick(
+                    int(held[i]),
+                    brick_pos,
+                    pick_point_xy,
+                    stowed[i],
+                    layout.top_down_x_limit(self.bin_layouts[i]),
+                )
+                if target >= 0:
+                    row[54 + target] = 1.0
+                row[60 : 60 + nb] = stowed[i].numpy().astype(np.float32)

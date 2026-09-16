@@ -73,6 +73,7 @@ from maker_arm_lab.core.checker import (
     PINCH_MIN_FORCE,
     PINCH_MIN_STALL,
     held_brick_from_forces,
+    pinch_min_stall,
 )
 from maker_arm_lab.core.global_ik import (
     ARM_DOF,
@@ -385,6 +386,7 @@ class OracleRig:
         rng: random.Random,
         induction: oracle.FailureInduction | None = None,
         transport_speed: float = trajectory.TRANSPORT_SPEED,
+        oracle_factory=None,
     ):
         self.env = env
         # Multiplier on the pace of the transport legs (TRANSPORT_PHASES); see leg_resolution.
@@ -495,6 +497,9 @@ class OracleRig:
         self.single_cycle = [False] * self.num_envs
         self.takeover_result: list[bool | None] = [None] * self.num_envs
         self._planned: list[torch.Tensor] = []
+        # MS6 design 7.5: who builds an env's oracle. The default is the six-brick EnvOracle;
+        # the heap script installs HeapOracle without a rig subclass. Called by rearm and resume.
+        self.oracle_factory = oracle_factory or self._default_oracle
         self.rearm(list(range(self.num_envs)))
 
     @staticmethod
@@ -523,6 +528,9 @@ class OracleRig:
             # episode's drawn hover height, because the drawn one gave no pick.
             "hover_lowered": 0,
         }
+
+    def _default_oracle(self, i: int, bl: layout.BinLayout, draw: oracle.EpisodeDraw):
+        return oracle.EnvOracle(bl, self.num_bricks, draw, induction=self.induction, rng=self.rng)
 
     def _check_action_space(self, env) -> None:
         """Fail loudly unless this env exposes the 7-element joint-position action.
@@ -814,7 +822,8 @@ class OracleRig:
         brick_end = self._brick_pos(i, brick)
         rise = (brick_end[2] - self.brick_start[i][2]).item()
         xy_error = (brick_end[:2] - self.pick_point(i)[:2]).norm().item()
-        pinch = self.pinch_evidence(i, brick)
+        # MS6 design 7.4: the stall floor follows the width the jaws close across.
+        pinch = self.pinch_evidence(i, brick, pinch_min_stall(self.oracles[i].grasp_width))
         lifted = rise > LIFT_MIN_RISE and xy_error < LIFT_MAX_XY_ERROR
         return oracle.PhaseResult(outcome=outcome, pinch_ok=pinch["ok"], lifted=lifted)
 
@@ -913,7 +922,11 @@ class OracleRig:
         pick_from, tilt_from = self._commanded_pick_pose(i, start)
         pick_to = goal.target_pos.double().cpu()
         heading = self.commanded_yaw[i]
-        if goal.phase == oracle.Phase.DESCEND:
+        if goal.phase == oracle.Phase.DESCEND or goal.phase in oracle.PUSH_PHASES - {
+            oracle.Phase.PUSH_HOVER
+        }:
+            # PUSH_DESCEND and PUSH_SWEEP (MS6 design 7.3) run near level like a descend: at
+            # the grasp tilt the plate corner dips 21 mm under the tip and ploughs the desk.
             plan = self._plan_descend(i, goal, start, pick_from, tilt_from, pick_to, heading)
         elif goal.phase == oracle.Phase.HOVER:
             plan = self._plan_hover_ladder(i, goal, start, pick_to, heading)
@@ -1135,10 +1148,11 @@ class OracleRig:
         Level where level solves, otherwise the least tilt this brick admits (ruling D3-11
         candidate 2). The rung's pick offset becomes this env's, so ``pick_point`` -- which
         the DESCEND tolerance, the LIFT gate and every later leg's target are expressed in --
-        names the point the jaws will actually close on.
+        names the point the jaws will actually close on. The ladder and the offset follow
+        ``goal.half_height``, the 2x4's on the six-brick task and the part's own on a heap.
         """
-        for rung in DESCEND_TILT_LADDER:
-            geometry = descend_pick_offset(rung, BRICK_HALF_HEIGHT)
+        for rung in descend_tilt_ladder(goal.half_height):
+            geometry = descend_pick_offset(rung, goal.half_height)
             if geometry is None:
                 continue
             offset_z = geometry[0]
@@ -1274,9 +1288,7 @@ class OracleRig:
                 # layout.
                 layouts = getattr(self.env, "bin_layouts", None)
                 bl = self.bl if layouts is None else layouts[i]
-                self.oracles[i] = oracle.EnvOracle(
-                    bl, self.num_bricks, draw, induction=self.induction, rng=self.rng
-                )
+                self.oracles[i] = self.oracle_factory(i, bl, draw)
             self.commanded_yaw[i] = self.jaw_yaw(i)
             self.commanded_tilt[i] = self.tool_tilt(i)
             self.pick_offset[i] = torch.tensor(PICK_OFFSET_MEASURED, device=self.device)
@@ -1314,7 +1326,7 @@ class OracleRig:
             raise RuntimeError(f"env {i} is not idle")
         layouts = getattr(self.env, "bin_layouts", None)
         bl = self.bl if layouts is None else layouts[i]
-        orc = oracle.EnvOracle(bl, self.num_bricks, oracle.nominal_draw())
+        orc = self.oracle_factory(i, bl, oracle.nominal_draw())
         self.oracles[i] = orc
         self.commanded_yaw[i] = self.jaw_yaw(i)
         self.commanded_tilt[i] = self.tool_tilt(i)
@@ -1406,6 +1418,15 @@ class OracleRig:
           meaning: ``all_bricks_stowed`` IS "every brick is in its bin".
         * ``sort_attempts`` -- pick-and-place cycles the ORACLE completed. Counts a brick it
           dropped in transit. Never a delivery count.
+
+        A heap oracle's ``cycle_outcomes`` (from ``extra_stats``) has the same staleness as
+        ``bricks_delivered`` and for the same reason: the brick that ends a successful episode
+        is marked sorted by ``RETREAT``'s own report, but ``dones`` gates ``_advance_phases``
+        off the very step termination fires, which for that brick lands mid-``RELEASE`` hold,
+        before ``RETREAT`` ever starts. So ``cycle_outcomes`` is one entry short of
+        ``bricks_delivered`` on every successful episode, structurally, not by chance. Padded
+        below with the same trust ``bricks_delivered`` already places in ``succeeded``: on a
+        successful episode, every brick that has no outcome yet arrived.
         """
         orc = self.oracles[env_id]
         outcome = self._outcome[env_id]
@@ -1425,7 +1446,15 @@ class OracleRig:
                 "hover_jitters": orc.hover_jitters,
                 "pick_order": list(orc.pick_order),
             }
-        return {**self.stats[env_id], **outcome, **induced}
+            extra = getattr(orc, "extra_stats", None)
+            if extra is not None:
+                induced.update(extra())
+        result = {**self.stats[env_id], **outcome, **induced}
+        if outcome["succeeded"] and "cycle_outcomes" in result:
+            shortfall = result["bricks_delivered"] - len(result["cycle_outcomes"])
+            if shortfall > 0:
+                result["cycle_outcomes"] = result["cycle_outcomes"] + [True] * shortfall
+        return result
 
     def _succeeded(self, env_id: int) -> bool | None:
         """The env's own ``success`` termination for the step that ended the episode.
@@ -1603,14 +1632,18 @@ class OracleRig:
         brick_lin_vel = torch.stack(
             [self.env.scene[f"brick_{b}"].data.root_lin_vel_w[i] for b in range(self.num_bricks)]
         ).cpu()
+        brick_quat = torch.stack(
+            [self.env.scene[f"brick_{b}"].data.root_quat_w[i] for b in range(self.num_bricks)]
+        ).cpu()
         return oracle.SceneSnapshot(
             brick_pos=brick_pos,
             brick_yaw=self._brick_headings(i),
             brick_lin_vel=brick_lin_vel,
             pick_point=self.pick_point(i).cpu(),
+            brick_quat=brick_quat,
         )
 
-    def pinch_evidence(self, i: int, brick: int) -> dict:
+    def pinch_evidence(self, i: int, brick: int, min_stall: float = PINCH_MIN_STALL) -> dict:
         """Is the brick pinched between the jaws, or merely entrained in the pocket?
 
         ``force_matrix_w`` is (num_envs, num_bodies, num_filters, 3); each sensor prim is a
@@ -1630,7 +1663,7 @@ class OracleRig:
             "right": right,
             "asymmetry": asymmetry,
             "ok": bool(
-                stall >= PINCH_MIN_STALL
+                stall >= min_stall
                 and weakest >= PINCH_MIN_FORCE
                 and asymmetry <= PINCH_MAX_ASYMMETRY
             ),

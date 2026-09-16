@@ -340,3 +340,30 @@ def test_spatial_scale_widens_the_camera_and_bin_x_draws_only():
     assert layout.sample_run_draw(random.Random(3)) == layout.sample_run_draw(
         random.Random(3), spatial_scale=1.0
     )
+
+
+def test_tray_interior_is_inside_the_measured_reach_and_under_the_x_limit():
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    for x, y in ((x0, y0), (x0, y1), (x1, y0), (x1, y1)):
+        assert math.hypot(x, y) <= layout.SCATTER_MAX_RADIUS
+    assert x0 >= layout.SCATTER_X[0]
+    tightest = layout.BinLayout(bin_x=0.43)  # the smallest bin_x the run draw produces
+    assert x1 <= layout.top_down_x_limit(tightest)
+    assert y0 >= layout.SCATTER_Y[0] and y1 <= layout.SCATTER_Y[1]
+
+
+def test_tray_walls_enclose_the_interior():
+    boxes = layout.tray_static_boxes()
+    assert [b[0] for b in boxes] == [
+        "tray_wall_near",
+        "tray_wall_far",
+        "tray_wall_left",
+        "tray_wall_right",
+    ]
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    by_name = {name: (center, size) for name, center, size in boxes}
+    assert by_name["tray_wall_near"][0][0] == pytest.approx(x0 - layout.TRAY_WALL / 2)
+    assert by_name["tray_wall_far"][0][0] == pytest.approx(x1 + layout.TRAY_WALL / 2)
+    assert by_name["tray_wall_left"][0][1] == pytest.approx(y0 - layout.TRAY_WALL / 2)
+    assert by_name["tray_wall_right"][0][1] == pytest.approx(y1 + layout.TRAY_WALL / 2)
+    assert all(size[2] == layout.TRAY_WALL_HEIGHT for _, _, size in boxes)

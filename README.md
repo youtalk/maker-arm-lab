@@ -9,7 +9,9 @@ source/maker_arm_lab/
   robots/            frames.py (measured constants, isaaclab-free) + maker_arm.py (ArticulationCfg)
   actuators/         MIT-mode actuator; gains and caps from maker_arm_rs.profile()
   assets/            urdf_prep.py (Z-up derived URDF), GravityCompensatedArticulation
-  core/              layout, oracle state machine, global_ik, checker, gate, profile, trace
+  core/              layout, oracle state machine, global_ik, checker, gate, profile, trace,
+                     parts, grasp, heap_oracle
+  mj/                MuJoCo backend: env, scene, recorder, overlay, depth
   tasks/manager_based/lego_sort/
                      env cfgs and the five task ids, mdp/, oracle_runtime, recorders, vision
 assets/vendor/maker_arm_description/   pinned copy of maker-arm-sdk urdf/maker_arm (+ VENDOR.md)
@@ -136,6 +138,16 @@ uv run python scripts/mj_dagger_batch.py --num_envs 12 --run_seed 1 --layout_see
     --server tcp://127.0.0.1:5700 --round 1 --out_dir /tmp/dag --shard_name proc_0
 ```
 
+MS6 phase A adds a heap of mixed parts in a tray, MuJoCo only. `--heap_k K` on `mj_generate_batch.py` replaces the six bricks with K parts drawn from a 62-part parametric catalog (bricks, plates, tiles and 45-degree slopes from 1x1 to 4x8), dropped into a 13 x 20 cm tray and settled. `--parts_split {train,heldout,all}` picks the side of the stratified 20 percent held-out split, seeded by `--parts_seed`. Every part goes to one destination bin drawn per episode, and colors carry no meaning. The teacher is `core/heap_oracle.py`: it ranks grasps on the part geometry (`core/grasp.py`), takes the highest clear one, remembers failures per 5 cm cell, and pushes through the densest cell when nothing clears. A heap run exports every episode. `obs/actor` holds the pick cycle ordinal, negative for a cycle that did not stow, so `convert_to_lerobot.py --dagger --split_cycles` keeps the good cycles. Heap shards also carry `obs/images/overhead_depth` (uint16 millimeters, 0 is a hole), `obs/target_part`, `obs/context_box`, a `parts` attribute and `initial_state/destination_bin`, and the overhead image carries a white marker on the target part. `scripts/heap_yield_read.py` sums a set of `*.meta.json` sidecars into the phase A read.
+
+```bash
+uv run python scripts/mj_generate_batch.py --out_dir /tmp/h0 --attempts 12 --num_envs 12 \
+    --heap_k 50 --parts_split heldout --probe                          # BATCH_OK exported=12 attempts=12
+python3 scripts/heap_yield_read.py --meta '/tmp/h*/shard.meta.json' --out /tmp/read.json   # YIELD_OK {...}
+```
+
+Design H7 exports every episode and marks one actor ordinal per pick cycle. The converter's positive-actor rule then keeps only the cycles that stowed. A heap run's `BATCH_OK` count therefore reports episodes written, not episodes where every part stowed.
+
 Dataset schema, both sides (spec section 4.2; `docs/ms1-maker-arm-sim.md`):
 
 | key | shape | content |
@@ -143,7 +155,8 @@ Dataset schema, both sides (spec section 4.2; `docs/ms1-maker-arm-sim.md`):
 | `observation.state` | (7,) | 6 URDF joint angles [rad] + gripper opening fraction (0 closed, 1 open) |
 | `action` | (7,) | 6 URDF joint targets [rad] + binary gripper (`>= 0` open, `< 0` close) |
 | `observation.images.wrist`, `observation.images.overhead` | 224x224x3 | uint8 RGB |
-| `observation.environment_state` | (6,) or (66,) | camera pose x, y, z, roll, pitch, yaw, or per brick position, rotation, target, and stowed mask, only with `--context` |
+| `observation.images.overhead_depth` | 224x224 | uint16 millimeters, 0 is a hole (MS6 heap shards, converted in phase B) |
+| `observation.environment_state` | (6,), (66,) or (9,) | camera pose x, y, z, roll, pitch, yaw, or per brick position, rotation, target, and stowed mask, or camera pose plus destination box x, y, yaw, only with `--context` |
 
 Under `--action_space delta_prev` the six joint columns of `action` are this frame's post-clamp target minus the previous frame's target, and the measured joints on the first frame of a sub-episode. The converter records the choice in `meta/action_space.json`. At inference the eval client sends its previous clamped command as the `anchor` array and the policy server adds it back, so the wire and the real arm still carry absolute joint targets. The c1 definition (`delta`, target minus the measured joints of the same frame) is refused by both sides.
 

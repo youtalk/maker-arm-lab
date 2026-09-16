@@ -97,6 +97,27 @@ re-measured.
 """
 
 
+PINCH_COMPLIANCE = 0.0025
+"""Metres the measured stall falls short of half the grasp width under contact compliance.
+
+MuJoCo's own pin, tests/test_mj_oracle.py, asserts stall in 5.5 to 8.5 mm on the 15.8 mm
+brick width, against a 7.9 mm ideal grip. The worst case in that range is a 7.9 - 5.5 =
+2.4 mm shortfall, so 2.5 mm leaves 0.1 mm of margin. Isaac's carries measured a tighter
+5.797 to 7.487 mm (recorded on PINCH_MIN_STALL above); that is a different backend's
+number and does not set this margin.
+"""
+
+
+def pinch_min_stall(grasp_width: float) -> float:
+    """The stall floor for a pinch across ``grasp_width`` (MS6 design 7.4).
+
+    The smaller of ``PINCH_MIN_STALL`` and half the width minus the compliance, floored at 1 mm.
+    On the 2x4 brick's 15.8 mm width this returns ``PINCH_MIN_STALL`` itself, so every MS1 to
+    MS4 read is unchanged. A 1x1 part gripped across 7.8 mm gets 1.4 mm.
+    """
+    return max(0.001, min(PINCH_MIN_STALL, grasp_width / 2.0 - PINCH_COMPLIANCE))
+
+
 def bin_targets(bin_centers_w: torch.Tensor, brick_color_ids: torch.Tensor) -> torch.Tensor:
     """Each brick's target bin center: (B,3) from (4,3) centers, (N,B,3) from (N,4,3).
 
@@ -104,11 +125,19 @@ def bin_targets(bin_centers_w: torch.Tensor, brick_color_ids: torch.Tensor) -> t
     without per-episode draws). The (N,4,3) form is one layout per env (MuJoCo with
     ``--episode_draws``). It is indexed along its LAST bin axis, so env n is graded against
     its own bins and never against env ``color_id``'s, which a plain ``[]`` index would do.
+
+    With (N, 4, 3) centers the ids can also be (N, B), one bin per env and brick. A heap
+    grades every part against its episode's destination that way.
     """
     if bin_centers_w.dim() == 2:
         return bin_centers_w[brick_color_ids]
     if bin_centers_w.dim() == 3:
-        return bin_centers_w[:, brick_color_ids]
+        if brick_color_ids.dim() == 1:
+            return bin_centers_w[:, brick_color_ids]
+        if brick_color_ids.dim() == 2:
+            # (N,B) ids: one destination per env and brick (MS6 heap grading).
+            index = brick_color_ids.unsqueeze(-1).expand(-1, -1, 3)
+            return torch.gather(bin_centers_w, 1, index)
     raise ValueError(f"bin_centers_w must be (4,3) or (N,4,3), got {tuple(bin_centers_w.shape)}")
 
 
@@ -120,7 +149,10 @@ def bricks_at_rest_in_bins(
     brick_color_ids: torch.Tensor,
     max_speed: float = 0.02,
 ) -> torch.Tensor:
-    """(N,B) bool: brick b in env n is at rest inside its correct-color bin.
+    """(N,B) bool: brick b in env n is at rest inside its target bin.
+
+    The target is the brick's correct-color bin, or, with (N,4,3) centers and (N,B) ids,
+    its episode's own destination bin (MS6 heap grading, see ``bin_targets``).
 
     Args:
         brick_pos_w: (N,B,3) brick centers, world frame.
@@ -128,7 +160,8 @@ def bricks_at_rest_in_bins(
         bin_centers_w: (4,3) bin interior AABB centers shared by every env, or (N,4,3)
             centers per env (see ``bin_targets``).
         bin_half_extents: (3,) bin interior half extents.
-        brick_color_ids: (B,) long, target bin index per brick.
+        brick_color_ids: (B,) long, target bin index per brick, or (N,B) long, one target
+            bin index per env and brick (see ``bin_targets``).
         max_speed: "at rest" linear speed threshold [m/s].
     """
     targets = bin_targets(bin_centers_w, brick_color_ids)  # (B,3) or (N,B,3)

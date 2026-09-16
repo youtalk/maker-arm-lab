@@ -5,6 +5,10 @@ These used to live in ``tasks/manager_based/lego_sort/mdp/terminations.py`` and
 ``env.cfg`` and ``env.device`` only, so any backend that exposes those members -- the Isaac
 ``ManagerBasedRLEnv`` or ``maker_arm_lab.mj.MjLegoSortEnv`` -- is graded by the same code.
 The mdp modules re-export them so the Isaac cfgs are unchanged.
+
+``per_brick_stowed`` also reads ``env.num_envs``, and, when present, ``env.destination_bins``
+and ``env.stow_half_extents`` (MuJoCo heap mode, MS6). Both are read with ``getattr(env, name,
+None)``, so a backend without them keeps grading by color, as before.
 """
 
 from functools import cache
@@ -71,16 +75,32 @@ def _brick_states(env) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def per_brick_stowed(env) -> torch.Tensor:
-    """(N,B) bool: which bricks are at rest inside their correct-color bin right now."""
+    """(N,B) bool: which bricks are at rest inside their target bin right now.
+
+    The target is the brick's color bin, or, when the env carries ``destination_bins`` (N,)
+    (MuJoCo heap mode, MS6), that one bin for every part of the env. ``stow_half_extents`` (3,)
+    on the env replaces the bin interior half extents; the heap's box is taller than the rim so
+    a pile over it still counts (design H6).
+    """
     pos, vel = _brick_states(env)
     device = str(env.device)
-    return checker.bricks_at_rest_in_bins(
-        pos,
-        vel,
-        env_bin_centers(env, device),
-        _bin_half_extents_cached(device),
-        _brick_color_ids_cached(env.cfg.num_bricks, device),
-    )
+    centers = env_bin_centers(env, device)
+    destination = getattr(env, "destination_bins", None)
+    if destination is None:
+        ids = _brick_color_ids_cached(env.cfg.num_bricks, device)
+    else:
+        destination = torch.as_tensor(destination).to(device)
+        if destination.shape[0] != env.num_envs:
+            raise ValueError(
+                f"destination_bins has {destination.shape[0]} entries, "
+                f"env.num_envs is {env.num_envs}"
+            )
+        if centers.dim() == 2:
+            centers = centers.unsqueeze(0).expand(env.num_envs, -1, -1)
+        ids = destination.long().unsqueeze(1).expand(-1, env.cfg.num_bricks)
+    half = getattr(env, "stow_half_extents", None)
+    half = _bin_half_extents_cached(device) if half is None else torch.as_tensor(half).to(device)
+    return checker.bricks_at_rest_in_bins(pos, vel, centers, half, ids)
 
 
 def all_bricks_stowed(env) -> torch.Tensor:
