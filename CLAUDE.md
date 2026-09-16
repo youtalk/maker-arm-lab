@@ -54,6 +54,7 @@ The Isaac Lab task lives in `source/maker_arm_lab/tasks/manager_based/lego_sort/
 - `core/stowed.py` and `core/checker.py` are the grader. Driver bookkeeping is never the metric.
 - `core/gate.py` and `core/trace.py` are the rollout tracker and per-step trace.
 - `core/dagger_loop.py` is the DAgger rollout: the policy drives, and the oracle rig takes over on a trigger for one brick cycle. It records only takeover frames. `scripts/mj_dagger_batch.py` is its thin client.
+- `core/parts.py`, `core/grasp.py` and `core/heap_oracle.py` are the MS6 heap teacher: the part catalog, grasp synthesis on part geometry, and an `EnvOracle` subclass with a failure memory and a push. `mj/env.py` builds a heap when it gets `parts`, and `OracleRig` takes an `oracle_factory` so the heap script installs the subclass without a rig subclass. `mj/overlay.py` stamps the target marker and `mj/depth.py` is the noisy depth model. Heap runs export every episode and mark cycles through `obs/actor`.
 
 ### The oracle is split into WHAT and HOW
 
@@ -85,3 +86,4 @@ Every script prints exactly one terminal token line on every exit path, includin
 - A number carried over from openyam-lab unchanged must say so and name what re-validates it on this arm.
 - Ruff: line length 100, target py312, `assets/vendor` excluded, F403 enabled.
 - Every committed artifact is English only. Commit with `git commit -s`. Stage named paths, never `git add -A`.
+- The six-brick task is the special case of every heap rule: `pinch_min_stall(0.0158)` is `PINCH_MIN_STALL`, `Goal.half_height` defaults to the 2x4's, and `per_brick_stowed` grades by color unless the env has `destination_bins`. Part sizes come from `core/parts.py`, never from a new constant table. The tray interior stays inside `SCATTER_MAX_RADIUS` (`tests/test_layout.py`).
