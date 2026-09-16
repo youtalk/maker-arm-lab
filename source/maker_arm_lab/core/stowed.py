@@ -71,16 +71,26 @@ def _brick_states(env) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def per_brick_stowed(env) -> torch.Tensor:
-    """(N,B) bool: which bricks are at rest inside their correct-color bin right now."""
+    """(N,B) bool: which bricks are at rest inside their target bin right now.
+
+    The target is the brick's color bin, or, when the env carries ``destination_bins`` (N,)
+    (MuJoCo heap mode, MS6), that one bin for every part of the env. ``stow_half_extents`` (3,)
+    on the env replaces the bin interior half extents; the heap's box is taller than the rim so
+    a pile over it still counts (design H6).
+    """
     pos, vel = _brick_states(env)
     device = str(env.device)
-    return checker.bricks_at_rest_in_bins(
-        pos,
-        vel,
-        env_bin_centers(env, device),
-        _bin_half_extents_cached(device),
-        _brick_color_ids_cached(env.cfg.num_bricks, device),
-    )
+    centers = env_bin_centers(env, device)
+    destination = getattr(env, "destination_bins", None)
+    if destination is None:
+        ids = _brick_color_ids_cached(env.cfg.num_bricks, device)
+    else:
+        if centers.dim() == 2:
+            centers = centers.unsqueeze(0).expand(env.num_envs, -1, -1)
+        ids = destination.to(device).long().unsqueeze(1).expand(-1, env.cfg.num_bricks)
+    half = getattr(env, "stow_half_extents", None)
+    half = _bin_half_extents_cached(device) if half is None else torch.as_tensor(half).to(device)
+    return checker.bricks_at_rest_in_bins(pos, vel, centers, half, ids)
 
 
 def all_bricks_stowed(env) -> torch.Tensor:

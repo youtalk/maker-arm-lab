@@ -27,6 +27,7 @@ class _Scene:
 def _env(brick_pos, bin_layouts=None):
     env = types.SimpleNamespace(
         device="cpu",
+        num_envs=brick_pos.shape[0],
         cfg=types.SimpleNamespace(
             num_bricks=brick_pos.shape[1], bin_layout=layout.DEFAULT_BIN_LAYOUT
         ),
@@ -56,3 +57,25 @@ def test_per_env_layouts_grade_each_env_against_its_own_bins():
     # Env 1's brick 0 at env 0's red bin is NOT stowed.
     pos[1, 0] = layout.bin_interior_centers(layouts[0])[0]
     assert stowed.per_brick_stowed(_env(pos, layouts)).tolist() == [[True, False], [False, False]]
+
+
+def test_destination_bins_replace_the_color_rule():
+    centers = layout.bin_interior_centers()
+    pos = torch.zeros(2, 2, 3)
+    pos[0, 0] = centers[2]  # brick 0 (red by color) sits in the yellow bin
+    pos[0, 1] = centers[2]
+    pos[1, 0] = centers[2]
+    pos[1, 1] = centers[1]
+    env = _env(pos)
+    env.destination_bins = torch.tensor([2, 2])
+    assert stowed.per_brick_stowed(env).tolist() == [[True, True], [True, False]]
+
+
+def test_stow_half_extents_count_a_part_piled_over_the_rim():
+    centers = layout.bin_interior_centers()
+    pos = torch.zeros(1, 1, 3)
+    pos[0, 0] = centers[0] + torch.tensor([0.0, 0.0, 0.05])  # 1 cm over the rim
+    env = _env(pos)
+    assert stowed.per_brick_stowed(env).tolist() == [[False]]
+    env.stow_half_extents = torch.tensor([0.045, 0.045, 0.08])
+    assert stowed.per_brick_stowed(env).tolist() == [[True]]

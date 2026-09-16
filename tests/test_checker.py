@@ -170,3 +170,19 @@ def test_the_held_attribution_threshold_has_one_definition():
     for module in (eval_loop, dagger_loop, mj_env, oracle_runtime):
         assert module.HELD_MIN_FORCE is checker.HELD_MIN_FORCE, module.__name__
     assert checker.HELD_MIN_FORCE < checker.PINCH_MIN_FORCE  # attribution under the quality gate
+
+
+def test_pinch_min_stall_keeps_the_brick_floor_and_scales_down_for_narrow_parts():
+    assert checker.pinch_min_stall(layout.BRICK_SIZE[1]) == checker.PINCH_MIN_STALL
+    assert checker.pinch_min_stall(0.0318) == checker.PINCH_MIN_STALL
+    assert checker.pinch_min_stall(0.0078) == pytest.approx(0.0039 - checker.PINCH_COMPLIANCE)
+    assert checker.pinch_min_stall(0.0032) == 0.001
+
+
+def test_bin_targets_accept_one_bin_per_env_and_brick():
+    centers = torch.stack([layout.bin_interior_centers(), layout.bin_interior_centers() + 1.0])
+    ids = torch.tensor([[0, 0, 0], [3, 3, 3]])
+    targets = checker.bin_targets(centers, ids)
+    assert targets.shape == (2, 3, 3)
+    assert torch.allclose(targets[0, 1], centers[0, 0])
+    assert torch.allclose(targets[1, 2], centers[1, 3])

@@ -97,6 +97,24 @@ re-measured.
 """
 
 
+PINCH_COMPLIANCE = 0.0025
+"""Metres the measured stall falls short of half the grasp width under contact compliance.
+
+MuJoCo carries stalled 5.8 to 7.5 mm against 7.9 mm ideal on the 15.8 mm brick width
+(tests/test_mj_oracle.py pins 5.5 to 8.5), so the shortfall is up to 2.1 mm; 2.5 leaves margin.
+"""
+
+
+def pinch_min_stall(grasp_width: float) -> float:
+    """The stall floor for a pinch across ``grasp_width`` (MS6 design 7.4).
+
+    The smaller of ``PINCH_MIN_STALL`` and half the width minus the compliance, floored at 1 mm.
+    On the 2x4 brick's 15.8 mm width this returns ``PINCH_MIN_STALL`` itself, so every MS1 to
+    MS4 read is unchanged. A 1x1 part gripped across 7.8 mm gets 1.4 mm.
+    """
+    return max(0.001, min(PINCH_MIN_STALL, grasp_width / 2.0 - PINCH_COMPLIANCE))
+
+
 def bin_targets(bin_centers_w: torch.Tensor, brick_color_ids: torch.Tensor) -> torch.Tensor:
     """Each brick's target bin center: (B,3) from (4,3) centers, (N,B,3) from (N,4,3).
 
@@ -104,11 +122,18 @@ def bin_targets(bin_centers_w: torch.Tensor, brick_color_ids: torch.Tensor) -> t
     without per-episode draws). The (N,4,3) form is one layout per env (MuJoCo with
     ``--episode_draws``). It is indexed along its LAST bin axis, so env n is graded against
     its own bins and never against env ``color_id``'s, which a plain ``[]`` index would do.
+
+    With (N, 4, 3) centers the ids can also be (N, B), one bin per env and brick. A heap
+    grades every part against its episode's destination that way.
     """
     if bin_centers_w.dim() == 2:
         return bin_centers_w[brick_color_ids]
     if bin_centers_w.dim() == 3:
-        return bin_centers_w[:, brick_color_ids]
+        if brick_color_ids.dim() == 1:
+            return bin_centers_w[:, brick_color_ids]
+        # (N,B) ids: one destination per env and brick (MS6 heap grading).
+        index = brick_color_ids.unsqueeze(-1).expand(-1, -1, 3)
+        return torch.gather(bin_centers_w, 1, index)
     raise ValueError(f"bin_centers_w must be (4,3) or (N,4,3), got {tuple(bin_centers_w.shape)}")
 
 
