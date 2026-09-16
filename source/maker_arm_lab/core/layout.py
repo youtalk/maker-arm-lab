@@ -165,6 +165,51 @@ TOP_DOWN_X_LIMIT = 0.29
 SHELF_SIZE = (0.10, 0.54, 0.15)
 SHELF_POS = (0.44, 0.0, 0.075)
 
+# MS6 heap tray (design H1). The roadmap's 25 x 25 cm tray does not fit the measured reach:
+# a square that size has corners past SCATTER_MAX_RADIUS wherever it sits on the desk. This
+# interior starts at the scatter band's measured inner edge and its far corners sit at radius
+# 0.279 m. Both facts are pinned by tests/test_layout.py. The real tray is an MA-track item.
+TRAY_CENTER = (0.195, 0.0)
+TRAY_INTERIOR = (0.13, 0.20)
+TRAY_WALL_HEIGHT = 0.02
+TRAY_WALL = 0.005
+# The heap drop (design section 6): part k lands at a height uniform in
+# [HEAP_DROP_Z_MIN, HEAP_DROP_Z_MIN + HEAP_DROP_Z_PER_PART * K], then the physics settles for
+# HEAP_SETTLE_STEPS steps at 240 Hz (2 s) before the episode starts.
+HEAP_DROP_Z_MIN = 0.03
+HEAP_DROP_Z_PER_PART = 0.0012
+HEAP_SETTLE_STEPS = 480
+
+
+def tray_bounds() -> tuple[tuple[float, float], tuple[float, float]]:
+    """((x_min, x_max), (y_min, y_max)) of the tray interior."""
+    cx, cy = TRAY_CENTER
+    hx, hy = TRAY_INTERIOR[0] / 2, TRAY_INTERIOR[1] / 2
+    return ((cx - hx, cx + hx), (cy - hy, cy + hy))
+
+
+def tray_static_boxes() -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
+    """(name, center, size) for the four tray walls, as static colliders on the desk."""
+    (x0, x1), (y0, y1) = tray_bounds()
+    z = TRAY_WALL_HEIGHT / 2
+    w = TRAY_WALL
+    long_y = TRAY_INTERIOR[1] + 2 * w
+    return [
+        ("tray_wall_near", (x0 - w / 2, TRAY_CENTER[1], z), (w, long_y, TRAY_WALL_HEIGHT)),
+        ("tray_wall_far", (x1 + w / 2, TRAY_CENTER[1], z), (w, long_y, TRAY_WALL_HEIGHT)),
+        (
+            "tray_wall_left",
+            (TRAY_CENTER[0], y0 - w / 2, z),
+            (TRAY_INTERIOR[0], w, TRAY_WALL_HEIGHT),
+        ),
+        (
+            "tray_wall_right",
+            (TRAY_CENTER[0], y1 + w / 2, z),
+            (TRAY_INTERIOR[0], w, TRAY_WALL_HEIGHT),
+        ),
+    ]
+
+
 BIN_INTERIOR = (0.09, 0.09, 0.04)
 BIN_WALL = 0.005
 _BIN_Y = (-0.21, -0.07, 0.07, 0.21)

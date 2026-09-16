@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import mujoco
@@ -47,6 +48,7 @@ from maker_arm_lab.assets.urdf_prep import (
     VENDORED_URDF,
 )
 from maker_arm_lab.core import cameras, layout
+from maker_arm_lab.core import parts as _parts
 from maker_arm_lab.core import profile as _profile
 from maker_arm_lab.core.global_ik import _rpy_matrix
 from maker_arm_lab.core.quat import compose_offset_rot, quat_from_rpy_deg, quat_mul
@@ -134,6 +136,7 @@ class SceneHandles:
     brick_qpos: tuple[int, ...]
     brick_dof: tuple[int, ...]
     brick_geoms: tuple[int, ...]
+    body_geoms: tuple[tuple[int, ...], ...]  # every geom of each part body, collider first
     finger_geoms: tuple[frozenset[int], frozenset[int]]
     desk_geom: int
     cameras: tuple[str, ...]
@@ -202,8 +205,54 @@ def _add_position_actuator(spec, joint: str, kp: float, kd: float, force_limit: 
     act.ctrlrange = list(spec.joint(joint).range)
 
 
-def build_spec(draw: dict, num_bricks: int = 6, cameras_on: bool = True) -> mujoco.MjSpec:
-    """The MjSpec for one run draw; ``compile_model`` turns it into a model and handles."""
+def _add_part_geoms(spec, body, index: int, part: _parts.Part, rgba) -> mujoco.MjsGeom:
+    """One collider (box or slope hull) plus visual-only studs (design H3); returns the collider."""
+    name = f"brick_{index}_geom"
+    if part.hull is None:
+        geom = body.add_geom(
+            name=name,
+            type=mujoco.mjtGeom.mjGEOM_BOX,
+            size=_half(part.size),
+            rgba=list(rgba),
+            friction=list(BRICK_FRICTION),
+        )
+    else:
+        spec.add_mesh(name=f"brick_{index}_hull", uservert=[c for v in part.hull for c in v])
+        geom = body.add_geom(
+            name=name,
+            type=mujoco.mjtGeom.mjGEOM_MESH,
+            meshname=f"brick_{index}_hull",
+            rgba=list(rgba),
+            friction=list(BRICK_FRICTION),
+        )
+    geom.mass = part.mass
+    for k, (x, y) in enumerate(_parts.stud_positions(part)):
+        stud = body.add_geom(
+            name=f"brick_{index}_stud_{k}",
+            type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+            size=[_parts.STUD_RADIUS, _parts.STUD_HEIGHT / 2, 0.0],
+            pos=[x, y, part.size[2] / 2 + _parts.STUD_HEIGHT / 2],
+            rgba=list(rgba),
+        )
+        stud.contype, stud.conaffinity = 0, 0
+        stud.mass = 0.0
+    return geom
+
+
+def build_spec(
+    draw: dict,
+    num_bricks: int = 6,
+    cameras_on: bool = True,
+    parts: Sequence[_parts.Part] | None = None,
+    tray: bool = False,
+) -> mujoco.MjSpec:
+    """The MjSpec for one run draw; ``compile_model`` turns it into a model and handles.
+
+    ``parts`` (MS6) replaces the ``num_bricks`` identical box bricks with one body per part,
+    and ``tray`` adds the four walls of ``layout.tray_static_boxes``.
+    """
+    if parts is not None:
+        num_bricks = len(parts)
     bl = layout.BinLayout(
         bin_x=draw["bin_x"], bin_ys=tuple(draw["bin_ys"]), slot_colors=tuple(draw["slot_colors"])
     )
@@ -285,6 +334,18 @@ def build_spec(draw: dict, num_bricks: int = 6, cameras_on: bool = True) -> mujo
             )
         )
 
+    if tray:
+        for name, center, size in layout.tray_static_boxes():
+            scene_geoms.append(
+                spec.worldbody.add_geom(
+                    name=name,
+                    type=mujoco.mjtGeom.mjGEOM_BOX,
+                    size=_half(size),
+                    pos=list(center),
+                    rgba=[0.35, 0.35, 0.35, 1.0],
+                )
+            )
+
     # Bricks: free bodies; the default pose is overwritten by the first reset's scatter.
     for index in range(num_bricks):
         color = layout.BRICK_COLOR_ORDER[index % len(layout.BRICK_COLOR_ORDER)]
@@ -292,14 +353,17 @@ def build_spec(draw: dict, num_bricks: int = 6, cameras_on: bool = True) -> mujo
             name=f"brick_{index}", pos=[layout.SCATTER_X[0] + 0.04 * index, 0.0, layout.SPAWN_Z]
         )
         body.add_freejoint(name=f"brick_{index}_free")
-        geom = body.add_geom(
-            name=f"brick_{index}_geom",
-            type=mujoco.mjtGeom.mjGEOM_BOX,
-            size=_half(layout.BRICK_SIZE),
-            rgba=list(layout.BRICK_RGBA[color]),
-            friction=list(BRICK_FRICTION),
-        )
-        geom.mass = layout.BRICK_MASS
+        if parts is None:
+            geom = body.add_geom(
+                name=f"brick_{index}_geom",
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=_half(layout.BRICK_SIZE),
+                rgba=list(layout.BRICK_RGBA[color]),
+                friction=list(BRICK_FRICTION),
+            )
+            geom.mass = layout.BRICK_MASS
+        else:
+            geom = _add_part_geoms(spec, body, index, parts[index], layout.BRICK_RGBA[color])
         geom.condim = BRICK_CONDIM
         geom.solref = list(CONTACT_SOLREF)
         scene_geoms.append(geom)
@@ -389,6 +453,16 @@ def compile_model(spec: mujoco.MjSpec, num_bricks: int) -> tuple[mujoco.MjModel,
             int(model.jnt_dofadr[model.joint(f"brick_{b}_free").id]) for b in range(num_bricks)
         ),
         brick_geoms=tuple(model.geom(f"brick_{b}_geom").id for b in range(num_bricks)),
+        body_geoms=tuple(
+            (model.geom(f"brick_{b}_geom").id,)
+            + tuple(
+                g
+                for g in range(model.ngeom)
+                if model.geom_bodyid[g] == model.body(f"brick_{b}").id
+                and g != model.geom(f"brick_{b}_geom").id
+            )
+            for b in range(num_bricks)
+        ),
         finger_geoms=(finger_geoms[0], finger_geoms[1]),
         desk_geom=model.geom("desk").id,
         cameras=tuple(model.camera(c).name for c in range(model.ncam)),
@@ -397,10 +471,16 @@ def compile_model(spec: mujoco.MjSpec, num_bricks: int) -> tuple[mujoco.MjModel,
 
 
 def build_model(
-    draw: dict, num_bricks: int = 6, cameras_on: bool = True
+    draw: dict,
+    num_bricks: int = 6,
+    cameras_on: bool = True,
+    parts: Sequence[_parts.Part] | None = None,
+    tray: bool = False,
 ) -> tuple[mujoco.MjModel, SceneHandles]:
     """One call for callers that do not need to edit the spec."""
-    return compile_model(build_spec(draw, num_bricks, cameras_on), num_bricks)
+    if parts is not None:
+        num_bricks = len(parts)
+    return compile_model(build_spec(draw, num_bricks, cameras_on, parts, tray), num_bricks)
 
 
 # -- per-episode draws: the same numbers as build_spec, written into a compiled model ----------
