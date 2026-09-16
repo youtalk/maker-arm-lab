@@ -16,10 +16,15 @@ consumers and are unchanged):
     obs/actor (T,) i16           who commanded the frame: 1 the oracle (batch loop), k the
         k-th DAgger takeover of the episode, negative when that takeover's cycle did not
         stow its brick
+    obs/images/overhead_depth (T,224,224) u16   MS6 heap shards only: millimeters, 0 = hole
+    obs/target_part (T,) i16     the part the overhead marker points at, -1 for none
+    obs/context_box (T,3) f32    destination bin x, y, yaw (MS6), with a JSON `names` attr
     initial_state/articulation/robot/{joint_position,joint_velocity,root_pose,root_velocity}
     initial_state/rigid_object/brick_N/{root_pose,root_velocity}     one leading axis of 1
     initial_state/bin_layout (1,5) f32: bin_x and the four slot y values of this episode's
         layout
+    initial_state/destination_bin (1,) i64      MS6 heap shards only
+    attrs: parts (JSON list of part names, MS6 heap shards only)
 
 Frames are appended per control step. Images go to resizable datasets under ``inflight/``
 in chunks of ``flush_every`` frames, so RAM stays flat whatever the episode length; at the
@@ -36,9 +41,14 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from maker_arm_lab.mj.context_names import CONTEXT_CAMERA_NAMES, CONTEXT_PRIVILEGED_NAMES
+from maker_arm_lab.mj.context_names import (
+    CONTEXT_BOX_NAMES,
+    CONTEXT_CAMERA_NAMES,
+    CONTEXT_PRIVILEGED_NAMES,
+)
 
 IMAGE_KEYS = ("wrist_rgb", "overhead_rgb")
+DEPTH_KEY = "overhead_depth"
 
 
 class ShardRecorder:
@@ -50,6 +60,7 @@ class ShardRecorder:
         export_all: bool = False,
         cameras: bool = True,
         flush_every: int = 256,
+        depth: bool = False,
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -59,13 +70,16 @@ class ShardRecorder:
         self.num_envs = num_envs
         self.export_all = export_all
         self.cameras = cameras
+        self.depth = depth and cameras
+        self.image_keys = IMAGE_KEYS + ((DEPTH_KEY,) if self.depth else ())
+        self._parts: list[list[str] | None] = [None] * num_envs
         self.flush_every = flush_every
         self.exported_successful_episode_count = 0
         self.exported_episode_count = 0
         self._total_frames = 0
         self._scalars: list[dict[str, list]] = [self._empty() for _ in range(num_envs)]
         self._images: list[dict[str, list[np.ndarray]]] = [
-            {k: [] for k in IMAGE_KEYS} for _ in range(num_envs)
+            {k: [] for k in self.image_keys} for _ in range(num_envs)
         ]
         self._image_ds: list[dict[str, h5py.Dataset] | None] = [None] * num_envs
         self._initial: list[dict[str, np.ndarray] | None] = [None] * num_envs
@@ -83,29 +97,38 @@ class ShardRecorder:
             "context_camera": [],
             "context_privileged": [],
             "actor": [],
+            "target_part": [],
+            "context_box": [],
         }
 
     # -- episode lifecycle --------------------------------------------------
 
-    def begin(self, env_index: int, initial_state: dict[str, np.ndarray]) -> None:
+    def begin(
+        self,
+        env_index: int,
+        initial_state: dict[str, np.ndarray],
+        parts: list[str] | None = None,
+    ) -> None:
         """Start buffering env ``env_index``'s next episode from ``initial_state``."""
         self._drop_inflight(env_index)
         self._scalars[env_index] = self._empty()
-        self._images[env_index] = {k: [] for k in IMAGE_KEYS}
+        self._images[env_index] = {k: [] for k in self.image_keys}
         self._initial[env_index] = {k: np.asarray(v) for k, v in initial_state.items()}
+        self._parts[env_index] = list(parts) if parts is not None else None
         if self.cameras:
             group = self._inflight.create_group(f"env_{env_index}")
-            self._image_ds[env_index] = {
-                key: group.create_dataset(
+            self._image_ds[env_index] = {}
+            for key in self.image_keys:
+                shape = (224, 224) if key == DEPTH_KEY else (224, 224, 3)
+                dtype = np.uint16 if key == DEPTH_KEY else np.uint8
+                self._image_ds[env_index][key] = group.create_dataset(
                     key,
-                    shape=(0, 224, 224, 3),
-                    maxshape=(None, 224, 224, 3),
-                    dtype=np.uint8,
-                    chunks=(1, 224, 224, 3),
+                    shape=(0, *shape),
+                    maxshape=(None, *shape),
+                    dtype=dtype,
+                    chunks=(1, *shape),
                     compression="lzf",
                 )
-                for key in IMAGE_KEYS
-            }
         self._open[env_index] = True
 
     def pre_step(
@@ -120,6 +143,9 @@ class ShardRecorder:
         context_camera: np.ndarray | None = None,
         context_privileged: np.ndarray | None = None,
         actor: int = 1,
+        depth: np.ndarray | None = None,
+        target_part: int = -1,
+        context_box: np.ndarray | None = None,
     ) -> None:
         s = self._scalars[env_index]
         s["joint_pos_abs"].append(np.asarray(joint_pos, dtype=np.float32).copy())
@@ -131,10 +157,15 @@ class ShardRecorder:
         if context_privileged is not None:
             s["context_privileged"].append(np.asarray(context_privileged, dtype=np.float32).copy())
         s["actor"].append(np.int16(actor))
+        s["target_part"].append(np.int16(target_part))
+        if context_box is not None:
+            s["context_box"].append(np.asarray(context_box, dtype=np.float32).copy())
         if self.cameras:
             imgs = self._images[env_index]
             imgs["wrist_rgb"].append(np.asarray(wrist, dtype=np.uint8).copy())
             imgs["overhead_rgb"].append(np.asarray(overhead, dtype=np.uint8).copy())
+            if self.depth:
+                imgs[DEPTH_KEY].append(np.asarray(depth, dtype=np.uint16).copy())
             if len(imgs["wrist_rgb"]) >= self.flush_every:
                 self._flush_images(env_index)
 
@@ -171,9 +202,11 @@ class ShardRecorder:
         obs.create_dataset("cycle_brick", data=np.asarray(s["cycle_brick"][:steps], dtype=np.int8))
         obs.create_dataset("clamped", data=np.asarray(s["clamped"][:steps], dtype=bool))
         obs.create_dataset("actor", data=np.asarray(s["actor"][:steps], dtype=np.int16))
+        obs.create_dataset("target_part", data=np.asarray(s["target_part"][:steps], dtype=np.int16))
         for key, names in (
             ("context_camera", CONTEXT_CAMERA_NAMES),
             ("context_privileged", CONTEXT_PRIVILEGED_NAMES),
+            ("context_box", CONTEXT_BOX_NAMES),
         ):
             if s[key]:
                 ds = obs.create_dataset(key, data=np.stack(s[key][:steps]))
@@ -193,6 +226,10 @@ class ShardRecorder:
             robot.create_dataset(key, data=state[f"robot_{key}"][None].astype(np.float32))
         if "bin_layout" in state:
             init.create_dataset("bin_layout", data=state["bin_layout"][None].astype(np.float32))
+        if "destination_bin" in state:
+            init.create_dataset("destination_bin", data=state["destination_bin"].astype(np.int64))
+        if self._parts[env_index] is not None:
+            group.attrs["parts"] = json.dumps(self._parts[env_index])
         rigid = init.create_group("rigid_object")
         for b in range(state["brick_root_pose"].shape[0]):
             brick = rigid.create_group(f"brick_{b}")

@@ -20,3 +20,8 @@ CONTEXT_DIMS = {
     "camera": len(CONTEXT_CAMERA_NAMES),
     "privileged": len(CONTEXT_PRIVILEGED_NAMES),
 }
+
+# MS6 (design section 9): the destination box pose in the base frame, recorded beside the
+# camera channel in every heap shard. "camera_box" serves both as one 9-wide vector.
+CONTEXT_BOX_NAMES = ("box_x", "box_y", "box_yaw")
+CONTEXT_DIMS["camera_box"] = len(CONTEXT_CAMERA_NAMES) + len(CONTEXT_BOX_NAMES)
