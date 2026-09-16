@@ -170,6 +170,8 @@ class HeapOracle(oracle.EnvOracle):
 
     def _target_yaw(self, scene: oracle.SceneSnapshot) -> float:
         # Goal.yaw is a LONG-AXIS heading; the runtime folds yaw + pi/2 as the closing axis.
+        if self.grasp is None:
+            return super()._target_yaw(scene)
         return self.grasp.heading - math.pi / 2 + self.draw.yaw_offset
 
     def _target_half_height(self) -> float:
@@ -185,7 +187,15 @@ class HeapOracle(oracle.EnvOracle):
         if self.phase == oracle.Phase.PUSH_HOVER:
             target = torch.tensor([*self.push.start, PUSH_HOVER_Z])
             return self._goal(
-                oracle.Phase.PUSH_HOVER, target, None, 0.0, -1.0, 0.01, 0, oracle.DEFAULT_MAX_STEPS
+                oracle.Phase.PUSH_HOVER,
+                target,
+                None,
+                0.0,
+                -1.0,
+                0.01,
+                0,
+                oracle.DEFAULT_MAX_STEPS,
+                half_height=PUSH_HALF_HEIGHT,
             )
         if self.phase == oracle.Phase.PUSH_DESCEND:
             target = torch.tensor([*self.push.start, PUSH_Z])

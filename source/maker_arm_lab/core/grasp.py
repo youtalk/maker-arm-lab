@@ -26,7 +26,8 @@ AXIS_MAX_TILT_RAD = math.radians(15.0)
 CLEARANCE_MIN = 0.003
 """Jaw-box clearance (m) a grasp needs to be selected."""
 # The virtual jaw box, in the grasp frame: x along the closing axis, origin at the part
-# center. The finger body is 30 mm along jaw travel. Its footprint is what a neighbor can foul.
+# center. The finger body is 30 mm along jaw travel, the y-span of the collision box
+# robots/frames.py quotes (-0.0303 to +0.0302 m). Its footprint is what a neighbor can foul.
 JAW_BOX_THICKNESS = 0.030
 JAW_BOX_HALF_FACE = 0.020
 """Half the jaw plate's face, perpendicular to the closing axis.

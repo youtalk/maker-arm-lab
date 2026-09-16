@@ -139,7 +139,7 @@ def test_the_cycle_budget_ends_the_episode_done_with_parts_left():
     assert orc.next_goal(scene) is None and orc.phase is oracle.Phase.DONE
 
 
-def test_a_lift_that_fails_after_the_retries_marks_the_cell_and_moves_on():
+def test_a_lift_that_fails_after_the_retries_marks_the_cell_and_takes_a_new_cycle():
     orc = _oracle([BRICK, BRICK])
     scene = _snapshot([[0.185, -0.045, 0.0048], [0.205, 0.045, 0.0048]])
     _to_hover(orc, scene)
