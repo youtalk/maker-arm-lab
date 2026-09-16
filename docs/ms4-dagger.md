@@ -21,7 +21,7 @@ The round 2 stop needs a plain statement. The DAgger rule adopts a round at 0.03
 
 The loop did not flatten. Round 2 gained 0.0278 over round 1, against the 0.03 the rule required. Its generalization read rose from 0.7389 to 0.7722, the best of MS4. Its takeover count fell 39 percent, from 4841 to 2970.
 
-The ceiling retry fixed both hypotheses c1 named and moved its rollout rate not at all. The 66-wide channel replaced the MuJoCo quaternion with two rotation columns, and it added a target one-hot and a stowed mask. The final training loss fell 29 percent, from 0.176 to 0.125. The rollout rate read 0.022 in c1 and 0.022 again here. A close distance diagnostic shows both state-only policies close the gripper about 4 to 5 cm from the nearest brick. The image policies close at about 1 cm. The state encoding was never the barrier (section 6).
+The ceiling retry fixed both hypotheses c1 named and moved its rollout rate not at all. The 66-wide channel replaced the MuJoCo quaternion with two rotation columns, and it added a target one-hot and a stowed mask. The final training loss fell 29 percent, from 0.176 to 0.125. The rollout rate read 0.022 in c1 and 0.022 again here. A close distance diagnostic shows both state-only policies close the gripper about 4 to 5 cm from the nearest brick. The image policies close at about 1 cm. The state encoding is not the barrier c1 proposed (section 6).
 
 delta_prev lifted its gate from c1 delta's 0.081 to 0.129 and stayed far under the base run's 0.8125. Its trace refutes the premise the design rests on. The delta_prev command tracks the measured pose more closely than the base run's command does, not less (section 5).
 
@@ -217,7 +217,7 @@ The two eval seeds disagree by a useful margin. The check step on selection seed
 
 ### 7.3 Round 2
 
-The rollouts again read 84 of 84 `DAGGER_OK`, over 1008 episodes, at a mixed per-brick rate of 0.990. There were 2970 takeovers, of which 2925 stowed and 44 failed. One takeover was still running at the end, by the same reading of that gap. This round declined 1018.
+The rollouts again read 84 of 84 `DAGGER_OK`, over 1008 episodes, at a mixed per-brick rate of 0.990. There were 2970 takeovers, of which 2925 stowed and 44 failed. One takeover was still running at the end, by the same reading of that gap. This round declined 1018. No read depends on these counters.
 
 Takeovers fell by 39 percent, which is what an improving loop looks like. Round 1 needed 4841 takeovers on the ctx policy. Round 2 needed 2970 on the round 1 policy. The rig rescued the newer policy far less often.
 
@@ -246,7 +246,7 @@ Round 3 never started. The campaign's own rule stopped the rounds, and that rule
 
 ## 8. Open questions
 
-- Round 3. The campaign stopped by its own pre-registered rule, so the decision to run a third round belongs to the owner. The margin is 2 bricks out of 720, a shortfall of 0.0022. The Wilson interval [0.9252, 0.9589] contains the bar of 0.9467, and the measured seed noise of 0.047 is 21 times the shortfall. Round 2 gained 0.0278 over round 1 and lifted its generalization read, so the loop did not flatten.
+- Round 3. The campaign stopped by its own pre-registered rule, so the decision to run a third round belongs to the owner. The plan pre-registered a maximum of three rounds, so a third round was always in scope. The margin is 2 bricks out of 720, a shortfall of 0.0022. The Wilson interval [0.9252, 0.9589] contains the bar of 0.9467, and the measured seed noise of 0.047 is 21 times the shortfall. Round 2 gained 0.0278 over round 1 and lifted its generalization read, so the loop did not flatten.
 - The barrier in the state-only path. It is not the state encoding, and this round measured no evidence that names it (section 6.3).
 - The size of the predicted delta, which the trace names as the one cause behind both lever 2 collapses (section 5.4).
 - Generalization. DAgger buys in-distribution reliability and almost no transfer to a 3x spatial scale (section 7.2). A lever for that read is still open.
