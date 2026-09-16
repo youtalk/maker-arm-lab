@@ -1036,3 +1036,56 @@ def test_nominal_draw_has_no_noise_and_nearest_first():
     draw = oracle.nominal_draw()
     assert draw.hover_jitter_range == (0.0, 0.0) and draw.action_noise_std == 0.0
     assert draw.lateral_dx == 0.0 and draw.yaw_offset == 0.0 and draw.nearest_first_pick_order
+
+
+def test_push_phases_are_pinned_after_abandon():
+    assert oracle.PHASE_TO_INT["PUSH_HOVER"] == 12
+    assert oracle.PHASE_TO_INT["PUSH_DESCEND"] == 13
+    assert oracle.PHASE_TO_INT["PUSH_SWEEP"] == 14
+    assert oracle.PUSH_PHASES == frozenset(
+        {oracle.Phase.PUSH_HOVER, oracle.Phase.PUSH_DESCEND, oracle.Phase.PUSH_SWEEP}
+    )
+    assert len(oracle.PHASE_TO_INT) == len(oracle.Phase)
+
+
+def test_goals_carry_the_brick_half_height_by_default():
+    orc = _oracle()
+    scene = _snapshot()
+    _run_phase(orc, scene)  # SETTLE
+    hover = orc.next_goal(scene)
+    assert hover.half_height == pytest.approx(layout.BRICK_SIZE[2] / 2)
+    assert orc.grasp_width == layout.BRICK_SIZE[1]
+    assert scene.brick_quat is None
+
+
+def test_retreat_appends_the_cycle_outcome():
+    orc = _oracle()
+    scene = _snapshot()
+    for outcome, pinch, lifted in (
+        ("converged", None, None),  # SETTLE
+        ("converged", None, None),  # HOVER
+        ("stalled", None, None),  # DESCEND
+        ("converged", None, None),  # CLOSE
+        ("converged", True, True),  # LIFT
+        ("converged", None, None),  # RAISE
+        ("converged", None, None),  # EXTEND
+        ("converged", None, None),  # RELEASE
+    ):
+        _run_phase(orc, scene, outcome=outcome, pinch_ok=pinch, lifted=lifted)
+    assert orc.phase is oracle.Phase.RETREAT and orc.cycle_outcomes == []
+    _run_phase(orc, _snapshot(stowed=(0,)))  # RETREAT with the brick in its bin
+    assert orc.cycle_outcomes == [True]
+    orc2 = _oracle()
+    for _ in range(9):
+        _run_phase(orc2, scene, outcome="stalled", pinch_ok=True, lifted=True)
+    assert orc2.cycle_outcomes == [False]
+
+
+def test_the_hooks_reproduce_the_legacy_choices():
+    orc = _oracle()
+    scene = _snapshot(brick_yaw=0.4)
+    _run_phase(orc, scene)
+    hover = orc.next_goal(scene)
+    assert hover.yaw == pytest.approx(0.4 + orc.draw.yaw_offset)
+    assert orc._no_target_phase(_snapshot(stowed=(0,))) is oracle.Phase.DONE
+    assert orc._no_target_phase(_snapshot()) is oracle.Phase.ABANDON
