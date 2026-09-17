@@ -271,9 +271,16 @@ class ReachOracle(oracle.EnvOracle):
         return alive[0] if alive else None
 
 
-def reach_grid() -> list[tuple[float, int]]:
-    """The (radius m, azimuth deg) points of design section 6.1, azimuth-major."""
-    return [(radius, azimuth) for azimuth in REACH_AZIMUTHS_DEG for radius in REACH_RADII_M]
+def reach_grid(radii_m=None, azimuths_deg=None) -> list[tuple[float, int]]:
+    """The (radius m, azimuth deg) points, azimuth-major.
+
+    The defaults are design section 6.1's own grid. ``--radii_mm`` and ``--azimuths_deg``
+    override them, which is how the near side is read finer and lower than 6.1 asks for
+    without the far read changing.
+    """
+    radii = REACH_RADII_M if radii_m is None else radii_m
+    azimuths = REACH_AZIMUTHS_DEG if azimuths_deg is None else azimuths_deg
+    return [(radius, azimuth) for azimuth in azimuths for radius in radii]
 
 
 def reach_outcome(phases: list[dict], succeeded: bool) -> str:
@@ -438,6 +445,11 @@ def reach_cell(args, radius: float, azimuth_deg: int) -> dict:
     angle = math.radians(azimuth_deg)
     x, y = radius * math.cos(angle), radius * math.sin(angle)
     place(env, (x, y, layout.BRICK_SIZE[2] / 2.0 + 0.001, 0.0))
+    # Where the brick ACTUALLY settled. Close to the base the arm's own body occupies the
+    # desk, so a requested point can be one the scene refuses to hold; a row whose brick moved
+    # is not a reading about the arm's reach and has to say so rather than report a number.
+    settled = rig._brick_pos(0, 0).tolist()
+    settled_radius = math.hypot(settled[0], settled[1])
     steps = 0
     while steps < int(env.max_episode_length):
         out = rig.step()
@@ -458,6 +470,9 @@ def reach_cell(args, radius: float, azimuth_deg: int) -> dict:
         "azimuth_deg": azimuth_deg,
         "x": round(x, 4),
         "y": round(y, 4),
+        "settled_radius_m": round(settled_radius, 4),
+        "settled_z_m": round(settled[2], 4),
+        "placement_drift_mm": round((settled_radius - radius) * 1000.0, 1),
         "outcome": reach_outcome(rig.phase_log, stats["succeeded"]),
         # Radians, commanded joint target against the measured joint position after env.step.
         "descend_resid_rad": None if descend_resid is None else round(descend_resid, 4),
@@ -471,45 +486,50 @@ def reach_cell(args, radius: float, azimuth_deg: int) -> dict:
 
 
 def reach_band(args) -> dict:
-    rows = [reach_cell(args, radius, azimuth) for radius, azimuth in reach_grid()]
+    radii, azimuths = args.radii_m, args.azimuths_deg
+    rows = [reach_cell(args, radius, azimuth) for radius, azimuth in reach_grid(radii, azimuths)]
     path = os.path.join(args.out_dir, "reach_band.json")
     with open(path, "w") as f:
         json.dump(rows, f, indent=2)
     letter = {"stowed": "S", "lost": "L", "no_solution": "N"}
-    control = {
-        str(a): next(
-            (r["resid_rad"] for r in rows if r["azimuth_deg"] == a and r["radius_m"] == c), None
-        )
-        for a in REACH_AZIMUTHS_DEG
-        for c in (REACH_CONTROL_RADIUS_M,)
-    }
+    at = {(r["azimuth_deg"], r["radius_m"]): r for r in rows}
     return {
         "mode": "reach_band",
         "table": path,
-        "radii_m": list(REACH_RADII_M),
-        "azimuths_deg": list(REACH_AZIMUTHS_DEG),
+        "radii_m": list(radii),
+        "azimuths_deg": list(azimuths),
         "rows": len(rows),
         "stowed": sum(1 for r in rows if r["outcome"] == "stowed"),
         "no_solution": sum(1 for r in rows if r["outcome"] == "no_solution"),
-        # One string per azimuth, one letter per radius in REACH_RADII_M order.
+        # Rows whose brick did not stay where it was put: a scene refusal, not a reach read.
+        "displaced": sum(1 for r in rows if abs(r["placement_drift_mm"]) > 2.0),
+        # One string per azimuth, one letter per radius, in the order of `radii_m`.
         "grid": {
             str(a): "".join(letter[r["outcome"]] for r in rows if r["azimuth_deg"] == a)
-            for a in REACH_AZIMUTHS_DEG
+            for a in azimuths
         },
-        "control_resid_rad": control,
+        # None when the control radius is not one of the radii this run drove.
+        "control_resid_rad": {
+            str(a): (
+                at[(a, REACH_CONTROL_RADIUS_M)]["resid_rad"]
+                if (a, REACH_CONTROL_RADIUS_M) in at
+                else None
+            )
+            for a in azimuths
+        },
         "max_stowed_radius_m": {
             str(a): max(
                 (r["radius_m"] for r in rows if r["azimuth_deg"] == a and r["outcome"] == "stowed"),
                 default=None,
             )
-            for a in REACH_AZIMUTHS_DEG
+            for a in azimuths
         },
         "min_stowed_radius_m": {
             str(a): min(
                 (r["radius_m"] for r in rows if r["azimuth_deg"] == a and r["outcome"] == "stowed"),
                 default=None,
             )
-            for a in REACH_AZIMUTHS_DEG
+            for a in azimuths
         },
     }
 
@@ -559,6 +579,19 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="part center to wall face, the rows of the section 3.2 table",
     )
     parser.add_argument(
+        "--radii_mm",
+        type=str,
+        default=",".join(str(round(r * 1000)) for r in REACH_RADII_M),
+        help="reach band only: comma-separated radii in mm; the default is design section "
+        "6.1's own grid",
+    )
+    parser.add_argument(
+        "--azimuths_deg",
+        type=str,
+        default=",".join(str(a) for a in REACH_AZIMUTHS_DEG),
+        help="reach band only: comma-separated azimuths in degrees",
+    )
+    parser.add_argument(
         "--part",
         type=str,
         default=PROBE_PART,
@@ -579,6 +612,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     if any(axis not in AXIS_HEADINGS for axis in args.axes.split(",")):
         parser.error(f"--axes must be drawn from {sorted(AXIS_HEADINGS)}")
     args.distances_mm = [int(d) for d in args.distances_mm.split(",")]
+    # Radii are taken in mm so a 10 mm step is an exact integer on the wire; the metre value
+    # is what every lookup keys on, so it is rounded once here and never recomputed.
+    args.radii_m = [round(int(r) / 1000.0, 4) for r in args.radii_mm.split(",")]
+    args.azimuths_deg = [int(a) for a in args.azimuths_deg.split(",")]
+    if not args.radii_m or not args.azimuths_deg:
+        parser.error("--radii_mm and --azimuths_deg must each name at least one value")
     if args.mode == "heap":
         # The read is pre-registered, so its heap is not a flag (Task 3 brief, step 3).
         args.heap_k, args.parts_split = HEAP_K, "heldout"

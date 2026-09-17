@@ -134,6 +134,22 @@ def test_the_reach_grid_is_the_designs_radii_and_azimuths():
     assert all((module.REACH_CONTROL_RADIUS_M, a) in grid for a in azimuths)
 
 
+def test_the_parser_honors_the_grid_flags_and_defaults_to_the_designs_grid():
+    module = _load(SCRIPT)
+    base = ["--mode", "reach_band", "--out_dir", "/tmp/x"]
+    default = module.parse_args(base)
+    assert default.radii_m == [round(0.10 + 0.02 * i, 2) for i in range(13)]
+    assert default.azimuths_deg == [-40, -20, 0, 20, 40]
+    assert module.reach_grid(default.radii_m, default.azimuths_deg) == module.reach_grid()
+
+    fine = module.parse_args(base + ["--radii_mm", "40,50,60,200", "--azimuths_deg", "0,40"])
+    assert fine.radii_m == [0.04, 0.05, 0.06, 0.20]
+    assert fine.azimuths_deg == [0, 40]
+    grid = module.reach_grid(fine.radii_m, fine.azimuths_deg)
+    assert len(grid) == 8
+    assert grid[0] == (0.04, 0) and grid[-1] == (0.20, 40)
+
+
 def test_a_point_outside_the_solvers_reach_reads_no_solution_not_lost():
     module = _load(SCRIPT)
     unplanned = [
