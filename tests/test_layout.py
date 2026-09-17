@@ -342,28 +342,51 @@ def test_spatial_scale_widens_the_camera_and_bin_x_draws_only():
     )
 
 
-def test_tray_interior_is_inside_the_measured_reach_and_under_the_x_limit():
-    (x0, x1), (y0, y1) = layout.tray_bounds()
-    for x, y in ((x0, y0), (x0, y1), (x1, y0), (x1, y1)):
-        assert math.hypot(x, y) <= layout.SCATTER_MAX_RADIUS
-    assert x0 >= layout.SCATTER_X[0]
+def test_the_dish_fills_the_driven_reach_band():
+    """Campaign d: the near edge is driven-bounded at 0.10 m, the far edge at 0.280 m."""
+    near = layout.TRAY_CENTER[0] - layout.TRAY_RADIUS
+    far = layout.TRAY_CENTER[0] + layout.TRAY_RADIUS
+    assert near >= 0.10
+    assert far <= layout.SCATTER_MAX_RADIUS
+    assert far <= layout.top_down_x_limit(layout.DEFAULT_BIN_LAYOUT)
+    # Carried forward from the rectangular tray's test: the far edge must also clear the
+    # TIGHTEST bin layout the run draw can produce, not only the default one.
     tightest = layout.BinLayout(bin_x=0.43)  # the smallest bin_x the run draw produces
-    assert x1 <= layout.top_down_x_limit(tightest)
-    assert y0 >= layout.SCATTER_Y[0] and y1 <= layout.SCATTER_Y[1]
+    assert far <= layout.top_down_x_limit(tightest)
 
 
-def test_tray_walls_enclose_the_interior():
-    boxes = layout.tray_static_boxes()
-    assert [b[0] for b in boxes] == [
-        "tray_wall_near",
-        "tray_wall_far",
-        "tray_wall_left",
-        "tray_wall_right",
-    ]
+def test_inside_tray_is_the_circle_and_the_bounds_are_its_box():
+    cx, cy = layout.TRAY_CENTER
+    assert layout.inside_tray(cx, cy)
+    assert layout.inside_tray(cx + layout.TRAY_RADIUS - 0.001, cy)
+    assert not layout.inside_tray(cx + layout.TRAY_RADIUS + 0.001, cy)
+    assert layout.inside_tray(cx + layout.TRAY_RADIUS + 0.002, cy, margin=0.005)
+    assert not layout.inside_tray(cx + layout.TRAY_RADIUS - 0.002, cy, margin=-0.005)
     (x0, x1), (y0, y1) = layout.tray_bounds()
-    by_name = {name: (center, size) for name, center, size in boxes}
-    assert by_name["tray_wall_near"][0][0] == pytest.approx(x0 - layout.TRAY_WALL / 2)
-    assert by_name["tray_wall_far"][0][0] == pytest.approx(x1 + layout.TRAY_WALL / 2)
-    assert by_name["tray_wall_left"][0][1] == pytest.approx(y0 - layout.TRAY_WALL / 2)
-    assert by_name["tray_wall_right"][0][1] == pytest.approx(y1 + layout.TRAY_WALL / 2)
-    assert all(size[2] == layout.TRAY_WALL_HEIGHT for _, _, size in boxes)
+    assert (x0, x1) == (cx - layout.TRAY_RADIUS, cx + layout.TRAY_RADIUS)
+    assert (y0, y1) == (cy - layout.TRAY_RADIUS, cy + layout.TRAY_RADIUS)
+
+
+def test_the_rim_segments_ring_the_dish_and_lean_outward():
+    boxes = layout.tray_static_boxes()
+    assert len(boxes) == layout.TRAY_SEGMENTS
+    radii = []
+    for name, center, size, quat in boxes:
+        assert name.startswith("tray_rim_")
+        assert len(center) == 3 and len(size) == 3 and len(quat) == 4
+        radii.append(
+            math.hypot(center[0] - layout.TRAY_CENTER[0], center[1] - layout.TRAY_CENTER[1])
+        )
+        assert center[2] > 0.0
+    # Every segment sits at the same radius, and the ring closes: neighbouring centres are
+    # no further apart than the segment's own length.
+    assert max(radii) - min(radii) < 1e-9
+    step = 2.0 * math.pi * radii[0] / layout.TRAY_SEGMENTS
+    assert step <= boxes[0][2][1]
+
+
+def test_a_part_at_the_rim_top_is_outside_the_interior_circle():
+    """The rim leans out, so its top edge is TRAY_WALL_HEIGHT further out than its base."""
+    top_radius = layout.TRAY_RADIUS + layout.TRAY_WALL_HEIGHT * math.tan(layout.TRAY_RIM_TILT_RAD)
+    assert top_radius > layout.TRAY_RADIUS
+    assert layout.TRAY_CENTER[0] + top_radius <= layout.SCATTER_MAX_RADIUS + layout.TRAY_WALL_HEIGHT

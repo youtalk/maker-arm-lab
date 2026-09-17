@@ -249,7 +249,7 @@ def build_spec(
     """The MjSpec for one run draw; ``compile_model`` turns it into a model and handles.
 
     ``parts`` (MS6) replaces the ``num_bricks`` identical box bricks with one body per part,
-    and ``tray`` adds the four walls of ``layout.tray_static_boxes``.
+    and ``tray`` adds the rim segments of ``layout.tray_static_boxes``.
     """
     if parts is not None:
         num_bricks = len(parts)
@@ -335,13 +335,14 @@ def build_spec(
         )
 
     if tray:
-        for name, center, size in layout.tray_static_boxes():
+        for name, center, size, quat in layout.tray_static_boxes():
             scene_geoms.append(
                 spec.worldbody.add_geom(
                     name=name,
                     type=mujoco.mjtGeom.mjGEOM_BOX,
                     size=_half(size),
                     pos=list(center),
+                    quat=list(quat),
                     rgba=[0.35, 0.35, 0.35, 1.0],
                 )
             )

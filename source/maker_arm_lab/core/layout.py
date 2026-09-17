@@ -11,6 +11,8 @@ from dataclasses import dataclass
 
 import torch
 
+from maker_arm_lab.core.quat import quat_from_rpy_deg, quat_mul
+
 BRICK_SIZE = (0.0318, 0.0158, 0.0096)
 BRICK_MASS = 0.003  # kg; real brick ~2.3 g, slightly rounded up for solver health
 BRICK_COLOR_ORDER = ("red", "blue", "yellow", "green")
@@ -165,14 +167,19 @@ TOP_DOWN_X_LIMIT = 0.29
 SHELF_SIZE = (0.10, 0.54, 0.15)
 SHELF_POS = (0.44, 0.0, 0.075)
 
-# MS6 heap tray (design H1). The roadmap's 25 x 25 cm tray does not fit the measured reach:
-# a square that size has corners past SCATTER_MAX_RADIUS wherever it sits on the desk. This
-# interior starts at the scatter band's measured inner edge and its far corners sit at radius
-# 0.279 m. Both facts are pinned by tests/test_layout.py. The real tray is an MA-track item.
-TRAY_CENTER = (0.195, 0.0)
-TRAY_INTERIOR = (0.13, 0.20)
+# MS6 rework section 5. The tray is a round dish. The rectangle's walls blocked the parts at
+# the edge: heap 0 of 2026-09-17 ended with 26 of 50 parts outside the tray. The dish fills
+# the driven reach band, 0.10 m to SCATTER_MAX_RADIUS, and its rim leans outward so a part
+# that slides out rides back in instead of resting on a wall top.
+TRAY_CENTER = (0.19, 0.0)
+TRAY_RADIUS = 0.088
 TRAY_WALL_HEIGHT = 0.02
 TRAY_WALL = 0.005
+TRAY_RIM_TILT_RAD = math.radians(45.0)
+TRAY_SEGMENTS = 24
+"""Box segments in the rim ring. Boxes and not a mesh: the contact cost stays flat, and
+`core.grasp` already models the wall as a footprint per box."""
+
 # The heap drop (design section 6): part k lands at a height uniform in
 # [HEAP_DROP_Z_MIN, HEAP_DROP_Z_MIN + HEAP_DROP_Z_PER_PART * K], then the physics settles for
 # HEAP_SETTLE_STEPS steps at 240 Hz (2 s) before the episode starts.
@@ -181,33 +188,49 @@ HEAP_DROP_Z_PER_PART = 0.0012
 HEAP_SETTLE_STEPS = 480
 
 
+def inside_tray(x: float, y: float, margin: float = 0.0) -> bool:
+    """Is (x, y) inside the dish interior, grown by ``margin`` (negative shrinks it)?"""
+    return math.hypot(x - TRAY_CENTER[0], y - TRAY_CENTER[1]) <= TRAY_RADIUS + margin
+
+
 def tray_bounds() -> tuple[tuple[float, float], tuple[float, float]]:
-    """((x_min, x_max), (y_min, y_max)) of the tray interior."""
+    """((x_min, x_max), (y_min, y_max)) of the dish interior's bounding box.
+
+    The region test is `inside_tray`. This stays for the callers that want a box: the camera
+    framing and any sampler that rejects to the circle afterwards.
+    """
     cx, cy = TRAY_CENTER
-    hx, hy = TRAY_INTERIOR[0] / 2, TRAY_INTERIOR[1] / 2
-    return ((cx - hx, cx + hx), (cy - hy, cy + hy))
+    return ((cx - TRAY_RADIUS, cx + TRAY_RADIUS), (cy - TRAY_RADIUS, cy + TRAY_RADIUS))
 
 
-def tray_static_boxes() -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
-    """(name, center, size) for the four tray walls, as static colliders on the desk."""
-    (x0, x1), (y0, y1) = tray_bounds()
-    z = TRAY_WALL_HEIGHT / 2
-    w = TRAY_WALL
-    long_y = TRAY_INTERIOR[1] + 2 * w
-    return [
-        ("tray_wall_near", (x0 - w / 2, TRAY_CENTER[1], z), (w, long_y, TRAY_WALL_HEIGHT)),
-        ("tray_wall_far", (x1 + w / 2, TRAY_CENTER[1], z), (w, long_y, TRAY_WALL_HEIGHT)),
-        (
-            "tray_wall_left",
-            (TRAY_CENTER[0], y0 - w / 2, z),
-            (TRAY_INTERIOR[0], w, TRAY_WALL_HEIGHT),
-        ),
-        (
-            "tray_wall_right",
-            (TRAY_CENTER[0], y1 + w / 2, z),
-            (TRAY_INTERIOR[0], w, TRAY_WALL_HEIGHT),
-        ),
-    ]
+def tray_static_boxes() -> list[
+    tuple[str, tuple[float, float, float], tuple[float, float, float], tuple[float, ...]]
+]:
+    """(name, center, size, quat) for the dish rim segments, as static colliders on the desk.
+
+    Each segment is a slab of thickness TRAY_WALL that starts at the interior circle on the
+    desk and leans outward by TRAY_RIM_TILT_RAD. The segments overlap a little, so the ring
+    has no gap for a plate to slide through.
+    """
+    tilt = TRAY_RIM_TILT_RAD
+    span = TRAY_WALL_HEIGHT / math.cos(tilt)
+    radius = TRAY_RADIUS + 0.5 * span * math.sin(tilt) + 0.5 * TRAY_WALL * math.cos(tilt)
+    z = 0.5 * span * math.cos(tilt) - 0.5 * TRAY_WALL * math.sin(tilt)
+    chord = 1.15 * 2.0 * math.pi * radius / TRAY_SEGMENTS
+    boxes = []
+    for k in range(TRAY_SEGMENTS):
+        theta = 2.0 * math.pi * k / TRAY_SEGMENTS
+        center = (
+            TRAY_CENTER[0] + radius * math.cos(theta),
+            TRAY_CENTER[1] + radius * math.sin(theta),
+            z,
+        )
+        quat = quat_mul(
+            quat_from_rpy_deg((0.0, 0.0, math.degrees(theta))),
+            quat_from_rpy_deg((0.0, math.degrees(tilt), 0.0)),
+        )
+        boxes.append((f"tray_rim_{k:02d}", center, (TRAY_WALL, chord, span), quat))
+    return boxes
 
 
 BIN_INTERIOR = (0.09, 0.09, 0.04)

@@ -53,12 +53,11 @@ def test_part_masses_and_sizes_reach_the_model(built):
 
 def test_the_tray_walls_are_static_colliders(built):
     model, _ = built
-    names = ["tray_wall_near", "tray_wall_far", "tray_wall_left", "tray_wall_right"]
+    names = [name for name, _, _, _ in layout.tray_static_boxes()]
+    assert len(names) == layout.TRAY_SEGMENTS
     for name in names:
         g = model.geom(name).id
         assert model.geom_contype[g] == 3 and model.geom_bodyid[g] == 0
-    (_x0, x1), _ = layout.tray_bounds()
-    assert model.geom_pos[model.geom("tray_wall_far").id][0] > x1
 
 
 def test_parts_settle_flat_on_the_desk(built):
