@@ -179,20 +179,25 @@ def rectangle_info(
 def clip_to_scatter_radius(
     mask: list[list[bool]], xs: list[float], ys: list[float], step: float
 ) -> list[list[bool]]:
-    """``mask`` restricted to points whose own radius from the arm base is inside
+    """``mask`` restricted to points whose padded corner sits inside
     ``layout.SCATTER_MAX_RADIUS``. The rectangle search then runs on this clipped mask directly,
     so an in-band rectangle is a candidate even when it is a proper sub-rectangle of a larger,
     out-of-band run -- unlike filtering ``maximal_rectangles``'s own output, which only ever
     sees the candidates that search produced from the unclipped mask.
 
-    This checks the grid point's own radius, not the padded corner ``rectangle_info`` reports
-    (that pad is at most ``step / 2`` per side, half a grid cell): a rectangle built from this
-    clipped mask can, after padding, read a hair past the bound at a point already this close
-    to it. That is a discretization artifact of the grid, the same one the pre-fix filter also
-    carried, not a new one this fix introduces, and it is not the failure Finding 3 describes.
+    A point qualifies when ``hypot(abs(x) + step / 2, abs(y) + step / 2)`` is inside the bound:
+    the same padded-corner geometry ``rectangle_info`` reports, evaluated in the direction that
+    moves the point away from the origin, because any grid point can end up as either edge of a
+    rectangle and only the outward pad can push a corner past the bound. This is at least as
+    strict as ``rectangle_info``'s own check on any rectangle built from the surviving points,
+    so an admissible pick can no longer carry ``within_scatter_max_radius: False``.
     """
+    pad = step / 2.0
     return [
-        [pickable and math.hypot(x, y) <= layout.SCATTER_MAX_RADIUS for x, pickable in zip(xs, row)]
+        [
+            pickable and math.hypot(abs(x) + pad, abs(y) + pad) <= layout.SCATTER_MAX_RADIUS
+            for x, pickable in zip(xs, row)
+        ]
         for y, row in zip(ys, mask)
     ]
 

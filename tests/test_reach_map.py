@@ -104,16 +104,22 @@ def test_admissible_all_headings_recovers_an_in_band_sub_rectangle_of_a_larger_o
     assert admissible["x_range"] == [-0.025, 0.175]  # the full column width, padded by step / 2
 
 
-def test_current_tray_fits_the_weakest_admissible_criterion_but_not_the_strict_one():
+def test_current_tray_admissible_picks_are_all_within_the_padded_bound():
     """The tray sits inside SCATTER_MAX_RADIUS by construction (tests/test_layout.py) and its
     four corners are pickable at every heading (test_current_tray_corners_are_pickable_by_the_
     real_solver). A single admissible rectangle needs every point along its edges to pass the
-    same test, not only the four corners, so this runs the real solver over the tray footprint
-    and checks which admissible group actually contains it as one contiguous rectangle.
+    same test, not only the four corners, so this runs the real solver over the tray footprint.
 
-    Do not read this test as a licence to weaken a criterion until it passes: the two asserts
-    below are what the real solver reports on this grid. admissible_all_headings does not cover
-    the tray, and only the weaker admissible_any_heading group does.
+    Whether a group covers the tray as one contiguous rectangle depends on the grid step: a
+    coarser or finer --step can move a candidate's edge onto or off of the tray's own boundary.
+    Read the two asserts below as what this particular grid reports, not as a fixed geometric
+    fact about the tray. The tray's own far corner is at radius 0.2786 m; padded by half this
+    grid's step (0.01 m) its corner reads 0.2915 m, past the 0.28 m bound, so neither group
+    reaches that far here.
+
+    What is a fixed fact, independent of the grid: every rectangle either group returns must
+    carry within_scatter_max_radius True, because both groups now search a mask already
+    clipped on the same padded-corner geometry rectangle_info reports.
     """
     reach = _load(REACH)
     (x0, x1), (y0, y1) = layout.tray_bounds()
@@ -144,12 +150,19 @@ def test_current_tray_fits_the_weakest_admissible_criterion_but_not_the_strict_o
         ry0, ry1 = rect["y_range"]
         return rx0 <= x0 and rx1 >= x1 and ry0 <= y0 and ry1 >= y1
 
-    all_headings = result["rectangles"]["admissible_all_headings"]["overall"]
-    any_heading = result["rectangles"]["admissible_any_heading"]["overall"]
-    assert not covers_tray(all_headings), (
+    all_headings = result["rectangles"]["admissible_all_headings"]
+    any_heading = result["rectangles"]["admissible_any_heading"]
+    assert not covers_tray(all_headings["overall"]), (
         "admissible_all_headings now covers the tray -- update this test"
     )
-    assert covers_tray(any_heading), "not even admissible_any_heading covers the tray"
+    assert not covers_tray(any_heading["overall"]), (
+        "admissible_any_heading now covers the tray -- update this test"
+    )
+    for group in (all_headings, any_heading):
+        for key in ("overall", "current_tray_ratio", "square", "widest"):
+            rect = group[key]
+            if rect is not None:
+                assert rect["within_scatter_max_radius"] is True
 
 
 def test_reach_ok_token_and_json_on_a_tiny_grid(tmp_path, capsys):
