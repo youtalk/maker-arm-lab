@@ -316,11 +316,15 @@ PUSH_MIN_GAIN_M = 0.005
 def clamp_to_tray(
     point: tuple[float, float], margin: float = PUSH_WALL_MARGIN_M
 ) -> tuple[float, float]:
-    (x0, x1), (y0, y1) = layout.tray_bounds()
-    return (
-        min(max(point[0], x0 + margin), x1 - margin),
-        min(max(point[1], y0 + margin), y1 - margin),
-    )
+    """Pull a point back along its own radius until it is ``margin`` inside the rim."""
+    cx, cy = layout.TRAY_CENTER
+    dx, dy = point[0] - cx, point[1] - cy
+    radius = math.hypot(dx, dy)
+    limit = layout.TRAY_RADIUS - margin
+    if radius <= limit or radius == 0.0:
+        return point
+    scale = limit / radius
+    return (cx + dx * scale, cy + dy * scale)
 
 
 def push_toward_center(
@@ -387,13 +391,22 @@ def push_segment(
     )
 
 
+# ponytail: the rim is modelled as a vertical stop at its xy shadow, which refuses some
+# grasps the 45 degree slope would accept. Upgrade to a sloped stop if rung R2 reads a
+# clearance loss at the rim.
 def tray_wall_obstacles() -> list[list[tuple[float, float]]]:
-    """The four tray walls as world-xy rectangles, for ``rank_grasps``."""
+    """The dish rim segments as world-xy footprints, for ``rank_grasps``.
+
+    The rim leans outward, so its xy footprint is the leaning slab's shadow. The model still
+    treats it as a stop that stands where the shadow is.
+    """
     prints = []
-    for _, center, size in layout.tray_static_boxes():
-        cx, cy = center[0], center[1]
-        hx, hy = size[0] / 2, size[1] / 2
+    for _, center, size, quat in layout.tray_static_boxes():
         prints.append(
-            [(cx - hx, cy - hy), (cx + hx, cy - hy), (cx + hx, cy + hy), (cx - hx, cy + hy)]
+            footprint(
+                torch.tensor(size, dtype=torch.float32),
+                torch.tensor(center, dtype=torch.float32),
+                torch.tensor(quat, dtype=torch.float32),
+            )
         )
     return prints

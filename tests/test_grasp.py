@@ -134,18 +134,30 @@ def test_the_landing_spot_grows_with_the_neighbor_height():
 
 
 def test_wall_clearance_matches_the_measured_landing_limit():
-    """Wall reads, 2026-09-16: a tip landing 0.6 mm inside the wall face picks, 2.6 mm past
-    it does not; the same on the short walls at 8 mm and 13 mm off the tray center."""
-    (_x0, x1), (y0, _y1) = layout.tray_bounds()
-    picks = torch.tensor([layout.TRAY_CENTER[0], y0 + 0.055, 0.0048])
-    fails = torch.tensor([layout.TRAY_CENTER[0], y0 + 0.050, 0.0048])
+    """Wall reads, adapted to the round dish (MS6 rework section 5): a tip landing a couple
+    mm inside the rim picks, one a couple mm past it does not, and one well past it has to
+    cross the rim on the way in. The dish is rotationally symmetric, so one radius stands
+    for every azimuth; the old rectangle's separate short/long wall reads do not carry over.
+    """
+    cx, cy = layout.TRAY_CENTER
+    picks = torch.tensor([cx, cy - 0.032, 0.0048])
+    fails = torch.tensor([cx, cy - 0.036, 0.0048])
+    beyond = torch.tensor([cx, cy - 0.06, 0.0048])
     assert 0.0 < _clearance(picks, math.pi / 2, walls=WALLS)[2] < 0.003
     assert _clearance(fails, math.pi / 2, walls=WALLS)[2] < 0.0
-    assert _clearance(torch.tensor([x1 - 0.057, 0.0, 0.0048]), 0.0, walls=WALLS)[2] > 0.0
-    assert _clearance(torch.tensor([x1 - 0.052, 0.0, 0.0048]), 0.0, walls=WALLS)[2] < 0.0
-    # A tip that lands past the wall has to cross it on the way in.
-    beyond = torch.tensor([layout.TRAY_CENTER[0], y0 + 0.020, 0.0048])
     assert _clearance(beyond, math.pi / 2, walls=WALLS)[2] < -0.01
+
+
+def test_a_grasp_at_the_dish_centre_clears_the_rim_and_one_at_the_rim_does_not():
+    sizes = torch.tensor([list(layout.BRICK_SIZE)])
+    quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    middle = torch.tensor([[layout.TRAY_CENTER[0], layout.TRAY_CENTER[1], 0.005]])
+    edge = torch.tensor([[layout.TRAY_CENTER[0] + layout.TRAY_RADIUS - 0.005, 0.0, 0.005]])
+    mask = torch.tensor([True])
+    best_middle = grasp.rank_grasps(sizes, middle, quat, mask, WALLS)[0]
+    best_edge = grasp.rank_grasps(sizes, edge, quat, mask, WALLS)[0]
+    assert best_middle.wall > 0.0
+    assert best_edge.wall < best_middle.wall
 
 
 def _heap(*rows):
@@ -202,7 +214,7 @@ def test_densest_cell_and_push_segment_stay_inside_the_tray():
 def test_push_toward_center_lands_behind_the_part_and_sweeps_inward():
     (x0, x1), (y0, y1) = layout.tray_bounds()
     cx, cy = layout.TRAY_CENTER
-    part = (0.164, -0.072)
+    part = (cx, cy - 0.06)  # wall-side: 28 mm shy of the rim, room for the sweep to start
     print_ = grasp.footprint(
         _size(parts.make_part("plate", 2, 8)), torch.tensor([*part, 0.0016]), IDENTITY
     )
@@ -217,21 +229,35 @@ def test_push_toward_center_lands_behind_the_part_and_sweeps_inward():
     assert other is None or grasp.polygon_distance(grasp.tip_footprint(other[0]), blocker) >= 0.0
 
 
-def test_a_part_wedged_in_a_corner_has_no_push():
-    (_x0, x1), (_y0, y1) = layout.tray_bounds()
-    part = (x1 - 0.011, y1 - 0.011)
+def test_a_part_wedged_against_the_rim_has_no_push():
+    """The round dish has no corner; the analog is a part close enough to the rim that no
+    swing direction leaves room for the tips to land behind it."""
+    cx, cy = layout.TRAY_CENTER
+    part = (cx, cy - (layout.TRAY_RADIUS - 0.008))
     print_ = grasp.footprint(
         _size(parts.make_part("brick", 2, 2)), torch.tensor([*part, 0.0048]), IDENTITY
     )
     assert grasp.push_toward_center(part, print_, []) is None
 
 
-def test_tray_wall_obstacles_are_the_four_wall_rectangles():
-    assert len(WALLS) == 4
-    (x0, x1), (y0, y1) = layout.tray_bounds()
-    for rect in WALLS:
-        assert len(rect) == 4
-        xs, ys = [p[0] for p in rect], [p[1] for p in rect]
-        outside_x = max(xs) <= x0 + 1e-9 or min(xs) >= x1 - 1e-9
-        outside_y = max(ys) <= y0 + 1e-9 or min(ys) >= y1 - 1e-9
-        assert outside_x or outside_y
+def test_the_wall_obstacles_ring_the_dish():
+    prints = grasp.tray_wall_obstacles()
+    assert len(prints) == layout.TRAY_SEGMENTS
+    cx, cy = layout.TRAY_CENTER
+    for poly in prints:
+        for x, y in poly:
+            assert math.hypot(x - cx, y - cy) > layout.TRAY_RADIUS - 0.006
+
+
+def test_clamp_to_tray_pulls_a_point_back_along_its_radius():
+    cx, cy = layout.TRAY_CENTER
+    inside = (cx + 0.01, cy + 0.01)
+    assert grasp.clamp_to_tray(inside) == inside
+    far = (cx + 0.5, cy)
+    clamped = grasp.clamp_to_tray(far)
+    assert math.isclose(
+        math.hypot(clamped[0] - cx, clamped[1] - cy),
+        layout.TRAY_RADIUS - grasp.PUSH_WALL_MARGIN_M,
+        abs_tol=1e-9,
+    )
+    assert clamped[1] == cy
