@@ -59,7 +59,8 @@ def cycle_actor(orc) -> int:
     """
     if orc is None or orc.phase in (oracle.Phase.SETTLE, oracle.Phase.DONE, oracle.Phase.ABANDON):
         return 0
-    return len(orc.pick_order) + (1 if orc.phase in oracle.PUSH_PHASES else 0)
+    corrective = orc.phase in oracle.PUSH_PHASES or orc.phase in oracle.TIP_PHASES
+    return len(orc.pick_order) + (1 if corrective else 0)
 
 
 def negate_new_failures(recorder, env_index: int, outcomes: list, seen: int) -> int:

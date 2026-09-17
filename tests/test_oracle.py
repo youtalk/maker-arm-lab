@@ -1074,6 +1074,18 @@ def test_push_phases_are_pinned_after_abandon():
     assert len(oracle.PHASE_TO_INT) == len(oracle.Phase)
 
 
+def test_the_tip_phases_are_appended_and_never_renumbered():
+    assert oracle.TIP_PHASES == frozenset(
+        {oracle.Phase.TIP_HOVER, oracle.Phase.TIP_DESCEND, oracle.Phase.TIP_SWEEP}
+    )
+    assert oracle.PHASE_TO_INT["TIP_HOVER"] == 15
+    assert oracle.PHASE_TO_INT["TIP_DESCEND"] == 16
+    assert oracle.PHASE_TO_INT["TIP_SWEEP"] == 17
+    assert oracle.PHASE_TO_INT["PUSH_SWEEP"] == 14  # nothing renumbered
+    assert len(set(oracle.PHASE_TO_INT.values())) == len(oracle.PHASE_TO_INT)
+    assert set(oracle.PHASE_TO_INT) == {p.name for p in oracle.Phase}
+
+
 def test_goals_carry_the_brick_half_height_by_default():
     orc = _oracle()
     scene = _snapshot()

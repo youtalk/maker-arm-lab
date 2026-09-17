@@ -929,11 +929,12 @@ class OracleRig:
         pick_from, tilt_from = self._commanded_pick_pose(i, start)
         pick_to = goal.target_pos.double().cpu()
         heading = self.commanded_yaw[i]
-        if goal.phase == oracle.Phase.DESCEND or goal.phase in oracle.PUSH_PHASES - {
-            oracle.Phase.PUSH_HOVER
-        }:
-            # PUSH_DESCEND and PUSH_SWEEP (MS6 design 7.3) run near level like a descend: at
-            # the grasp tilt the plate corner dips 21 mm under the tip and ploughs the desk.
+        if goal.phase == oracle.Phase.DESCEND or goal.phase in (
+            oracle.PUSH_PHASES | oracle.TIP_PHASES
+        ) - {oracle.Phase.PUSH_HOVER, oracle.Phase.TIP_HOVER}:
+            # PUSH_DESCEND, PUSH_SWEEP (MS6 design 7.3) and TIP_DESCEND, TIP_SWEEP run near
+            # level like a descend: at the grasp tilt the plate corner dips 21 mm under the tip
+            # and ploughs the desk.
             plan = self._plan_descend(i, goal, start, pick_from, tilt_from, pick_to, heading)
         elif goal.phase == oracle.Phase.HOVER:
             plan = self._plan_hover_ladder(i, goal, start, pick_to, heading)

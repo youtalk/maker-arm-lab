@@ -396,6 +396,9 @@ class Phase(enum.Enum):
     PUSH_HOVER = enum.auto()
     PUSH_DESCEND = enum.auto()
     PUSH_SWEEP = enum.auto()
+    TIP_HOVER = enum.auto()
+    TIP_DESCEND = enum.auto()
+    TIP_SWEEP = enum.auto()
 
 
 # Explicit pin, NOT Phase.value: the recorded integers are a dataset schema
@@ -421,9 +424,15 @@ PHASE_TO_INT = {
     "PUSH_HOVER": 12,
     "PUSH_DESCEND": 13,
     "PUSH_SWEEP": 14,
+    # MS6 rework section 7. Appended, never renumbered, for the same reason as the pushes.
+    "TIP_HOVER": 15,
+    "TIP_DESCEND": 16,
+    "TIP_SWEEP": 17,
 }
 
 PUSH_PHASES = frozenset({Phase.PUSH_HOVER, Phase.PUSH_DESCEND, Phase.PUSH_SWEEP})
+TIP_PHASES = frozenset({Phase.TIP_HOVER, Phase.TIP_DESCEND, Phase.TIP_SWEEP})
+"""The tip-up: a corrective like a push, and recorded by the same actor ordinal."""
 
 
 @dataclass

@@ -26,6 +26,11 @@ def test_cycle_actor_is_the_pick_ordinal_and_a_push_shares_the_next_pick():
     assert batch_loop.cycle_actor(_orc(oracle.Phase.ABANDON, 5)) == 0
 
 
+def test_a_tip_frame_belongs_to_the_corrective_actor_like_a_push():
+    assert batch_loop.cycle_actor(_orc(oracle.Phase.TIP_SWEEP, 2)) == 3
+    assert batch_loop.cycle_actor(_orc(oracle.Phase.HOVER, 2)) == 2
+
+
 def test_negate_new_failures_negates_each_new_false_once():
     calls = []
     recorder = types.SimpleNamespace(negate_actor=lambda i, ordinal: calls.append((i, ordinal)))
