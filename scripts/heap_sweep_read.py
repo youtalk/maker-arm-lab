@@ -14,7 +14,15 @@ import os
 import sys
 from collections import defaultdict
 
-COUNT_FIELDS = ("outside", "wall_blocked", "blocked", "stacked", "unreachable", "speed_max")
+COUNT_FIELDS = (
+    "outside",
+    "wall_blocked",
+    "blocked",
+    "no_grasp",
+    "stacked",
+    "unreachable",
+    "speed_max",
+)
 CELL_FIELDS = (
     "tray_w_mm",
     "tray_h_mm",

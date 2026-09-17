@@ -36,10 +36,10 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 import numpy as np
 import torch
 
-from maker_arm_lab.core import batch_loop, grasp, layout
+from maker_arm_lab.core import batch_loop, grasp, heap_oracle, layout
 from maker_arm_lab.mj.env import MjLegoSortEnv
 
-CURRENT_TRAY_MM = "130x200"
+CURRENT_TRAY_MM = f"{layout.TRAY_INTERIOR[0] * 1000.0:g}x{layout.TRAY_INTERIOR[1] * 1000.0:g}"
 CURRENT_WALL_HEIGHT_MM = layout.TRAY_WALL_HEIGHT * 1000.0
 CURRENT_DROP_BAND_MM = (
     f"{layout.HEAP_DROP_Z_MIN * 1000.0:g}:{layout.HEAP_DROP_Z_PER_PART * 1000.0:g}"
@@ -65,15 +65,19 @@ def measure_heap(
     """The design's per-sample counts at step zero. Pure: no env, only geometry.
 
     ``outside``, ``stacked`` and ``unreachable`` read every part's position and size directly.
-    ``wall_blocked`` and ``blocked`` restrict to the parts inside the tray and in reach -- the
-    same set ``HeapOracle._candidates`` hands ``rank_grasps`` -- so the two counts answer "of
-    what the teacher would actually rank, how many rank empty", the same wall footprints and
-    the same ranking the teacher scans with.
+    ``wall_blocked``, ``blocked`` and ``no_grasp`` restrict to the parts inside the tray, in
+    reach and under ``heap_oracle.CANDIDATE_MAX_Z`` -- the same mask ``HeapOracle._candidates``
+    hands ``rank_grasps`` -- so they answer "of what the teacher would actually rank, how many
+    rank empty", with the same wall footprints and the same ranking the teacher scans with.
+    ``wall_blocked`` and ``blocked`` count a candidate with no grasp at all as blocked too, so
+    they are not the same population as ``no_grasp``: a reader wanting only "ranked but every
+    grasp fails" reads ``wall_blocked - no_grasp`` / ``blocked - no_grasp``.
     """
     n = sizes.shape[0]
     (x0, x1), (y0, y1) = tray_bounds
     inside = torch.zeros(n, dtype=torch.bool)
     reachable = torch.zeros(n, dtype=torch.bool)
+    below_candidate_z = torch.zeros(n, dtype=torch.bool)
     outside = stacked = unreachable = 0
     for b in range(n):
         x, y, z = (float(v) for v in pos[b])
@@ -81,18 +85,21 @@ def measure_heap(
         is_reachable = x <= reach_x_limit and math.hypot(x, y) <= reach_radius
         inside[b] = is_inside
         reachable[b] = is_reachable
+        below_candidate_z[b] = z <= heap_oracle.CANDIDATE_MAX_Z
         outside += int(not is_inside)
         unreachable += int(not is_reachable)
         if z > _half_height(sizes[b], quat[b]):
             stacked += 1
-    candidates = inside & reachable
+    candidates = inside & reachable & below_candidate_z
     ranked = grasp.rank_grasps(sizes, pos, quat, candidates, wall_footprints)
     by_part: dict[int, list[grasp.Grasp]] = {}
     for g in ranked:
         by_part.setdefault(g.part, []).append(g)
-    wall_blocked = blocked = 0
+    wall_blocked = blocked = no_grasp = 0
     for b in torch.nonzero(candidates).flatten().tolist():
         grasps = by_part.get(b, [])
+        if not grasps:
+            no_grasp += 1
         if not grasps or all(g.wall < grasp.CLEARANCE_MIN for g in grasps):
             wall_blocked += 1
         if not grasps or all(g.clearance < grasp.CLEARANCE_MIN for g in grasps):
@@ -101,6 +108,7 @@ def measure_heap(
         "outside": outside,
         "wall_blocked": wall_blocked,
         "blocked": blocked,
+        "no_grasp": no_grasp,
         "stacked": stacked,
         "unreachable": unreachable,
     }

@@ -53,11 +53,12 @@ def test_the_read_script_prints_its_token_and_exits_through_os_exit():
     assert exits, "the script must leave through os._exit"
 
 
-def _sample(outside, wall_blocked, blocked, stacked, unreachable, speed_max):
+def _sample(outside, wall_blocked, blocked, no_grasp, stacked, unreachable, speed_max):
     return {
         "outside": outside,
         "wall_blocked": wall_blocked,
         "blocked": blocked,
+        "no_grasp": no_grasp,
         "stacked": stacked,
         "unreachable": unreachable,
         "speed_max": speed_max,
@@ -74,7 +75,7 @@ def _sample(outside, wall_blocked, blocked, stacked, unreachable, speed_max):
 
 def test_read_groups_a_two_sample_fixture_into_one_baseline_cell(tmp_path, capsys):
     read = _load(READ)
-    samples = [_sample(2, 1, 1, 0, 0, 0.01), _sample(4, 3, 2, 1, 1, 0.05)]
+    samples = [_sample(2, 1, 1, 1, 0, 0, 0.01), _sample(4, 3, 2, 1, 1, 1, 0.05)]
     path = tmp_path / "samples.jsonl"
     path.write_text("".join(json.dumps(s) + "\n" for s in samples))
     assert read.main([str(path)]) == 0
@@ -97,17 +98,20 @@ def _quat() -> torch.Tensor:
     return torch.tensor([1.0, 0.0, 0.0, 0.0])
 
 
-def test_measure_heap_flags_an_outside_part_and_a_stacked_part():
+def test_measure_heap_flags_an_outside_a_stacked_and_a_no_grasp_part():
     module = _load(SWEEP)
     brick = (0.0318, 0.0158, 0.0096)  # brick_2x4, from core.parts.footprint
-    sizes = torch.tensor([brick, brick, brick])
-    quat = torch.stack([_quat(), _quat(), _quat()])
+    # Both horizontal sides over MAX_GRASP_WIDTH (0.045 m): candidate_grasps finds no axis.
+    too_wide = (0.05, 0.05, 0.01)
+    sizes = torch.tensor([brick, brick, brick, too_wide])
+    quat = torch.stack([_quat(), _quat(), _quat(), _quat()])
     half_height = 0.5 * brick[2]
     pos = torch.tensor(
         [
             [0.15, 0.00, half_height],  # resting flat, inside the tray, in reach: the baseline
             [0.40, 0.05, half_height],  # outside the tray, still in reach
             [0.15, 0.10, 0.02],  # inside and in reach, but well above its own half height
+            [0.15, 0.20, 0.005],  # inside, in reach, resting flat, but ungraspable on any axis
         ]
     )
     tray_bounds = ((0.0, 0.3), (0.0, 0.3))
@@ -122,8 +126,9 @@ def test_measure_heap_flags_an_outside_part_and_a_stacked_part():
     )
     assert counts == {
         "outside": 1,
-        "wall_blocked": 0,
-        "blocked": 0,
+        "wall_blocked": 1,
+        "blocked": 1,
+        "no_grasp": 1,
         "stacked": 1,
         "unreachable": 0,
     }
