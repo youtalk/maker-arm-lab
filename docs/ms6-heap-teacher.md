@@ -89,7 +89,7 @@ campaign. It is not itself a source of the campaign's numbers.
 Over the 120 episodes, 115 timed out and 5 were abandoned. No episode succeeded. The run
 logged 423 retries in total. The failure memory excluded 46 cells. An excluded cell is a 5 cm
 cell where the teacher failed three times and then gave up on it. Parts outside the tray per
-episode ranged from 0 to 23, with a median of 9.
+episode ranged from 0 to 23, with a median of 8.5.
 
 Per family, over the held-out split:
 
