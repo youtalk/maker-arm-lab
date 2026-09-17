@@ -2,6 +2,7 @@
 
 import ast
 import importlib.util
+import json
 import math
 import random
 import subprocess
@@ -174,6 +175,83 @@ def test_the_heap_seeds_are_defaults_and_a_passed_seed_survives():
     equals_form = module.parse_args(base + ["--run_seed=20261002", "--heap_k=12"])
     assert equals_form.run_seed == 20261002 and equals_form.heap_k == 12
     assert equals_form.layout_seed == module.HEAP_LAYOUT_SEED
+
+
+def test_the_heap_mode_resolves_to_the_reads_flags():
+    module = _load(SCRIPT)
+    args = module.parse_args(["--mode", "heap", "--out_dir", "/tmp/x"])
+    # The whole read, not just the heap's identity: a default left at argparse's own value is a
+    # configuration difference nobody sees, and the jitter band alone moves heap 0 from 15 to 18.
+    assert args.nearest_first_pick_order is True
+    assert args.frame_jitter is True
+    assert (args.hover_jitter_min, args.hover_jitter_max) == module.HEAP_HOVER_JITTER
+    assert (args.hover_jitter_min, args.hover_jitter_max) == (0.035, 0.080)
+    assert args.episode_draws is True
+    assert (args.run_seed, args.layout_seed) == (20261000, 20261010)
+    assert args.heap_k == module.HEAP_K and args.parts_split == "heldout"
+
+
+def test_a_caller_passed_read_flag_still_wins():
+    module = _load(SCRIPT)
+    base = ["--mode", "heap", "--out_dir", "/tmp/x"]
+    passed = module.parse_args(base + ["--hover_jitter_min", "0.0", "--hover_jitter_max", "0.0"])
+    assert (passed.hover_jitter_min, passed.hover_jitter_max) == (0.0, 0.0)
+    assert passed.nearest_first_pick_order is True  # untouched flags keep the read's value
+    equals_form = module.parse_args(base + ["--hover_jitter_max=0.05"])
+    assert equals_form.hover_jitter_max == 0.05
+    assert equals_form.hover_jitter_min == module.HEAP_HOVER_JITTER[0]
+
+
+def test_no_read_flags_restores_every_argparse_default():
+    module = _load(SCRIPT)
+    # The heap's own flags must then be given, which is what the flag means.
+    args = module.parse_args(
+        ["--mode", "heap", "--out_dir", "/tmp/x", "--no_read_flags", "--heap_k", "50"]
+    )
+    assert args.nearest_first_pick_order is False
+    assert args.frame_jitter is False
+    assert (args.hover_jitter_min, args.hover_jitter_max) == (0.0, 0.0)
+    assert args.episode_draws is False
+    assert (args.run_seed, args.layout_seed) == (0, 0)
+    assert args.parts_split == "train"
+
+
+def test_the_heap_mode_refuses_a_zero_k_rather_than_crashing_later():
+    module = _load(SCRIPT)
+    with pytest.raises(SystemExit):
+        module.parse_args(["--mode", "heap", "--out_dir", "/tmp/x", "--no_read_flags"])
+
+
+def test_the_resolved_configuration_is_reported():
+    module = _load(SCRIPT)
+    args = module.parse_args(["--mode", "heap", "--out_dir", "/tmp/x", "--matched_clearance"])
+    config = module.resolved_config(args)
+    assert config["hover_jitter"] == [0.035, 0.080]
+    assert config["nearest_first_pick_order"] is True and config["frame_jitter"] is True
+    assert config["episode_draws"] is True and config["read_flags"] is True
+    assert (config["run_seed"], config["layout_seed"]) == (20261000, 20261010)
+    assert config["heap_k"] == 50 and config["cycle_budget"] == args.cycle_budget
+    assert config["matched_clearance"] is True
+    assert config["matched_half_gap_m"] == module.MATCHED_HALF_GAP_M
+    off = module.resolved_config(module.parse_args(["--mode", "heap", "--out_dir", "/tmp/x"]))
+    assert off["matched_clearance"] is False and off["matched_half_gap_m"] is None
+
+
+def test_the_config_is_stamped_into_the_logs_end_event(tmp_path):
+    module = _load(SCRIPT)
+    log = tmp_path / "events.jsonl"
+    log.write_text(
+        json.dumps({"kind": "scan", "step": 1})
+        + "\n"
+        + json.dumps({"kind": "end", "step": 9, "stowed": 3, "parts": 50, "extra_stats": {}})
+        + "\n"
+    )
+    module.stamp_config(str(log), {"run_seed": 7, "hover_jitter": [0.035, 0.08]})
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(events) == 2 and events[0]["kind"] == "scan"
+    end = events[-1]
+    assert end["kind"] == "end" and end["stowed"] == 3  # the log's own fields survive
+    assert end["config"] == {"run_seed": 7, "hover_jitter": [0.035, 0.08]}
 
 
 def _wall_blocked_grasp():

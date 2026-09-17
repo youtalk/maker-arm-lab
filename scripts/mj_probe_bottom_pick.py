@@ -123,6 +123,15 @@ ones, so a part wider than 15.8 mm may be selected on a clearance its jaws would
 have. `MAX_GRASP_WIDTH` is 45 mm, where the true held gap would be near 26.5 mm.
 """
 
+HEAP_HOVER_JITTER = (0.035, 0.080)
+"""The read's corrective-approach band, the MS3 Phase 4 t4 window.
+
+Left at the argparse default of 0.0 the heap mode silently measures a configuration the corpus
+does not use. That is not a small difference: heap 0 with the matched clearance model stows 15
+at the read's flags and 18 without this band, and the first 67 of 150 was measured without it
+against a baseline measured with it.
+"""
+
 HEAP_K = 50
 HEAP_RUN_SEED = 20261000
 HEAP_LAYOUT_SEED = 20261010
@@ -135,6 +144,26 @@ seeds: the parts are the same 50 and their poses after the settle differ by 100 
 against the inspection's own first scan. With it on they match that scan to 0.007 mm, which is
 the log's rounding. Comparing this mode's episode against the inspection's 15 of 50 is only
 meaningful with it on. It has no "off" switch, because the mode exists to reproduce the read.
+"""
+
+HEAP_READ_FLAGS = (
+    ("--heap_k", HEAP_K),
+    ("--parts_split", "heldout"),
+    ("--run_seed", HEAP_RUN_SEED),
+    ("--layout_seed", HEAP_LAYOUT_SEED),
+    ("--episode_draws", HEAP_EPISODE_DRAWS),
+    ("--nearest_first_pick_order", True),
+    ("--frame_jitter", True),
+    ("--hover_jitter_min", HEAP_HOVER_JITTER[0]),
+    ("--hover_jitter_max", HEAP_HOVER_JITTER[1]),
+)
+"""The read's flags, as DEFAULTS for the heap mode. A flag the caller passed always wins.
+
+The heap mode's whole job is to reproduce the inspection's K = 50 read, and a default it does
+not set is a configuration difference nobody sees. Every entry here was a hole someone fell
+into: the seeds made three heaps into one, `episode_draws` made the arrangement a different
+arrangement, and the jitter band and the pick order made the yield incomparable to the
+baseline it was reported against.
 """
 
 
@@ -583,6 +612,47 @@ def wall_table(args) -> dict:
     }
 
 
+def resolved_config(args) -> dict:
+    """Everything that decides what the heap episode measured, as the run actually resolved it.
+
+    This exists because a log that cannot say what it ran costs a day. Every number in it was
+    once left to an argparse default nobody noticed.
+    """
+    return {
+        "run_seed": args.run_seed,
+        "layout_seed": args.layout_seed,
+        "parts_seed": args.parts_seed,
+        "parts_split": args.parts_split,
+        "heap_k": args.heap_k,
+        "cycle_budget": args.cycle_budget,
+        "episode_draws": bool(args.episode_draws),
+        "frame_jitter": bool(args.frame_jitter),
+        "nearest_first_pick_order": bool(args.nearest_first_pick_order),
+        "randomize_pick_order": bool(args.randomize_pick_order),
+        "hover_jitter": [args.hover_jitter_min, args.hover_jitter_max],
+        "noise_scale": args.noise_scale,
+        "transport_speed": args.transport_speed,
+        "matched_clearance": bool(args.matched_clearance),
+        "matched_half_gap_m": MATCHED_HALF_GAP_M if args.matched_clearance else None,
+        "read_flags": not args.no_read_flags,
+    }
+
+
+def stamp_config(log: str, config: dict) -> None:
+    """Put the resolved configuration into the log's ``end`` event, which is its last line.
+
+    Written after ``mj_inspect_heap.run`` rather than inside it, so the inspection tool and the
+    log format it owns are untouched and ``scripts/heap_inspect_read.py`` keeps reading both.
+    """
+    with open(log) as f:
+        lines = f.read().splitlines()
+    end = json.loads(lines[-1])
+    end["config"] = config
+    lines[-1] = json.dumps(end)
+    with open(log, "w") as f:
+        f.writelines(line + "\n" for line in lines)
+
+
 @contextlib.contextmanager
 def matched_clearance():
     """Give ``core.grasp``'s ranking the landing half gap the bottom-open descend holds.
@@ -620,7 +690,10 @@ def heap(args) -> dict:
     module.OracleRig = BottomPickRig
     patch = matched_clearance() if args.matched_clearance else contextlib.nullcontext(None)
     with patch as half_gap:
-        return {"mode": "heap", "matched_half_gap_m": half_gap, **module.run(args)}
+        summary = module.run(args)
+    config = resolved_config(args)
+    stamp_config(summary["events"], config)
+    return {"mode": "heap", "matched_half_gap_m": half_gap, "config": config, **summary}
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -657,6 +730,14 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="catalog name of the lone part the wall table picks, e.g. plate_2x8",
     )
     parser.add_argument(
+        "--no_read_flags",
+        action="store_true",
+        help="heap mode only: skip the read's default flags entirely and leave every argparse "
+        "default alone, so the heap's own flags must then be given explicitly. Needed to "
+        "reproduce the archived runs that were measured WITHOUT the hover jitter band: "
+        "~/data/maker-arm-ms6/d/probe/iso_nojitter_* and minimal_matched_0.",
+    )
+    parser.add_argument(
         "--matched_clearance",
         action="store_true",
         help="heap mode only: give the grasp ranking the bottom-open descend's own landing "
@@ -684,21 +765,20 @@ def parse_args(argv=None) -> argparse.Namespace:
     args.azimuths_deg = [int(a) for a in args.azimuths_deg.split(",")]
     if not args.radii_m or not args.azimuths_deg:
         parser.error("--radii_mm and --azimuths_deg must each name at least one value")
-    if args.mode == "heap":
+    if args.mode == "heap" and not args.no_read_flags:
         # The pre-registered read (Task 3 brief, step 3) is the DEFAULT heap, not a pin. These
-        # four were overwritten unconditionally, so three runs at three seed pairs were three
+        # were once overwritten unconditionally, so three runs at three seed pairs were three
         # copies of heap 0, down to the push_parts list. Accepting a flag and then discarding
         # it is worse than either refusing it or honoring it, so a flag the caller passed wins.
         given = list(sys.argv[1:] if argv is None else argv)
-        for flag, value in (
-            ("--heap_k", HEAP_K),
-            ("--parts_split", "heldout"),
-            ("--run_seed", HEAP_RUN_SEED),
-            ("--layout_seed", HEAP_LAYOUT_SEED),
-            ("--episode_draws", HEAP_EPISODE_DRAWS),
-        ):
+        for flag, value in HEAP_READ_FLAGS:
             if not any(a == flag or a.startswith(flag + "=") for a in given):
                 setattr(args, flag[2:], value)
+    if args.mode == "heap" and args.heap_k <= 0:
+        parser.error(
+            "--heap_k must be positive for the heap mode; --no_read_flags leaves every "
+            "argparse default alone, so it must be given with the heap's own flags"
+        )
     return args
 
 
