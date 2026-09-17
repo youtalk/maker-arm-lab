@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from maker_arm_lab.core import grasp, layout, parts
+from maker_arm_lab.core import grasp, layout, oracle, parts
 
 BRICK = parts.make_part("brick", 2, 4)
 PLATE = parts.make_part("plate", 2, 4)
@@ -67,6 +67,28 @@ def test_a_tilted_approach_opens_the_short_axis_of_a_lying_plate():
     # the thickness axis is still refused, only the long in-plane axis survives.
     assert all(g.width > plate.size[2] for g in tilted_40)
     assert any(math.isclose(g.width, plate.size[2], rel_tol=1e-6) for g in tilted_80)
+
+
+def test_the_tilted_jaw_plane_refuses_an_axis_that_lies_along_the_tilt_direction():
+    """World +x is 0.342 = sin(20 deg) off the PICK_TILT_RAD jaw plane, over the 0.259 =
+    sin(15 deg) = sin(AXIS_MAX_TILT_RAD) limit; world +y, across the tilt, stays at 0."""
+    size = _size(BRICK)
+    world_x_width = float(size[0])
+    world_y_width = float(size[1])
+    level = grasp.candidate_grasps(0, size, torch.zeros(3), IDENTITY, tilt_rad=0.0)
+    tilted = grasp.candidate_grasps(
+        0, size, torch.zeros(3), IDENTITY, tilt_rad=oracle.PICK_TILT_RAD
+    )
+
+    def has_axis(found, heading, width):
+        return any(
+            math.isclose(g.heading, heading, abs_tol=1e-6) and math.isclose(g.width, width)
+            for g in found
+        )
+
+    assert has_axis(level, 0.0, world_x_width)
+    assert not has_axis(tilted, 0.0, world_x_width)
+    assert has_axis(tilted, math.pi / 2, world_y_width)
 
 
 def test_neighbor_extents_follow_the_world_aligned_bounding_box():
