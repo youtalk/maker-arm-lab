@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 
 import mujoco
+import pytest
+import torch
 
 from maker_arm_lab.core import grasp, layout, oracle, parts
 from maker_arm_lab.core.heap_oracle import HeapOracle
@@ -172,6 +174,62 @@ def test_the_heap_seeds_are_defaults_and_a_passed_seed_survives():
     equals_form = module.parse_args(base + ["--run_seed=20261002", "--heap_k=12"])
     assert equals_form.run_seed == 20261002 and equals_form.heap_k == 12
     assert equals_form.layout_seed == module.HEAP_LAYOUT_SEED
+
+
+def _wall_blocked_grasp():
+    """A lone 2x4 brick 40 mm from the +y wall, the section 3.2 row the shipped model rejects."""
+    part = parts.make_part("brick", 2, 4)
+    sizes = torch.tensor([part.size])
+    (_x0, _x1), (_y0, y1) = layout.tray_bounds()
+    pos = torch.tensor([[layout.TRAY_CENTER[0], y1 - 0.040, part.size[2] / 2]])
+    quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]])  # yaw 0: the narrow axis lies along y
+    ranked = grasp.rank_grasps(sizes, pos, quat, torch.tensor([True]), grasp.tray_wall_obstacles())
+    return [g for g in ranked if abs(math.remainder(g.heading - math.pi / 2, math.pi)) < 0.1]
+
+
+def test_matched_clearance_reaches_rank_grasps_and_is_restored():
+    module = _load(SCRIPT)
+    before_gap = grasp.OPEN_HALF_GAP
+    before_defaults = grasp.sweep_footprints.__defaults__
+
+    # The shipped model lands the tips 52.4 mm out, so at 40 mm the wall is 12.4 mm inside
+    # them and the grasp is rejected: this is the row the wall table stows and the teacher
+    # will not select.
+    (shipped,) = _wall_blocked_grasp()
+    assert shipped.wall < 0.0
+    assert grasp.select_grasp([shipped]) is None
+
+    with module.matched_clearance() as half_gap:
+        assert half_gap == module.MATCHED_HALF_GAP_M
+        assert grasp.OPEN_HALF_GAP == module.MATCHED_HALF_GAP_M
+        # The default argument was bound at import, so patching the global alone would leave
+        # the swept count on the shipped radius.
+        assert grasp.sweep_footprints.__defaults__ == (module.MATCHED_HALF_GAP_M,)
+        (matched,) = _wall_blocked_grasp()
+        assert matched.wall > 0.0, matched
+        assert grasp.select_grasp([matched]) is matched
+
+    assert grasp.OPEN_HALF_GAP == before_gap
+    assert grasp.sweep_footprints.__defaults__ == before_defaults
+    (again,) = _wall_blocked_grasp()
+    assert again.wall == shipped.wall
+
+
+def test_matched_clearance_is_restored_when_the_body_raises():
+    module = _load(SCRIPT)
+    before_gap = grasp.OPEN_HALF_GAP
+    before_defaults = grasp.sweep_footprints.__defaults__
+    with pytest.raises(RuntimeError), module.matched_clearance():
+        raise RuntimeError("the run failed")
+    assert grasp.OPEN_HALF_GAP == before_gap
+    assert grasp.sweep_footprints.__defaults__ == before_defaults
+
+
+def test_the_matched_clearance_flag_is_off_by_default():
+    module = _load(SCRIPT)
+    base = ["--mode", "heap", "--out_dir", "/tmp/x"]
+    assert module.parse_args(base).matched_clearance is False
+    assert module.parse_args(base + ["--matched_clearance"]).matched_clearance is True
 
 
 def test_a_point_outside_the_solvers_reach_reads_no_solution_not_lost():
