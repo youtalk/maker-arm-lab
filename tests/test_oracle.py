@@ -86,6 +86,32 @@ def test_failed_pinch_retries_from_hover_then_abandons():
     assert orc.phase == oracle.Phase.ABANDON
 
 
+def test_a_lift_that_rose_advances_even_when_the_pinch_factors_refuse_it():
+    """MS6 rework section 4: 8 of 26 real holds on heap 0 failed a pinch factor
+    while the part rose 90 mm or more in the jaws."""
+    orc = _oracle()
+    scene = _snapshot()
+    _run_phase(orc, scene)  # SETTLE
+    _run_phase(orc, scene)  # HOVER
+    _run_phase(orc, scene, outcome="stalled")  # DESCEND
+    _run_phase(orc, scene)  # CLOSE
+    _run_phase(orc, scene, pinch_ok=False, lifted=True)  # LIFT
+    assert orc.phase is oracle.Phase.RAISE
+    assert orc.retries_used == 0
+
+
+def test_a_lift_that_did_not_rise_still_retries():
+    orc = _oracle()
+    scene = _snapshot()
+    _run_phase(orc, scene)  # SETTLE
+    _run_phase(orc, scene)  # HOVER
+    _run_phase(orc, scene, outcome="stalled")  # DESCEND
+    _run_phase(orc, scene)  # CLOSE
+    _run_phase(orc, scene, outcome="budget", pinch_ok=True, lifted=False)  # LIFT
+    assert orc.phase is oracle.Phase.REOPEN
+    assert orc.retries_used == 1
+
+
 def test_release_targets_track_the_permuted_bin():
     bl = layout.BinLayout(bin_x=0.45, bin_ys=(-0.20, -0.06, 0.08, 0.20), slot_colors=(3, 1, 2, 0))
     orc = oracle.EnvOracle(bl, num_bricks=1, draw=_draw())

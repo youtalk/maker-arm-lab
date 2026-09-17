@@ -1062,7 +1062,11 @@ class EnvOracle:
         elif self.phase == Phase.CLOSE:
             self.phase = Phase.LIFT
         elif self.phase == Phase.LIFT:
-            if result.pinch_ok and result.lifted:
+            # MS6 rework section 4: the decision is the measured rise, not the pinch
+            # factors. Heap 0 of 2026-09-17 rejected 8 of 26 real holds on the force floor,
+            # the asymmetry limit and the stall floor's own boundary, while the part rose
+            # 90 mm or more in the jaws. `pinch_ok` stays on the result as telemetry.
+            if result.lifted:
                 self.phase = Phase.RAISE
             elif self.retries_used < MAX_GRASP_RETRIES:
                 self.retries_used += 1

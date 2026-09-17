@@ -308,7 +308,7 @@ class HeapOracle(oracle.EnvOracle):
             self.push = None
             self.phase = oracle.Phase.HOVER
             return
-        failed_lift = phase == oracle.Phase.LIFT and not (result.pinch_ok and result.lifted)
+        failed_lift = phase == oracle.Phase.LIFT and not result.lifted
         if failed_lift and self.retries_used >= oracle.MAX_GRASP_RETRIES:
             # The base class abandons the episode here; a heap marks the cell and moves on,
             # through REOPEN so a part riding in the pocket is dropped here, not carried off

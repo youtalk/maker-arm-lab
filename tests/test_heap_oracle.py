@@ -192,13 +192,43 @@ def test_a_lift_that_fails_after_the_retries_releases_before_the_next_cycle():
             assert orc.phase is phase
             orc.report(oracle.PhaseResult(outcome="converged"), scene)
         assert orc.phase is oracle.Phase.LIFT
-        orc.report(oracle.PhaseResult(outcome="converged", pinch_ok=False, lifted=True), scene)
+        # MS6 rework section 4: the gate reads the measured rise, not the pinch factors, so a
+        # retry needs a lift that did not rise -- a failed pinch on a lift that did rise now
+        # advances (see test_the_heap_gives_up_on_a_lift_that_did_not_rise_and_keeps_one_that_did).
+        orc.report(oracle.PhaseResult(outcome="converged", pinch_ok=False, lifted=False), scene)
         assert orc.phase is oracle.Phase.REOPEN
         orc.report(oracle.PhaseResult(outcome="converged"), scene)
     assert orc.target_brick is None and orc.phase is oracle.Phase.HOVER
     assert orc.cycle_outcomes == [False]
     hover = orc.next_goal(scene)
     assert hover.phase is oracle.Phase.HOVER and orc.target_brick is not None
+
+
+def test_the_heap_gives_up_on_a_lift_that_did_not_rise_and_keeps_one_that_did():
+    """The heap carries its own copy of the gate; both copies read `lifted` only."""
+    orc = _oracle([BRICK])
+    scene = _snapshot([[0.19, 0.0, 0.0048]])
+    _to_hover(orc, scene)
+    for phase in (oracle.Phase.HOVER, oracle.Phase.DESCEND, oracle.Phase.CLOSE):
+        assert orc.phase is phase
+        orc.report(oracle.PhaseResult(outcome="converged"), scene)
+    assert orc.phase is oracle.Phase.LIFT
+    orc.retries_used = oracle.MAX_GRASP_RETRIES
+    orc.report(oracle.PhaseResult(outcome="converged", pinch_ok=False, lifted=True), scene)
+    assert orc.phase is oracle.Phase.RAISE
+    assert orc.cycle_outcomes == []
+
+    orc = _oracle([BRICK])
+    scene = _snapshot([[0.19, 0.0, 0.0048]])
+    _to_hover(orc, scene)
+    for phase in (oracle.Phase.HOVER, oracle.Phase.DESCEND, oracle.Phase.CLOSE):
+        assert orc.phase is phase
+        orc.report(oracle.PhaseResult(outcome="converged"), scene)
+    assert orc.phase is oracle.Phase.LIFT
+    orc.retries_used = oracle.MAX_GRASP_RETRIES
+    orc.report(oracle.PhaseResult(outcome="converged", pinch_ok=True, lifted=False), scene)
+    assert orc.phase is oracle.Phase.REOPEN
+    assert orc.cycle_outcomes == [False]
 
 
 def test_push_heading_matches_the_old_uniform_draw_at_the_tray_center():
