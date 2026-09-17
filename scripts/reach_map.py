@@ -5,16 +5,22 @@ are not in it (that is ``mj_heap_drop_sweep.py`` and the bottom-open pick probe)
 sweeps a grid over the desk plane and, at every point, asks ``core.global_ik`` for the descend
 pose at the level tilt (``MIN_DESCEND_TILT``), at every heading in an evenly spaced set over a
 half turn. A point is ``pickable`` once every heading converges inside the solver's own
-tolerance, ``partial`` once some heading does, honoring the joint limits exactly as
-``OracleRig`` does -- ``GlobalIK.solve`` is the same call the oracle's rig makes for a hover or
-a descend, at the same restart count and the same tolerance, since both are baked into the
-Rust solver rather than passed in.
+tolerance, ``partial`` once some heading does. ``probe_point`` calls ``GlobalIK.solve``
+unseeded, on the same entry point, the same tolerance and the same target-pose geometry the
+oracle's rig uses for a descend -- not the rig's own seeded, continuity-constrained
+``solve_path``, and not ``_plan_hover``'s tilt. Dropping the seed is conservative: it can only
+make convergence harder, never easier, so a ``pickable`` point here is at least as reachable
+as the rig finds it in practice.
 
 From the pickable set it finds the largest axis-aligned rectangle by area, plus the best
 rectangle at three aspect ratios: the current tray's (``layout.TRAY_INTERIOR``), a square, and
 the widest one the pickable set admits. Each is reported with its interior size, its center,
-its four corners' radii from the arm base (to read against ``layout.SCATTER_MAX_RADIUS``) and
-its area against the current tray's.
+its four corners' radii from the arm base and its area against the current tray's. This sweep
+is a solver read (``solver_read_only: true``): ``layout.SCATTER_MAX_RADIUS`` is a driven-
+tracking measurement that a solver query cannot re-derive, so every rectangle also carries
+``within_scatter_max_radius``, and only the ``admissible`` group (every corner inside that
+bound) is fit to size a tray. The out-of-band rectangles stay in the report, clearly labelled,
+because a separate driven measurement of the band may widen the bound.
 
     .venv/bin/python scripts/reach_map.py --out /tmp/reach.json --step 0.02
 
@@ -46,6 +52,14 @@ from maker_arm_lab.core.parts import BRICK_HEIGHT
 # The shipping convention documented on ``GraspTarget.lean_azimuth`` itself: 0.0, +x. The
 # oracle's rig (``oracle_runtime.LEAN_AZIMUTH``) commands the same value for every descend.
 LEAN_AZIMUTH = 0.0
+
+ADMISSIBLE_NOTE = (
+    "Only the rectangles under 'admissible' have every corner inside "
+    "layout.SCATTER_MAX_RADIUS. That bound is a driven-tracking measurement, and the comment "
+    "above it in core/layout.py says a solver query cannot re-derive it. Do not size a tray "
+    "from the top-level rectangles until a driven read across the band says the bound is "
+    "wider."
+)
 
 
 def descend_target(
@@ -134,6 +148,7 @@ def rectangle_info(
     y0, y1 = ys[row0] - step / 2.0, ys[row1] + step / 2.0
     width, height = x1 - x0, y1 - y0
     corners = [(x0, y0), (x0, y1), (x1, y0), (x1, y1)]
+    corner_radii = [math.hypot(cx, cy) for cx, cy in corners]
     current_tray_area = layout.TRAY_INTERIOR[0] * layout.TRAY_INTERIOR[1]
     area = width * height
     return {
@@ -141,7 +156,8 @@ def rectangle_info(
         "y_range": [y0, y1],
         "size_m": [width, height],
         "center": [(x0 + x1) / 2.0, (y0 + y1) / 2.0],
-        "corner_radii_m": [math.hypot(cx, cy) for cx, cy in corners],
+        "corner_radii_m": corner_radii,
+        "within_scatter_max_radius": all(r <= layout.SCATTER_MAX_RADIUS for r in corner_radii),
         "area_m2": area,
         "area_vs_current_tray": area / current_tray_area,
     }
@@ -151,10 +167,14 @@ def best_rectangles(mask: list[list[bool]], xs: list[float], ys: list[float], st
     """The counting below works in grid-cell counts (``col1 - col0 + 1``, and so on), which is
     ratio- and area-equivalent to real units up to the constant ``step`` factor; the padding
     that turns a count into a physical size (see ``rectangle_info``) is applied only when a
-    winning rectangle is reported."""
-    candidates = maximal_rectangles(mask)
-    if not candidates:
-        return {"overall": None, "current_tray_ratio": None, "square": None, "widest": None}
+    winning rectangle is reported.
+
+    Every pick is reported twice: at the top level over every candidate (some may reach past
+    ``layout.SCATTER_MAX_RADIUS``, a driven-tracking bound this solver-only sweep cannot
+    re-derive) and under ``admissible`` over only the candidates whose every corner is inside
+    that bound. ``ADMISSIBLE_NOTE`` explains why in the JSON itself, not only in this comment.
+    """
+    empty = {"overall": None, "current_tray_ratio": None, "square": None, "widest": None}
 
     def ratio_of(rect: tuple[int, int, int, int]) -> float:
         row0, row1, col0, col1 = rect
@@ -168,21 +188,32 @@ def best_rectangles(mask: list[list[bool]], xs: list[float], ys: list[float], st
         _row0, _row1, col0, col1 = rect
         return col1 - col0 + 1
 
-    def best_at_ratio(target_ratio: float) -> tuple[int, int, int, int]:
+    def best_at_ratio(cands: list[tuple[int, int, int, int]], target_ratio: float):
         return min(
-            candidates,
+            cands,
             key=lambda r: (round(abs(math.log(ratio_of(r) / target_ratio)), 6), -area_of(r)),
         )
 
-    overall = max(candidates, key=area_of)
-    current_ratio = layout.TRAY_INTERIOR[0] / layout.TRAY_INTERIOR[1]
-    widest = max(candidates, key=lambda r: (width_of(r), area_of(r)))
-    return {
-        "overall": rectangle_info(overall, xs, ys, step),
-        "current_tray_ratio": rectangle_info(best_at_ratio(current_ratio), xs, ys, step),
-        "square": rectangle_info(best_at_ratio(1.0), xs, ys, step),
-        "widest": rectangle_info(widest, xs, ys, step),
-    }
+    def pick(cands: list[tuple[int, int, int, int]]) -> dict:
+        if not cands:
+            return dict(empty)
+        overall = max(cands, key=area_of)
+        current_ratio = layout.TRAY_INTERIOR[0] / layout.TRAY_INTERIOR[1]
+        widest = max(cands, key=lambda r: (width_of(r), area_of(r)))
+        return {
+            "overall": rectangle_info(overall, xs, ys, step),
+            "current_tray_ratio": rectangle_info(best_at_ratio(cands, current_ratio), xs, ys, step),
+            "square": rectangle_info(best_at_ratio(cands, 1.0), xs, ys, step),
+            "widest": rectangle_info(widest, xs, ys, step),
+        }
+
+    candidates = maximal_rectangles(mask)
+    result = pick(candidates)
+    admissible_candidates = [
+        r for r in candidates if rectangle_info(r, xs, ys, step)["within_scatter_max_radius"]
+    ]
+    result["admissible"] = {**pick(admissible_candidates), "note": ADMISSIBLE_NOTE}
+    return result
 
 
 # --- the grid sweep --------------------------------------------------------------------------
@@ -219,6 +250,7 @@ def run(args: argparse.Namespace) -> dict:
     }
     rectangles = best_rectangles(pickable_mask, xs, ys, args.step)
     return {
+        "solver_read_only": True,
         "grid": {
             "x_min": args.x_min,
             "x_max": args.x_max,
@@ -277,7 +309,12 @@ def main(argv=None) -> int:
     print(
         "REACH_OK "
         + json.dumps(
-            {"counts": result["counts"], "rectangles": result["rectangles"], "out": args.out}
+            {
+                "solver_read_only": result["solver_read_only"],
+                "counts": result["counts"],
+                "rectangles": result["rectangles"],
+                "out": args.out,
+            }
         ),
         flush=True,
     )

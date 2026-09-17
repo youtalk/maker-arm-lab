@@ -38,13 +38,34 @@ def test_maximal_rectangles_cover_only_pickable_points():
 def test_best_rectangles_reports_the_four_requested_picks():
     reach = _load(REACH)
     mask = [[True] * 4 for _ in range(2)]  # a 4-wide, 2-tall block: only "widest" should pick it
-    xs = [0.0, 0.1, 0.2, 0.3]
-    ys = [0.0, 0.1]
-    picks = reach.best_rectangles(mask, xs, ys, step=0.1)
+    xs = [0.0, 0.05, 0.1, 0.15]  # close to the arm base, so every corner is in band
+    ys = [0.0, 0.05]
+    picks = reach.best_rectangles(mask, xs, ys, step=0.05)
     for key in ("overall", "current_tray_ratio", "square", "widest"):
         assert picks[key] is not None
         assert picks[key]["area_m2"] > 0.0
+        assert picks[key]["within_scatter_max_radius"] is True  # this mask sits near the origin
     assert picks["widest"]["size_m"][0] >= picks["square"]["size_m"][0]
+    assert picks["admissible"]["overall"] == picks["overall"]  # nothing here is out of band
+
+
+def test_rectangle_info_flags_within_scatter_max_radius():
+    reach = _load(REACH)
+    near = reach.rectangle_info((0, 1, 0, 1), [0.0, 0.05], [0.0, 0.05], step=0.05)
+    assert near["within_scatter_max_radius"] is True
+
+    far = reach.rectangle_info((0, 1, 0, 1), [0.25, 0.35], [0.15, 0.25], step=0.05)
+    assert far["within_scatter_max_radius"] is False
+    assert far["corner_radii_m"][-1] > layout.SCATTER_MAX_RADIUS
+
+
+def test_best_rectangles_admissible_group_excludes_out_of_band_picks():
+    reach = _load(REACH)
+    mask = [[True, True], [True, True]]
+    picks = reach.best_rectangles(mask, [0.25, 0.35], [0.15, 0.25], step=0.05)
+    assert picks["overall"]["within_scatter_max_radius"] is False
+    assert picks["admissible"]["overall"] is None
+    assert picks["admissible"]["note"] == reach.ADMISSIBLE_NOTE
 
 
 def test_reach_ok_token_and_json_on_a_tiny_grid(tmp_path, capsys):
@@ -74,8 +95,10 @@ def test_reach_ok_token_and_json_on_a_tiny_grid(tmp_path, capsys):
     payload = json.loads(lines[-1][len("REACH_OK ") :])
     assert payload["counts"]["total"] == 2
     assert payload["out"] == str(out)
+    assert payload["solver_read_only"] is True
     data = json.loads(out.read_text())
     assert len(data["points"]) == 2
+    assert data["solver_read_only"] is True
 
 
 def test_argparse_error_becomes_a_fail_token(capsys):
