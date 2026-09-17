@@ -207,13 +207,30 @@ RAISE_MAX_STEPS = 60
 # every tilt. The runtime advances straight to EXTEND on the legs it cannot plan.
 RAISE_TILT_RAD = 1.05
 
-PICK_TILT_RAD = 0.0
+PICK_TILT_RAD = math.radians(20.0)
 """Tool-axis tilt the pick phases hold. MS6 rework rung R5 raises it off zero.
 
 At 0.0 the jaws come down flat, so a part offers only the body axes that are within
 `grasp.AXIS_MAX_TILT_RAD` of horizontal, and a lying plate offers its in-plane axes alone.
 Raising it moves the reach ceiling, the joint6 budget of `fold_jaw_heading` and the descend
 clearance model at the same time, which is why the rung runs last.
+
+20.0 deg, not a rounder or larger value: it equals `robots.frames.GRASP_TILT_DEG` today, the
+runtime's own floor on the hover-approach tilt. That constant comes from the D3 sweep's
+18.42 deg worst case (the outer corners of the scatter band, `robots/frames.py`'s own
+comment), rounded up to the nearest whole degree. `oracle_runtime` already raises any
+smaller request to `GRASP_TILT_RAD` (`max(goal.tilt_rad, GRASP_TILT_RAD)`, and
+`_plan_hover_ladder` hardcodes it outright), so this module cannot command the arm below its
+floor no matter what it asks for -- every value up to and including 20.0 deg lands on the
+commanded pose the runtime already holds today, and only a value above it would move that
+pose and the reach ceiling. This rung's read of the ladder is what re-validates the D3
+choice: it says the floor is still where the runtime already sits, not a new number for the
+oracle to push past it.
+
+`core/` never imports `robots.frames` -- it is the ported, arm-agnostic state machine, and
+the runtime owning the arm's floor is the whole reason that floor lives there instead of
+here -- so this duplicates the number rather than importing it, and the two must be read
+together, not assumed to track each other automatically.
 """
 
 _JOINT_LIMIT_GUARD_RAD = 0.05
