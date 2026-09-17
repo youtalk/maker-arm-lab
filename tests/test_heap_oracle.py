@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from maker_arm_lab.core import grasp, heap_oracle, layout, oracle, parts
+from maker_arm_lab.core.quat import quat_from_rpy_deg
 
 BL = layout.DEFAULT_BIN_LAYOUT
 BRICK = parts.make_part("brick", 2, 4)
@@ -55,6 +56,24 @@ def _to_hover(orc, scene):
     return orc.next_goal(scene)  # HOVER entry selects the target
 
 
+def _heap_with_parts(parts_list, flat):
+    """A heap oracle plus a scene with each part on the desk at the tray center.
+
+    `flat=True` sits each part at the identity quaternion, so a plate lies with its 3.2 mm
+    thickness straight up. `flat=False` rolls each part 90 degrees about its long axis, the
+    way a tip stands a plate up onto its short edge.
+    """
+    orc = _oracle(parts_list)
+    quat = IDENTITY if flat else torch.tensor(quat_from_rpy_deg((90.0, 0.0, 0.0)))
+    positions = [
+        [layout.TRAY_CENTER[0] + 0.03 * i, layout.TRAY_CENTER[1], p.size[2] / 2]
+        for i, p in enumerate(parts_list)
+    ]
+    scene = _snapshot(positions)
+    scene.brick_quat = quat.expand(len(parts_list), 4).clone()
+    return orc, scene
+
+
 def test_selection_takes_the_highest_clear_part_and_squares_the_jaws_to_its_grasp():
     orc = _oracle([BRICK, SMALL, BRICK])
     scene = _snapshot([[0.195, 0.0, 0.0048], [0.195, 0.0, 0.0144], [0.24, 0.06, 0.0048]])
@@ -94,7 +113,7 @@ def _push_phases(orc, scene):
     assert orc.phase is oracle.Phase.HOVER and orc.push is None
 
 
-def test_a_wall_side_part_is_pushed_toward_the_tray_center_then_selected():
+def test_a_wall_side_part_is_pushed_toward_the_tray_center_then_tipped():
     # A long plate 22 mm off the rim, short side along y: its one closing axis lands a jaw
     # past the rim. 20 mm put the push start exactly on the dish's clamp radius (TRAY_RADIUS
     # - TIP_HALF_FACE), where float32 scene positions tip the comparison either way; 22 mm
@@ -111,9 +130,11 @@ def test_a_wall_side_part_is_pushed_toward_the_tray_center_then_selected():
     _push_phases(orc, scene)
     assert orc.pushes == 1 and orc.pushes_in_a_row == 1
     moved = _snapshot([[layout.TRAY_CENTER[0], 0.0, 0.0016]])
+    # A LONG_PLATE is 3.2 mm thick, under TIP_MIN_GRIP_HEIGHT, so the centered plate is
+    # tipped, not picked directly (task 8: the teacher tips a flat part before it picks it).
     hover = orc.next_goal(moved)
-    assert hover.phase is oracle.Phase.HOVER and orc.target_brick == 0
-    assert orc.pushes_in_a_row == 0 and orc.forced_picks == 0
+    assert hover.phase is oracle.Phase.TIP_HOVER and orc.tip is not None and orc.tip.part == 0
+    assert orc.forced_picks == 0
 
 
 def test_a_landing_spot_under_a_stack_falls_back_to_the_densest_cell_push():
@@ -344,6 +365,8 @@ def test_extra_stats_report_the_counters():
     assert stats == {
         "cycles": 0,
         "pushes": 0,
+        "tips": 0,
+        "tips_ok": 0,
         "forced_picks": 0,
         "push_parts": [],
         "cycle_parts": [],
@@ -351,3 +374,101 @@ def test_extra_stats_report_the_counters():
         "cells_excluded": 0,
         "parts_outside_tray": 0,
     }
+
+
+def test_a_flat_plate_is_tipped_and_a_brick_is_picked():
+    """A 3.2 mm plate grips 3.2 mm of face, under TIP_MIN_GRIP_HEIGHT. A brick grips 9.6."""
+    plate = parts.make_part("plate", 2, 4)
+    brick = parts.make_part("brick", 2, 4)
+    orc, scene = _heap_with_parts([plate], flat=True)
+    assert orc._next_brick(scene) is None
+    assert orc.tip is not None and orc.tip.part == 0
+    assert orc._no_target_phase(scene) is oracle.Phase.TIP_HOVER
+
+    orc, scene = _heap_with_parts([brick], flat=True)
+    assert orc._next_brick(scene) == 0
+    assert orc.tip is None
+
+
+def test_the_tip_stroke_starts_beside_the_part_and_stays_in_the_dish():
+    plate = parts.make_part("plate", 2, 4)
+    orc, scene = _heap_with_parts([plate], flat=True)
+    orc._next_brick(scene)
+    start, end = orc.tip.start, orc.tip.end
+    assert layout.inside_tray(*start, margin=0.0)
+    assert layout.inside_tray(*end, margin=0.0)
+    assert math.isclose(math.dist(start, end), heap_oracle.TIP_STROKE_M, rel_tol=0.2)
+
+
+def test_standing_reads_the_short_axis_against_the_closing_band():
+    plate = parts.make_part("plate", 2, 4)
+    orc, flat_scene = _heap_with_parts([plate], flat=True)
+    assert not orc.standing(flat_scene, 0)
+    _, upright_scene = _heap_with_parts([plate], flat=False)  # rolled 90 degrees
+    assert orc.standing(upright_scene, 0)
+
+
+def test_the_tip_phases_run_in_order_and_a_failed_tip_marks_the_cell():
+    plate = parts.make_part("plate", 2, 4)
+    orc, scene = _heap_with_parts([plate], flat=True)
+    orc._next_brick(scene)
+    orc.phase = oracle.Phase.TIP_HOVER
+    for expected in (oracle.Phase.TIP_DESCEND, oracle.Phase.TIP_SWEEP, oracle.Phase.HOVER):
+        orc.report(oracle.PhaseResult("converged"), scene)
+        assert orc.phase is expected
+    assert orc.tips == 1 and orc.tip is None
+    assert orc.extra_stats()["tips"] == 1 and orc.extra_stats()["tips_ok"] == 0
+    assert orc.failures  # the flat part did not stand up, so its cell took a failure
+
+
+def _tip_phases(orc, scene):
+    """Drive one tip end to end via next_goal/report: TIP_HOVER, TIP_DESCEND, TIP_SWEEP, HOVER."""
+    hover = orc.next_goal(scene)
+    assert hover.phase is oracle.Phase.TIP_HOVER and orc.target_brick is None
+    assert hover.gripper == -1.0 and hover.target_pos[2] == pytest.approx(heap_oracle.TIP_HOVER_Z)
+    orc.report(oracle.PhaseResult(outcome="converged"), scene)
+    descend = orc.next_goal(scene)
+    assert descend.phase is oracle.Phase.TIP_DESCEND
+    assert descend.target_pos[2] == pytest.approx(heap_oracle.TIP_Z) and descend.stall_steps > 0
+    orc.report(oracle.PhaseResult(outcome="stalled"), scene)
+    sweep = orc.next_goal(scene)
+    assert sweep.phase is oracle.Phase.TIP_SWEEP and sweep.gripper == -1.0
+    assert tuple(sweep.target_pos[:2].tolist()) == pytest.approx(orc.tip.end)
+    orc.report(oracle.PhaseResult(outcome="converged"), scene)
+    assert orc.phase is oracle.Phase.HOVER and orc.tip is None
+
+
+def test_next_goal_drives_a_flat_part_through_a_tip_end_to_end():
+    """Correction 1: the widened HOVER guard must hand back the TIP_HOVER goal, not None.
+
+    Before the guard widened, `HeapOracle.next_goal` saw a phase that was not PUSH_HOVER and
+    returned None from the HOVER branch, which the rig reads as the episode ending instead of
+    tipping.
+    """
+    plate = parts.make_part("plate", 2, 4)
+    orc, scene = _heap_with_parts([plate], flat=True)
+    hover = _to_hover(orc, scene)
+    assert hover is not None and hover.phase is oracle.Phase.TIP_HOVER
+    _tip_phases(orc, scene)
+    assert orc.tips == 1
+
+
+def test_a_forced_pick_that_gets_tipped_does_not_inflate_forced_picks():
+    """Correction 2: a candidate reached through the forced-pick branch that turns out to be
+    flat gets tipped, not picked, and `forced_picks` must not count a pick that never ran."""
+    x, y = 0.19, 0.0
+    d = grasp.OPEN_HALF_GAP + 0.006
+    towers = [[x + d, y], [x - d, y], [x, y + d], [x, y - d]]
+    orc = _oracle([BRICK, BRICK, BRICK, BRICK, BRICK])
+    orc.pushes_in_a_row = heap_oracle.MAX_PUSHES_IN_A_ROW
+    # Only the footprint (x, y) sizes drive the towers' blocking; shrink the target's height
+    # to a plate's so its best grasp grips less than TIP_MIN_GRIP_HEIGHT of face.
+    orc.sizes[0] = torch.tensor(parts.make_part("plate", 2, 4).size)
+    orc.sizes[1:] = torch.tensor([0.0158, 0.0158, 0.0480])
+    for t in towers:
+        orc.failures[heap_oracle.HeapOracle.cell_of(t)] = heap_oracle.CELL_FAILURE_CAP
+    scene = _snapshot([[x, y, 0.0016]] + [[tx, ty, 0.0240] for tx, ty in towers])
+    hover = _to_hover(orc, scene)
+    assert hover is not None and hover.phase is oracle.Phase.TIP_HOVER
+    assert orc.tip is not None and orc.tip.part == 0
+    assert orc.forced_picks == 0
