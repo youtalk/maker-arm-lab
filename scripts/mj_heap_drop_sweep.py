@@ -13,8 +13,13 @@ sample to ``<out_dir>/samples.jsonl`` and prints one ``SWEEP_OK {json}`` or ``SW
 Runs under the project's own venv, with ``MUJOCO_GL=egl``:
 
     MUJOCO_GL=egl uv run python scripts/mj_heap_drop_sweep.py --out_dir /tmp/s0 --seeds 5 \\
-        --heap_k 50 --trays 130x200 --trays 170x200 --drop_bands 30:1.2 --drop_bands 15:0.6 \\
+        --heap_k 50 --trays 130x200 --trays 170x200@180 --drop_bands 30:1.2 --drop_bands 15:0.6 \\
         --settle_steps 480 --settle_steps 960 --wall_heights 20 --wall_heights 40
+
+``--trays`` takes ``WxH`` or ``WxH@cx``, where ``cx`` is the tray center's x in millimeters.
+A candidate tray from the reach map comes with its own center: a wider tray at the layout's
+default center can push its far corners past the arm's reach, so the sweep must honor
+whatever center the candidate names, not assume ``layout.TRAY_CENTER``.
 
 ``measure_heap`` (below) is the pure part of this: part sizes, poses and quaternions, the
 tray bounds, the wall footprints and the reach bounds in, the counts out. It never touches an
@@ -114,11 +119,17 @@ def measure_heap(
     }
 
 
-def _parse_tray(spec: str) -> tuple[float, float]:
-    w, _, h = spec.lower().partition("x")
+def _parse_tray(spec: str) -> tuple[tuple[float, float], float]:
+    """``WxH`` or ``WxH@cx``, all in millimeters. ``cx`` is the tray center's x; a candidate
+    tray with no center keeps today's ``layout.TRAY_CENTER`` x, so the reach map's centered
+    candidates and a plain size both mean "at the layout's own place." The y center is always
+    0: the arm and every candidate tray are symmetric in y."""
+    size, _, cx = spec.lower().partition("@")
+    w, _, h = size.partition("x")
     if not h:
-        raise ValueError(f"--trays wants WxH in millimeters, got {spec!r}")
-    return float(w), float(h)
+        raise ValueError(f"--trays wants WxH or WxH@cx in millimeters, got {spec!r}")
+    cx_mm = float(cx) if cx else layout.TRAY_CENTER[0] * 1000.0
+    return (float(w), float(h)), cx_mm
 
 
 def _parse_drop_band(spec: str) -> tuple[float, float]:
@@ -168,13 +179,16 @@ def _base_batch_args(
 
 
 @contextlib.contextmanager
-def _patched_layout(tray_interior_m, wall_height_m: float, drop_band_m, settle_steps: int):
+def _patched_layout(
+    tray_interior_m, tray_center_m, wall_height_m: float, drop_band_m, settle_steps: int
+):
     """Sets the sample's ``core.layout`` constants for the scope of one env build and
     measurement, then restores them. Every reader below (``_drop_heap``, ``tray_bounds``,
     ``tray_static_boxes``, ``tray_wall_obstacles``) reads these module attributes at call
     time, which is what makes patching them from outside trustworthy."""
     names = (
         "TRAY_INTERIOR",
+        "TRAY_CENTER",
         "TRAY_WALL_HEIGHT",
         "HEAP_DROP_Z_MIN",
         "HEAP_DROP_Z_PER_PART",
@@ -182,6 +196,7 @@ def _patched_layout(tray_interior_m, wall_height_m: float, drop_band_m, settle_s
     )
     saved = {name: getattr(layout, name) for name in names}
     layout.TRAY_INTERIOR = tray_interior_m
+    layout.TRAY_CENTER = tray_center_m
     layout.TRAY_WALL_HEIGHT = wall_height_m
     layout.HEAP_DROP_Z_MIN = drop_band_m[0]
     layout.HEAP_DROP_Z_PER_PART = drop_band_m[1]
@@ -195,7 +210,9 @@ def _patched_layout(tray_interior_m, wall_height_m: float, drop_band_m, settle_s
 
 def _assert_tray_matches(model) -> None:
     """The trust check the design calls for: the compiled scene's wall geoms must be the
-    sample's own tray, not a stale one from a constant read at import time somewhere else."""
+    sample's own tray, not a stale one from a constant read at import time somewhere else.
+    ``layout.tray_static_boxes()`` folds ``TRAY_CENTER`` into every wall's position, so this
+    catches a wrong center the same way it catches a wrong size."""
     for name, center, size in layout.tray_static_boxes():
         geom = model.geom(name)
         half = [0.5 * s for s in size]
@@ -236,6 +253,7 @@ def _measure_sample(env: MjLegoSortEnv, parts, bl: layout.BinLayout) -> dict:
 
 def run_sample(
     tray_mm: tuple[float, float],
+    tray_cx_mm: float,
     wall_height_mm: float,
     drop_band_mm: tuple[float, float],
     settle_steps: int,
@@ -244,9 +262,10 @@ def run_sample(
 ) -> dict:
     """One grid cell's one layout seed: patch, build, reset, check, measure, restore."""
     tray_interior_m = (tray_mm[0] / 1000.0, tray_mm[1] / 1000.0)
+    tray_center_m = (tray_cx_mm / 1000.0, 0.0)
     wall_height_m = wall_height_mm / 1000.0
     drop_band_m = (drop_band_mm[0] / 1000.0, drop_band_mm[1] / 1000.0)
-    with _patched_layout(tray_interior_m, wall_height_m, drop_band_m, settle_steps):
+    with _patched_layout(tray_interior_m, tray_center_m, wall_height_m, drop_band_m, settle_steps):
         base = _base_batch_args(
             args.out_dir, args.heap_k, args.parts_split, args.parts_seed, layout_seed
         )
@@ -262,6 +281,7 @@ def run_sample(
     sample.update(
         tray_w_mm=tray_mm[0],
         tray_h_mm=tray_mm[1],
+        tray_cx_mm=tray_cx_mm,
         wall_height_mm=wall_height_mm,
         drop_min_mm=drop_band_mm[0],
         drop_per_part_mm=drop_band_mm[1],
@@ -282,9 +302,15 @@ def run(args: argparse.Namespace) -> tuple[int, str]:
     )
     count = 0
     with open(out_path, "w") as f:
-        for tray_mm, wall_height_mm, drop_band_mm, settle_steps, layout_seed in grid:
+        for (
+            (tray_mm, tray_cx_mm),
+            wall_height_mm,
+            drop_band_mm,
+            settle_steps,
+            layout_seed,
+        ) in grid:
             sample = run_sample(
-                tray_mm, wall_height_mm, drop_band_mm, settle_steps, layout_seed, args
+                tray_mm, tray_cx_mm, wall_height_mm, drop_band_mm, settle_steps, layout_seed, args
             )
             f.write(json.dumps(sample) + "\n")
             count += 1

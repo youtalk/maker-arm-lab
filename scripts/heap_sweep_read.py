@@ -1,9 +1,9 @@
 """Summarize scripts/mj_heap_drop_sweep.py's samples.jsonl into one row per grid cell.
 
-Stdlib only. Groups samples by their grid cell (tray size, wall height, drop band, settle
-steps), averages the design's five counts and the settle speed across that cell's layout
-seeds, and marks the cell that matches ``core/layout.py`` today as the baseline. Prints a
-table and one ``SWEEP_READ {json}`` line.
+Stdlib only. Groups samples by their grid cell (tray size and center, wall height, drop band,
+settle steps), averages the design's five counts and the settle speed across that cell's
+layout seeds, and marks the cell that matches ``core/layout.py`` today as the baseline. Prints
+a table and one ``SWEEP_READ {json}`` line.
 
     python3 scripts/heap_sweep_read.py /tmp/sweep0/samples.jsonl
 """
@@ -26,14 +26,17 @@ COUNT_FIELDS = (
 CELL_FIELDS = (
     "tray_w_mm",
     "tray_h_mm",
+    "tray_cx_mm",
     "wall_height_mm",
     "drop_min_mm",
     "drop_per_part_mm",
     "settle_steps",
 )
-# core/layout.py today: TRAY_INTERIOR, TRAY_WALL_HEIGHT, HEAP_DROP_Z_MIN, HEAP_DROP_Z_PER_PART,
-# HEAP_SETTLE_STEPS, in millimeters. A literal so this script stays stdlib-only.
-BASELINE_CELL = (130.0, 200.0, 20.0, 30.0, 1.2, 480)
+# core/layout.py today: TRAY_INTERIOR, TRAY_CENTER, TRAY_WALL_HEIGHT, HEAP_DROP_Z_MIN,
+# HEAP_DROP_Z_PER_PART, HEAP_SETTLE_STEPS, in millimeters. A literal so this script stays
+# stdlib-only. The center keeps two trays of one size at different centers from collapsing
+# into one cell.
+BASELINE_CELL = (130.0, 200.0, 195.0, 20.0, 30.0, 1.2, 480)
 
 
 def read_samples(paths: list[str]) -> list[dict]:
@@ -75,7 +78,7 @@ def main(argv=None) -> int:
     header += [f"{f}_mean" for f in COUNT_FIELDS]
     print(" ".join(f"{h:>12s}" for h in header))
     for c in cells:
-        tray = f"{c['tray_w_mm']:g}x{c['tray_h_mm']:g}"
+        tray = f"{c['tray_w_mm']:g}x{c['tray_h_mm']:g}@{c['tray_cx_mm']:g}"
         drop = f"{c['drop_min_mm']:g}:{c['drop_per_part_mm']:g}"
         row = [
             tray,

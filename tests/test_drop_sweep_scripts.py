@@ -5,6 +5,7 @@ import importlib.util
 import json
 import pathlib
 
+import numpy as np
 import pytest
 import torch
 
@@ -64,6 +65,7 @@ def _sample(outside, wall_blocked, blocked, no_grasp, stacked, unreachable, spee
         "speed_max": speed_max,
         "tray_w_mm": 130.0,
         "tray_h_mm": 200.0,
+        "tray_cx_mm": 195.0,
         "wall_height_mm": 20.0,
         "drop_min_mm": 30.0,
         "drop_per_part_mm": 1.2,
@@ -132,3 +134,49 @@ def test_measure_heap_flags_an_outside_a_stacked_and_a_no_grasp_part():
         "stacked": 1,
         "unreachable": 0,
     }
+
+
+def test_parse_tray_accepts_a_plain_size_and_a_size_at_a_center():
+    module = _load(SWEEP)
+    layout = module.layout
+    assert module._parse_tray("130x200") == ((130.0, 200.0), layout.TRAY_CENTER[0] * 1000.0)
+    assert module._parse_tray("160x200@180") == ((160.0, 200.0), 180.0)
+
+
+class _FakeGeom:
+    def __init__(self, pos, size):
+        self.pos = np.array(pos)
+        self.size = np.array(size)
+
+
+class _FakeModel:
+    """Stands in for a compiled ``mujoco.MjModel``: only ``.geom(name)`` is used."""
+
+    def __init__(self, boxes):
+        self._geoms = {
+            name: _FakeGeom(center, [0.5 * s for s in size]) for name, center, size in boxes
+        }
+
+    def geom(self, name):
+        return self._geoms[name]
+
+
+def test_assert_tray_matches_catches_a_wrong_center():
+    module = _load(SWEEP)
+    layout = module.layout
+    # A scene built at today's tray: the trust check must pass it.
+    model = _FakeModel(layout.tray_static_boxes())
+    module._assert_tray_matches(model)
+
+    # The same scene, judged against a tray moved 50 mm off-center: must fail.
+    with (
+        module._patched_layout(
+            layout.TRAY_INTERIOR,
+            (layout.TRAY_CENTER[0] + 0.05, layout.TRAY_CENTER[1]),
+            layout.TRAY_WALL_HEIGHT,
+            (layout.HEAP_DROP_Z_MIN, layout.HEAP_DROP_Z_PER_PART),
+            layout.HEAP_SETTLE_STEPS,
+        ),
+        pytest.raises(AssertionError),
+    ):
+        module._assert_tray_matches(model)
