@@ -324,7 +324,9 @@ at its argparse defaults, while the fixed teacher it was compared against ran at
 flags. The probe's heap mode pins only `heap_k`, `parts_split`, `run_seed`, `layout_seed` and
 `episode_draws`. It does not pin `--nearest_first_pick_order`, the hover jitter band,
 `--frame_jitter` or `--cycle_budget`. So the earlier 67 of 150 against 43 of 150 compared two
-different configurations. Section 5.4 is the like-for-like table.
+different configurations. Pull request #57 now records the resolved flag set in the probe's
+own `PROBE_OK` token and in its end event. A future log answers this question without a
+re-run. Section 5.4 is the like-for-like table.
 
 ### 5.4 The heap read, under both flag sets
 
@@ -627,6 +629,12 @@ READ_FLAGS="--heap_k 50 --cycle_budget 50 --parts_split heldout --parts_seed 202
     --nearest_first_pick_order --hover_jitter_min 0.035 --hover_jitter_max 0.080 \
     --episode_draws --frame_jitter --no_cameras"
 
+# After pull request #57 merges, --mode heap resolves the nearest-first flag, the frame
+# jitter and the hover jitter band by itself, on top of the five arguments it already pins.
+# --no_read_flags skips that block. Passing READ_FLAGS is exact before and after. Dropping
+# one read flag needs --no_read_flags plus the rest, because leaving a flag out no longer
+# drops it. mj_inspect_heap.py is not affected by any of this.
+
 # The fixed teacher, one command per heap, n = 0, 1, 2.
 MUJOCO_GL=egl uv run python scripts/mj_inspect_heap.py --no_video $READ_FLAGS \
     --run_seed 2026100n --layout_seed 2026101n \
@@ -640,12 +648,34 @@ MUJOCO_GL=egl uv run python scripts/mj_probe_bottom_pick.py --mode heap --no_vid
     $READ_FLAGS --matched_clearance --run_seed 2026100n --layout_seed 2026101n \
     --out_dir ~/data/maker-arm-ms6/d/probe/matched_n
 
-# The isolation. Drop one flag at a time from the matched run.
-#   iso_nonearest_n: the same command without --nearest_first_pick_order
-#   iso_nojitter_n:  the same command without --hover_jitter_min/--hover_jitter_max
-#   base_nojitter_n: the fixed teacher without --hover_jitter_min/--hover_jitter_max
-#   base_defaults_n, minimal_matched_0, minimal_unmatched_0: no flags beyond
-#                    --mode heap, --no_video, --matched_clearance and --out_dir
+# The isolation. Each run is the read's flags with exactly one of them dropped.
+NO_NEAREST="--heap_k 50 --cycle_budget 50 --parts_split heldout --parts_seed 20260915 \
+    --hover_jitter_min 0.035 --hover_jitter_max 0.080 --episode_draws --frame_jitter \
+    --no_cameras"
+NO_JITTER="--heap_k 50 --cycle_budget 50 --parts_split heldout --parts_seed 20260915 \
+    --nearest_first_pick_order --episode_draws --frame_jitter --no_cameras"
+
+MUJOCO_GL=egl uv run python scripts/mj_probe_bottom_pick.py --mode heap --no_video \
+    --no_read_flags $NO_NEAREST --matched_clearance --run_seed 2026100n \
+    --layout_seed 2026101n --out_dir ~/data/maker-arm-ms6/d/probe/iso_nonearest_n
+MUJOCO_GL=egl uv run python scripts/mj_probe_bottom_pick.py --mode heap --no_video \
+    --no_read_flags $NO_JITTER --matched_clearance --run_seed 2026100n \
+    --layout_seed 2026101n --out_dir ~/data/maker-arm-ms6/d/probe/iso_nojitter_n
+
+# The shortest command that produces the no-band row, at the probe's own defaults.
+MUJOCO_GL=egl uv run python scripts/mj_probe_bottom_pick.py --mode heap --no_video \
+    --no_read_flags --matched_clearance \
+    --out_dir ~/data/maker-arm-ms6/d/probe/minimal_matched_0
+MUJOCO_GL=egl uv run python scripts/mj_probe_bottom_pick.py --mode heap --no_video \
+    --no_read_flags --out_dir ~/data/maker-arm-ms6/d/probe/minimal_unmatched_0
+
+# The fixed teacher without the hover jitter band. It runs through mj_inspect_heap.py, so
+# #57 leaves it alone.
+MUJOCO_GL=egl uv run python scripts/mj_inspect_heap.py --no_video $NO_JITTER \
+    --run_seed 2026100n --layout_seed 2026101n \
+    --out_dir ~/data/maker-arm-ms6/d/probe/base_nojitter_n
+#   base_defaults_n: the same teacher at its own default flag set, with no read flags. It
+#   reads the same as base_nojitter_n on every heap.
 
 # Every group above sums through one reader.
 python3 scripts/heap_inspect_read.py ~/data/maker-arm-ms6/d/probe/matched_*/events.jsonl
