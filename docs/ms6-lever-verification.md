@@ -22,9 +22,11 @@ The two headline numbers, both on the same three held-out heaps of 50 parts:
 
 Interpretation: the primitive is the stronger of the two levers the owner asked about, and its
 measured gain is configuration-dependent. The tray lever removes 3.6 of the 23.8 wall-blocked
-parts of 50 at the best candidate. The primitive removes 15.3 of them by the grasp ranking
-model alone. The size of the yield that follows is what the hover jitter band decides. Retuning
-that band for the new primitive is a measurable follow-up, not a decision.
+parts of 50 at the best candidate. Both of those numbers come from the drop sweep, at step
+zero. The grasp ranking model moves the same blockage far more. That read uses a different
+script and a different dataset, and section 5.4 carries it beside its own baseline. The size of
+the yield that follows is what the hover jitter band decides. Retuning that band for the new
+primitive is a measurable follow-up, not a decision.
 
 Interpretation: neither reading is a pass. The pre-registered phase A rule is 0.90. The fixed
 teacher's repeated read over 121 episodes is 0.2676. 45 of 150 is 0.300 and 67 of 150 is 0.447.
@@ -370,10 +372,13 @@ heap 0 under the shipped model it reads 25 against the script's 23. The table us
 for both sides.
 
 The per-cycle stow rate does not improve. At the read's flags it reads 0.449 for the
-bottom-open descend against 0.506 for the fixed teacher, as cycles flagged successful over
-cycles logged. The matched model reads 0.405 at the read's flags and 0.573 without the band. So
-the matched model buys its yield through more cycles at the read's flags, 113 against 87, and
-not through a better cycle. An earlier draft of this report said the per-cycle rate was
+bottom-open descend against 0.506 for the fixed teacher. That rate divides the successful
+entries of the logged `cycle_outcomes` list by the length of that list, which is 78 and 85. The
+matched model reads 0.405 at the read's flags and 0.573 without the band. So the matched model
+buys its yield through more cycles at the read's flags, 113 against 87, and not through a
+better cycle. Those two cycle counts come from `extra_stats.cycles`, a different field. It runs
+one to two higher per group than the length of the outcome list. The two denominators differ,
+and no reading here mixes them. An earlier draft of this report said the per-cycle rate was
 unchanged at 0.53 against 0.56. That pair does not reproduce from the archived logs and is
 withdrawn.
 
@@ -433,7 +438,7 @@ to fit the data.
 
 | reading | verdict | evidence |
 | --- | --- | --- |
-| R-A, the tray can grow | not fired | The first clause holds: experiment 0 returns an any-heading square of 0.210 m, which is 80 mm wider than 0.13 m. The second clause fails. `wall_blocked` reads 30.8 to 31.6 of 50 at every candidate against 32.0 at the current tray, nowhere near the 0.10 the reading asked for. |
+| R-A, the tray can grow | not fired | The first clause holds: experiment 0 returns an any-heading square of 0.210 m, which is 80 mm wider than 0.13 m. The second clause fails. `wall_blocked` reads 30.8 to 31.6 of 50 at every candidate against 32.0 at the current tray, nowhere near the 0.10 the reading asked for. The reading's own 0.40 baseline is off too, because the sweep measures 0.64 at the current tray. The verdict does not change. |
 | R-B, the tray cannot grow | not fired | Rectangles wider than 0.15 m in the short axis do exist inside the band: 0.160 m overall and 0.210 m square, both at the any-heading cut. |
 | R-C, the pick primitive works | not fired | The first half fired: the wall table stows a lone brick at 20 mm from a wall, past the reading's 40 mm bar. The second half asked for at least 25 of 50 on the heap the fixed teacher stowed 15 of. The matched run returns 15 of 50 there at the read's flags and 18 of 50 without the hover jitter band. |
 | R-D, neither lever alone is enough | fired on its literal terms, conclusion does not follow | R-A failed and R-C failed, which is exactly what R-D asked for. See the note below. |
@@ -448,10 +453,11 @@ to fit the data.
 R-D needs a note, because its literal firing is misleading. R-D was written to mean that both
 levers had a fair test and both lost. R-C did not give the primitive a fair test. It ran a
 changed descend against an unchanged selection model, so the teacher rejected the grasps the
-changed descend makes. R-J is the fair test, and it fires. The report therefore does not draw
-R-D's conclusion. That conclusion sends the owner to a smaller K, a different part catalog or a
-different task. R-D stands as written and as fired, and the conclusion it points at does not
-follow from this data.
+changed descend makes. R-J is the fair test, and it fires by 2 parts of 150 at the corpus
+flags. What removes R-D's premise is that R-C tested an unmatched selection model, not the size
+of that win. The report therefore does not draw R-D's conclusion. That conclusion sends the
+owner to a smaller K, a different part catalog or a different task. R-D stands as written and
+as fired, and the conclusion it points at does not follow from this data.
 
 R-E needs a note too. Its wording asks experiment 1 for a drop band and settle with `outside`
 under 2 of 50 and `stacked` no higher than the current cell. Twelve cells meet it. Every one of
@@ -501,7 +507,8 @@ Each item below is a finding the design did not pre-register.
   width. 17.5 mm is the measured held gap for a 15.8 mm part. It is pessimistic for narrower
   parts and optimistic for wider ones. Near the 45 mm maximum grasp width the true held gap is
   about 26.5 mm. The gain spreads over all four part families, so no single size carries it. A
-  width-aware model is the honest next version, and its yield is unmeasured.
+  width-aware model is the honest next version, and its yield is unmeasured. The 17.5 mm value
+  is a probe setting and not a design. No code under `core/` carries it.
 - Three heaps are three heaps. 45 of 150 against 43 of 150 is a margin of 2 parts, which three
   episodes cannot resolve. The report states the direction and not a significant difference.
   The fixed teacher's own read over 121 episodes is 0.2676 and its three-heap read is 0.287.
@@ -544,7 +551,9 @@ Option 1C, do both. Cost: the sum of the two. Buys: unmeasured. No sweep cell ra
 with the matched primitive.
 
 Option 1D, do neither and change the task. Cost: the phase A design changes. Buys: nothing
-measured here. R-D pointed at this option and R-J removed its premise.
+measured here. R-D pointed at this option. Its premise fails for one reason only: R-C tested a
+primitive whose selection model was not matched to it. The size of R-J's win is not that
+reason.
 
 Option 1E, open the primitive and measure the hover jitter band with it. Cost: option 1A plus a
 band ladder, which is three heaps per rung. Buys: the one number this round does not supply,
@@ -602,9 +611,9 @@ uv run python scripts/heap_sweep_read.py ~/data/maker-arm-ms6/d/sweep/samples.js
 
 # Experiment 2, the lone-part wall table and its shipped-descend control.
 MUJOCO_GL=egl uv run python scripts/mj_probe_bottom_pick.py --mode wall_table \
-    --out_dir ~/data/maker-arm-ms6/d/probe/wall
+    --out_dir ~/data/maker-arm-ms6/d/probe/wall_table
 MUJOCO_GL=egl uv run python scripts/mj_probe_bottom_pick.py --mode wall_table --shipped \
-    --out_dir ~/data/maker-arm-ms6/d/probe/wall_control
+    --out_dir ~/data/maker-arm-ms6/d/probe/wall_table
 
 # The driven reach band, far side at the script's own grid, then the near side.
 MUJOCO_GL=egl uv run python scripts/mj_probe_bottom_pick.py --mode reach_band \
