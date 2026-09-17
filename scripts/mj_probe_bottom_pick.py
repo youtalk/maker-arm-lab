@@ -619,9 +619,19 @@ def parse_args(argv=None) -> argparse.Namespace:
     if not args.radii_m or not args.azimuths_deg:
         parser.error("--radii_mm and --azimuths_deg must each name at least one value")
     if args.mode == "heap":
-        # The read is pre-registered, so its heap is not a flag (Task 3 brief, step 3).
-        args.heap_k, args.parts_split = HEAP_K, "heldout"
-        args.run_seed, args.layout_seed = HEAP_RUN_SEED, HEAP_LAYOUT_SEED
+        # The pre-registered read (Task 3 brief, step 3) is the DEFAULT heap, not a pin. These
+        # four were overwritten unconditionally, so three runs at three seed pairs were three
+        # copies of heap 0, down to the push_parts list. Accepting a flag and then discarding
+        # it is worse than either refusing it or honoring it, so a flag the caller passed wins.
+        given = list(sys.argv[1:] if argv is None else argv)
+        for flag, value in (
+            ("--heap_k", HEAP_K),
+            ("--parts_split", "heldout"),
+            ("--run_seed", HEAP_RUN_SEED),
+            ("--layout_seed", HEAP_LAYOUT_SEED),
+        ):
+            if not any(a == flag or a.startswith(flag + "=") for a in given):
+                setattr(args, flag[2:], value)
     return args
 
 

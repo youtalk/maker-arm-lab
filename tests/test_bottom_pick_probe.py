@@ -150,6 +150,28 @@ def test_the_parser_honors_the_grid_flags_and_defaults_to_the_designs_grid():
     assert grid[0] == (0.04, 0) and grid[-1] == (0.20, 40)
 
 
+def test_the_heap_seeds_are_defaults_and_a_passed_seed_survives():
+    module = _load(SCRIPT)
+    base = ["--mode", "heap", "--out_dir", "/tmp/x"]
+
+    default = module.parse_args(base)
+    assert (default.run_seed, default.layout_seed) == (20261000, 20261010)
+    assert (default.run_seed, default.layout_seed) == (
+        module.HEAP_RUN_SEED,
+        module.HEAP_LAYOUT_SEED,
+    )
+    assert default.heap_k == module.HEAP_K and default.parts_split == "heldout"
+
+    # A flag the caller passes is honored, or three seed pairs are three copies of heap 0.
+    passed = module.parse_args(base + ["--run_seed", "20261001", "--layout_seed", "20261011"])
+    assert (passed.run_seed, passed.layout_seed) == (20261001, 20261011)
+    assert passed.heap_k == module.HEAP_K  # untouched flags keep the read's default
+
+    equals_form = module.parse_args(base + ["--run_seed=20261002", "--heap_k=12"])
+    assert equals_form.run_seed == 20261002 and equals_form.heap_k == 12
+    assert equals_form.layout_seed == module.HEAP_LAYOUT_SEED
+
+
 def test_a_point_outside_the_solvers_reach_reads_no_solution_not_lost():
     module = _load(SCRIPT)
     unplanned = [
