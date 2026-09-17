@@ -18,9 +18,14 @@ the widest one the pickable set admits. Each is reported with its interior size,
 its four corners' radii from the arm base and its area against the current tray's. This sweep
 is a solver read (``solver_read_only: true``): ``layout.SCATTER_MAX_RADIUS`` is a driven-
 tracking measurement that a solver query cannot re-derive, so every rectangle also carries
-``within_scatter_max_radius``, and only the ``admissible`` group (every corner inside that
-bound) is fit to size a tray. The out-of-band rectangles stay in the report, clearly labelled,
-because a separate driven measurement of the band may widen the bound.
+``within_scatter_max_radius``. Only the two ``admissible_*`` groups are fit to size a tray, and
+each is searched directly on a mask already clipped to that bound -- never by filtering the
+unrestricted search's candidates afterward, because ``maximal_rectangles`` does not enumerate
+every sub-rectangle such a filter would need to recover. ``admissible_all_headings`` clips the
+all-heading ``pickable`` mask; ``admissible_any_heading`` clips the weaker ``partial`` mask
+(some heading converges), matching the oracle's own grasp ranking, which only needs its best
+heading to clear, not every one. The out-of-band, top-level rectangles stay in the report,
+clearly labelled, because a separate driven measurement of the band may widen the bound.
 
     .venv/bin/python scripts/reach_map.py --out /tmp/reach.json --step 0.02
 
@@ -53,12 +58,20 @@ from maker_arm_lab.core.parts import BRICK_HEIGHT
 # oracle's rig (``oracle_runtime.LEAN_AZIMUTH``) commands the same value for every descend.
 LEAN_AZIMUTH = 0.0
 
-ADMISSIBLE_NOTE = (
-    "Only the rectangles under 'admissible' have every corner inside "
-    "layout.SCATTER_MAX_RADIUS. That bound is a driven-tracking measurement, and the comment "
-    "above it in core/layout.py says a solver query cannot re-derive it. Do not size a tray "
-    "from the top-level rectangles until a driven read across the band says the bound is "
-    "wider."
+ADMISSIBLE_ALL_HEADINGS_NOTE = (
+    "Only the rectangles under 'admissible_all_headings' have every point pickable at every "
+    "heading and every corner inside layout.SCATTER_MAX_RADIUS. That bound is a driven-tracking "
+    "measurement, and the comment above it in core/layout.py says a solver query cannot "
+    "re-derive it. Do not size a tray from the top-level rectangles until a driven read across "
+    "the band says the bound is wider."
+)
+
+ADMISSIBLE_ANY_HEADING_NOTE = (
+    "The rectangles under 'admissible_any_heading' relax the pickable test to at least one "
+    "converging heading per point, not every heading, because the real teacher ranks the "
+    "grasps a part offers and takes the best one that clears. Every corner still sits inside "
+    "layout.SCATTER_MAX_RADIUS. A tray sized from this group can still miss a grasp at some "
+    "azimuths, since only one heading was tried, not all of them."
 )
 
 
@@ -163,16 +176,49 @@ def rectangle_info(
     }
 
 
-def best_rectangles(mask: list[list[bool]], xs: list[float], ys: list[float], step: float) -> dict:
+def clip_to_scatter_radius(
+    mask: list[list[bool]], xs: list[float], ys: list[float], step: float
+) -> list[list[bool]]:
+    """``mask`` restricted to points whose own radius from the arm base is inside
+    ``layout.SCATTER_MAX_RADIUS``. The rectangle search then runs on this clipped mask directly,
+    so an in-band rectangle is a candidate even when it is a proper sub-rectangle of a larger,
+    out-of-band run -- unlike filtering ``maximal_rectangles``'s own output, which only ever
+    sees the candidates that search produced from the unclipped mask.
+
+    This checks the grid point's own radius, not the padded corner ``rectangle_info`` reports
+    (that pad is at most ``step / 2`` per side, half a grid cell): a rectangle built from this
+    clipped mask can, after padding, read a hair past the bound at a point already this close
+    to it. That is a discretization artifact of the grid, the same one the pre-fix filter also
+    carried, not a new one this fix introduces, and it is not the failure Finding 3 describes.
+    """
+    return [
+        [pickable and math.hypot(x, y) <= layout.SCATTER_MAX_RADIUS for x, pickable in zip(xs, row)]
+        for y, row in zip(ys, mask)
+    ]
+
+
+def best_rectangles(
+    mask: list[list[bool]],
+    xs: list[float],
+    ys: list[float],
+    step: float,
+    any_heading_mask: list[list[bool]] | None = None,
+) -> dict:
     """The counting below works in grid-cell counts (``col1 - col0 + 1``, and so on), which is
     ratio- and area-equivalent to real units up to the constant ``step`` factor; the padding
     that turns a count into a physical size (see ``rectangle_info``) is applied only when a
     winning rectangle is reported.
 
-    Every pick is reported twice: at the top level over every candidate (some may reach past
-    ``layout.SCATTER_MAX_RADIUS``, a driven-tracking bound this solver-only sweep cannot
-    re-derive) and under ``admissible`` over only the candidates whose every corner is inside
-    that bound. ``ADMISSIBLE_NOTE`` explains why in the JSON itself, not only in this comment.
+    Every pick is reported at the top level over every candidate in ``mask`` (some may reach
+    past ``layout.SCATTER_MAX_RADIUS``, a driven-tracking bound this solver-only sweep cannot
+    re-derive), and again under two admissible groups. Each admissible group runs the
+    rectangle search directly on a mask already clipped by ``clip_to_scatter_radius`` --
+    never by filtering the unrestricted search's own candidates, because ``maximal_rectangles``
+    does not enumerate every sub-rectangle such a filter would need to recover.
+    ``admissible_all_headings`` clips ``mask`` itself. ``admissible_any_heading`` clips
+    ``any_heading_mask`` when the caller passes one, the weaker criterion a real teacher needs:
+    it ranks the grasps a part offers and takes the best one that clears, not every heading.
+    Both carry a ``note`` explaining this in the JSON itself, not only in this comment.
     """
     empty = {"overall": None, "current_tray_ratio": None, "square": None, "widest": None}
 
@@ -207,12 +253,23 @@ def best_rectangles(mask: list[list[bool]], xs: list[float], ys: list[float], st
             "widest": rectangle_info(widest, xs, ys, step),
         }
 
-    candidates = maximal_rectangles(mask)
-    result = pick(candidates)
-    admissible_candidates = [
-        r for r in candidates if rectangle_info(r, xs, ys, step)["within_scatter_max_radius"]
-    ]
-    result["admissible"] = {**pick(admissible_candidates), "note": ADMISSIBLE_NOTE}
+    result = pick(maximal_rectangles(mask))
+
+    all_headings_candidates = maximal_rectangles(clip_to_scatter_radius(mask, xs, ys, step))
+    result["admissible_all_headings"] = {
+        **pick(all_headings_candidates),
+        "note": ADMISSIBLE_ALL_HEADINGS_NOTE,
+    }
+
+    if any_heading_mask is not None:
+        any_heading_candidates = maximal_rectangles(
+            clip_to_scatter_radius(any_heading_mask, xs, ys, step)
+        )
+        result["admissible_any_heading"] = {
+            **pick(any_heading_candidates),
+            "note": ADMISSIBLE_ANY_HEADING_NOTE,
+        }
+
     return result
 
 
@@ -248,7 +305,9 @@ def run(args: argparse.Namespace) -> dict:
         "partial": n_partial,
         "none": len(points) - n_pickable - n_partial,
     }
-    rectangles = best_rectangles(pickable_mask, xs, ys, args.step)
+    # partial_mask already stores "at least one heading converges" (any(converged)), a superset
+    # of pickable_mask, so it is exactly the at-least-one-heading criterion best_rectangles needs.
+    rectangles = best_rectangles(pickable_mask, xs, ys, args.step, any_heading_mask=partial_mask)
     return {
         "solver_read_only": True,
         "grid": {

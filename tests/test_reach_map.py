@@ -46,7 +46,8 @@ def test_best_rectangles_reports_the_four_requested_picks():
         assert picks[key]["area_m2"] > 0.0
         assert picks[key]["within_scatter_max_radius"] is True  # this mask sits near the origin
     assert picks["widest"]["size_m"][0] >= picks["square"]["size_m"][0]
-    assert picks["admissible"]["overall"] == picks["overall"]  # nothing here is out of band
+    # nothing here is out of band, so the admissible group matches the unrestricted one
+    assert picks["admissible_all_headings"]["overall"] == picks["overall"]
 
 
 def test_rectangle_info_flags_within_scatter_max_radius():
@@ -64,8 +65,91 @@ def test_best_rectangles_admissible_group_excludes_out_of_band_picks():
     mask = [[True, True], [True, True]]
     picks = reach.best_rectangles(mask, [0.25, 0.35], [0.15, 0.25], step=0.05)
     assert picks["overall"]["within_scatter_max_radius"] is False
-    assert picks["admissible"]["overall"] is None
-    assert picks["admissible"]["note"] == reach.ADMISSIBLE_NOTE
+    assert picks["admissible_all_headings"]["overall"] is None
+    assert picks["admissible_all_headings"]["note"] == reach.ADMISSIBLE_ALL_HEADINGS_NOTE
+
+
+def test_admissible_all_headings_recovers_an_in_band_sub_rectangle_of_a_larger_out_of_band_run():
+    """maximal_rectangles's own docstring says it does not enumerate every sub-rectangle a run
+    contains, so filtering its output after the fact can miss an in-band rectangle that is a
+    proper sub-rectangle of a larger, out-of-band one. This mask reproduces exactly that shape:
+    every row is pickable out to x=0.15 (a plain solver read, radius-unaware, uniform across all
+    three rows), so the only rectangle maximal_rectangles(mask) can ever build from the full
+    block is the whole 3-row slab. That slab pokes past layout.SCATTER_MAX_RADIUS at its outer
+    rows (y = +-0.278), so every candidate the old post-hoc filter sees fails, even at column
+    width zero. The middle row alone (y = 0.0) stays in band across the full column width: a
+    proper sub-rectangle of the out-of-band slab that the old filter could never reach.
+    """
+    reach = _load(REACH)
+    xs = [0.0, 0.05, 0.10, 0.15]
+    ys = [-0.278, 0.0, 0.278]
+    mask = [[True, True, True, True] for _ in ys]
+    picks = reach.best_rectangles(mask, xs, ys, step=0.05)
+
+    # The pre-fix approach: search the raw mask, then filter its candidates by radius. It can
+    # only pick among the candidates maximal_rectangles(mask) already produced, and every one of
+    # those spans all three rows, so every one of them pokes past the bound at y = +-0.278.
+    filtered_best_area = 0.0
+    for rect in reach.maximal_rectangles(mask):
+        info = reach.rectangle_info(rect, xs, ys, step=0.05)
+        if info["within_scatter_max_radius"]:
+            filtered_best_area = max(filtered_best_area, info["area_m2"])
+    assert filtered_best_area == 0.0  # the old filter recovers nothing at all from this mask
+
+    admissible = picks["admissible_all_headings"]["overall"]
+    assert admissible is not None
+    assert admissible["within_scatter_max_radius"] is True
+    assert admissible["area_m2"] > filtered_best_area  # the fixed search finds strictly more
+    assert admissible["y_range"] == [-0.025, 0.025]  # the middle row only, padded by step / 2
+    assert admissible["x_range"] == [-0.025, 0.175]  # the full column width, padded by step / 2
+
+
+def test_current_tray_fits_the_weakest_admissible_criterion_but_not_the_strict_one():
+    """The tray sits inside SCATTER_MAX_RADIUS by construction (tests/test_layout.py) and its
+    four corners are pickable at every heading (test_current_tray_corners_are_pickable_by_the_
+    real_solver). A single admissible rectangle needs every point along its edges to pass the
+    same test, not only the four corners, so this runs the real solver over the tray footprint
+    and checks which admissible group actually contains it as one contiguous rectangle.
+
+    Do not read this test as a licence to weaken a criterion until it passes: the two asserts
+    below are what the real solver reports on this grid. admissible_all_headings does not cover
+    the tray, and only the weaker admissible_any_heading group does.
+    """
+    reach = _load(REACH)
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    args = reach.parse_args(
+        [
+            "--x_min",
+            str(x0),
+            "--x_max",
+            str(x1),
+            "--y_min",
+            str(y0),
+            "--y_max",
+            str(y1),
+            "--step",
+            "0.02",
+            "--headings",
+            "8",
+            "--out",
+            "/dev/null",  # unused: run() never touches args.out, only main() writes it
+        ]
+    )
+    result = reach.run(args)
+
+    def covers_tray(rect):
+        if rect is None:
+            return False
+        rx0, rx1 = rect["x_range"]
+        ry0, ry1 = rect["y_range"]
+        return rx0 <= x0 and rx1 >= x1 and ry0 <= y0 and ry1 >= y1
+
+    all_headings = result["rectangles"]["admissible_all_headings"]["overall"]
+    any_heading = result["rectangles"]["admissible_any_heading"]["overall"]
+    assert not covers_tray(all_headings), (
+        "admissible_all_headings now covers the tray -- update this test"
+    )
+    assert covers_tray(any_heading), "not even admissible_any_heading covers the tray"
 
 
 def test_reach_ok_token_and_json_on_a_tiny_grid(tmp_path, capsys):
