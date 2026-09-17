@@ -146,24 +146,34 @@ the log's rounding. Comparing this mode's episode against the inspection's 15 of
 meaningful with it on. It has no "off" switch, because the mode exists to reproduce the read.
 """
 
-HEAP_READ_FLAGS = (
+HEAP_PINS = (
     ("--heap_k", HEAP_K),
     ("--parts_split", "heldout"),
     ("--run_seed", HEAP_RUN_SEED),
     ("--layout_seed", HEAP_LAYOUT_SEED),
     ("--episode_draws", HEAP_EPISODE_DRAWS),
+)
+"""WHICH HEAP the episode is. Applied whatever ``--no_read_flags`` says.
+
+These five decide the identity of the heap rather than how it is driven, and the archived
+no-band runs are runs of THIS heap: the merged report's reproduction block
+(``docs/ms6-lever-verification.md``) gives ``--mode heap --no_video --no_read_flags ...`` as
+the whole command for ``minimal_matched_0`` and ``minimal_unmatched_0``. Skipping these along
+with the read flags would leave ``heap_k`` at 0 and refuse to start, so those commands must
+keep them.
+"""
+
+HEAP_READ_FLAGS = (
     ("--nearest_first_pick_order", True),
     ("--frame_jitter", True),
     ("--hover_jitter_min", HEAP_HOVER_JITTER[0]),
     ("--hover_jitter_max", HEAP_HOVER_JITTER[1]),
 )
-"""The read's flags, as DEFAULTS for the heap mode. A flag the caller passed always wins.
+"""HOW THE CORPUS DRIVES that heap, and exactly what ``--no_read_flags`` skips.
 
-The heap mode's whole job is to reproduce the inspection's K = 50 read, and a default it does
-not set is a configuration difference nobody sees. Every entry here was a hole someone fell
-into: the seeds made three heaps into one, `episode_draws` made the arrangement a different
-arrangement, and the jitter band and the pick order made the yield incomparable to the
-baseline it was reported against.
+A default the heap mode does not set is a configuration difference nobody sees. Left at
+argparse's own values these made the yield incomparable to the baseline it was reported
+against: heap 0 with the matched model reads 15 with this band and 18 without it.
 """
 
 
@@ -732,10 +742,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--no_read_flags",
         action="store_true",
-        help="heap mode only: skip the read's default flags entirely and leave every argparse "
-        "default alone, so the heap's own flags must then be given explicitly. Needed to "
-        "reproduce the archived runs that were measured WITHOUT the hover jitter band: "
-        "~/data/maker-arm-ms6/d/probe/iso_nojitter_* and minimal_matched_0.",
+        help="heap mode only: skip the read's driving flags -- the hover jitter band, "
+        "--nearest_first_pick_order and --frame_jitter -- leaving them at their argparse "
+        "defaults. It does NOT skip the five that fix which heap this is (--heap_k, "
+        "--parts_split, --run_seed, --layout_seed, --episode_draws), so the command stays a "
+        "one-liner. Needed to reproduce the archived runs measured without the band: "
+        "~/data/maker-arm-ms6/d/probe/iso_nojitter_*, minimal_matched_0 and "
+        "minimal_unmatched_0.",
     )
     parser.add_argument(
         "--matched_clearance",
@@ -765,20 +778,18 @@ def parse_args(argv=None) -> argparse.Namespace:
     args.azimuths_deg = [int(a) for a in args.azimuths_deg.split(",")]
     if not args.radii_m or not args.azimuths_deg:
         parser.error("--radii_mm and --azimuths_deg must each name at least one value")
-    if args.mode == "heap" and not args.no_read_flags:
-        # The pre-registered read (Task 3 brief, step 3) is the DEFAULT heap, not a pin. These
+    if args.mode == "heap":
+        # The pre-registered read (Task 3 brief, step 3) is a set of DEFAULTS, not a pin. These
         # were once overwritten unconditionally, so three runs at three seed pairs were three
         # copies of heap 0, down to the push_parts list. Accepting a flag and then discarding
         # it is worse than either refusing it or honoring it, so a flag the caller passed wins.
         given = list(sys.argv[1:] if argv is None else argv)
-        for flag, value in HEAP_READ_FLAGS:
+        defaults = HEAP_PINS if args.no_read_flags else HEAP_PINS + HEAP_READ_FLAGS
+        for flag, value in defaults:
             if not any(a == flag or a.startswith(flag + "=") for a in given):
                 setattr(args, flag[2:], value)
     if args.mode == "heap" and args.heap_k <= 0:
-        parser.error(
-            "--heap_k must be positive for the heap mode; --no_read_flags leaves every "
-            "argparse default alone, so it must be given with the heap's own flags"
-        )
+        parser.error("--heap_k must be positive for the heap mode")
     return args
 
 

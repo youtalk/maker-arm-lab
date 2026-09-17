@@ -202,24 +202,62 @@ def test_a_caller_passed_read_flag_still_wins():
     assert equals_form.hover_jitter_min == module.HEAP_HOVER_JITTER[0]
 
 
-def test_no_read_flags_restores_every_argparse_default():
+def test_no_read_flags_skips_the_driving_flags_and_keeps_the_pins():
     module = _load(SCRIPT)
-    # The heap's own flags must then be given, which is what the flag means.
-    args = module.parse_args(
-        ["--mode", "heap", "--out_dir", "/tmp/x", "--no_read_flags", "--heap_k", "50"]
-    )
+    # The merged report gives this as the WHOLE command for the archived no-band runs, so it
+    # has to start: the five pins say which heap this is and survive the flag.
+    args = module.parse_args(["--mode", "heap", "--out_dir", "/tmp/x", "--no_read_flags"])
     assert args.nearest_first_pick_order is False
     assert args.frame_jitter is False
     assert (args.hover_jitter_min, args.hover_jitter_max) == (0.0, 0.0)
-    assert args.episode_draws is False
-    assert (args.run_seed, args.layout_seed) == (0, 0)
-    assert args.parts_split == "train"
+    assert args.heap_k == module.HEAP_K and args.parts_split == "heldout"
+    assert (args.run_seed, args.layout_seed) == (module.HEAP_RUN_SEED, module.HEAP_LAYOUT_SEED)
+    assert args.episode_draws is module.HEAP_EPISODE_DRAWS is True
+    assert module.resolved_config(args)["read_flags"] is False
+    # The two groups are disjoint and the pins are not in the skippable one.
+    pinned = {flag for flag, _ in module.HEAP_PINS}
+    assert pinned.isdisjoint(flag for flag, _ in module.HEAP_READ_FLAGS)
+    assert "--episode_draws" in pinned and "--hover_jitter_min" not in pinned
 
 
-def test_the_heap_mode_refuses_a_zero_k_rather_than_crashing_later():
+def test_a_caller_passed_flag_still_wins_under_no_read_flags():
+    module = _load(SCRIPT)
+    args = module.parse_args(
+        ["--mode", "heap", "--out_dir", "/tmp/x", "--no_read_flags", "--run_seed=20261002"]
+    )
+    assert args.run_seed == 20261002
+    assert args.layout_seed == module.HEAP_LAYOUT_SEED
+
+
+def test_the_heap_mode_refuses_a_non_positive_k():
     module = _load(SCRIPT)
     with pytest.raises(SystemExit):
-        module.parse_args(["--mode", "heap", "--out_dir", "/tmp/x", "--no_read_flags"])
+        module.parse_args(["--mode", "heap", "--out_dir", "/tmp/x", "--heap_k", "0"])
+
+
+def test_the_three_verified_commands_resolve_as_measured():
+    module = _load(SCRIPT)
+    out = ["--out_dir", "/tmp/x"]
+
+    # matched_0, 15 stowed: the read's flags, matched clearance.
+    bare = module.parse_args(["--mode", "heap", *out, "--matched_clearance"])
+    assert (bare.hover_jitter_min, bare.hover_jitter_max) == module.HEAP_HOVER_JITTER
+    assert bare.matched_clearance is True and bare.heap_k == module.HEAP_K
+
+    # minimal_matched_0 / iso_nojitter_0, 18 stowed: same heap, no band.
+    no_band = module.parse_args(["--mode", "heap", *out, "--no_read_flags", "--matched_clearance"])
+    assert (no_band.hover_jitter_min, no_band.hover_jitter_max) == (0.0, 0.0)
+    assert no_band.matched_clearance is True and no_band.heap_k == module.HEAP_K
+
+    # minimal_unmatched_0, 10 stowed: same heap, no band, shipped clearance model.
+    unmatched = module.parse_args(["--mode", "heap", *out, "--no_read_flags"])
+    assert (unmatched.hover_jitter_min, unmatched.hover_jitter_max) == (0.0, 0.0)
+    assert unmatched.matched_clearance is False and unmatched.heap_k == module.HEAP_K
+
+    # All three are the same heap; only the driving differs.
+    identity = ("heap_k", "parts_split", "run_seed", "layout_seed", "episode_draws")
+    for name in identity:
+        assert getattr(bare, name) == getattr(no_band, name) == getattr(unmatched, name), name
 
 
 def test_the_resolved_configuration_is_reported():
