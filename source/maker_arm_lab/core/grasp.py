@@ -2,11 +2,16 @@
 
 Torch and stdlib only. A part pose gives three body axes in the world. Every axis near the
 horizontal is a closing axis: the jaws close across the part's size along it, at that axis's
-heading. The approach is from above through the runtime's near-level descend ladder, so no
-tilt is chosen here. Clearance is measured with two virtual jaw boxes against the footprint
-of every other part that stands taller than the finger tips, and against the tray walls.
-Parts below the tips are the surface the descend stalls on, not obstacles. Grasps rank by
-height, then clearance.
+heading. The approach is from above with the jaws fully open, so what the descend has to
+clear is not the part's neighborhood but the two LANDING spots of the open jaws: the finger
+tips come down ``OPEN_HALF_GAP`` out from the part center on both sides of the closing axis.
+The closing stroke then sweeps everything between a tip and the part toward the part, which
+the physics tolerates (a brick target is stowed with a brick or a plate in the sweep band,
+lone-part reads 2026-09-16). A tray wall under a landing spot is a hard stop: a jaw whose
+inner face lands past the wall's inner face never picks, one that lands inside picks even
+when it brushes the wall top (wall reads 2026-09-16). A standing neighbor under a landing
+spot stalls the descend early. Grasps rank by height band, then by how many standing
+neighbors the stroke sweeps, then by clearance.
 """
 
 from __future__ import annotations
@@ -23,38 +28,31 @@ from maker_arm_lab.core.quat import quat_apply
 
 AXIS_MAX_TILT_RAD = math.radians(15.0)
 """A body axis this far from horizontal still counts as a closing axis."""
-CLEARANCE_MIN = 0.003
-"""Jaw-box clearance (m) a grasp needs to be selected."""
-# The virtual jaw box, in the grasp frame: x along the closing axis, origin at the part
-# center. The finger body is 30 mm along jaw travel, the y-span of the collision box
-# robots/frames.py quotes (-0.0303 to +0.0302 m). Its footprint is what a neighbor can foul.
-JAW_BOX_THICKNESS = 0.030
-JAW_BOX_HALF_FACE = 0.020
-"""Half the jaw plate's face, perpendicular to the closing axis.
+CLEARANCE_MIN = 0.0
+"""Landing clearance (m) a grasp needs to be selected.
 
-The vendored URDF's jaw meshes (``part_034_solid_034.stl``, ``part_041_solid_041.stl``)
-measure at most 17.07 x 40.52 x 22.50 mm, so the plate's half extent is about 20 mm. The
-MS6 design table's 0.0625 m modelled a 125 mm face, which no jaw on this arm has: against
-the 130 mm tray interior it left only a 10 mm band of x pickable for a y-closing grasp.
-Corrected on the owner's decision, 2026-09-16, with the measurement above as the authority.
+The model's own boundary already matches the physics: a jaw whose tip lands 0.6 mm inside
+the wall face picks, one that lands 2.6 mm past it does not (wall reads, 2026-09-16).
 """
-# How far under the pick point the finger tips reach at the shipped pick offset: 34.2 mm of
-# tip reach against a 32.1 mm offset (robots.frames), rounded up. A neighbor whose top is under
-# this depth is the surface the descend stalls on, not an obstacle the jaws have to clear.
-TIP_BELOW_CENTER = 0.003
+# The open jaw, measured in the MuJoCo model in the grasp frame (2026-09-16). Each finger's
+# collision hull ends in a flat tip 8 mm across the face and 2 mm along jaw travel, with a
+# vertical inner face ``OPEN_HALF_GAP`` from the tool axis when the jaws are open. Above the
+# tip the hull widens: about 0.46 mm of thickness and 0.32 mm of half face per mm of height.
+OPEN_HALF_GAP = 0.0524
+TIP_THICKNESS = 0.002
+TIP_HALF_FACE = 0.004
+TIP_THICKNESS_PER_M = 0.46
+TIP_HALF_FACE_PER_M = 0.32
+# The jaws must reach this far down the target's side faces to hold it. A lone plate picked
+# with 2.4 mm of overlap is pressed into the desk and lost, a brick with 7 mm is held
+# (lone-part reads, 2026-09-16). A neighbor whose top is under the target's top by more than
+# this is the surface the descend stalls on, not an obstacle the jaws have to clear.
+MIN_GRIP_OVERLAP = 0.005
+HEIGHT_BAND = 0.005
+"""Parts within one band rank as equally high; the desk's bricks and plates tie."""
 PUSH_CELL_M = 0.05
 """Grid cell of the failure memory and of the densest-cell push (design 7.2)."""
 PUSH_HALF_LENGTH_M = 0.04
-WALL_SPHERE_SPACING = 0.005
-"""Spacing (m) between the discs ``tray_wall_obstacles`` lines each tray wall with.
-
-Each disc's radius has to cover half the spacing, or the row would leave gaps between
-discs, so this spacing sets how much the modelled wall is inflated over the real one.
-0.005 matches ``layout.TRAY_WALL`` (the real wall's thickness) and gives a radius of
-``0.5 * hypot(0.005, 0.005)`` ~= 3.5 mm, a reasonable model of a 5 mm wall. The previous
-0.02 gave a 10.3 mm radius, inflating each wall by about 10 mm on a side and costing
-roughly a fifth of the tray's pickable width.
-"""
 
 
 @dataclass(frozen=True)
@@ -63,8 +61,10 @@ class Grasp:
     heading: float  # world heading of the closing axis, rad
     width: float  # part size along the closing axis, m
     half_height: float  # half the part size along its most vertical axis, m
-    clearance: float  # m to the nearest neighbor surface, nan until ranked
+    clearance: float  # m from the landing tips to the nearest wall or standing neighbor
     height: float  # part center z, m
+    swept: int = 0  # standing neighbors the closing stroke pushes toward the part
+    wall: float = math.inf  # m from the landing tips to the nearest tray wall
 
 
 def body_axes_world(quat: torch.Tensor) -> torch.Tensor:
@@ -95,7 +95,8 @@ def neighbor_extents(sizes: torch.Tensor, quat: torch.Tensor) -> tuple[torch.Ten
     """(B,) horizontal radius and (B,) vertical half extent of each part's world-aligned box.
 
     The world-aligned half extents are ``0.5 * |R|^T size``; the radius circumscribes the box's
-    footprint, so a part's rotation about z never matters to the check.
+    footprint. The radius is the cheap lower bound ``jaw_clearance`` screens neighbors with
+    before it measures the exact footprint.
     """
     rxy, hz = [], []
     for b in range(sizes.shape[0]):
@@ -105,37 +106,150 @@ def neighbor_extents(sizes: torch.Tensor, quat: torch.Tensor) -> tuple[torch.Ten
     return torch.tensor(rxy), torch.tensor(hz)
 
 
+_CORNERS = torch.tensor(
+    [[sx, sy, sz] for sx in (-0.5, 0.5) for sy in (-0.5, 0.5) for sz in (-0.5, 0.5)]
+)
+
+
+def footprint(
+    size: torch.Tensor, pos: torch.Tensor, quat: torch.Tensor
+) -> list[tuple[float, float]]:
+    """The part's top-down footprint: the convex hull of its eight box corners, world xy."""
+    corners = (_CORNERS * size) @ body_axes_world(quat) + pos
+    return convex_hull([(float(x), float(y)) for x, y in corners[:, :2].tolist()])
+
+
+def convex_hull(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Andrew's monotone chain, counterclockwise, no collinear points."""
+    pts = sorted(set(points))
+    if len(pts) <= 2:
+        return pts
+
+    def half(seq):
+        out: list[tuple[float, float]] = []
+        for p in seq:
+            while len(out) >= 2 and _cross(out[-2], out[-1], p) <= 0:
+                out.pop()
+            out.append(p)
+        return out[:-1]
+
+    return half(pts) + half(pts[::-1])
+
+
+def _cross(o, a, b) -> float:
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+
+def _point_segment_distance(p, a, b) -> float:
+    ax, ay = b[0] - a[0], b[1] - a[1]
+    length2 = ax * ax + ay * ay
+    t = (
+        0.0
+        if length2 == 0.0
+        else max(0.0, min(1.0, ((p[0] - a[0]) * ax + (p[1] - a[1]) * ay) / length2))
+    )
+    return math.hypot(p[0] - a[0] - t * ax, p[1] - a[1] - t * ay)
+
+
+def polygon_distance(a: list[tuple[float, float]], b: list[tuple[float, float]]) -> float:
+    """Signed distance between two convex polygons: the gap, or minus the penetration depth."""
+    # Separating axes: every edge normal of both polygons. The largest signed separation
+    # over the axes is the penetration depth when they overlap; positive means they do not.
+    worst = -math.inf
+    for poly in (a, b):
+        n = len(poly)
+        for k in range(n):
+            ex, ey = poly[(k + 1) % n][0] - poly[k][0], poly[(k + 1) % n][1] - poly[k][1]
+            norm = math.hypot(ex, ey)
+            if norm == 0.0:
+                continue
+            nx, ny = -ey / norm, ex / norm
+            pa = [nx * x + ny * y for x, y in a]
+            pb = [nx * x + ny * y for x, y in b]
+            worst = max(worst, min(pa) - max(pb), min(pb) - max(pa))
+    if worst >= 0.0:
+        # Disjoint: the exact gap is attained at a vertex of one and an edge of the other.
+        best = math.inf
+        for p in a:
+            for k in range(len(b)):
+                best = min(best, _point_segment_distance(p, b[k], b[(k + 1) % len(b)]))
+        for p in b:
+            for k in range(len(a)):
+                best = min(best, _point_segment_distance(p, a[k], a[(k + 1) % len(a)]))
+        return best
+    return worst
+
+
+def landing_footprints(
+    pos: torch.Tensor, heading: float, height_above_tips: float
+) -> list[list[tuple[float, float]]]:
+    """The two open-jaw landing spots as world-xy rectangles, at a height above the tips."""
+    h = max(0.0, height_above_tips)
+    thickness = TIP_THICKNESS + TIP_THICKNESS_PER_M * h
+    half_face = TIP_HALF_FACE + TIP_HALF_FACE_PER_M * h
+    c, s = math.cos(heading), math.sin(heading)
+    boxes = []
+    for side in (1.0, -1.0):
+        corners = []
+        for lx in (side * OPEN_HALF_GAP, side * (OPEN_HALF_GAP + thickness)):
+            for ly in (-half_face, half_face):
+                corners.append((float(pos[0]) + c * lx - s * ly, float(pos[1]) + s * lx + c * ly))
+        boxes.append(convex_hull(corners))
+    return boxes
+
+
+def sweep_footprints(
+    pos: torch.Tensor, heading: float, width: float, outer: float = OPEN_HALF_GAP
+) -> list[list[tuple[float, float]]]:
+    """The band each closing tip crosses, from ``outer`` along the axis to the part's face."""
+    c, s = math.cos(heading), math.sin(heading)
+    boxes = []
+    for side in (1.0, -1.0):
+        corners = []
+        for lx in (side * width / 2, side * outer):
+            for ly in (-TIP_HALF_FACE, TIP_HALF_FACE):
+                corners.append((float(pos[0]) + c * lx - s * ly, float(pos[1]) + s * lx + c * ly))
+        boxes.append(convex_hull(corners))
+    return boxes
+
+
 def jaw_clearance(
     pos: torch.Tensor,
     heading: float,
     width: float,
+    half_height: float,
     other_pos: torch.Tensor,
-    other_rxy: torch.Tensor,
     other_hz: torch.Tensor,
-) -> float:
-    """Horizontal distance (m) from the two jaw footprints to the nearest standing neighbor.
+    other_footprints: list[list[tuple[float, float]]],
+    wall_footprints: list[list[tuple[float, float]]],
+) -> tuple[float, int, float]:
+    """``(clearance, swept, wall)`` for a grasp at ``pos`` closing along ``heading``.
 
-    A neighbor stands when its top is above the finger tips (``TIP_BELOW_CENTER`` under the
-    part center). Negative when a footprint overlaps a jaw box. ``inf`` with no standing
-    neighbor.
+    ``clearance`` is the horizontal distance from the landing tips to the nearest wall or
+    standing neighbor, negative when a footprint overlaps a landing spot. A neighbor stands
+    when its top reaches into the target's grip band, the top ``MIN_GRIP_OVERLAP`` of its
+    side faces. ``swept`` counts the standing neighbors whose footprint crosses a closing
+    stroke. ``wall`` is the wall-only clearance of the whole stroke, landing spot
+    included, measured with the tip itself: the slanted hull above the tip slides off a wall
+    edge, so only the tip's own footprint counts, but a tip that lands past a wall has to
+    cross it on the way in.
     """
-    standing = other_pos[:, 2] + other_hz > float(pos[2]) - TIP_BELOW_CENTER
-    if not bool(standing.any()):
-        return math.inf
-    c, s = math.cos(heading), math.sin(heading)
-    rel = other_pos[standing] - pos
-    radius = other_rxy[standing]
-    local_x = c * rel[:, 0] + s * rel[:, 1]
-    local_y = -s * rel[:, 0] + c * rel[:, 1]
-    best = math.inf
-    for side in (1.0, -1.0):
-        dx = (local_x - side * (width / 2 + JAW_BOX_THICKNESS / 2)).abs() - JAW_BOX_THICKNESS / 2
-        dy = local_y.abs() - JAW_BOX_HALF_FACE
-        outside = torch.hypot(dx.clamp(min=0.0), dy.clamp(min=0.0))
-        inside = torch.maximum(dx, dy).clamp(max=0.0)
-        distance = torch.where((dx > 0) | (dy > 0), outside, inside) - radius
-        best = min(best, float(distance.min()))
-    return best
+    bottom = float(pos[2]) - half_height
+    band = float(pos[2]) + half_height - MIN_GRIP_OVERLAP
+    strokes = sweep_footprints(pos, heading, width, OPEN_HALF_GAP + TIP_THICKNESS)
+    wall = min((polygon_distance(t, w) for t in strokes for w in wall_footprints), default=math.inf)
+    standing = torch.nonzero(other_pos[:, 2] + other_hz > band).flatten().tolist()
+    clearance = wall
+    swept = 0
+    if standing:
+        sweeps = sweep_footprints(pos, heading, width)
+        for k in standing:
+            reach = float(other_pos[k, 2] + other_hz[k]) - bottom
+            spots = landing_footprints(pos, heading, reach)
+            clearance = min(clearance, min(polygon_distance(t, other_footprints[k]) for t in spots))
+            if any(polygon_distance(b, other_footprints[k]) < 0.0 for b in sweeps):
+                swept += 1
+    return clearance, swept, wall
 
 
 def rank_grasps(
@@ -143,27 +257,35 @@ def rank_grasps(
     pos: torch.Tensor,
     quat: torch.Tensor,
     candidates: torch.Tensor,
-    extra_pos: torch.Tensor,
-    extra_rxy: torch.Tensor,
-    extra_hz: torch.Tensor,
+    wall_footprints: list[list[tuple[float, float]]],
 ) -> list[Grasp]:
-    """Every grasp of every candidate part with its clearance, highest part first.
+    """Every grasp of every candidate part with its clearance, best first.
 
-    Other parts enter through ``neighbor_extents``. The ``extra_*`` arrays are static
-    obstacles, the tray walls from ``tray_wall_obstacles``.
+    Other parts enter through ``neighbor_extents`` and ``footprint``; the walls come from
+    ``tray_wall_obstacles``. The order is the height band (highest first), then the swept
+    count, then the clearance.
     """
-    rxy, hz = neighbor_extents(sizes, quat)
+    _, hz = neighbor_extents(sizes, quat)
+    prints = [footprint(sizes[b], pos[b], quat[b]) for b in range(sizes.shape[0])]
     ranked: list[Grasp] = []
     for b in torch.nonzero(candidates).flatten().tolist():
         others = torch.ones(sizes.shape[0], dtype=torch.bool)
         others[b] = False
-        other_pos = torch.cat([pos[others], extra_pos])
-        other_rxy = torch.cat([rxy[others], extra_rxy])
-        other_hz = torch.cat([hz[others], extra_hz])
+        other_pos, other_hz = pos[others], hz[others]
+        other_prints = [prints[k] for k in torch.nonzero(others).flatten().tolist()]
         for g in candidate_grasps(b, sizes[b], pos[b], quat[b]):
-            clearance = jaw_clearance(pos[b], g.heading, g.width, other_pos, other_rxy, other_hz)
-            ranked.append(replace(g, clearance=clearance))
-    ranked.sort(key=lambda g: (-g.height, -g.clearance))
+            clearance, swept, wall = jaw_clearance(
+                pos[b],
+                g.heading,
+                g.width,
+                g.half_height,
+                other_pos,
+                other_hz,
+                other_prints,
+                wall_footprints,
+            )
+            ranked.append(replace(g, clearance=clearance, swept=swept, wall=wall))
+    ranked.sort(key=lambda g: (-math.floor(g.height / HEIGHT_BAND), g.swept, -g.clearance))
     return ranked
 
 
@@ -182,25 +304,96 @@ def densest_cell(xy: torch.Tensor, cell: float = PUSH_CELL_M) -> tuple[float, fl
     return ((cx + 0.5) * cell, (cy + 0.5) * cell)
 
 
+PUSH_START_GAP_M = 0.004
+"""Gap (m) between the pushed part's footprint and the closed tips' landing spot."""
+PUSH_WALL_MARGIN_M = TIP_HALF_FACE
+"""The closed tips' center stays this far (m) inside the tray interior: the tip touches a
+wall face at most, and the slanted hull above it slides off the wall edge (wall reads)."""
+PUSH_MIN_GAIN_M = 0.005
+"""A push must bring its part at least this much (m) closer to the tray center."""
+
+
+def clamp_to_tray(
+    point: tuple[float, float], margin: float = PUSH_WALL_MARGIN_M
+) -> tuple[float, float]:
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    return (
+        min(max(point[0], x0 + margin), x1 - margin),
+        min(max(point[1], y0 + margin), y1 - margin),
+    )
+
+
+def push_toward_center(
+    part_xy: tuple[float, float],
+    part_footprint: list[tuple[float, float]],
+    blocked: list[list[tuple[float, float]]],
+    half_length: float = PUSH_HALF_LENGTH_M,
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """A sweep that moves a wall-side part toward the tray center, or None.
+
+    The closed tips land behind the part (on its far side from the tray center), a
+    ``PUSH_START_GAP_M`` off its footprint, clear of every footprint in ``blocked`` and
+    ``PUSH_WALL_MARGIN_M`` inside the walls, then sweep through the part's center toward the
+    tray center. When the straight-in approach has no room, the start swings to either side,
+    up to 115 degrees, as long as the sweep still brings the part ``PUSH_MIN_GAIN_M`` closer
+    to the tray center: a part in a corner is pushed out along one wall.
+    """
+    cx, cy = layout.TRAY_CENTER
+    dx, dy = part_xy[0] - cx, part_xy[1] - cy
+    radius = math.hypot(dx, dy)
+    away = math.atan2(dy, dx) if radius > 1e-6 else 0.0
+    for turn in (0.0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.0, -2.0):
+        heading = away + turn
+        c, s = math.cos(heading), math.sin(heading)
+        start = None
+        for k in range(1, 30):
+            point = (part_xy[0] + 0.002 * k * c, part_xy[1] + 0.002 * k * s)
+            if clamp_to_tray(point) != point:
+                break
+            tip = tip_footprint(point)
+            if polygon_distance(tip, part_footprint) < PUSH_START_GAP_M:
+                continue
+            if any(polygon_distance(tip, b) < 0.0 for b in blocked):
+                continue
+            start = point
+            break
+        if start is None:
+            continue
+        end = clamp_to_tray((part_xy[0] - half_length * c, part_xy[1] - half_length * s))
+        if math.hypot(end[0] - cx, end[1] - cy) > radius - PUSH_MIN_GAIN_M:
+            continue
+        return start, end
+    return None
+
+
+def tip_footprint(point: tuple[float, float]) -> list[tuple[float, float]]:
+    """The closed tips' footprint at ``point``, as a square of the tip's half face."""
+    return convex_hull(
+        [
+            (point[0] + sx * TIP_HALF_FACE, point[1] + sy * TIP_HALF_FACE)
+            for sx in (-1.0, 1.0)
+            for sy in (-1.0, 1.0)
+        ]
+    )
+
+
 def push_segment(
     center: tuple[float, float], heading: float, half_length: float = PUSH_HALF_LENGTH_M
 ) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Start and end of a straight sweep through ``center`` along ``heading``."""
+    """Start and end of a straight sweep through ``center`` along ``heading``, inside the tray."""
     dx, dy = half_length * math.cos(heading), half_length * math.sin(heading)
-    return ((center[0] - dx, center[1] - dy), (center[0] + dx, center[1] + dy))
+    return clamp_to_tray((center[0] - dx, center[1] - dy)), clamp_to_tray(
+        (center[0] + dx, center[1] + dy)
+    )
 
 
-def tray_wall_obstacles() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """The tray walls as rows of discs, for ``rank_grasps``'s static obstacles."""
-    rows = []
+def tray_wall_obstacles() -> list[list[tuple[float, float]]]:
+    """The four tray walls as world-xy rectangles, for ``rank_grasps``."""
+    prints = []
     for _, center, size in layout.tray_static_boxes():
-        axis = 0 if size[0] >= size[1] else 1
-        length = size[axis]
-        count = math.ceil(length / WALL_SPHERE_SPACING) + 1
-        for k in range(count):
-            point = list(center)
-            point[axis] = center[axis] - length / 2 + length * k / (count - 1)
-            rows.append(point)
-    pos = torch.tensor(rows, dtype=torch.float32)
-    rxy = torch.full((pos.shape[0],), 0.5 * math.hypot(layout.TRAY_WALL, WALL_SPHERE_SPACING))
-    return pos, rxy, torch.full((pos.shape[0],), layout.TRAY_WALL_HEIGHT / 2)
+        cx, cy = center[0], center[1]
+        hx, hy = size[0] / 2, size[1] / 2
+        prints.append(
+            [(cx - hx, cy - hy), (cx + hx, cy - hy), (cx + hx, cy + hy), (cx - hx, cy + hy)]
+        )
+    return prints

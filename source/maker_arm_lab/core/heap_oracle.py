@@ -6,7 +6,12 @@ What changes against the six-brick oracle, and nothing else:
   that grasp's closing axis instead of the brick's long axis;
 * every part goes to one destination bin drawn per episode, whatever its color (design H5);
 * a 5 cm cell holds a failure count; at three failures the cell is skipped (design 7.2);
-* when no grasp clears, a push sweeps the densest cell with the jaws closed (design H8);
+* when no grasp clears, a push moves the best wall-blocked part toward the tray center with
+  the jaws closed; with no wall-blocked part it sweeps the densest cell (design H8);
+* a part whose center is outside the tray is counted but never a target (fix F1);
+* after ``MAX_PUSHES_IN_A_ROW`` pushes with nothing clear, the top-ranked grasp whose tips
+  land inside the tray is taken anyway as a forced pick (fix F2); with none, the pushes go
+  on up to the push budget, so DONE comes only from a budget or an empty set;
 * the episode ends DONE, never ABANDON, at the cycle budget or with no candidate left.
 
 The phases, the correctives, the induction and the retry ladder are the base class's.
@@ -27,6 +32,7 @@ from maker_arm_lab.core.parts import Part
 CYCLE_BUDGET = 50
 CELL_FAILURE_CAP = 3
 MAX_PUSHES_IN_A_ROW = 3
+PUSH_BUDGET = CYCLE_BUDGET
 CANDIDATE_MAX_Z = 0.10
 """A part above this height sits in a bin or on the shelf, never on the heap."""
 PUSH_HOVER_Z = 0.08
@@ -67,14 +73,18 @@ class HeapOracle(oracle.EnvOracle):
         self.sizes = torch.tensor([p.size for p in self.parts], dtype=torch.float32)
         self.cycle_budget = cycle_budget
         self.grasp: grasp.Grasp | None = None
+        self.grasp_min_size = min(layout.BRICK_SIZE)
         self.push: Push | None = None
         self.cycles = 0
         self.pushes = 0
+        self.forced_picks = 0
+        self.push_parts: list[int] = []
+        self._give_up = False
         self.pushes_in_a_row = 0
         self.failures: dict[tuple[int, int], int] = {}
         self.cycle_parts: list[int] = []
         self.outside_tray = 0
-        self.wall_pos, self.wall_rxy, self.wall_hz = grasp.tray_wall_obstacles()
+        self.walls = grasp.tray_wall_obstacles()
         self._push_rng = rng if rng is not None else random.Random(0)
 
     # -- grading against the destination -----------------------------------
@@ -121,6 +131,7 @@ class HeapOracle(oracle.EnvOracle):
                 continue
             if not (x0 <= x <= x1 and y0 <= y <= y1):
                 self.outside_tray += 1
+                continue
             if x > limit or math.hypot(x, y) > layout.SCATTER_MAX_RADIUS:
                 continue
             if self.failures.get(self.cell_of((x, y)), 0) >= CELL_FAILURE_CAP:
@@ -129,15 +140,7 @@ class HeapOracle(oracle.EnvOracle):
         return mask
 
     def _ranked(self, scene: oracle.SceneSnapshot, mask: torch.Tensor) -> list[grasp.Grasp]:
-        return grasp.rank_grasps(
-            self.sizes,
-            scene.brick_pos,
-            scene.brick_quat,
-            mask,
-            self.wall_pos,
-            self.wall_rxy,
-            self.wall_hz,
-        )
+        return grasp.rank_grasps(self.sizes, scene.brick_pos, scene.brick_quat, mask, self.walls)
 
     def _push_heading(self, center: tuple[float, float]) -> float:
         """A push heading from ``self._push_rng``, biased away from the tray's nearest wall.
@@ -176,20 +179,52 @@ class HeapOracle(oracle.EnvOracle):
         mask = self._candidates(scene)
         if not bool(mask.any()):
             return None
-        chosen = grasp.select_grasp(self._ranked(scene, mask))
+        ranked = self._ranked(scene, mask)
+        chosen = grasp.select_grasp(ranked)
         if chosen is None:
-            if self.pushes_in_a_row >= MAX_PUSHES_IN_A_ROW:
+            if not ranked:
                 return None
-            center = grasp.densest_cell(scene.brick_pos[mask, :2])
-            heading = self._push_heading(center)
-            self.push = Push(*grasp.push_segment(center, heading))
-            return None
+            # Fix F2: after the pushes, try the best grasp whose tips land inside the tray.
+            # A jaw that lands past a wall never picks (wall reads, 2026-09-16).
+            inside = [g for g in ranked if g.wall >= 0.0]
+            if inside and self.pushes_in_a_row >= MAX_PUSHES_IN_A_ROW:
+                chosen = inside[0]
+                self.forced_picks += 1
+            elif self.pushes < PUSH_BUDGET:
+                self.push = self._plan_push(scene, mask, ranked)
+                return None
+            else:
+                return None
         self.grasp = chosen
         self.grasp_width = chosen.width
+        self.grasp_min_size = min(self.parts[chosen.part].size)
         self.cycles += 1
         self.pushes_in_a_row = 0
         self.cycle_parts.append(chosen.part)
         return chosen.part
+
+    def _plan_push(self, scene: oracle.SceneSnapshot, mask: torch.Tensor, ranked) -> Push:
+        """A push toward the tray center for the best wall-blocked part, or a densest-cell sweep."""
+        prints = {
+            b: grasp.footprint(self.sizes[b], scene.brick_pos[b], scene.brick_quat[b])
+            for b in range(self.num_bricks)
+            if float(scene.brick_pos[b, 2]) <= CANDIDATE_MAX_Z
+        }
+        seen: set[int] = set()
+        for g in ranked:
+            if g.wall >= 0.0 or g.part in seen:
+                continue
+            seen.add(g.part)
+            others = [f for b, f in prints.items() if b != g.part]
+            xy = tuple(scene.brick_pos[g.part, :2].tolist())
+            segment = grasp.push_toward_center(xy, prints[g.part], others)
+            if segment is not None:
+                self.push_parts.append(g.part)
+                return Push(*segment)
+        center = grasp.densest_cell(scene.brick_pos[mask, :2])
+        heading = self._push_heading(center)
+        self.push_parts.append(-1)
+        return Push(*grasp.push_segment(center, heading))
 
     def _regrasp(self, scene: oracle.SceneSnapshot) -> None:
         """After REOPEN: the same part at its live pose, best grasp even under the floor."""
@@ -275,13 +310,20 @@ class HeapOracle(oracle.EnvOracle):
             return
         failed_lift = phase == oracle.Phase.LIFT and not (result.pinch_ok and result.lifted)
         if failed_lift and self.retries_used >= oracle.MAX_GRASP_RETRIES:
-            # The base class abandons the episode here; a heap marks the cell and moves on.
+            # The base class abandons the episode here; a heap marks the cell and moves on,
+            # through REOPEN so a part riding in the pocket is dropped here, not carried off
+            # by the next transit and released over the wall (K=12 read, 2026-09-16).
             self._mark_failure(scene, self.target_brick)
             self.cycle_outcomes.append(False)
+            self._give_up = True
+            self.phase = oracle.Phase.REOPEN
+            return
+        brick = self.target_brick
+        if phase == oracle.Phase.REOPEN and self._give_up:
+            self._give_up = False
             self.target_brick = None
             self.phase = oracle.Phase.HOVER
             return
-        brick = self.target_brick
         super().report(result, scene)
         if phase == oracle.Phase.REOPEN:
             self._regrasp(scene)
@@ -297,6 +339,8 @@ class HeapOracle(oracle.EnvOracle):
         return {
             "cycles": self.cycles,
             "pushes": self.pushes,
+            "forced_picks": self.forced_picks,
+            "push_parts": list(self.push_parts),
             "cycle_parts": list(self.cycle_parts),
             "cycle_outcomes": list(self.cycle_outcomes),
             "cells_excluded": sum(1 for v in self.failures.values() if v >= CELL_FAILURE_CAP),
