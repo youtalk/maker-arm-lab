@@ -422,6 +422,12 @@ class HeapOracle(oracle.EnvOracle):
         if phase == oracle.Phase.TIP_SWEEP:
             part = self.tip.part
             self.tips += 1
+            # A tip is a corrective like a push, and counts against the same
+            # forced-pick grace period: a successful tip costs nothing once the pick
+            # it enables resets the counter on the next scan, but a failed tip must
+            # count against the policy so a run of correctives on unrelated parts
+            # cannot pin the counter at MAX_PUSHES_IN_A_ROW forever.
+            self.pushes_in_a_row += 1
             if self.standing(scene, part):
                 self.tips_ok += 1
             else:

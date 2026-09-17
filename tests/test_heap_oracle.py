@@ -135,6 +135,10 @@ def test_a_wall_side_part_is_pushed_toward_the_tray_center_then_tipped():
     hover = orc.next_goal(moved)
     assert hover.phase is oracle.Phase.TIP_HOVER and orc.tip is not None and orc.tip.part == 0
     assert orc.forced_picks == 0
+    # The tip is a corrective like the push, and counts against the same forced-pick
+    # grace period: it raises pushes_in_a_row again once it completes.
+    _tip_phases(orc, moved)
+    assert orc.pushes_in_a_row == 2
 
 
 def test_a_landing_spot_under_a_stack_falls_back_to_the_densest_cell_push():
