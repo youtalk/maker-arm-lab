@@ -6,10 +6,16 @@ a hard stop and the part is unpickable (``docs/ms6-teacher-inspection.md`` secti
 script holds the jaws just clear of the part while the tips travel down, opens them once the
 descend leg has been walked, and lets the shipped CLOSE run unchanged.
 
-Two modes:
+Three modes:
 
 * ``--mode wall_table`` repeats section 3.2's read. One 2x4 brick, both closing axes, at the
   same part-center-to-wall distances, with the shipped three-retry ladder.
+* ``--mode reach_band`` is the driven reach band of the lever-verification design section 6.1.
+  It shares this script because the honest measurement is a driven descend and pick on a lone
+  part, which is what this script already does. The comment above ``layout.SCATTER_MAX_RADIUS``
+  says that bound is a TRACKING bound and that whoever re-measures it must drive real descends
+  and must not query the solver, so this mode reports the joint tracking residual of a driven
+  servo and never the solver's own convergence. It uses the SHIPPED descend.
 * ``--mode heap`` runs one K = 50 held-out heap through ``scripts/mj_inspect_heap.py``'s own
   driver loop, so it writes the same ``events.jsonl`` and ``scripts/heap_inspect_read.py``
   reads it unchanged. Its seeds are pinned.
@@ -91,6 +97,13 @@ against a clear wall: the bottom-open descend must not cost what those fixes bou
 WALL_EPISODE_LENGTH_S = 120.0
 """Long enough for one cycle plus the shipped three-retry ladder."""
 
+REACH_RADII_M = tuple(round(0.10 + 0.02 * i, 2) for i in range(13))
+"""0.10 m to 0.34 m in 0.02 m steps, the radii of design section 6.1."""
+REACH_AZIMUTHS_DEG = (-40, -20, 0, 20, 40)
+REACH_CONTROL_RADIUS_M = 0.20
+"""The control point, well inside ``layout.SCATTER_MAX_RADIUS``, read at every azimuth."""
+REACH_EPISODE_LENGTH_S = 120.0
+
 HEAP_K = 50
 HEAP_RUN_SEED = 20261000
 HEAP_LAYOUT_SEED = 20261010
@@ -110,8 +123,10 @@ class BottomPickRig(OracleRig):
         # control the wall table is read against.
         self.bottom_open = bottom_open
         self._open_hold = [0] * self.num_envs
+        self._driven: list[oracle.Phase | None] = [None] * self.num_envs
         self.jaw_log: list[dict] = []
         self.phase_log: list[dict] = []
+        self.residuals: list[dict[str, float]] = [{} for _ in range(self.num_envs)]
         self.last_pinch: dict | None = None
 
     # -- the descend --------------------------------------------------------
@@ -149,7 +164,27 @@ class BottomPickRig(OracleRig):
                     "pick_z": round(float(self.pick_point(i)[2]), 4),
                 }
             )
+        self._driven = [None if goal is None else goal.phase for goal in self.goals]
         return action
+
+    def observe(self, dones):
+        """Sample the joint tracking residual before the base class advances the phases.
+
+        This is a DRIVEN read and nothing else: ``self._planned[i]`` is the joint target this
+        step commanded, and ``robot.data.joint_pos`` is where the servo actually ended up after
+        ``env.step``. The solver's own convergence report is not consulted -- the whole point of
+        ``layout.SCATTER_MAX_RADIUS`` is that the solver reports a clean solve at poses the arm
+        never arrives at. An env that finished this step is skipped, because ``env.step`` has
+        already reset it and its joints describe the next episode.
+        """
+        measured = self.robot.data.joint_pos[:, self.arm_ids]
+        for i, phase in enumerate(self._driven):
+            if phase is None or bool(dones[i]) or self.abandoned[i]:
+                continue
+            target = self._planned[i].to(device=measured.device, dtype=measured.dtype)
+            gap = float((target - measured[i]).abs().max())
+            self.residuals[i][phase.name] = max(self.residuals[i].get(phase.name, 0.0), gap)
+        return super().observe(dones)
 
     # -- instrumentation ----------------------------------------------------
 
@@ -220,6 +255,41 @@ class AxisOracle(HeapOracle):
         self.cycles += 1
         self.cycle_parts.append(chosen.part)
         return chosen.part
+
+
+class ReachOracle(oracle.EnvOracle):
+    """``EnvOracle`` with the top-down x limit lifted, for the driven reach band.
+
+    ``layout.TOP_DOWN_X_LIMIT`` is a bin-fouling limit, not a reach limit (design section 6.1),
+    and the shipped candidate filter drops every brick past it before a descend is ever driven.
+    The band is what this mode measures, so that filter cannot be part of the measurement.
+    """
+
+    def _next_brick(self, scene) -> int | None:
+        done = self._stowed(scene) | self._sorted
+        alive = [b for b in range(self.num_bricks) if b not in done]
+        return alive[0] if alive else None
+
+
+def reach_grid() -> list[tuple[float, int]]:
+    """The (radius m, azimuth deg) points of design section 6.1, azimuth-major."""
+    return [(radius, azimuth) for azimuth in REACH_AZIMUTHS_DEG for radius in REACH_RADII_M]
+
+
+def reach_outcome(phases: list[dict], succeeded: bool) -> str:
+    """``stowed``, ``lost`` or ``no_solution`` for one grid point.
+
+    A leg the solver could not plan is reported apart from a pick that was driven and failed,
+    so the two causes never blur: a point the arm cannot even be ASKED to reach is not evidence
+    about tracking. ``succeeded`` wins over an earlier unplanned leg, because a point whose
+    retry ladder eventually stowed the brick was reachable after all.
+    """
+    if succeeded:
+        return "stowed"
+    approach = ("HOVER", "DESCEND")
+    if any(e["outcome"] == "unplanned" for e in phases if e["phase"] in approach):
+        return "no_solution"
+    return "lost"
 
 
 def wall_pose(
@@ -331,6 +401,119 @@ def wall_cell(args, axis: str, distance_mm: int) -> dict:
     }
 
 
+def reach_cell(args, radius: float, azimuth_deg: int) -> dict:
+    """One driven grid point: the shipped descend and pick on a lone brick, no tray.
+
+    The env is the six-brick task with ONE brick, which is the scene that has no tray at all
+    (``mj/env.py`` builds the tray only for a heap). So the arm reaches a bare desk, and a wall
+    can neither block a descend nor foul a carry.
+    """
+    draw, bl, noise = build_run(args)
+    env = MjLegoSortEnv(
+        1,
+        draw,
+        num_bricks=1,
+        cameras=False,
+        start_pose_offset_rad=0.05
+        if args.start_pose_offset_rad is None
+        else args.start_pose_offset_rad,
+        episode_length_s=args.episode_length_s or REACH_EPISODE_LENGTH_S,
+    )
+    env.reset(seed=args.run_seed)
+    rng = random.Random(args.run_seed)
+    induction = make_induction(args)
+    rig = BottomPickRig(
+        env,
+        bl,
+        noise,
+        rng,
+        induction=induction,
+        transport_speed=args.transport_speed,
+        oracle_factory=lambda i, layout_i, episode_draw: ReachOracle(
+            layout_i, 1, episode_draw, induction=induction, rng=rng
+        ),
+        # The band is measured against the SHIPPED descend; the bottom-open one is experiment 2.
+        bottom_open=False,
+    )
+    angle = math.radians(azimuth_deg)
+    x, y = radius * math.cos(angle), radius * math.sin(angle)
+    place(env, (x, y, layout.BRICK_SIZE[2] / 2.0 + 0.001, 0.0))
+    steps = 0
+    while steps < int(env.max_episode_length):
+        out = rig.step()
+        steps += 1
+        if bool(out["dones"][0]) or bool(out["abandoned"][0]):
+            break
+        if rig.oracles[0].phase in (oracle.Phase.DONE, oracle.Phase.ABANDON):
+            break
+    stats = rig.episode_stats(0)
+    residuals = dict(rig.residuals[0])
+    descends = [e for e in rig.phase_log if e["phase"] == "DESCEND"]
+    env.close()
+    descend_resid = residuals.get("DESCEND")
+    lift_resid = residuals.get("LIFT")
+    driven = [r for r in (descend_resid, lift_resid) if r is not None]
+    return {
+        "radius_m": radius,
+        "azimuth_deg": azimuth_deg,
+        "x": round(x, 4),
+        "y": round(y, 4),
+        "outcome": reach_outcome(rig.phase_log, stats["succeeded"]),
+        # Radians, commanded joint target against the measured joint position after env.step.
+        "descend_resid_rad": None if descend_resid is None else round(descend_resid, 4),
+        "lift_resid_rad": None if lift_resid is None else round(lift_resid, 4),
+        "resid_rad": None if not driven else round(max(driven), 4),
+        "descend": None if not descends else descends[-1]["outcome"],
+        "unplanned_legs": stats["unplanned_legs"],
+        "retries": stats["retries"],
+        "steps": steps,
+    }
+
+
+def reach_band(args) -> dict:
+    rows = [reach_cell(args, radius, azimuth) for radius, azimuth in reach_grid()]
+    path = os.path.join(args.out_dir, "reach_band.json")
+    with open(path, "w") as f:
+        json.dump(rows, f, indent=2)
+    letter = {"stowed": "S", "lost": "L", "no_solution": "N"}
+    control = {
+        str(a): next(
+            (r["resid_rad"] for r in rows if r["azimuth_deg"] == a and r["radius_m"] == c), None
+        )
+        for a in REACH_AZIMUTHS_DEG
+        for c in (REACH_CONTROL_RADIUS_M,)
+    }
+    return {
+        "mode": "reach_band",
+        "table": path,
+        "radii_m": list(REACH_RADII_M),
+        "azimuths_deg": list(REACH_AZIMUTHS_DEG),
+        "rows": len(rows),
+        "stowed": sum(1 for r in rows if r["outcome"] == "stowed"),
+        "no_solution": sum(1 for r in rows if r["outcome"] == "no_solution"),
+        # One string per azimuth, one letter per radius in REACH_RADII_M order.
+        "grid": {
+            str(a): "".join(letter[r["outcome"]] for r in rows if r["azimuth_deg"] == a)
+            for a in REACH_AZIMUTHS_DEG
+        },
+        "control_resid_rad": control,
+        "max_stowed_radius_m": {
+            str(a): max(
+                (r["radius_m"] for r in rows if r["azimuth_deg"] == a and r["outcome"] == "stowed"),
+                default=None,
+            )
+            for a in REACH_AZIMUTHS_DEG
+        },
+        "min_stowed_radius_m": {
+            str(a): min(
+                (r["radius_m"] for r in rows if r["azimuth_deg"] == a and r["outcome"] == "stowed"),
+                default=None,
+            )
+            for a in REACH_AZIMUTHS_DEG
+        },
+    }
+
+
 def wall_table(args) -> dict:
     rows = [
         wall_cell(args, axis, distance_mm)
@@ -365,7 +548,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     add_batch_arguments(parser)
     parser.set_defaults(num_envs=1)
-    parser.add_argument("--mode", choices=("wall_table", "heap"), required=True)
+    parser.add_argument("--mode", choices=("wall_table", "reach_band", "heap"), required=True)
     parser.add_argument(
         "--axes", type=str, default="y,x", help="closing axes the wall table runs, in order"
     )
@@ -407,7 +590,9 @@ def main(argv=None) -> int:
     try:
         args = parse_args(argv)
         os.makedirs(args.out_dir, exist_ok=True)
-        summary = heap(args) if args.mode == "heap" else wall_table(args)
+        summary = {"heap": heap, "reach_band": reach_band, "wall_table": wall_table}[args.mode](
+            args
+        )
     except SystemExit as e:  # argparse
         print("PROBE_FAIL " + json.dumps({"error": f"argparse exit {e.code}"}), flush=True)
         return 2

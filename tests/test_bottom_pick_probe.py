@@ -118,3 +118,38 @@ def test_the_descend_holds_the_narrow_opening_and_opens_at_the_pick_depth():
     assert all(e["command"] >= 0.0 for e in at_depth)
     assert max(e["gap"] for e in at_depth) >= grasp.OPEN_HALF_GAP - 2.0 * module.JAW_BAND_M
     assert len(at_depth) <= module.JAW_OPEN_STEPS + 1, len(at_depth)
+
+
+def test_the_reach_grid_is_the_designs_radii_and_azimuths():
+    module = _load(SCRIPT)
+    grid = module.reach_grid()
+    radii = sorted({r for r, _ in grid})
+    azimuths = sorted({a for _, a in grid})
+    assert radii == [round(0.10 + 0.02 * i, 2) for i in range(13)]
+    assert radii[0] == 0.10 and radii[-1] == 0.34
+    assert azimuths == [-40, -20, 0, 20, 40]
+    assert len(grid) == len(radii) * len(azimuths)
+    # The control is a point of the grid, not a separate run.
+    assert module.REACH_CONTROL_RADIUS_M in radii
+    assert all((module.REACH_CONTROL_RADIUS_M, a) in grid for a in azimuths)
+
+
+def test_a_point_outside_the_solvers_reach_reads_no_solution_not_lost():
+    module = _load(SCRIPT)
+    unplanned = [
+        {"phase": "HOVER", "outcome": "converged"},
+        {"phase": "DESCEND", "outcome": "unplanned"},
+    ]
+    driven = [
+        {"phase": "HOVER", "outcome": "converged"},
+        {"phase": "DESCEND", "outcome": "stalled"},
+        {"phase": "LIFT", "outcome": "converged"},
+    ]
+    # Unreachable is not a failed pick: the two causes stay apart.
+    assert module.reach_outcome(unplanned, False) == "no_solution"
+    assert module.reach_outcome(driven, False) == "lost"
+    assert module.reach_outcome(driven, True) == "stowed"
+    # A leg the solver missed before a retry that stowed the brick is not no_solution.
+    assert module.reach_outcome(unplanned, True) == "stowed"
+    # An unplanned CARRY leg is not evidence about reaching the brick.
+    assert module.reach_outcome([{"phase": "EXTEND", "outcome": "unplanned"}], False) == "lost"
