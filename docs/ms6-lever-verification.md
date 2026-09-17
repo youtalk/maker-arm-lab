@@ -76,9 +76,8 @@ integration commit `60e6130`. Pull requests 57, 58 and 59 are open. None is merg
 them is the owner's decision.
 
 Every heap episode this report reads is archived under `~/data/maker-arm-ms6/d/probe/`, one
-directory and one log per episode. Section 5 names the directory of every number. The one
-exception is stated where it falls. Every number in this report was recomputed from those files
-for this report.
+directory and one log per episode. Section 5 names the directory of every number. Every
+number in this report was recomputed from those files for this report.
 
 No experiment changed production behavior. Nothing under `source/maker_arm_lab/core/` changed.
 Every script is a probe or a measurement script.
@@ -341,11 +340,8 @@ run, which are the inspection's own numbers, so every row starts from the same p
 | bottom-open descend, matched model | 45/150 (15, 15, 15) | 67/150 (18, 22, 27) |
 
 Archived at `d/probe/`: `base_readflags_*` and `base_defaults_*` for the first row,
-`unmatched_*` for the second, `matched_*` and `iso_nojitter_*` for the third. The one exception
-in this report falls here. The second row's without-the-band cell holds archived data for heap
-0 only, at `minimal_unmatched_0`, which reads 10 of 50. Heaps 1 and 2 of that cell were
-measured before the archive existed and their files are gone. Every other cell in the table is
-archived for all three heaps.
+`unmatched_*` and `minimal_unmatched_*` for the second, `matched_*` and `iso_nojitter_*` for
+the third. Every cell of the table has an archived log for all three heaps.
 
 The first row at the read's flags reproduces the inspection's 15, 11 and 17 exactly. The heaps,
 the scripts and the grader therefore all agree with campaign `b`.
@@ -526,8 +522,6 @@ Each item below is a finding the design did not pre-register.
   an episode. A tray that starts better can still run worse.
 - The wall table is a lone part against a bare wall. It does not cover a part against a wall
   with neighbors around it.
-- The second row of the table in section 5.4 holds archived data for heap 0 only in its
-  without-the-band cell.
 - No read here measures the dataset. Whether a bottom-open pick can be recorded as a
   demonstration is not answered by any number above.
 
