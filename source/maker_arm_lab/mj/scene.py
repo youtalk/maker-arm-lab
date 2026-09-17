@@ -319,10 +319,13 @@ def build_spec(
             rgba=[0.6, 0.6, 0.6, 1.0],
         )
     )
-    for name, center, size in layout.bin_static_boxes(bl):
+    bin_boxes = layout.heap_bin_static_boxes(bl) if tray else layout.bin_static_boxes(bl)
+    for name, center, size in bin_boxes:
         color = name.split("_")[1]
         rgba = (
-            [*layout.BRICK_RGBA[color][:3], 1.0] if name.endswith("floor") else [0.55] * 3 + [1.0]
+            [*layout.BRICK_RGBA[color][:3], 1.0]
+            if name.endswith("floor") and color in layout.BRICK_RGBA
+            else [0.55] * 3 + [1.0]
         )
         scene_geoms.append(
             spec.worldbody.add_geom(
@@ -494,9 +497,10 @@ def overhead_camera_pose(draw: dict) -> tuple[list[float], tuple[float, float, f
     return pos, rot
 
 
-def apply_bins(model: mujoco.MjModel, bl: layout.BinLayout) -> None:
-    """Move the 20 static bin geoms to ``bl``. Sizes and colors never change per episode."""
-    for name, center, _size in layout.bin_static_boxes(bl):
+def apply_bins(model: mujoco.MjModel, bl: layout.BinLayout, heap: bool = False) -> None:
+    """Move the static bin geoms to ``bl``. Sizes and colors never change per episode."""
+    boxes = layout.heap_bin_static_boxes(bl) if heap else layout.bin_static_boxes(bl)
+    for name, center, _size in boxes:
         model.geom_pos[model.geom(name).id] = center
 
 

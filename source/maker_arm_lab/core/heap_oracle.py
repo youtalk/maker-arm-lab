@@ -44,9 +44,9 @@ PUSH_HEADING_MIN_HALF_ARC = math.pi / 2
 """Narrowest half-arc a push heading is drawn from, right at a tray wall (see ``_push_heading``)."""
 # Design H6: the bin footprint, and twice the interior height so a pile over the rim counts.
 STOW_HALF_EXTENTS = (
-    layout.BIN_INTERIOR[0] / 2,
-    layout.BIN_INTERIOR[1] / 2,
-    layout.BIN_INTERIOR[2] * 2,
+    layout.HEAP_BIN_INTERIOR[0] / 2,
+    layout.HEAP_BIN_INTERIOR[1] / 2,
+    layout.HEAP_BIN_INTERIOR[2] * 2,
 )
 
 

@@ -7,7 +7,7 @@ import random
 import pytest
 import torch
 
-from maker_arm_lab.core import layout
+from maker_arm_lab.core import layout, oracle
 
 
 def test_bin_centers_within_reach():
@@ -390,3 +390,24 @@ def test_a_part_at_the_rim_top_is_outside_the_interior_circle():
     top_radius = layout.TRAY_RADIUS + layout.TRAY_WALL_HEIGHT * math.tan(layout.TRAY_RIM_TILT_RAD)
     assert top_radius > layout.TRAY_RADIUS
     assert layout.TRAY_CENTER[0] + top_radius <= layout.SCATTER_MAX_RADIUS + layout.TRAY_WALL_HEIGHT
+
+
+def test_the_heap_bin_holds_the_heap_and_keeps_the_reach_limit():
+    solid_cm3 = 159.0  # a 50 part heldout heap, layout seed 20261010
+    volume_cm3 = 1e6 * math.prod(layout.HEAP_BIN_INTERIOR)
+    assert volume_cm3 / solid_cm3 > 5.0
+    # The x half extent is what bin_front_x reads, and the dish's far edge depends on it.
+    assert layout.HEAP_BIN_INTERIOR[0] == layout.BIN_INTERIOR[0]
+    rim_z = layout._BIN_FLOOR_TOP_Z + layout.HEAP_BIN_INTERIOR[2]
+    assert rim_z < oracle.RELEASE_Z - 0.05
+
+
+def test_the_heap_bin_is_one_box_on_the_shelf_at_y_zero():
+    boxes = layout.heap_bin_static_boxes(layout.DEFAULT_BIN_LAYOUT)
+    assert len(boxes) == 5
+    half_y = layout.HEAP_BIN_INTERIOR[1] / 2 + layout.BIN_WALL
+    assert half_y <= layout.SHELF_SIZE[1] / 2
+    for _name, center, _size in boxes:
+        assert abs(center[1]) <= half_y + 1e-9
+    (_x_range, y_range, _z) = layout.overhead_view_region()
+    assert y_range[0] <= -half_y and y_range[1] >= half_y

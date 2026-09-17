@@ -430,6 +430,46 @@ def bin_static_boxes(
     return boxes
 
 
+# MS6 rework section 6. Heap mode drops 50 parts into ONE bin, and the four-bin footprint
+# overflows: 0.09 by 0.09 by 0.04 m is 324 cm3 against 159 cm3 of solid parts, which piles
+# over the rim. This box grows along y only. bin_front_x reads BIN_INTERIOR[0] and
+# top_down_x_limit sits 0.10 m in front of it, so a wider x would pull the pick limit under
+# the dish's far edge.
+HEAP_BIN_INTERIOR = (0.09, 0.30, 0.06)
+
+
+def heap_bin_center(bl: BinLayout | None = None) -> tuple[float, float, float]:
+    """Centre of the single heap bin's interior."""
+    bl = bl or DEFAULT_BIN_LAYOUT
+    return (bl.bin_x, 0.0, _BIN_FLOOR_TOP_Z + HEAP_BIN_INTERIOR[2] / 2)
+
+
+def heap_bin_static_boxes(
+    bl: BinLayout | None = None,
+) -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
+    """(name, center, size) for the one heap bin: floor plus four walls."""
+    bl = bl or DEFAULT_BIN_LAYOUT
+    ix, iy, iz = HEAP_BIN_INTERIOR
+    floor_z = _BIN_FLOOR_TOP_Z - BIN_WALL / 2
+    wall_z = _BIN_FLOOR_TOP_Z + iz / 2
+    outer_x, outer_y = ix + 2 * BIN_WALL, iy + 2 * BIN_WALL
+    return [
+        ("heap_bin_floor", (bl.bin_x, 0.0, floor_z), (outer_x, outer_y, BIN_WALL)),
+        (
+            "heap_bin_wall_front",
+            (bl.bin_x + ix / 2 + BIN_WALL / 2, 0.0, wall_z),
+            (BIN_WALL, outer_y, iz),
+        ),
+        (
+            "heap_bin_wall_back",
+            (bl.bin_x - ix / 2 - BIN_WALL / 2, 0.0, wall_z),
+            (BIN_WALL, outer_y, iz),
+        ),
+        ("heap_bin_wall_left", (bl.bin_x, -iy / 2 - BIN_WALL / 2, wall_z), (ix, BIN_WALL, iz)),
+        ("heap_bin_wall_right", (bl.bin_x, iy / 2 + BIN_WALL / 2, wall_z), (ix, BIN_WALL, iz)),
+    ]
+
+
 def sample_brick_poses(
     num_bricks: int,
     min_separation: float,

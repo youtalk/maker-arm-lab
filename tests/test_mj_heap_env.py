@@ -137,13 +137,14 @@ def test_every_dropped_part_starts_inside_the_dish():
     env.close()
 
 
-def test_a_second_reset_redraws_the_destination_and_the_colors(heap):
+def test_a_second_reset_keeps_the_one_destination_and_redraws_the_colors(heap):
+    # MS6 rework section 6: heap mode has one bin, at destination 0, on every reset.
     seen_dest, seen_color = set(), set()
     for seed in range(12, 24):
         heap.reset(seed=seed)
         seen_dest.add(int(heap.destination_bins[0]))
         seen_color.add(tuple(heap.models[0].geom_rgba[heap.handles.brick_geoms[0]].round(2)))
-    assert len(seen_dest) > 1 and len(seen_color) > 1
+    assert seen_dest == {0} and len(seen_color) > 1
     stud = heap.handles.body_geoms[0][1]
     assert (
         heap.models[0].geom_rgba[stud] == heap.models[0].geom_rgba[heap.handles.brick_geoms[0]]
@@ -252,3 +253,20 @@ def test_a_heap_shard_carries_the_new_datasets(tmp_path):
         assert json.loads(g.attrs["parts"]) == ["brick_2x4", "plate_1x2"]
         assert g["initial_state/destination_bin"].shape == (1,)
         assert g["obs/images/overhead_rgb"][5].max() == 255  # the marker is in the frame
+
+
+def test_heap_mode_builds_one_bin_and_grades_against_it():
+    draw = layout.sample_run_draw(random.Random(4))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    parts_list = parts.sample_parts(random.Random(9), parts.catalog(), 3)
+    env = MjLegoSortEnv(1, draw, num_bricks=3, parts=parts_list, cameras=False)
+    env.reset(seed=2)
+    assert int(env.destination_bins[0]) == 0
+    assert env.bin_layouts[0].bin_ys == (0.0, 0.0, 0.0, 0.0)
+    names = [
+        mujoco.mj_id2name(env.models[0], mujoco.mjtObj.mjOBJ_GEOM, g)
+        for g in range(env.models[0].ngeom)
+    ]
+    assert sum(1 for n in names if n and n.startswith("heap_bin_")) == 5
+    assert not any(n and n.startswith("bin_") for n in names)
+    env.close()
