@@ -144,6 +144,39 @@ leg reaches 0.04 m from its start. Over up to three pushes in a row, that reach 
 part the rest of the way past a 0.02 m wall. The data does not separate ejections caused by
 the drop and settle from ejections caused by a push.
 
+**A look at one episode's frames.** The illustration episode from section 3 sits in
+`~/data/maker-arm-ms6/a/video/vid.hdf5`. Reading `initial_state/rigid_object/brick_<k>/root_pose`
+for its 50 parts against the tray interior (design H1) finds 7 already outside the tray, before
+step one. The episode's `obs/target_part` channel names only two targets, over its whole 2617
+recorded frames. Part 19, a slope, sits at x = 0.220 m and y = 0.153 m. Part 44, a tile, sits at
+x = -0.023 m and y = 0.122 m. Both sit outside the tray. Part 44 sits about 0.15 m past the tray's
+near x edge, well clear of it. The teacher spent the episode on these two parts and stowed one.
+
+`_candidates` in `source/maker_arm_lab/core/heap_oracle.py` does not drop a part from the
+candidate set for sitting outside the tray. It counts such a part in `self.outside_tray`, then
+checks only the arm's reach: `x` against `layout.top_down_x_limit`, and the radius
+`math.hypot(x, y)` against `SCATTER_MAX_RADIUS`. `rank_grasps` and `select_grasp` in
+`core/grasp.py` then rank a candidate's grasps by height and by clearance against the other
+parts and the tray walls. Neither function checks tray membership on its own. A part outside
+the tray but inside reach is a candidate on the same terms as a part inside it. This episode's
+two targets show that path in practice.
+
+This episode adds one more measurement to candidate 3. Seven of its 50 parts sit outside the
+tray before the first step, right after the drop and the settle. This is an inference. It points
+at a second route out of the tray, earlier than a push: the drop and the settle can eject a part
+on their own, apart from any push that follows later in the episode.
+
+The recorded phase channel, over the clip's 2617 frames, splits this way: DESCEND 24.5 percent,
+the gripper-close phase 17.2 percent, HOVER 15.4 percent, and the three push phases 31.4 percent
+combined. Every other phase holds under 5 percent. `obs/joint_pos_abs` sums the absolute change
+per step over the arm's 8 joints. It averages about 0.017 rad per step during a push phase,
+against about 0.04 rad per step elsewhere. `obs/clamped` reads false on every one of the 2617
+frames. The arm slows during a push. It does not stall, and it never reaches the command clamp.
+
+These readings come from one episode, not from the 120-episode read behind section 4's rates.
+They point at a mechanism. They do not change the stowed fraction, the cycles per stowed part,
+or any other rate in this report.
+
 ### 4.2 A test suite gap
 
 The full suite has 705 passing tests. None of them caught this. `tests/test_mj_heap_oracle.py`
@@ -174,6 +207,19 @@ and stop before phase B. Both of its conditions failed (section 4). No timing da
 - Whether the 13 by 20 cm tray interior (design H1) adds its own constraint on candidates 1
   and 3, apart from the drop band and the push length, and whether the MA track's real tray
   removes or changes that constraint.
+- Whether `_candidates` in `core/heap_oracle.py` needs a rule to drop a part from the candidate
+  set for sitting outside the tray, instead of only counting it. Today a part outside the tray
+  but inside reach is a candidate on the same terms as a part inside it.
+- `obs/context_camera` holds exactly one distinct row across the illustration episode's 2617
+  frames. The overhead frames jitter by a few pixels every step, from the `--frame_jitter`
+  augmentation. Whether the context channel needs that per-frame jitter, or holding it fixed
+  is the intended behavior, is open.
+- The readings in section 4.1 about the illustration episode's frames come from one episode,
+  not from the 120-episode read. They point at a mechanism. Section 4's rates stay the numbers
+  a fix must move.
+- No test in `tests/test_mj_heap_oracle.py` places a part outside the tray and checks that the
+  teacher skips it, picks it, or handles it some other way. Section 4.2 lists the flat-part and
+  dropped-heap gaps. This is a third gap.
 
 ## 7. Reproduction
 
