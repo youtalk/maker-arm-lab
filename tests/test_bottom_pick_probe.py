@@ -161,6 +161,8 @@ def test_the_heap_seeds_are_defaults_and_a_passed_seed_survives():
         module.HEAP_LAYOUT_SEED,
     )
     assert default.heap_k == module.HEAP_K and default.parts_split == "heldout"
+    # Without this the reset RNG runs differently and the heap is a different heap.
+    assert default.episode_draws is True
 
     # A flag the caller passes is honored, or three seed pairs are three copies of heap 0.
     passed = module.parse_args(base + ["--run_seed", "20261001", "--layout_seed", "20261011"])

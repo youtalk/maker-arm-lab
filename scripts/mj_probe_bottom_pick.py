@@ -107,6 +107,16 @@ REACH_EPISODE_LENGTH_S = 120.0
 HEAP_K = 50
 HEAP_RUN_SEED = 20261000
 HEAP_LAYOUT_SEED = 20261010
+HEAP_EPISODE_DRAWS = True
+"""The read's flags include ``--episode_draws``, and it is not cosmetic here.
+
+The flag redraws bins, lights and cameras at the episode reset, which consumes the same
+``_rng`` the heap drop then draws from, so leaving it off gives a DIFFERENT heap at the same
+seeds: the parts are the same 50 and their poses after the settle differ by 100 mm on average
+against the inspection's own first scan. With it on they match that scan to 0.007 mm, which is
+the log's rounding. Comparing this mode's episode against the inspection's 15 of 50 is only
+meaningful with it on. It has no "off" switch, because the mode exists to reproduce the read.
+"""
 
 
 class BottomPickRig(OracleRig):
@@ -629,6 +639,7 @@ def parse_args(argv=None) -> argparse.Namespace:
             ("--parts_split", "heldout"),
             ("--run_seed", HEAP_RUN_SEED),
             ("--layout_seed", HEAP_LAYOUT_SEED),
+            ("--episode_draws", HEAP_EPISODE_DRAWS),
         ):
             if not any(a == flag or a.startswith(flag + "=") for a in given):
                 setattr(args, flag[2:], value)
