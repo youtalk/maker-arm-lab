@@ -29,7 +29,9 @@ import subprocess
 import sys
 import traceback
 
-os.environ.setdefault("MUJOCO_GL", "egl")
+# --viewer needs an on-screen GL context, and the video renderer shares the backend, so
+# that run moves to glfw. Read off argv: the backend is fixed at the first mujoco import.
+os.environ.setdefault("MUJOCO_GL", "glfw" if "--viewer" in sys.argv else "egl")
 
 import mujoco
 import numpy as np
@@ -43,6 +45,7 @@ from maker_arm_lab.core.batch_loop import (
     heap_parts,
     make_induction,
 )
+from maker_arm_lab.core.checker import pinch_min_force, pinch_min_stall
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
@@ -73,6 +76,9 @@ class InspectHeapOracle(HeapOracle):
         super().__init__(*args, **kwargs)
         self.events: list[dict] = []
         self.step = 0
+        self.lift_detail: dict = {}
+        """The pinch factors behind the next LIFT report, filled by the rig wrapper in
+        ``run()``. Telemetry only: the gate itself is untouched."""
 
     def _event(self, kind: str, phase: str | None = None, **fields) -> dict:
         event = {"step": self.step, "phase": phase or self.phase.name, "kind": kind, **fields}
@@ -155,7 +161,9 @@ class InspectHeapOracle(HeapOracle):
             retries_used=self.retries_used,
             next_phase=self.phase.name,
             target_pose=pose,
+            **self.lift_detail,
         )
+        self.lift_detail = {}
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -166,6 +174,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--video_tail_s", type=float, default=5.0, help="seconds to keep stepping after DONE"
     )
     parser.add_argument("--no_video", action="store_true")
+    parser.add_argument(
+        "--viewer",
+        action="store_true",
+        help="open the MuJoCo GUI on the episode (needs a display; closing it ends the run)",
+    )
     args = parser.parse_args(argv)
     if args.heap_k <= 0:
         parser.error("--heap_k must be positive: this script inspects heap episodes only")
@@ -278,7 +291,38 @@ def run(args: argparse.Namespace) -> dict:
         oracle_factory=factory,
     )
     orc = holder[-1]
+
+    inner_lift = rig._lift_result
+
+    def lift_result(i: int, outcome: str):
+        """Record what the pinch gate saw, then let the untouched gate decide."""
+        orc_i = rig.oracles[i]
+        width = orc_i.grasp_width
+        min_size = getattr(orc_i, "grasp_min_size", min(layout.BRICK_SIZE))
+        floor_stall = pinch_min_stall(width, min_size)
+        floor_force = pinch_min_force(width, min_size)
+        ev = rig.pinch_evidence(i, orc_i.target_brick, floor_stall, floor_force)
+        end = rig._brick_pos(i, orc_i.target_brick)
+        orc_i.lift_detail = {
+            "stall": round(ev["stall"], 5),
+            "left": round(ev["left"], 3),
+            "right": round(ev["right"], 3),
+            "asymmetry": round(ev["asymmetry"], 3),
+            "min_stall": round(floor_stall, 5),
+            "min_force": round(floor_force, 3),
+            "rise": round((end[2] - rig.brick_start[i][2]).item(), 4),
+            "xy_error": round((end[:2] - rig.pick_point(i)[:2]).norm().item(), 4),
+            "grasp_width": round(width, 4),
+        }
+        return inner_lift(i, outcome)
+
+    rig._lift_result = lift_result
     video = None if args.no_video else Video(env, os.path.join(args.out_dir, "inspect.mp4"))
+    gui = None
+    if args.viewer:
+        import mujoco.viewer
+
+        gui = mujoco.viewer.launch_passive(env.models[0], env.datas[0])
     tail_steps = round(args.video_tail_s * 30)
 
     def poses() -> list[list[float]]:
@@ -331,6 +375,11 @@ def run(args: argparse.Namespace) -> dict:
                     }
                 )
         prev = now
+        if gui is not None:
+            if not gui.is_running():
+                reason = "closed"
+                break
+            gui.sync()
         if video is not None and step % args.video_stride == 0:
             g = orc.grasp
             target_name = "" if orc.target_brick is None else parts[orc.target_brick].name
@@ -358,6 +407,8 @@ def run(args: argparse.Namespace) -> dict:
                 break
     if video is not None:
         video.close()
+    if gui is not None:
+        gui.close()
     stats = orc.extra_stats()
     end = {
         "step": step,
