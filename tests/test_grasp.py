@@ -253,11 +253,23 @@ def test_clamp_to_tray_pulls_a_point_back_along_its_radius():
     cx, cy = layout.TRAY_CENTER
     inside = (cx + 0.01, cy + 0.01)
     assert grasp.clamp_to_tray(inside) == inside
-    far = (cx + 0.5, cy)
+    # Diagonal, off both cardinal axes: a box clamp and a radial clamp disagree here, so
+    # this is the direction that actually pins down the radial model.
+    far = (cx + 0.5, cy + 0.3)
     clamped = grasp.clamp_to_tray(far)
     assert math.isclose(
         math.hypot(clamped[0] - cx, clamped[1] - cy),
         layout.TRAY_RADIUS - grasp.PUSH_WALL_MARGIN_M,
         abs_tol=1e-9,
     )
-    assert clamped[1] == cy
+    away = math.atan2(far[1] - cy, far[0] - cx)
+    clamped_away = math.atan2(clamped[1] - cy, clamped[0] - cx)
+    assert math.isclose(away, clamped_away, abs_tol=1e-9)
+
+
+def test_clamp_to_tray_pins_the_centre_when_the_margin_exceeds_the_radius():
+    """A margin past TRAY_RADIUS must pin the centre, not reflect the point through it."""
+    cx, cy = layout.TRAY_CENTER
+    off_center = (cx + 1e-6, cy)
+    clamped = grasp.clamp_to_tray(off_center, margin=layout.TRAY_RADIUS + 0.05)
+    assert clamped == (cx, cy)

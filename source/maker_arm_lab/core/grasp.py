@@ -316,11 +316,15 @@ PUSH_MIN_GAIN_M = 0.005
 def clamp_to_tray(
     point: tuple[float, float], margin: float = PUSH_WALL_MARGIN_M
 ) -> tuple[float, float]:
-    """Pull a point back along its own radius until it is ``margin`` inside the rim."""
+    """Pull a point back along its own radius until it is ``margin`` inside the rim.
+
+    A ``margin`` past ``layout.TRAY_RADIUS`` clamps to the dish centre rather than going
+    negative, which would reflect the point through the centre onto the far side.
+    """
     cx, cy = layout.TRAY_CENTER
     dx, dy = point[0] - cx, point[1] - cy
     radius = math.hypot(dx, dy)
-    limit = layout.TRAY_RADIUS - margin
+    limit = max(0.0, layout.TRAY_RADIUS - margin)
     if radius <= limit or radius == 0.0:
         return point
     scale = limit / radius
