@@ -15,10 +15,12 @@ LONG_PLATE = parts.make_part("plate", 2, 8)  # one closing axis: its 15.8 mm sid
 IDENTITY = torch.tensor([1.0, 0.0, 0.0, 0.0])
 
 
-def _snapshot(positions, stowed=(), destination=1):
+def _snapshot(positions, stowed=()):
     pos = torch.tensor(positions, dtype=torch.float32)
     for b in stowed:
-        pos[b] = layout.bin_interior_centers(BL)[destination]
+        # HeapOracle._stowed grades against the one heap bin (the MS6 z-centre fix), so a
+        # "stowed" stub sits at layout.heap_bin_center, not a per-color slot.
+        pos[b] = torch.tensor(layout.heap_bin_center(BL))
     n = pos.shape[0]
     return oracle.SceneSnapshot(
         brick_pos=pos,
@@ -68,8 +70,10 @@ def test_release_and_stowed_read_the_destination_bin():
     orc = _oracle([BRICK], destination=3)
     target = orc._release_target(0)
     assert target[1] == pytest.approx(BL.bin_ys[3]) and target[2] == oracle.RELEASE_Z
-    assert orc._stowed(_snapshot([[0.0, 0.0, 0.0]], stowed=(0,), destination=3)) == {0}
-    assert orc._stowed(_snapshot([[0.0, 0.0, 0.0]], stowed=(0,), destination=0)) == set()
+    # _stowed grades against the one heap bin (the MS6 z-centre fix), so it reads the same
+    # centre regardless of orc.destination.
+    assert orc._stowed(_snapshot([[0.0, 0.0, 0.0]], stowed=(0,))) == {0}
+    assert orc._stowed(_snapshot([[0.0, 0.0, 0.0]])) == set()
 
 
 def _push_phases(orc, scene):

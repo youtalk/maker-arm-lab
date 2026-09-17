@@ -90,11 +90,13 @@ class HeapOracle(oracle.EnvOracle):
     # -- grading against the destination -----------------------------------
 
     def _stowed(self, scene: oracle.SceneSnapshot) -> set[int]:
-        ids = torch.full((self.num_bricks,), self.destination, dtype=torch.long)
+        # The MS6 z-centre fix: heap mode has one physical bin, so grading reads
+        # layout.heap_bin_center directly instead of the six-brick per-color array.
+        ids = torch.zeros(self.num_bricks, dtype=torch.long)
         ok = checker.bricks_at_rest_in_bins(
             scene.brick_pos.unsqueeze(0),
             scene.brick_lin_vel.unsqueeze(0),
-            layout.bin_interior_centers(self.bl),
+            torch.tensor(layout.heap_bin_center(self.bl)).unsqueeze(0),
             torch.tensor(STOW_HALF_EXTENTS),
             ids,
         )[0]

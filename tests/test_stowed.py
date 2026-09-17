@@ -60,15 +60,34 @@ def test_per_env_layouts_grade_each_env_against_its_own_bins():
 
 
 def test_destination_bins_replace_the_color_rule():
-    centers = layout.bin_interior_centers()
+    # destination_bins grades against the one heap bin (the MS6 z-centre fix), so every
+    # index reads the same layout.heap_bin_center, never a per-color slot.
+    heap_center = torch.tensor(layout.heap_bin_center())
     pos = torch.zeros(2, 2, 3)
-    pos[0, 0] = centers[2]  # brick 0 (red by color) sits in the yellow bin
-    pos[0, 1] = centers[2]
-    pos[1, 0] = centers[2]
-    pos[1, 1] = centers[1]
+    pos[0, 0] = heap_center  # brick 0 (red by color) sits in the heap bin, not its color bin
+    pos[0, 1] = heap_center
+    pos[1, 0] = heap_center
+    pos[1, 1] = layout.bin_interior_centers()[1]  # a color bin, not the heap bin
     env = _env(pos)
     env.destination_bins = torch.tensor([2, 2])
     assert stowed.per_brick_stowed(env).tolist() == [[True, True], [True, False]]
+
+
+def test_destination_bins_grade_against_the_heap_centre_not_the_six_brick_bin():
+    """The reviewer's regression test for the MS6 z-centre fix.
+
+    ``env_heap_bin_centers`` must read ``layout.heap_bin_center`` itself, not a copy of its
+    z value. A future change to ``HEAP_BIN_INTERIOR`` moves both sides together, so this
+    test only fails if the grader falls back to the six-brick array again.
+    """
+    bl = layout.DEFAULT_BIN_LAYOUT
+    want = torch.tensor(layout.heap_bin_center(bl))
+    env = _env(torch.zeros(2, 1, 3))
+    env.destination_bins = torch.tensor([0, 3])
+    centers = stowed.env_heap_bin_centers(env, "cpu")
+    assert centers.shape == (4, 3)
+    assert torch.allclose(centers[0], want)
+    assert torch.allclose(centers[3], want)
 
 
 def test_stow_half_extents_count_a_part_piled_over_the_rim():
