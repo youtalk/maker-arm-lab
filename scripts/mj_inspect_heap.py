@@ -243,6 +243,35 @@ class Video:
         self.renderer.close()
 
 
+def _install_lift_wrapper(rig) -> None:
+    """Record what the pinch gate saw on every LIFT, then let the untouched gate decide."""
+    inner_lift = rig._lift_result
+
+    def lift_result(i: int, outcome: str):
+        """Record what the pinch gate saw, then let the untouched gate decide."""
+        orc_i = rig.oracles[i]
+        width = orc_i.grasp_width
+        min_size = getattr(orc_i, "grasp_min_size", min(layout.BRICK_SIZE))
+        floor_stall = pinch_min_stall(width, min_size)
+        floor_force = pinch_min_force(width, min_size)
+        ev = rig.pinch_evidence(i, orc_i.target_brick, floor_stall, floor_force)
+        end = rig._brick_pos(i, orc_i.target_brick)
+        orc_i.lift_detail = {
+            "stall": round(ev["stall"], 5),
+            "left": round(ev["left"], 3),
+            "right": round(ev["right"], 3),
+            "asymmetry": round(ev["asymmetry"], 3),
+            "min_stall": round(floor_stall, 5),
+            "min_force": round(floor_force, 3),
+            "rise": round((end[2] - rig.brick_start[i][2]).item(), 4),
+            "xy_error": round((end[:2] - rig.pick_point(i)[:2]).norm().item(), 4),
+            "grasp_width": round(width, 4),
+        }
+        return inner_lift(i, outcome)
+
+    rig._lift_result = lift_result
+
+
 def run(args: argparse.Namespace) -> dict:
     os.makedirs(args.out_dir, exist_ok=True)
     draw, bl, noise = build_run(args)
@@ -291,32 +320,7 @@ def run(args: argparse.Namespace) -> dict:
         oracle_factory=factory,
     )
     orc = holder[-1]
-
-    inner_lift = rig._lift_result
-
-    def lift_result(i: int, outcome: str):
-        """Record what the pinch gate saw, then let the untouched gate decide."""
-        orc_i = rig.oracles[i]
-        width = orc_i.grasp_width
-        min_size = getattr(orc_i, "grasp_min_size", min(layout.BRICK_SIZE))
-        floor_stall = pinch_min_stall(width, min_size)
-        floor_force = pinch_min_force(width, min_size)
-        ev = rig.pinch_evidence(i, orc_i.target_brick, floor_stall, floor_force)
-        end = rig._brick_pos(i, orc_i.target_brick)
-        orc_i.lift_detail = {
-            "stall": round(ev["stall"], 5),
-            "left": round(ev["left"], 3),
-            "right": round(ev["right"], 3),
-            "asymmetry": round(ev["asymmetry"], 3),
-            "min_stall": round(floor_stall, 5),
-            "min_force": round(floor_force, 3),
-            "rise": round((end[2] - rig.brick_start[i][2]).item(), 4),
-            "xy_error": round((end[:2] - rig.pick_point(i)[:2]).norm().item(), 4),
-            "grasp_width": round(width, 4),
-        }
-        return inner_lift(i, outcome)
-
-    rig._lift_result = lift_result
+    _install_lift_wrapper(rig)
     video = None if args.no_video else Video(env, os.path.join(args.out_dir, "inspect.mp4"))
     gui = None
     if args.viewer:
