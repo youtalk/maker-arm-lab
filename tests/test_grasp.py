@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from maker_arm_lab.core import grasp, layout, oracle, parts
+from maker_arm_lab.core import grasp, layout, parts
 
 BRICK = parts.make_part("brick", 2, 4)
 PLATE = parts.make_part("plate", 2, 4)
@@ -70,15 +70,17 @@ def test_a_tilted_approach_opens_the_short_axis_of_a_lying_plate():
 
 
 def test_the_tilted_jaw_plane_refuses_an_axis_that_lies_along_the_tilt_direction():
-    """World +x is 0.342 = sin(20 deg) off the PICK_TILT_RAD jaw plane, over the 0.259 =
-    sin(15 deg) = sin(AXIS_MAX_TILT_RAD) limit; world +y, across the tilt, stays at 0."""
+    """Pins the jaw-plane MECHANISM in candidate_grasps, independent of PICK_TILT_RAD's
+    shipped value (0.0 as of the R5 revert): world +x is 0.342 = sin(20 deg) off a jaw plane
+    tilted 20 deg, over the 0.259 = sin(15 deg) = sin(AXIS_MAX_TILT_RAD) limit; world +y,
+    across the tilt, stays at 0. An explicit 20 deg keeps this test meaningful at any
+    PICK_TILT_RAD, including the 0.0 it ships at today, so the next attempt at this rung
+    starts from a mechanism that is already pinned."""
     size = _size(BRICK)
     world_x_width = float(size[0])
     world_y_width = float(size[1])
     level = grasp.candidate_grasps(0, size, torch.zeros(3), IDENTITY, tilt_rad=0.0)
-    tilted = grasp.candidate_grasps(
-        0, size, torch.zeros(3), IDENTITY, tilt_rad=oracle.PICK_TILT_RAD
-    )
+    tilted = grasp.candidate_grasps(0, size, torch.zeros(3), IDENTITY, tilt_rad=math.radians(20.0))
 
     def has_axis(found, heading, width):
         return any(

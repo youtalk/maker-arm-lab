@@ -207,25 +207,41 @@ RAISE_MAX_STEPS = 60
 # every tilt. The runtime advances straight to EXTEND on the legs it cannot plan.
 RAISE_TILT_RAD = 1.05
 
-PICK_TILT_RAD = math.radians(20.0)
-"""Tool-axis tilt the pick phases hold. MS6 rework rung R5 raises it off zero.
+PICK_TILT_RAD = 0.0
+"""Tool-axis tilt the pick phases hold. MS6 rework rung R5 tried to raise it off zero.
 
 At 0.0 the jaws come down flat, so a part offers only the body axes that are within
 `grasp.AXIS_MAX_TILT_RAD` of horizontal, and a lying plate offers its in-plane axes alone.
 Raising it moves the reach ceiling, the joint6 budget of `fold_jaw_heading` and the descend
-clearance model at the same time, which is why the rung runs last.
+clearance model at the same time, which is why the rung ran last, and why it ran twice.
 
-20.0 deg, not a rounder or larger value: it equals `robots.frames.GRASP_TILT_DEG` today, the
-runtime's own floor on the hover-approach tilt. That constant comes from the D3 sweep's
-18.42 deg worst case (the outer corners of the scatter band, `robots/frames.py`'s own
-comment), rounded up to the nearest whole degree. `oracle_runtime` already raises any
-smaller request to `GRASP_TILT_RAD` (`max(goal.tilt_rad, GRASP_TILT_RAD)`, and
-`_plan_hover_ladder` hardcodes it outright), so this module cannot command the arm below its
-floor no matter what it asks for -- every value up to and including 20.0 deg lands on the
-commanded pose the runtime already holds today, and only a value above it would move that
-pose and the reach ceiling. This rung's read of the ladder is what re-validates the D3
-choice: it says the floor is still where the runtime already sits, not a new number for the
-oracle to push past it.
+The ladder read two non-zero values and rejected both, so the constant stays at 0.0.
+
+25.0 deg moved the commanded pose past `robots.frames.GRASP_TILT_DEG` (20.0 deg today), the
+runtime's own floor on the hover-approach tilt (`oracle_runtime`'s
+`max(goal.tilt_rad, GRASP_TILT_RAD)`, and `_plan_hover_ladder`'s hardcoded use of it). That
+moved attitude cost a grasp attempt in the bottom-pick probe and halved the heap teacher's
+completed cycles inside a fixed step budget.
+
+20.0 deg equals `GRASP_TILT_RAD` itself, so it never moves the commanded pose -- every
+request at or below the runtime's floor lands on the pose it already holds today. That floor
+comes from the D3 sweep's 18.42 deg worst case at the outer corners of the scatter band
+(`robots/frames.py`'s own comment), rounded up to the nearest whole degree. Holding the pose
+did not hold the grasp model steady, though: `grasp.candidate_grasps` measures a candidate
+closing axis against the JAW PLANE, and at 20.0 deg that plane is no longer level.
+`AXIS_MAX_TILT_RAD` (15.0 deg) was calibrated against a level plane, so tilting the plane
+20.0 deg while keeping that same 15.0 deg band refuses every closing axis that lies along the
+tilt direction -- a whole orientation class of parts the level-plane model used to accept.
+Driven, a three-part heap that stowed completely at 0.0 deg stalled at 20.0 deg:
+`sort_attempts` 2 of 3, `retries` 12, `unplanned_legs` 0, so the IK solver could still reach
+the part and the grasp model was the one that refused to offer it a grip. The arm never
+moved; only the model's own opinion of what it can hold did, so this is a modeling gap, not a
+measured hardware limit.
+
+This constant does not go non-zero again until `grasp.AXIS_MAX_TILT_RAD` is re-measured
+against a tilted jaw plane at the matching tilt, and that measured-constant change is outside
+this rung's scope. Until then 0.0 is the value every test, the bottom-pick probe and the heap
+teacher all still pass at, and it is the value that ships.
 
 `core/` never imports `robots.frames` -- it is the ported, arm-agnostic state machine, and
 the runtime owning the arm's floor is the whole reason that floor lives there instead of
