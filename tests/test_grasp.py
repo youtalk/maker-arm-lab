@@ -54,6 +54,21 @@ def test_a_tilted_axis_and_an_oversize_width_are_not_candidates():
     assert grasp.candidate_grasps(0, wide, torch.zeros(3), IDENTITY) == []
 
 
+def test_a_tilted_approach_opens_the_short_axis_of_a_lying_plate():
+    plate = parts.make_part("plate", 2, 4)
+    size = torch.tensor(list(plate.size))
+    pos = torch.tensor([layout.TRAY_CENTER[0], 0.0, 0.0016])
+    quat = torch.tensor([1.0, 0.0, 0.0, 0.0])
+    flat = grasp.candidate_grasps(0, size, pos, quat)
+    tilted_40 = grasp.candidate_grasps(0, size, pos, quat, tilt_rad=math.radians(40.0))
+    tilted_80 = grasp.candidate_grasps(0, size, pos, quat, tilt_rad=math.radians(80.0))
+    assert all(g.width > plate.size[2] for g in flat)
+    # 40 degrees is short of the ~75 degree floor AXIS_MAX_TILT_RAD sets on this plate:
+    # the thickness axis is still refused, only the long in-plane axis survives.
+    assert all(g.width > plate.size[2] for g in tilted_40)
+    assert any(math.isclose(g.width, plate.size[2], rel_tol=1e-6) for g in tilted_80)
+
+
 def test_neighbor_extents_follow_the_world_aligned_bounding_box():
     sizes = torch.stack([_size(BRICK), _size(BRICK)])
     rxy, hz = grasp.neighbor_extents(sizes, torch.stack([IDENTITY, ROLL_90]))

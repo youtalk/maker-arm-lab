@@ -195,7 +195,14 @@ class HeapOracle(oracle.EnvOracle):
         return mask
 
     def _ranked(self, scene: oracle.SceneSnapshot, mask: torch.Tensor) -> list[grasp.Grasp]:
-        return grasp.rank_grasps(self.sizes, scene.brick_pos, scene.brick_quat, mask, self.walls)
+        return grasp.rank_grasps(
+            self.sizes,
+            scene.brick_pos,
+            scene.brick_quat,
+            mask,
+            self.walls,
+            oracle.PICK_TILT_RAD,
+        )
 
     def _push_heading(self, center: tuple[float, float]) -> float:
         """A push heading from ``self._push_rng``, biased away from the dish rim.

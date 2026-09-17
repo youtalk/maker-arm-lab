@@ -280,6 +280,7 @@ def rank_grasps(
     quat: torch.Tensor,
     candidates: torch.Tensor,
     wall_footprints: list[list[tuple[float, float]]],
+    tilt_rad: float = 0.0,
 ) -> list[Grasp]:
     """Every grasp of every candidate part with its clearance, best first.
 
@@ -295,7 +296,7 @@ def rank_grasps(
         others[b] = False
         other_pos, other_hz = pos[others], hz[others]
         other_prints = [prints[k] for k in torch.nonzero(others).flatten().tolist()]
-        for g in candidate_grasps(b, sizes[b], pos[b], quat[b]):
+        for g in candidate_grasps(b, sizes[b], pos[b], quat[b], tilt_rad):
             clearance, swept, wall = jaw_clearance(
                 pos[b],
                 g.heading,

@@ -207,6 +207,15 @@ RAISE_MAX_STEPS = 60
 # every tilt. The runtime advances straight to EXTEND on the legs it cannot plan.
 RAISE_TILT_RAD = 1.05
 
+PICK_TILT_RAD = 0.0
+"""Tool-axis tilt the pick phases hold. MS6 rework rung R5 raises it off zero.
+
+At 0.0 the jaws come down flat, so a part offers only the body axes that are within
+`grasp.AXIS_MAX_TILT_RAD` of horizontal, and a lying plate offers its in-plane axes alone.
+Raising it moves the reach ceiling, the joint6 budget of `fold_jaw_heading` and the descend
+clearance model at the same time, which is why the rung runs last.
+"""
+
 _JOINT_LIMIT_GUARD_RAD = 0.05
 _JOINT_SPEED_MAX = 6.0
 
@@ -893,7 +902,7 @@ class EnvOracle:
             Phase.DESCEND,
             target,
             yaw,
-            0.0,
+            PICK_TILT_RAD,
             1.0,
             0.0008,
             DESCEND_STALL_STEPS,
@@ -970,7 +979,7 @@ class EnvOracle:
                 Phase.HOVER,
                 target,
                 yaw,
-                0.0,
+                PICK_TILT_RAD,
                 1.0,
                 0.005,
                 0,
@@ -981,7 +990,7 @@ class EnvOracle:
             return self.descend_goal(self._target_yaw(scene))
         if self.phase == Phase.CLOSE:
             return self._goal(
-                Phase.CLOSE, None, None, 0.0, -1.0, None, 0, CLOSE_STEPS, hold=CLOSE_STEPS
+                Phase.CLOSE, None, None, PICK_TILT_RAD, -1.0, None, 0, CLOSE_STEPS, hold=CLOSE_STEPS
             )
         if self.phase == Phase.LIFT:
             target = scene.pick_point.clone()
@@ -1007,7 +1016,7 @@ class EnvOracle:
             else:
                 target[2] += LIFT_HEIGHT
             return self._goal(
-                Phase.LIFT, target, None, 0.0, -1.0, 0.002, 0, DEFAULT_MAX_STEPS, hold=30
+                Phase.LIFT, target, None, PICK_TILT_RAD, -1.0, 0.002, 0, DEFAULT_MAX_STEPS, hold=30
             )
         if self.phase == Phase.REOPEN:
             return self._goal(Phase.REOPEN, None, None, 0.0, 1.0, None, 0, 20, hold=20)

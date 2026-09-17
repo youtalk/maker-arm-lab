@@ -228,6 +228,40 @@ def test_retreat_carries_the_release_tilt():
     assert retreat_goal.tilt_rad == pytest.approx(oracle.RELEASE_TILT_RAD)
 
 
+def test_every_pick_phase_carries_the_pick_tilt():
+    orc = _oracle()
+    scene = _snapshot()
+    _run_phase(orc, scene)  # SETTLE -> HOVER
+    orc.next_goal(scene)  # HOVER's entry selects the target brick
+    for phase in (
+        oracle.Phase.HOVER,
+        oracle.Phase.DESCEND,
+        oracle.Phase.CLOSE,
+        oracle.Phase.LIFT,
+    ):
+        orc.phase = phase
+        goal = orc.next_goal(scene)
+        assert goal.tilt_rad == oracle.PICK_TILT_RAD
+
+
+def test_every_pick_phase_carries_a_raised_pick_tilt(monkeypatch):
+    """PICK_TILT_RAD == 0.0 makes the assertion above unable to fail; this pins the wiring."""
+    monkeypatch.setattr(oracle, "PICK_TILT_RAD", 0.4)
+    orc = _oracle()
+    scene = _snapshot()
+    _run_phase(orc, scene)  # SETTLE -> HOVER
+    orc.next_goal(scene)  # HOVER's entry selects the target brick
+    for phase in (
+        oracle.Phase.HOVER,
+        oracle.Phase.DESCEND,
+        oracle.Phase.CLOSE,
+        oracle.Phase.LIFT,
+    ):
+        orc.phase = phase
+        goal = orc.next_goal(scene)
+        assert goal.tilt_rad == 0.4
+
+
 def test_unreachable_brick_is_skipped_and_reachable_one_sorted():
     bl = layout.DEFAULT_BIN_LAYOUT
     pos = torch.tensor(
