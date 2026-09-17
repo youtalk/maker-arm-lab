@@ -19,7 +19,8 @@ Section 4 names three candidate mechanisms from the per-cycle outcomes. They are
 The data does not prove that any one of them is the cause. Flat parts, plates and tiles, are
 never stowed. The teacher
 attempts few pick cycles per episode against its budget. About one part in five leaves the
-tray during the drop or a push. The read failed, so the plan stops before phase B. The
+tray by a route the read does not identify. The drop and a push are two candidates, not the
+complete set (section 4.1). The read failed, so the plan stops before phase B. The
 throughput rows did not run (section 5). No constant changed before or during the read. This
 report reflects the code as merged in PR #50.
 
@@ -41,9 +42,9 @@ does not fit the arm's measured reach. Wherever it sits on the desk, its corners
 (`source/maker_arm_lab/core/layout.py`). The built tray has a 13 by 20 cm interior, at x from
 0.13 to 0.26 m and y from -0.10 to 0.10 m. Its near edge sits at x = 0.13 m, the start of the
 measured scatter band (`SCATTER_X[0]`). Its far corners sit at radius 0.279 m, just under the
-reach bound. The roadmap's "thousands" throughput arithmetic assumed a 30 by 30 cm tray. That
-tray size is a question for the real arm on the MA track, not a question this simulation can
-settle.
+reach bound. The roadmap's "thousands" throughput arithmetic comes from a different passage
+than the 25 by 25 cm tray size. It assumed a 30 by 30 cm tray. That tray size is a question for
+the real arm on the MA track, not a question this simulation can settle.
 
 Design H4 fixes the part set and the part count K per generation run, not per episode. Poses,
 colors, and the destination bin still draw per episode. A part set that changes every episode
@@ -72,8 +73,12 @@ One episode has a video, under the read's own seeds: held-out split, K = 50, run
 runs 87 seconds at 30 Hz, with overhead RGB, wrist RGB, and overhead depth side by side. A
 heap run exports only pick-cycle frames. The clip holds 2617 of the episode's 30900 control
 steps. In that episode the teacher stowed 1 of 50 parts, in 4 cycles. It attempted part 44
-three times without stowing it. It pushed 3 times, and it put 5 parts outside the tray. This
-file lives outside the repository, and this report does not commit it. It illustrates the
+three times without stowing it. It pushed 3 times. Its last candidate scan counted 5 parts
+outside the tray, a snapshot at that scan (Candidate 3 in section 4.1 defines the count). That
+count is not the 7 parts sitting outside the tray at step zero, reported later in section 4.1.
+The two readings come from different points in the episode, and the last scan already excludes
+the 1 part the teacher had stowed by then. This file lives outside the repository, and this
+report does not commit it. It illustrates the
 campaign. It is not itself a source of the campaign's numbers.
 
 ## 4. The read
@@ -82,9 +87,11 @@ campaign. It is not itself a source of the campaign's numbers.
 | --- | --- | --- | --- |
 | stowed fraction | 34 / 6000 = 0.0057, Wilson 95 percent [0.0041, 0.0079] | at least 0.90 | FAIL |
 | cycles per stowed part | 7.24 | at most 1.3 | FAIL |
-| parts outside the tray | 1107 of 6000 = 18.5 percent | not gated | reported |
-| pushes | 367 = 3.06 per episode | not gated | reported |
+| parts outside the tray, last scan per episode (Candidate 3) | 1107 of 6000 = 18.5 percent | not gated | reported |
+| pushes | 367 = 3.06 per episode, capped at 3 in 115 of 120 episodes (Candidate 2) | not gated | reported |
 | pick cycles | 246 over 120 episodes = 2.05 per episode | budget is 50 | reported |
+| episodes at the 3-push cap | 115 of 120 = 95.8 percent | not gated | reported |
+| episodes with zero pick cycles | 50 of 120 = 41.7 percent | not gated | reported |
 
 Over the 120 episodes, 115 timed out and 5 were abandoned. No episode succeeded. The run
 logged 423 retries in total. The failure memory excluded 46 cells. An excluded cell is a 5 cm
@@ -113,24 +120,48 @@ presented with its evidence. The data does not prove that any one of them is the
 **Candidate 1: flat parts are never stowed.** Plates and tiles took 105 of the 246 cycles and
 stowed 0 of them. Bricks and slopes stowed 34 of their 141 cycles. `CLEARANCE_MIN` in
 `source/maker_arm_lab/core/grasp.py` is 0.003 m. A grasp needs at least that jaw-box
-clearance to be selected. `tests/test_mj_heap_oracle.py` stows parts in one layout only: three
-bricks hand-placed at x = 0.195, with 45 mm of y separation between them. That test's own
-comment records a check at 40 mm of separation. At that spacing the best reachable grasp on
-the outer two parts reads 0.00287 m of clearance, under `CLEARANCE_MIN`. No test in that file
-stows a plate or a tile. No test stows a dropped heap. This is an inference. A flat part has a
+clearance to be selected. `tests/test_mj_heap_oracle.py` stows parts in two hand-placed
+layouts: three spread bricks, and a two-part stack with a third loose part. Both assert 3
+parts delivered. The spread-brick test hand-places its bricks at x = 0.195, with 45 mm of y
+separation between them. That test's own comment records a check at 40 mm of separation. At
+that spacing the best reachable grasp on the outer two parts reads 0.00287 m of clearance,
+under `CLEARANCE_MIN`. No test in that file stows a plate or a tile. No test stows a dropped
+heap. This is an inference. A flat part has a
 smaller candidate grasp set. On the 13 by 20 cm tray interior (design H1), that smaller set
 sits closer to the tray walls and to its neighbors. More of a flat part's grasps can fall
 under `CLEARANCE_MIN` than a brick's grasps do. The data does not separate tray width from
 part geometry as the cause.
 
-**Candidate 2: the teacher rarely attempts a cycle.** The budget is 50 cycles per episode. The
-teacher used 2.05 of them on average. It pushed 3.06 times per episode, close to one push for
-every pick cycle. 115 of 120 episodes hit the time out, not the cycle budget. This is an
-inference. The teacher spends its episode time on pushes and on failed grasp searches, not on
-picks. If that reading holds, raising the cycle budget alone will not raise the stowed count.
-The evidence points at the push length or at the push trigger condition, not at the budget.
+**Candidate 2: the teacher gives up early, then idles.** Pushes per episode read
+{0: 5, 3: 102, 4: 6, 5: 5, 6: 2}. 102 of 120 episodes ended with exactly 3 pushes, and 115 of
+120 ended with 3 or more. `MAX_PUSHES_IN_A_ROW = 3`, in
+`source/maker_arm_lab/core/heap_oracle.py`, caps consecutive pushes at 3. The 3.06 pushes per
+episode in the table above is this cap, not a free-running push rate.
 
-**Candidate 3: parts leave the tray.** 1107 of 6000 parts, 18.5 percent, ended up outside the
+When no grasp clears and `pushes_in_a_row` reaches `MAX_PUSHES_IN_A_ROW`, `_next_brick` returns
+`None`. It does not schedule another push. The prior push already cleared
+`self.push` to `None` in `report`, so `_no_target_phase` then finds `self.push is None` and
+returns `Phase.DONE`. The teacher stops picking and stops pushing for the rest of the episode.
+`tests/test_heap_oracle.py`'s `test_three_pushes_in_a_row_end_the_episode_done` checks this
+path directly: after 3 pushes in a row with no clear grasp, `orc.phase is oracle.Phase.DONE`
+and `orc.next_goal(scene)` returns `None`.
+
+Cycles per episode read
+{0: 50, 1: 18, 2: 10, 3: 13, 4: 8, 5: 10, 6: 4, 7: 2, 8: 2, 9: 1, 12: 2}. 50 of 120 episodes
+attempted zero pick cycles. `core/batch_loop.py`'s `cycle_actor` does not record a frame while
+the oracle's phase is `SETTLE`, `DONE`, or `ABANDON`. Once a give-up episode reaches `DONE`, it
+records nothing further. Recorded in-cycle frames per episode, over the 115 written episodes,
+range from 480 to a median of 1268 and a mean of 1912. Each episode allows 30900 control steps.
+
+This is an inference. The teacher does not run out of clock on a steady rate of work. It
+reaches the push cap, goes idle, and the rest of the episode records nothing. `CLEARANCE_MIN`
+and `MAX_PUSHES_IN_A_ROW` are where phase B's fix belongs, not the cycle budget.
+
+**Candidate 3: parts leave the tray.** `self.outside_tray`, in `_candidates`
+(`source/maker_arm_lab/core/heap_oracle.py`), resets to zero on every call. When a non-stowed
+part at or below `CANDIDATE_MAX_Z` sits outside the tray bounds at that scan, it counts that
+part. The reported total, 1107 of 6000 parts, 18.5 percent, is this count at each
+episode's last candidate scan. It is not a running tally of every part that ever left the
 tray. `source/maker_arm_lab/core/layout.py` sets the drop band. Part k lands at a height
 uniform in `[HEAP_DROP_Z_MIN, HEAP_DROP_Z_MIN + HEAP_DROP_Z_PER_PART * K]`. The physics then
 settles for `HEAP_SETTLE_STEPS` steps. The constants read `HEAP_DROP_Z_MIN = 0.03` and
@@ -141,8 +172,11 @@ The teacher allows up to `MAX_PUSHES_IN_A_ROW = 3` pushes before it must try a g
 This is an inference. A part can drop from up to 0.09 m onto a pile inside a 0.02 m wall. On
 that drop, or on the settle after it, the part can bounce or roll clear of the tray. A push
 leg reaches 0.04 m from its start. Over up to three pushes in a row, that reach can carry a
-part the rest of the way past a 0.02 m wall. The data does not separate ejections caused by
-the drop and settle from ejections caused by a push.
+part the rest of the way past a 0.02 m wall. The drop and a push are the two routes this read
+can name, not the complete set. Other routes stay unruled out, such as a failed grasp or a
+part dropped in transit across the 423 logged retries. The jaws brushing a neighbor during
+DESCEND is a third. The data does not separate ejections caused by the drop and settle from
+ejections caused by a push.
 
 **A look at one episode's frames.** The illustration episode from section 3 sits in
 `~/data/maker-arm-ms6/a/video/vid.hdf5`. Reading `initial_state/rigid_object/brick_<k>/root_pose`
@@ -153,13 +187,17 @@ x = -0.023 m and y = 0.122 m. Both sit outside the tray. Part 44 sits about 0.15
 near x edge, well clear of it. The teacher spent the episode on these two parts and stowed one.
 
 `_candidates` in `source/maker_arm_lab/core/heap_oracle.py` does not drop a part from the
-candidate set for sitting outside the tray. It counts such a part in `self.outside_tray`, then
-checks only the arm's reach: `x` against `layout.top_down_x_limit`, and the radius
-`math.hypot(x, y)` against `SCATTER_MAX_RADIUS`. `rank_grasps` and `select_grasp` in
-`core/grasp.py` then rank a candidate's grasps by height and by clearance against the other
-parts and the tray walls. Neither function checks tray membership on its own. A part outside
-the tray but inside reach is a candidate on the same terms as a part inside it. This episode's
-two targets show that path in practice.
+candidate set for sitting outside the tray. It skips a part already stowed or above
+`CANDIDATE_MAX_Z` before the tally. If that part sits outside the tray bounds, it counts the
+part in `self.outside_tray`. A candidate still needs the arm's reach: `x` against
+`layout.top_down_x_limit`, and the radius `math.hypot(x, y)` against `SCATTER_MAX_RADIUS`. A
+candidate also needs an open cell, its failure count under `CELL_FAILURE_CAP`.
+
+It never checks tray membership as a reason to exclude a candidate. `rank_grasps` and
+`select_grasp` in `core/grasp.py` then rank a candidate's grasps by height and by clearance
+against the other parts and the tray walls. Neither function checks tray membership on its
+own. A part outside the tray but inside reach and an open cell is a candidate on the same
+terms as a part inside it. This episode's two targets show that path in practice.
 
 This episode adds one more measurement to candidate 3. Seven of its 50 parts sit outside the
 tray before the first step, right after the drop and the settle. This is an inference. It points
@@ -168,9 +206,10 @@ on their own, apart from any push that follows later in the episode.
 
 The recorded phase channel, over the clip's 2617 frames, splits this way: DESCEND 24.5 percent,
 the gripper-close phase 17.2 percent, HOVER 15.4 percent, and the three push phases 31.4 percent
-combined. Every other phase holds under 5 percent. `obs/joint_pos_abs` sums the absolute change
-per step over the arm's 8 joints. It averages about 0.017 rad per step during a push phase,
-against about 0.04 rad per step elsewhere. `obs/clamped` reads false on every one of the 2617
+combined. Every other phase holds under 5 percent. `obs/joint_pos_abs` holds pre-step joint
+positions in URDF order, 6 arm joints and 2 jaws. Summing the absolute step-to-step change
+across its 8 columns averages about 0.017 rad per step during a push, against 0.04 rad per
+step elsewhere. `obs/clamped` reads false on every one of the 2617
 frames. The arm slows during a push. It does not stall, and it never reaches the command clamp.
 
 These readings come from one episode, not from the 120-episode read behind section 4's rates.
@@ -186,8 +225,9 @@ question.
 
 ## 5. The throughput rows
 
-The throughput rows did not run. When the teacher read fails, the pre-registered plan says to record which condition failed
-and stop before phase B. Both of its conditions failed (section 4). No timing data exists for K = 10, 50, 100, or 200 in this campaign.
+The throughput rows did not run. When the teacher read fails, the pre-registered plan says to
+record which condition failed and stop before phase B. Both of its conditions failed
+(section 4). No timing data exists for K = 10, 50, 100, or 200 in this campaign.
 
 ## 6. Open questions
 
@@ -198,9 +238,10 @@ and stop before phase B. Both of its conditions failed (section 4). No timing da
   both. No test isolates part geometry from tray width for a plate or a tile.
 - Whether the drop band or the push length (candidate 3) accounts for more of the 18.5 percent
   ejected. The read does not separate drop-time ejections from push-time ejections.
-- Whether the push trigger or the push length drives the low pick-cycle count (candidate 2).
-  An alternative is that the teacher spends its budget on grasp searches that find nothing
-  above `CLEARANCE_MIN`.
+- Why a push does not clear a grasp within the 3-push cap (candidate 2), and whether
+  `CLEARANCE_MIN` or the push length or placement is the lever. `MAX_PUSHES_IN_A_ROW = 3` ends
+  an episode's picking once it is hit, so the low pick-cycle count follows from that cap, not
+  from a separate push trigger question.
 - The test suite gap (section 4.2). Before phase B changes any of the three constants, add a
   test that stows a plate, a tile, and a dropped heap at a representative K. That test lets a
   fix get checked against a real regression, not only against this campaign's read.
@@ -217,9 +258,12 @@ and stop before phase B. Both of its conditions failed (section 4). No timing da
 - The readings in section 4.1 about the illustration episode's frames come from one episode,
   not from the 120-episode read. They point at a mechanism. Section 4's rates stay the numbers
   a fix must move.
-- No test in `tests/test_mj_heap_oracle.py` places a part outside the tray and checks that the
-  teacher skips it, picks it, or handles it some other way. Section 4.2 lists the flat-part and
-  dropped-heap gaps. This is a third gap.
+- `tests/test_heap_oracle.py`'s `test_candidates_exclude_out_of_reach_lifted_and_stowed_parts`
+  is the only unit test of the `outside_tray` counter. Its one out-of-tray part sits at
+  x = 0.35 m, past `SCATTER_MAX_RADIUS` as well as outside the tray. It never exercises a part
+  that sits outside the tray but still inside reach. No test in `tests/test_mj_heap_oracle.py`
+  places such a part and checks that the teacher skips it, picks it, or handles it some other
+  way. Section 4.2 lists the flat-part and dropped-heap gaps. This is a third gap.
 
 ## 7. Reproduction
 
