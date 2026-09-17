@@ -101,10 +101,11 @@ def test_the_logging_oracle_writes_a_scan_per_selection_and_a_phase_per_report(t
 
     rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)
     module._install_lift_wrapper(rig)
-    (x0, _x1), _ = layout.tray_bounds()
-    # Two bricks in the tray, one on the bare desk inside reach but outside the tray.
+    # Two bricks in the tray, one on the bare desk inside reach but outside the dish.
+    outside_x = layout.TRAY_CENTER[0] - layout.TRAY_RADIUS - 0.03
     _place(
-        env, [(0.195, -0.03, 0.006, 0.3), (0.195, 0.03, 0.006, -0.8), (x0 - 0.03, 0.0, 0.006, 0.0)]
+        env,
+        [(0.195, -0.03, 0.006, 0.3), (0.195, 0.03, 0.006, -0.8), (outside_x, 0.0, 0.006, 0.0)],
     )
     orc = holder[0]
     steps = 0

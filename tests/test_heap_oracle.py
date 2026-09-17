@@ -91,11 +91,13 @@ def _push_phases(orc, scene):
 
 
 def test_a_wall_side_part_is_pushed_toward_the_tray_center_then_selected():
-    # A long plate 20 mm off the long wall, short side along y: its one closing axis lands a
-    # jaw past that wall.
+    # A long plate 22 mm off the rim, short side along y: its one closing axis lands a jaw
+    # past the rim. 20 mm put the push start exactly on the dish's clamp radius (TRAY_RADIUS
+    # - TIP_HALF_FACE), where float32 scene positions tip the comparison either way; 22 mm
+    # keeps it clear of that boundary.
     (x0, x1), (y0, y1) = layout.tray_bounds()
     orc = _oracle([LONG_PLATE])
-    scene = _snapshot([[layout.TRAY_CENTER[0], y1 - 0.020, 0.0016]])
+    scene = _snapshot([[layout.TRAY_CENTER[0], y1 - 0.022, 0.0016]])
     goal = _to_hover(orc, scene)
     assert goal.phase is oracle.Phase.PUSH_HOVER and orc.push_parts == [0]
     cx, cy = layout.TRAY_CENTER
@@ -183,6 +185,16 @@ def test_a_part_outside_the_tray_is_counted_but_never_a_target():
     assert alone.phase is oracle.Phase.DONE and alone.outside_tray == 1
 
 
+def test_a_part_outside_the_circle_is_counted_and_never_a_target():
+    cx, cy = layout.TRAY_CENTER
+    corner = (cx + layout.TRAY_RADIUS * 0.9, cy + layout.TRAY_RADIUS * 0.9)
+    assert not layout.inside_tray(*corner)  # inside the old rectangle, outside the dish
+    orc = _oracle([BRICK, BRICK])
+    scene = _snapshot([[cx, cy, 0.0048], [corner[0], corner[1], 0.0048]])
+    _to_hover(orc, scene)
+    assert orc.target_brick == 0 and orc.outside_tray == 1
+
+
 def test_a_lift_that_fails_after_the_retries_releases_before_the_next_cycle():
     orc = _oracle([BRICK, BRICK])
     scene = _snapshot([[0.19, 0.0, 0.0048], [0.19, 0.04, 0.0048]])
@@ -232,8 +244,8 @@ def test_the_heap_gives_up_on_a_lift_that_did_not_rise_and_keeps_one_that_did():
 
 
 def test_push_heading_matches_the_old_uniform_draw_at_the_tray_center():
-    # At TRAY_CENTER, x and y are both exactly half the (smaller) span from their walls, so
-    # bias == 0 and away == 0.0 (the x0 candidate), leaving heading == a plain uniform draw.
+    # At the exact centre, radius == 0, so away == 0.0 (radius <= 1e-6) and bias == 0
+    # (radius / TRAY_RADIUS), leaving heading == a plain uniform draw, exactly as before.
     orc = heap_oracle.HeapOracle(BL, [BRICK], 1, oracle.nominal_draw(), rng=random.Random(0))
     mirror = random.Random(0)
     for _ in range(20):
@@ -242,12 +254,12 @@ def test_push_heading_matches_the_old_uniform_draw_at_the_tray_center():
         )
 
 
-def test_push_heading_never_points_into_a_wall_it_sits_against():
-    (x0, _), _ = layout.tray_bounds()
-    at_the_wall = (x0, layout.TRAY_CENTER[1])  # nearest_dist == 0, so bias == 1 (max narrowing)
+def test_push_heading_never_points_into_the_rim_it_sits_against():
+    at_the_rim = (layout.TRAY_CENTER[0] + layout.TRAY_RADIUS, layout.TRAY_CENTER[1])
+    # radius == TRAY_RADIUS, so bias == 1 (max narrowing) and away == pi (points at the centre).
     orc = heap_oracle.HeapOracle(BL, [BRICK], 1, oracle.nominal_draw(), rng=random.Random(1))
-    headings = [orc._push_heading(at_the_wall) for _ in range(200)]
-    assert all(math.cos(h) >= -1e-9 for h in headings)  # never more than 90 deg from away (0.0)
+    headings = [orc._push_heading(at_the_rim) for _ in range(200)]
+    assert all(math.cos(h - math.pi) >= -1e-9 for h in headings)  # never > 90 deg from away (pi)
     assert len({round(h, 6) for h in headings}) > 1  # still random, not collapsed to one value
 
 

@@ -564,16 +564,19 @@ class MjLegoSortEnv:
         """Design section 6: a destination, a color per part, a drop into the tray, a settle."""
         m, d, h = self.models[i], self.datas[i], self.handles
         self.destination_bins[i] = self._rng.randrange(len(self.bin_layouts[i].bin_ys))
-        (x0, x1), (y0, y1) = layout.tray_bounds()
         k = self.cfg.num_bricks
         z_top = layout.HEAP_DROP_Z_MIN + layout.HEAP_DROP_Z_PER_PART * k
         for b, part in enumerate(self.parts):
             rgba = layout.BRICK_RGBA[self._rng.choice(layout.BRICK_COLOR_ORDER)]
             for g in h.body_geoms[b]:
                 m.geom_rgba[g] = rgba
-            r = part.half_diagonal
-            x = self._rng.uniform(x0 + r, x1 - r)
-            y = self._rng.uniform(y0 + r, y1 - r)
+            # Uniform on the dish interior, shrunk by the part's own half diagonal so a
+            # part never starts over the rim. sqrt keeps the draw uniform per unit area.
+            reach = max(0.0, layout.TRAY_RADIUS - part.half_diagonal)
+            rho = reach * math.sqrt(self._rng.random())
+            phi = self._rng.uniform(0.0, 2.0 * math.pi)
+            x = layout.TRAY_CENTER[0] + rho * math.cos(phi)
+            y = layout.TRAY_CENTER[1] + rho * math.sin(phi)
             z = self._rng.uniform(layout.HEAP_DROP_Z_MIN, z_top)
             adr = h.brick_qpos[b]
             d.qpos[adr : adr + 3] = (x, y, z)

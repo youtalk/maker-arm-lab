@@ -122,14 +122,13 @@ class HeapOracle(oracle.EnvOracle):
         """(B,) bool: parts still to pick that the arm can reach and whose cell is open."""
         done = self._stowed(scene) | self._sorted
         limit = layout.top_down_x_limit(self.bl)
-        (x0, x1), (y0, y1) = layout.tray_bounds()
         mask = torch.zeros(self.num_bricks, dtype=torch.bool)
         self.outside_tray = 0
         for b in range(self.num_bricks):
             x, y, z = scene.brick_pos[b].tolist()
             if b in done or z > CANDIDATE_MAX_Z:
                 continue
-            if not (x0 <= x <= x1 and y0 <= y <= y1):
+            if not layout.inside_tray(x, y):
                 self.outside_tray += 1
                 continue
             if x > limit or math.hypot(x, y) > layout.SCATTER_MAX_RADIUS:
@@ -143,32 +142,22 @@ class HeapOracle(oracle.EnvOracle):
         return grasp.rank_grasps(self.sizes, scene.brick_pos, scene.brick_quat, mask, self.walls)
 
     def _push_heading(self, center: tuple[float, float]) -> float:
-        """A push heading from ``self._push_rng``, biased away from the tray's nearest wall.
+        """A push heading from ``self._push_rng``, biased away from the dish rim.
 
-        Design H8 fixes the push's GEOMETRY -- two near-level legs, jaws closed, through the
-        densest cell -- and says nothing about the heading's distribution, so biasing that
-        distribution is an improvement on H8, not a violation of it. A plain uniform draw
-        sends about half of all pushes near a wall further into it, the opposite of what a
-        push is for.
+        Design H8 fixes the push's GEOMETRY and says nothing about the heading's
+        distribution, so biasing that distribution is an improvement on H8. A plain uniform
+        draw sends about half of all pushes near the rim further into it.
 
-        The draw stays a random ``uniform`` call on ``self._push_rng`` and nothing else, so a
-        seeded episode stays reproducible. It is centered on the heading that points straight
-        away from the tray wall nearest ``center`` (from ``layout.tray_bounds()``), within a
-        half-arc that shrinks toward ``PUSH_HEADING_MIN_HALF_ARC`` as the cell nears that wall
-        and grows back to a full circle -- the original uniform draw, unchanged -- once the
-        cell is at least half the tray's narrow span from every wall. A cell in the middle of
-        the tray is that far from every wall, so it keeps the old uniform behavior exactly.
+        The draw stays one ``uniform`` call, so a seeded episode stays reproducible. It is
+        centred on the heading that points at the dish centre, within a half-arc that shrinks
+        toward PUSH_HEADING_MIN_HALF_ARC as the cell nears the rim and opens back to a full
+        circle at the centre.
         """
-        (x0, x1), (y0, y1) = layout.tray_bounds()
-        cx, cy = center
-        nearest_dist, away = min(
-            (cx - x0, 0.0),
-            (x1 - cx, math.pi),
-            (cy - y0, math.pi / 2),
-            (y1 - cy, -math.pi / 2),
-        )
-        half_span = min(layout.TRAY_INTERIOR) / 2
-        bias = max(0.0, 1.0 - nearest_dist / half_span)
+        cx, cy = layout.TRAY_CENTER
+        dx, dy = center[0] - cx, center[1] - cy
+        radius = math.hypot(dx, dy)
+        away = math.atan2(-dy, -dx) if radius > 1e-6 else 0.0
+        bias = max(0.0, min(1.0, radius / layout.TRAY_RADIUS))
         half_arc = math.pi - bias * (math.pi - PUSH_HEADING_MIN_HALF_ARC)
         return away + self._push_rng.uniform(-half_arc, half_arc)
 

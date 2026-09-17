@@ -122,6 +122,21 @@ def test_a_heap_reset_drops_the_parts_inside_the_tray_at_rest(heap):
     assert "overhead_depth" not in heap.obs_buf["images"]  # cameras off
 
 
+def test_every_dropped_part_starts_inside_the_dish():
+    draw = layout.sample_run_draw(random.Random(3))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    parts_list = parts.sample_parts(random.Random(7), parts.catalog(), 12)
+    env = MjLegoSortEnv(1, draw, num_bricks=12, parts=parts_list, cameras=False)
+    env.reset(seed=5)
+    for b in range(12):
+        x, y = env._brick_pos_np(0, b)[:2] if hasattr(env, "_brick_pos_np") else (None, None)
+        if x is None:
+            adr = env.handles.brick_qpos[b]
+            x, y = env.datas[0].qpos[adr], env.datas[0].qpos[adr + 1]
+        assert layout.inside_tray(float(x), float(y), margin=0.01)
+    env.close()
+
+
 def test_a_second_reset_redraws_the_destination_and_the_colors(heap):
     seen_dest, seen_color = set(), set()
     for seed in range(12, 24):

@@ -63,12 +63,6 @@ and back in once it is this far inside. A part resting on a wall top jitters acr
 by a millimeter for thousands of steps; without the band every jitter is an exit."""
 
 
-def inside_tray(x: float, y: float, margin: float = 0.0) -> bool:
-    """Inside the tray interior grown by ``margin`` (negative shrinks it)."""
-    (x0, x1), (y0, y1) = layout.tray_bounds()
-    return x0 - margin <= x <= x1 + margin and y0 - margin <= y <= y1 + margin
-
-
 class InspectHeapOracle(HeapOracle):
     """``HeapOracle`` that writes its decisions to ``self.events``; behavior unchanged."""
 
@@ -105,7 +99,7 @@ class InspectHeapOracle(HeapOracle):
                     "x": round(x, 4),
                     "y": round(y, 4),
                     "z": round(z, 4),
-                    "inside": inside_tray(x, y),
+                    "inside": layout.inside_tray(x, y),
                     "reach": x <= limit and math.hypot(x, y) <= layout.SCATTER_MAX_RADIUS,
                     "cell_open": self.failures.get(self.cell_of((x, y)), 0) < 3,
                     "candidate": bool(mask[b]),
@@ -334,7 +328,7 @@ def run(args: argparse.Namespace) -> dict:
 
     prev = poses()
     crossings: list[dict] = []
-    outside = [not inside_tray(x, y, EXIT_HYSTERESIS) for x, y, _ in prev]
+    outside = [not layout.inside_tray(x, y, EXIT_HYSTERESIS) for x, y, _ in prev]
     for b, (x, y, _) in enumerate(prev):
         if outside[b]:
             crossings.append(
@@ -361,8 +355,8 @@ def run(args: argparse.Namespace) -> dict:
         finished = bool(out["dones"][0]) or bool(out["abandoned"][0])
         for b in range(len(parts) if not finished else 0):
             x, y = now[b][:2]
-            left = not outside[b] and not inside_tray(x, y, EXIT_HYSTERESIS)
-            back = outside[b] and inside_tray(x, y, -EXIT_HYSTERESIS)
+            left = not outside[b] and not layout.inside_tray(x, y, EXIT_HYSTERESIS)
+            back = outside[b] and layout.inside_tray(x, y, -EXIT_HYSTERESIS)
             if left or back:
                 outside[b] = left
                 crossings.append(

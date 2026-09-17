@@ -1,21 +1,21 @@
 """Design Q1: what is the largest tray interior the arm can pick over?
 
 A solver read, not a physics read: the arm's own collisions with the desk and the tray walls
-are not in it (that is ``mj_heap_drop_sweep.py`` and the bottom-open pick probe). This script
-sweeps a grid over the desk plane and, at every point, asks ``core.global_ik`` for the descend
-pose at the level tilt (``MIN_DESCEND_TILT``), at every heading in an evenly spaced set over a
-half turn. A point is ``pickable`` once every heading converges inside the solver's own
-tolerance, ``partial`` once some heading does. ``probe_point`` calls ``GlobalIK.solve``
-unseeded, on the same entry point, the same tolerance and the same target-pose geometry the
+are not in it (that is the bottom-open pick probe). This script sweeps a grid over the desk
+plane and, at every point, asks ``core.global_ik`` for the descend pose at the level tilt
+(``MIN_DESCEND_TILT``), at every heading in an evenly spaced set over a half turn. A point is
+``pickable`` once every heading converges inside the solver's own tolerance, ``partial`` once
+some heading does. ``probe_point`` calls ``GlobalIK.solve`` unseeded, on the same entry point,
+the same tolerance and the same target-pose geometry the
 oracle's rig uses for a descend -- not the rig's own seeded, continuity-constrained
 ``solve_path``, and not ``_plan_hover``'s tilt. Dropping the seed is conservative: it can only
 make convergence harder, never easier, so a ``pickable`` point here is at least as reachable
 as the rig finds it in practice.
 
 From the pickable set it finds the largest axis-aligned rectangle by area, plus the best
-rectangle at three aspect ratios: the current tray's (``layout.TRAY_INTERIOR``), a square, and
+rectangle at three aspect ratios: the pre-dish tray's (``RECT_TRAY_INTERIOR``), a square, and
 the widest one the pickable set admits. Each is reported with its interior size, its center,
-its four corners' radii from the arm base and its area against the current tray's. This sweep
+its four corners' radii from the arm base and its area against the pre-dish tray's. This sweep
 is a solver read (``solver_read_only: true``): ``layout.SCATTER_MAX_RADIUS`` is a driven-
 tracking measurement that a solver query cannot re-derive, so every rectangle also carries
 ``within_scatter_max_radius``. Only the two ``admissible_*`` groups are fit to size a tray, and
@@ -57,6 +57,12 @@ from maker_arm_lab.core.parts import BRICK_HEIGHT
 # The shipping convention documented on ``GraspTarget.lean_azimuth`` itself: 0.0, +x. The
 # oracle's rig (``oracle_runtime.LEAN_AZIMUTH``) commands the same value for every descend.
 LEAN_AZIMUTH = 0.0
+
+# The pre-dish tray interior (MS6 rework section 5 replaced it with the round dish in
+# ``layout.TRAY_CENTER`` / ``layout.TRAY_RADIUS``). This script still compares candidate
+# rectangles against it: a rectangle is the natural shape for this grid sweep, and the retired
+# rectangle stays the baseline this read is judged against.
+RECT_TRAY_INTERIOR = (0.13, 0.20)
 
 ADMISSIBLE_ALL_HEADINGS_NOTE = (
     "Only the rectangles under 'admissible_all_headings' have every point pickable at every "
@@ -162,7 +168,7 @@ def rectangle_info(
     width, height = x1 - x0, y1 - y0
     corners = [(x0, y0), (x0, y1), (x1, y0), (x1, y1)]
     corner_radii = [math.hypot(cx, cy) for cx, cy in corners]
-    current_tray_area = layout.TRAY_INTERIOR[0] * layout.TRAY_INTERIOR[1]
+    current_tray_area = RECT_TRAY_INTERIOR[0] * RECT_TRAY_INTERIOR[1]
     area = width * height
     return {
         "x_range": [x0, x1],
@@ -249,7 +255,7 @@ def best_rectangles(
         if not cands:
             return dict(empty)
         overall = max(cands, key=area_of)
-        current_ratio = layout.TRAY_INTERIOR[0] / layout.TRAY_INTERIOR[1]
+        current_ratio = RECT_TRAY_INTERIOR[0] / RECT_TRAY_INTERIOR[1]
         widest = max(cands, key=lambda r: (width_of(r), area_of(r)))
         return {
             "overall": rectangle_info(overall, xs, ys, step),
