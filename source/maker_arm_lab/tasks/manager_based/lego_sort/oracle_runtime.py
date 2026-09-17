@@ -73,6 +73,7 @@ from maker_arm_lab.core.checker import (
     PINCH_MIN_FORCE,
     PINCH_MIN_STALL,
     held_brick_from_forces,
+    pinch_min_force,
     pinch_min_stall,
 )
 from maker_arm_lab.core.global_ik import (
@@ -822,8 +823,14 @@ class OracleRig:
         brick_end = self._brick_pos(i, brick)
         rise = (brick_end[2] - self.brick_start[i][2]).item()
         xy_error = (brick_end[:2] - self.pick_point(i)[:2]).norm().item()
-        # MS6 design 7.4: the stall floor follows the width the jaws close across.
-        pinch = self.pinch_evidence(i, brick, pinch_min_stall(self.oracles[i].grasp_width))
+        # MS6 design 7.4: the stall floor follows the width the jaws close across, and so
+        # does the force floor (the jaw drive's force is its stall times its stiffness).
+        orc = self.oracles[i]
+        width = orc.grasp_width
+        min_size = getattr(orc, "grasp_min_size", min(layout.BRICK_SIZE))
+        pinch = self.pinch_evidence(
+            i, brick, pinch_min_stall(width, min_size), pinch_min_force(width, min_size)
+        )
         lifted = rise > LIFT_MIN_RISE and xy_error < LIFT_MAX_XY_ERROR
         return oracle.PhaseResult(outcome=outcome, pinch_ok=pinch["ok"], lifted=lifted)
 
@@ -1643,7 +1650,13 @@ class OracleRig:
             brick_quat=brick_quat,
         )
 
-    def pinch_evidence(self, i: int, brick: int, min_stall: float = PINCH_MIN_STALL) -> dict:
+    def pinch_evidence(
+        self,
+        i: int,
+        brick: int,
+        min_stall: float = PINCH_MIN_STALL,
+        min_force: float = PINCH_MIN_FORCE,
+    ) -> dict:
         """Is the brick pinched between the jaws, or merely entrained in the pocket?
 
         ``force_matrix_w`` is (num_envs, num_bodies, num_filters, 3); each sensor prim is a
@@ -1663,8 +1676,6 @@ class OracleRig:
             "right": right,
             "asymmetry": asymmetry,
             "ok": bool(
-                stall >= min_stall
-                and weakest >= PINCH_MIN_FORCE
-                and asymmetry <= PINCH_MAX_ASYMMETRY
+                stall >= min_stall and weakest >= min_force and asymmetry <= PINCH_MAX_ASYMMETRY
             ),
         }

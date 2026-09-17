@@ -108,14 +108,31 @@ number and does not set this margin.
 """
 
 
-def pinch_min_stall(grasp_width: float) -> float:
+def pinch_min_stall(grasp_width: float, part_min_size: float = min(layout.BRICK_SIZE)) -> float:
     """The stall floor for a pinch across ``grasp_width`` (MS6 design 7.4).
 
-    The smaller of ``PINCH_MIN_STALL`` and half the width minus the compliance, floored at 1 mm.
-    On the 2x4 brick's 15.8 mm width this returns ``PINCH_MIN_STALL`` itself, so every MS1 to
-    MS4 read is unchanged. A 1x1 part gripped across 7.8 mm gets 1.4 mm.
+    The smaller of half the part's smallest dimension and half the width minus the
+    compliance, floored at 1 mm. ``PINCH_MIN_STALL`` is the brick's own value of the first
+    term (gap >= the smallest dimension, see its docstring), and on the 2x4 brick's 15.8 mm
+    width this returns exactly that, so every MS1 to MS4 read is unchanged. A 1x1 part
+    gripped across 7.8 mm gets 1.4 mm. A 3.2 mm plate gets 1.6 mm: its real pinch stalls at
+    4.4 mm (a 3.5 mm compliance on a tip pressed to the desk, 2026-09-16), under the brick's
+    4.8 mm, and the failures it has to reject stall under 1.3 mm.
     """
-    return max(0.001, min(PINCH_MIN_STALL, grasp_width / 2.0 - PINCH_COMPLIANCE))
+    return max(0.001, min(part_min_size / 2.0, grasp_width / 2.0 - PINCH_COMPLIANCE))
+
+
+def pinch_min_force(grasp_width: float, part_min_size: float = min(layout.BRICK_SIZE)) -> float:
+    """The jaw force floor for a pinch across ``grasp_width``.
+
+    The jaw drive is a position actuator, so its force is the stall times its stiffness: a
+    15.8 mm brick stalls at 6.1 mm with 6.1 N per jaw, a 7.8 mm part at 1.8 mm with 1.8 N
+    (lone-part reads on MuJoCo, 2026-09-16). A fixed 2 N floor therefore rejected every real
+    pinch on a part under 9 mm wide while the part rose 100 mm in the jaws. The floor scales
+    with the stall floor, so the 2x4 brick keeps ``PINCH_MIN_FORCE`` and a 7.8 mm part gets
+    0.58 N.
+    """
+    return PINCH_MIN_FORCE * pinch_min_stall(grasp_width, part_min_size) / PINCH_MIN_STALL
 
 
 def bin_targets(bin_centers_w: torch.Tensor, brick_color_ids: torch.Tensor) -> torch.Tensor:

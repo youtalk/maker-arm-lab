@@ -140,6 +140,17 @@ JAW_FACE_FAR = 0.0625
 MIN_DESCEND_TILT = math.radians(0.5)
 MAX_DESCEND_TILT = math.radians(3.0)
 
+# A flat part (a plate or a tile, 3.2 mm tall) leaves the offset window no room: the tips
+# have to hold 2.1 mm off the desk AND reach down a 3.2 mm side face, and the pinch then
+# closes over the part's top edge and presses it into the desk (lone-part reads, MuJoCo,
+# 2026-09-16: every plate and tile lost that way at the level descend). Below this half
+# height the descend instead asks for the tips FLAT_TIP_PRESS under the desk, so the desk
+# stops them at zero height and the DESCEND stall is the intended end of the leg. Measured
+# on the same reads: 2 mm of press pinches the 2-wide plates and tiles (3.8 to 5.7 N per jaw),
+# 1 mm does not, 0 mm only the 1-wide ones.
+FLAT_HALF_HEIGHT = 0.002
+FLAT_TIP_PRESS = 0.002
+
 
 def descend_tilt_ceiling(brick_half_height: float) -> float:
     """Largest tilt (rad) at which some pick offset still clears the desk AND the tip."""
@@ -194,6 +205,10 @@ def descend_pick_offset(tilt: float, brick_half_height: float) -> tuple[float, f
     this gripper -- about 2.1 mm either side at 0.5 deg -- because `grasp_center` sits only
     34.2 mm inside a plate that has to reach past a brick resting on a table.
     """
+    if brick_half_height < FLAT_HALF_HEIGHT:
+        # The margin is negative on purpose: the tips are asked under the desk.
+        offset = JAW_TIP_REACH - brick_half_height - FLAT_TIP_PRESS
+        return -offset, -FLAT_TIP_PRESS
     lower = JAW_TIP_REACH + JAW_FACE_FAR * math.tan(tilt) - brick_half_height / math.cos(tilt)
     if lower >= JAW_TIP_REACH:
         return None
@@ -207,6 +222,8 @@ def descend_tilt_ladder(brick_half_height: float, steps: int = 6) -> list[float]
     Ruling D3-11 candidate (2): level where level solves, otherwise the minimum tilt that
     brick admits. "Level" is `MIN_DESCEND_TILT`, not zero, for the singularity above.
     """
+    if brick_half_height < FLAT_HALF_HEIGHT:
+        return [MIN_DESCEND_TILT]  # a pressed tip gains nothing from tilt
     top = min(MAX_DESCEND_TILT, descend_tilt_ceiling(brick_half_height))
     if top <= MIN_DESCEND_TILT:
         return [MIN_DESCEND_TILT]
