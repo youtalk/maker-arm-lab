@@ -22,7 +22,8 @@ attempts few pick cycles per episode against its budget. About one part in five 
 tray by a route the read does not identify. The drop and a push are two candidates, not the
 complete set (section 4.1). The read failed, so the plan stops before phase B. The
 throughput rows did not run (section 5). No constant changed before or during the read. This
-report reflects the code as merged in PR #50.
+report reflects the code as merged in PR #50. Section 8 records the repeated read on the
+fixed teacher. It also fails.
 
 ## 2. What was built
 
@@ -278,4 +279,110 @@ bash ~/data/maker-arm-ms6/a/run_read.sh
 
 # The throughput rows. This campaign did not run them, because the read above failed.
 bash ~/data/maker-arm-ms6/a/run_rows.sh
+```
+
+## 8. The repeated read: the fixed teacher (campaign c)
+
+**The teacher read fails again, on both pre-registered conditions.** The stowed fraction
+reads 1619 of 6050 parts, 0.2676. The Wilson 95 percent interval is [0.2566, 0.2789], against
+a rule of at least 0.90. Cycles per stowed part read 2.176, against a rule of at most 1.3. This is the
+same pre-registered 120-episode teacher read as section 4, repeated on fresh seeds after the
+teacher-logic fixes below. It still fails.
+
+### 8.1 What changed since the failed read
+
+Between the phase A read and this one, an inspection found four teacher-logic defects and
+fixed all four. `docs/ms6-teacher-inspection.md` names the mechanisms and the fixes in full,
+and this section does not restate them. PR #53 landed four fixes:
+
+- A landing-spot clearance model with the tray walls as hard stops.
+- A push that moves a wall-blocked part toward the tray center.
+- A pressed-tip descend for flat parts.
+- A part-aware LIFT gate.
+
+PR #54 landed the inspection write-up. It reports three held-out K = 50 reads of the fixed
+teacher: 15, 11 and 17 of 50 parts stowed. This campaign repeats the pre-registered
+120-episode read on top of both.
+
+### 8.2 The campaign
+
+The campaign ran from the detached worktree `~/src/maker-arm-lab-ms6`, at commit `5773614`,
+the merge of PR #54 into `main`. Ten processes ran the held-out part split, parts seed
+20260915, at K = 50 and a cycle budget of 50. Process `p` used run seed `20261150 + p` and
+layout seed `20261100 + p`, for `p` from 0 to 9. The flags matched the pre-registered design.
+They set `--nearest_first_pick_order`, hover jitter from 0.035 to 0.080, `--episode_draws`,
+`--frame_jitter`, and cameras off. `--max_wall_minutes 600` replaced the design's 240,
+because the fixed teacher no longer gives up early and runs its full episode. Every process
+printed `BATCH_OK`. Wall time per process ran 54.6 to 74.5 minutes, mean 62.4 minutes. The
+ten processes ran together in about 75 minutes. Control rate ran 6.9 to 9.4 steps per second
+per process, mean 8.3. No process reached the cap. One env auto-reset mid-batch and finished
+a second episode, so the run recorded 121 episodes and 6050 parts, not 120 and 6000. The
+throughput rows did not run this round. The inspection design holds them until the read
+passes.
+
+### 8.3 The read
+
+| quantity | measured | rule | verdict |
+| --- | --- | --- | --- |
+| stowed fraction | 1619 / 6050 = 0.2676, Wilson 95 percent [0.2566, 0.2789] | at least 0.90 | FAIL |
+| cycles per stowed part | 2.176 | at most 1.3 | FAIL |
+| parts outside the tray, last scan | 2066 of 6050 = 0.342 | not gated | reported |
+| pushes | 4151 = 34.3 per episode | not gated | reported |
+| forced picks | 549 = 4.5 per episode | not gated | reported |
+| pick cycles | 3523 over 121 episodes = 29.1 per episode | budget is 50 | reported |
+
+Per family, over the held-out split:
+
+| family | attempts | stowed |
+| --- | --- | --- |
+| brick | 1408 | 805 |
+| plate | 763 | 246 |
+| slope | 606 | 204 |
+| tile | 746 | 174 |
+
+The family rows sum to 1429 stowed parts. The run total, the sum of each episode's
+`bricks_delivered`, reads 1619. Section 8.5 lists the 190 part gap as an open question.
+
+Episode outcomes split 114 time outs and 7 abandons, out of 121 episodes. No episode
+succeeded. Every abandon was a watchdog trip. Phase A also had watchdog trips, 5 of them
+over 120 episodes. This read has 7. The seven trips here stowed 1 to 15 parts each before
+they stopped. Stowed per episode ranged from 1 to 27, mean 13.38. Cycles per episode ranged
+from 4 to 39, mean 29.12.
+
+### 8.4 What this read adds beyond the inspection's three heaps
+
+The inspection report's three held-out K = 50 heaps stowed 43 of 150 parts, 0.29. This read
+stows 1619 of 6050 parts, 0.2676. This is an inference. The two numbers sit in the same
+band, on a sample about 40 times larger. The three heaps only estimate a ceiling for the
+fixed teacher. This read
+measures it, across 121 episodes and ten seeds instead of three.
+
+### 8.5 Open questions
+
+- The outside-tray fraction rose to 0.342 (2066 of 6050), against 0.185 (1107 of 6000) in
+  phase A, with about eleven times the pushes (4151 against 367). This read does not
+  attribute the rise. It is consistent with the added pushes, and it is not proven to be
+  caused by them.
+- The 190 part gap between `bricks_delivered` (1619) and the parts credited to a family row
+  (1429). A family row counts a pick cycle whose outcome was true. Some parts reach a bin by
+  a path this read does not credit. This read does not explain the gap.
+- This read logged 7 watchdog trips over 121 episodes, against 5 over 120 in phase A. Both
+  reads have watchdog trips. Whether the small rise means anything is open.
+- The inspection report's three owner decisions stay open. Whether to reopen the tray
+  footprint or the pick primitive. Whether to reopen the drop band. Whether phase B waits on
+  either answer, or starts from this read's ceiling.
+
+### 8.6 Reproduction
+
+```
+# Code: maker-arm-lab pull requests #53-#54, main at 5773614.
+# Drivers and ledger under ~/data/maker-arm-ms6/c/.
+bash ~/data/maker-arm-ms6/c/run_read.sh
+
+# The driver call that run_read.sh makes per process, p = 0 to 9:
+.venv/bin/python scripts/mj_generate_batch.py --out_dir ~/data/maker-arm-ms6/c/read \
+  --shard_name proc_0 --attempts 12 --num_envs 12 --heap_k 50 --cycle_budget 50 \
+  --parts_split heldout --parts_seed 20260915 --run_seed 20261150 --layout_seed 20261100 \
+  --nearest_first_pick_order --hover_jitter_min 0.035 --hover_jitter_max 0.080 \
+  --episode_draws --frame_jitter --no_cameras --probe --max_wall_minutes 600
 ```
