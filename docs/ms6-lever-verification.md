@@ -8,24 +8,27 @@ answers open items 1 and 2 of `docs/ms6-teacher-inspection.md` section 8.
 
 The recommended lever is the pick primitive, not the tray. The primitive opens the jaws at the
 bottom of the descend instead of descending with the jaws open. It needs a grasp ranking model
-matched to that opening. With both parts in place the teacher stows 67 of 150 parts on three
-heaps of 50 parts each. The fixed teacher stows 43 of 150 on the same three heaps. The tray lever is nearly
-dead inside this arm's driven reach. The drop lever misses its pre-registered bar at every band
-tested. The cheapest ejection lever measured is a taller tray wall, and it is not one of the
-two levers the owner asked about.
+matched to that opening. Its measured gain depends on one corpus-level randomization, the hover
+jitter band, and the report gives both readings. The tray lever is nearly dead inside this
+arm's driven reach. The drop lever moves the ejections only through the tray and the wall, not
+through the drop band alone.
 
-The two headline numbers:
+The two headline numbers, both on the same three held-out heaps of 50 parts:
 
-- The matched bottom-open pick stows 67 of 150, a fraction of 0.447. The fixed teacher stows 43
-  of 150 on the same heaps, a fraction of 0.287. That is a factor of 1.56.
-- The widest tray with a driven-valid near edge grows the short axis from 130 to 160 mm. At
-  that tray the wall blockage falls from 23.8 to 20.2 of 50 parts. The parts outside the tray
-  fall from 6.6 to 3.6 of 50.
+- At the read's flags, which is the configuration the corpus runs, the matched primitive stows
+  45 of 150. The fixed teacher stows 43 of 150. That is a gain of 2 parts of 150.
+- Without the hover jitter band, the matched primitive stows 67 of 150 and the fixed teacher
+  stows 32 of 150. That is a doubling, in a configuration the project does not use.
 
-Interpretation: 0.447 on three heaps is not a pass. The pre-registered phase A rule is 0.90,
-and the fixed teacher's repeated read over 121 episodes is 0.2676. A 1.56 factor on three heaps
-does not close that gap. The recommendation is about which lever to open next, not about a
-passing read.
+Interpretation: the primitive is the stronger of the two levers the owner asked about, and its
+measured gain is configuration-dependent. The tray lever removes 3.6 of the 23.8 wall-blocked
+parts of 50 at the best candidate. The primitive removes 15.3 of them by the grasp ranking
+model alone. The size of the yield that follows is what the hover jitter band decides. Retuning
+that band for the new primitive is a measurable follow-up, not a decision.
+
+Interpretation: neither reading is a pass. The pre-registered phase A rule is 0.90. The fixed
+teacher's repeated read over 121 episodes is 0.2676. 45 of 150 is 0.300 and 67 of 150 is 0.447.
+Both sit far below the rule.
 
 Both owner decisions are stated as options in section 9. Decision 1 is the tray footprint
 against the pick primitive. Decision 2 is the drop band and the settle.
@@ -33,7 +36,8 @@ against the pick primitive. Decision 2 is the drop band and the settle.
 ## 2. What was measured
 
 Three experiments, from the design. Two more reads were added in the middle of the round, each
-pre-registered before its code ran.
+pre-registered before its code ran. A set of flag controls was added after the first draft of
+this report, because the first heap comparison was not like for like.
 
 | experiment | what it measures | script | pull request | branch commit |
 | --- | --- | --- | --- | --- |
@@ -49,18 +53,30 @@ Added in the middle of the round:
   the solver. The band read is a mode of the probe. It drives a real descend and pick at each
   point of a radius and azimuth grid.
 - The matched clearance model, design section 6.2. The first heap read of the probe lost
-  against the fixed teacher. `jaw_clearance` in `core/grasp.py` still modeled a fully open
-  jaw, so the teacher kept rejecting the grasps the new primitive can make. The
+  against the fixed teacher. `jaw_clearance` in `core/grasp.py` still modeled a fully open jaw,
+  so the teacher kept rejecting the grasps the new primitive can make. The
   `--matched_clearance` flag gives the ranking the probe's own landing half gap.
+
+Added after the first draft:
+
+- The flag controls. The first heap comparison ran the probe at its argparse defaults and the
+  fixed teacher at the read's flags. The two differ. Every heap number in this report now comes
+  from a run at a named flag set. The fixed teacher is measured under the same flag set as the
+  probe. Section 5.4 gives the table and section 5.5 gives the isolation.
 
 The campaign did not run from `main`. It ran from a local integration worktree,
 `~/src/maker-arm-lab-ms6d`, which merges the three branches without pushing anything.
 Integration commit `723bea3` merges `feat/ms6-reach-map` at `f03f16c`, `feat/ms6-drop-sweep` at
 `0fe7029` and `feat/ms6-bottom-pick-probe` at `b9b1a27`. Integration commit `539091f` folds in
 two later fix rounds, and brings `feat/ms6-drop-sweep` to `9da4400` and
-`feat/ms6-bottom-pick-probe` to `782b4e4`. The corrected heap reads at `8a388e8` and `e9dca80`,
-and the matched read at `c59ba15`, ran from a second worktree on the probe branch. Pull
-requests 57, 58 and 59 are open. None is merged. Merging them is the owner's decision.
+`feat/ms6-bottom-pick-probe` to `782b4e4`. The heap re-runs and the flag controls ran at
+integration commit `60e6130`. Pull requests 57, 58 and 59 are open. None is merged. Merging
+them is the owner's decision.
+
+Every heap episode this report reads is archived under `~/data/maker-arm-ms6/d/probe/`, one
+directory and one log per episode. Section 5 names the directory of every number. The one
+exception is stated where it falls. Every number in this report was recomputed from those files
+for this report.
 
 No experiment changed production behavior. Nothing under `source/maker_arm_lab/core/` changed.
 Every script is a probe or a measurement script.
@@ -153,6 +169,16 @@ m.
 The short axis is the axis the jaw span binds. The open jaw spans 105 mm. The current tray
 leaves 12.5 mm on each side of it. The wide candidate leaves 27.5 mm.
 
+The candidates were not required to sit inside a rectangle the reach map returned, and none of
+them does. Every candidate runs out to x = 0.26 m, while the largest any-heading rectangle
+stops at x = 0.2075 m. The current production tray does not sit inside a rectangle either, for
+the same reason. `rectangle_info` pads a corner outward by half a grid step before the clip
+tests it. The current tray's far corner therefore reads 0.2818 m padded, against a 0.280 m
+bound. A separate test drives the real solver over the current tray's own footprint and finds
+all four corners pickable at every heading. So the rectangles bound nothing about these four
+candidates. The bounds that do apply to them are the driven near edge of 0.10 m and the 0.280 m
+far-corner limit, and both were applied.
+
 ## 4. The tray and the drop sweep
 
 240 samples, 48 combinations, 5 layout seeds per combination, K = 50, held-out split, parts
@@ -174,7 +200,7 @@ At the current drop band, settle 480 and wall 20 mm.
 `wall_blocked` counts every part with no grasp whose wall-only clearance clears the threshold.
 `no_grasp` counts the parts inside it that have no grasp candidate at all, for any reason. The
 difference is the count of parts that have a grasp a wall still rules out. It is 23.8 of 50 at
-the current tray and 20.2 of 50 at the 160 mm one.
+the current tray, 20.2 at the 160 mm one, 21.8 at the square and 24.6 at the long one.
 
 ### 4.2 The drop axis
 
@@ -197,7 +223,25 @@ about 0.02 m/s. Both sit at layout seed 1. The residual-speed field is what caug
 Settle length changes nothing measured. Over all 24 cells the largest difference in mean
 `outside` between settle 480 and settle 960 is 0.2 parts.
 
-### 4.3 What each lever buys
+### 4.3 The cells that clear 2 ejections of 50
+
+Twelve of the 48 cells read `outside` under 2 of 50. Ten of the twelve also hold `stacked` at
+or below the current cell's 32.4. The best cell is the long tray at a 40 mm wall, at the
+current drop band: `outside` 0.4 and `stacked` 30.0.
+
+| tray | wall mm | drop | outside | stacked |
+| --- | --- | --- | --- | --- |
+| 120x340@160 | 40 | 30:1.2 (current) | 0.4 | 30.0 |
+| 120x340@160 | 20 | 30:1.2 (current) | 0.8 | 32.0 |
+| 160x200@180 | 40 | 30:1.2 (current) | 1.2 | 30.6 |
+| 160x200@180 | 40 | 20:0 | 1.2 | 30.8 |
+| 120x340@160 | 40 | 20:0 | 1.8 | 28.8 |
+
+Every one of the twelve cells changes the tray, the wall, or both. Not one of them sits at the
+current tray with the current wall. The drop band alone therefore did not move the ejections.
+The best cell holds the current drop band unchanged.
+
+### 4.4 What each lever buys
 
 - A 30 mm wider short axis buys 3.6 of 50 fewer wall-blocked parts, out of 23.8. That is about
   15 percent of the blockage. It also buys 3.0 of 50 fewer ejections.
@@ -205,7 +249,7 @@ Settle length changes nothing measured. Over all 24 cells the largest difference
   Its short axis is narrower than the current one.
 - A 40 mm wall at the current tray and the current drop buys 2.6 of 50 fewer ejections and does
   not raise the blockage.
-- A lower or fixed drop buys nothing. It raises the ejections.
+- A lower or fixed drop band buys nothing. It raises the ejections.
 
 Interpretation: no tray inside the driven reach removes the wall blockage. The blockage is not
 mostly a tray-size problem at this heap density. It is a problem of what the jaw needs next to
@@ -221,7 +265,8 @@ gap of 17.5 mm, against the fully open 52.4 mm.
 ### 5.1 The lone-part wall table
 
 One 2x4 brick at a measured distance from a tray wall face, x-closing and y-closing. The
-control is the shipped fully-open descend through the same driver.
+control is the shipped fully-open descend through the same driver. Source:
+`d/probe/wall_table/bottom_open.json` and `shipped.json`.
 
 | distance (mm) | bottom-open, y | bottom-open, x | shipped, y | shipped, x |
 | --- | --- | --- | --- | --- |
@@ -241,9 +286,27 @@ up. The pick point ends at 11.9 mm at the 20 mm row, against a nominal 4.8 mm. T
 but it presses on the tray. Interpretation: on a real arm that is a durability question, and it
 bounds how far this table can be trusted as a primitive read.
 
-### 5.2 The first heap read, and the defect that withdrew it
+### 5.2 The other part families, at a clear wall
 
-The first heap read returned 12 of 50 on one heap. It is withdrawn. Two defects made it
+The campaign also holds one row per part family at 70 mm from the wall, under both descends.
+Source: `d/probe/wall_table/wall_table_<part>.json` and the `_shipped` file beside it.
+
+| part | bottom-open | shipped |
+| --- | --- | --- |
+| brick_1x2 | stowed | stowed |
+| plate_1x4 | lost | lost |
+| plate_2x4 | lost | lost |
+| plate_2x8 | stowed | stowed |
+| tile_1x6 | stowed | stowed |
+
+Both descends agree on every family. Two of the five parts are lost at 70 mm, which is a
+distance where no wall blocks anything. The inspection named the flat-part descend as a
+separate mechanism, and this table says the bottom-open primitive does not touch it. That bears
+on the owner's decision, so section 9 carries it.
+
+### 5.3 What the first heap read got wrong, twice
+
+The first heap read returned 12 of 50 on one heap, and it is withdrawn. Two defects made it
 invalid.
 
 - `parse_args` overwrote `--run_seed` and `--layout_seed` with its own pinned constants in heap
@@ -254,55 +317,96 @@ invalid.
   Without it the first scan sits 100.6 mm mean and 270.3 mm maximum away from the inspection's
   log. With it the two agree to 0.007 mm.
 
-The 12 of 50 was measured on a heap that is not the inspection's heap. The fix makes the
-constants defaults, honors a flag the caller passes, and adds a test.
+A third defect survived both fixes and is the reason this report was rewritten. The probe ran
+at its argparse defaults, while the fixed teacher it was compared against ran at the read's
+flags. The probe's heap mode pins only `heap_k`, `parts_split`, `run_seed`, `layout_seed` and
+`episode_draws`. It does not pin `--nearest_first_pick_order`, the hover jitter band,
+`--frame_jitter` or `--cycle_budget`. So the earlier 67 of 150 against 43 of 150 compared two
+different configurations. Section 5.4 is the like-for-like table.
 
-### 5.3 The corrected read
+### 5.4 The heap read, under both flag sets
 
-Three heaps, run seeds 20261000 to 20261002 and layout seeds 20261010 to 20261012, at the
-read's flags. The fixed teacher's column is the inspection's own run on the same heaps.
+All six configurations, all on the same three held-out heaps of 50 parts, run seeds 20261000 to
+20261002 and layout seeds 20261010 to 20261012. `outside_at_start` reads 9, 11 and 8 in every
+run, which are the inspection's own numbers, so every row starts from the same physics.
 
-| heap | bottom-open | fixed teacher | cycles | pushes | forced | end |
-| --- | --- | --- | --- | --- | --- | --- |
-| 0 | 10/50 | 15/50 | 19 | 50 | 9 | push budget at step 28476 |
-| 1 | 8/50 | 11/50 | 21 | 23 | 4 | timeout |
-| 2 | 17/50 | 17/50 | 33 | 44 | 7 | timeout |
-| total | 35/150 = 0.233 | 43/150 = 0.287 | | | | |
+| teacher and model | with the hover jitter band | without the band |
+| --- | --- | --- |
+| fixed teacher, shipped descend, shipped model | 43/150 (15, 11, 17) | 32/150 (10, 6, 16) |
+| bottom-open descend, shipped model | 35/150 (12, 9, 14) | 35/150 (10, 8, 17) |
+| bottom-open descend, matched model | 45/150 (15, 15, 15) | 67/150 (18, 22, 27) |
 
-The primitive wins every lone-part wall row and loses on a heap. Heap 0's parts were never
-attempted. The per-cycle stow rate is unchanged, 0.53 against 0.56, and the descend converges
-more often. What collapsed is the supply of grasps the teacher selects. 73 percent of scans
-ended in a push, and the push budget ended the episode.
+Archived at `d/probe/`: `base_readflags_*` and `base_defaults_*` for the first row,
+`unmatched_*` for the second, `matched_*` and `iso_nojitter_*` for the third. The one exception
+in this report falls here. The second row's without-the-band cell holds archived data for heap
+0 only, at `minimal_unmatched_0`, which reads 10 of 50. Heaps 1 and 2 of that cell were
+measured before the archive existed and their files are gone. Every other cell in the table is
+archived for all three heaps.
 
-### 5.4 The matched-clearance read
+The first row at the read's flags reproduces the inspection's 15, 11 and 17 exactly. The heaps,
+the scripts and the grader therefore all agree with campaign `b`.
 
-`jaw_clearance` in `core/grasp.py` models the landing spots of a jaw that descends fully open.
-The probe changed the descend and left the model alone. The teacher therefore kept rejecting,
-as unpickable, exactly the grasps the new primitive can make. The `--matched_clearance` flag
-patches that constant at run time, for the heap mode only. It sets the landing half gap the
-ranking uses to the probe's own 17.5 mm. Nothing under `core/` changes.
+The corpus runs at the read's flags. The like-for-like answer is therefore 45 against 43, a
+gain of 2 parts of 150. The 67 against 32 belongs to a configuration the project does not use.
 
-| heap | matched | fixed teacher | bottom-open, shipped model | cycles | pushes | end |
-| --- | --- | --- | --- | --- | --- | --- |
-| 0 | 18/50 | 15/50 | 10/50 | 37 | 26 | timeout |
-| 1 | 22/50 | 11/50 | 8/50 | 40 | 34 | timeout |
-| 2 | 27/50 | 17/50 | 17/50 | 42 | 38 | timeout |
-| total | 67/150 = 0.447 | 43/150 = 0.287 | 35/150 = 0.233 | | | |
+The summary rows below come from one source, `scripts/heap_inspect_read.py`, run over the
+archived `events.jsonl` of each group.
 
-No matched run came near the 50-push budget. All three ran to the clock. Cycles per stowed part
-fall to 1.78, against the fixed teacher's 2.02 on the same heaps.
+| configuration | stowed | cycles per stowed | wall-blocked at start | ejections |
+| --- | --- | --- | --- | --- |
+| fixed teacher, read's flags | 43/150 | 2.02 | 22.0 | 36 |
+| fixed teacher, no band | 32/150 | 2.75 | 22.0 | 37 |
+| bottom-open, shipped model, read's flags | 35/150 | 2.29 | 22.0 | 22 |
+| bottom-open, matched, read's flags | 45/150 | 2.51 | 6.67 | 21 |
+| bottom-open, matched, no band | 67/150 | 1.78 | 6.67 | 11 |
 
-The mechanism is the model change itself, and it reads directly off the first scan of each
-episode. The matched and the unmatched runs start from identical part poses on all three heaps.
-The count of parts whose best grasp lands past a wall falls from 25, 17 and 26 to 6, 3 and 11.
-That is a mean of 22.7 against 6.67 on the same physical heaps. The campaign ledger records
-6.67 and 22.0 for the same pair, from the read script's own count.
+`wall-blocked at start` is the mean count of parts whose best grasp lands past a wall, at the
+first scan. `ejections` counts tray exits that are neither the settle nor a carried target.
 
-The yield was not bought by knocking parts out. Count the ejections that are neither the settle
-nor a carried target. They read 36 for the fixed teacher, 20 for the unmatched probe and 11 for
-the matched one. The grasp-phase bucket is zero across all three matched episodes.
+The matched model is what moves the wall blockage, in every configuration, by 15.3 parts of 50.
+The per-heap counts are 23, 17 and 26 under the shipped model. They are 6, 3 and 11 under the
+matched one. An independent recount off the same `scan` events agrees on every heap but one. On
+heap 0 under the shipped model it reads 25 against the script's 23. The table uses the script
+for both sides.
 
-### 5.5 Two mechanisms that were wrong
+The per-cycle stow rate does not improve. At the read's flags it reads 0.449 for the
+bottom-open descend against 0.506 for the fixed teacher, as cycles flagged successful over
+cycles logged. The matched model reads 0.405 at the read's flags and 0.573 without the band. So
+the matched model buys its yield through more cycles at the read's flags, 113 against 87, and
+not through a better cycle. An earlier draft of this report said the per-cycle rate was
+unchanged at 0.53 against 0.56. That pair does not reproduce from the archived logs and is
+withdrawn.
+
+The DESCEND convergence fraction is 0.425 for the fixed teacher and 0.429 for the bottom-open
+descend at the read's flags. An earlier claim that the bottom-open descend converges much more
+often does not hold at the read's flags. It reads 0.53 for the matched model without the band,
+against 0.425.
+
+### 5.5 The isolation: the hover jitter band is the flag
+
+Matched bottom-open, all three heaps, at the read's flags with one flag dropped.
+
+| configuration | heaps | total | archive |
+| --- | --- | --- | --- |
+| read's flags, all of them | 15, 15, 15 | 45/150 | `matched_*` |
+| read's flags without `--nearest_first_pick_order` | 15, 15, 15 | 45/150 | `iso_nonearest_*` |
+| read's flags without the hover jitter band | 18, 22, 27 | 67/150 | `iso_nojitter_*` |
+| the probe's argparse defaults, heap 0 only | 18 | | `minimal_matched_0` |
+
+The hover jitter band of 0.035 to 0.080 m is the flag. Dropping nearest-first ordering changes
+nothing at all: `iso_nonearest_*` matches `matched_*` in stowed count, cycles and pushes on
+every heap. Dropping the band recovers the full 67, and `minimal_matched_0` reproduces
+`iso_nojitter_0` exactly.
+
+The same band moves the fixed teacher in the opposite direction. It reads 43 with the band and
+32 without it. `base_nojitter_*` matches `base_defaults_*` exactly, so nearest-first ordering
+and frame jitter change nothing for it either.
+
+So one corpus-level randomization lifts the shipped teacher by about a third and cuts the
+matched primitive by about a third. This round does not separate why. The band exists for
+policy training, and its interaction with a bottom-open descend is unmeasured.
+
+### 5.6 The two mechanisms that were floated, and what the data supports
 
 The round records this because it is what the round learned. After the corrected heap read the
 implementer floated two mechanisms for the loss. The first was the design's own named risk: a
@@ -310,14 +414,17 @@ narrow-opening descend fouls the neighbors it passes on the way down. The second
 opposite. The shipped descend lands 52.4 mm out and sweeps a space clear around every target.
 The gentler descend then leaves a denser and more tangled tray.
 
-Both were wrong. The matched read settles it. The supply of grasps collapsed because the
-selection model rejected them, not because the heap was in a worse physical state. The physical
-state was identical at step zero, and the model change alone recovers the yield.
+The matched read shows that the model change alone is sufficient to recover the yield. It does
+not show that either mechanism was absent. The logs cannot separate them. The log records part
+poses only in `scan` events, once per selection. A displacement between two scans covers
+DESCEND, CLOSE, LIFT, the carry, the release and the settle together. A phase-attributed read
+needs per-phase part poses. `events.jsonl` does not carry them. So both mechanisms stay
+unmeasured, and neither is needed to explain the numbers.
 
-Interpretation: the logs cannot separate either mechanism. The log records part poses only in
-`scan` events, once per selection. A displacement between two scans covers DESCEND, CLOSE,
-LIFT, the carry, the release and the settle together. A phase-attributed read needs per-phase
-part poses. `events.jsonl` does not carry them.
+What the data does support: the model change is what moves the wall blockage. All three
+configurations at the read's flags start from identical part poses on all three heaps, checked
+pose by pose at the first scan. The wall-blocked count at that scan falls from 22.0 to 6.67
+across the model change.
 
 ## 6. The pre-registered readings
 
@@ -326,30 +433,41 @@ to fit the data.
 
 | reading | verdict | evidence |
 | --- | --- | --- |
-| R-A, the tray can grow | not fired | The widest tray with a driven near edge is 165 mm in the short axis. The reading asked for 170 mm. `wall_blocked` does not fall near 0.10 at any tray in the sweep. |
+| R-A, the tray can grow | not fired | The first clause holds: experiment 0 returns an any-heading square of 0.210 m, which is 80 mm wider than 0.13 m. The second clause fails. `wall_blocked` reads 30.8 to 31.6 of 50 at every candidate against 32.0 at the current tray, nowhere near the 0.10 the reading asked for. |
 | R-B, the tray cannot grow | not fired | Rectangles wider than 0.15 m in the short axis do exist inside the band: 0.160 m overall and 0.210 m square, both at the any-heading cut. |
-| R-C, the pick primitive works | not fired | The first half fired: the wall table stows a lone brick at 20 mm from a wall, past the reading's 40 mm bar. The second half asked for at least 25 of 50 on the heap the fixed teacher stowed 15 of. The matched run returns 18 of 50 there. |
+| R-C, the pick primitive works | not fired | The first half fired: the wall table stows a lone brick at 20 mm from a wall, past the reading's 40 mm bar. The second half asked for at least 25 of 50 on the heap the fixed teacher stowed 15 of. The matched run returns 15 of 50 there at the read's flags and 18 of 50 without the hover jitter band. |
 | R-D, neither lever alone is enough | fired on its literal terms, conclusion does not follow | R-A failed and R-C failed, which is exactly what R-D asked for. See the note below. |
-| R-E, the drop is fixable | not fired | No drop band at the current tray reaches `outside` under 2 of 50. The lowest measured is the current band, at 6.6. |
-| R-F, the drop trades against stacking | not fired | No cell met the precondition, because no cell has `outside` under 2 of 50. |
+| R-E, the drop is fixable | fired | Twelve sweep cells read `outside` under 2 of 50, and ten of them hold `stacked` at or below the current cell's 32.4. The best is the long tray at a 40 mm wall, at `outside` 0.4 and `stacked` 30.0. See the note below. |
+| R-F, the drop trades against stacking | not fired | Its precondition is met by twelve cells, and the trade it predicted does not appear. Ten of the twelve lower the stacking instead of raising it by half. |
 | R-G, the band holds at 0.280 m | not fired | Two points beyond 0.280 m stow the part with a residual below the control's, at plus and minus 40 degrees, at 0.30 and 0.32 m. |
 | R-H, the band is wider than 0.280 m | not fired | 0.30 m is lost at -20, 0 and +20 degrees. |
 | R-I, the near side bounds the tray | fired | The driven near-side sweep gives 0.10 m as the smallest radius that stows at every azimuth. No number in the repository covered the near side before. |
-| R-J, the primitive lifts the heap | fired | The matched run stows 67 of 150, against the threshold of 43, the fixed teacher's count on the same three heaps. |
-| R-K, the primitive does not lift the heap | not fired | 67 of 150 is above 43 of 150. |
+| R-J, the primitive lifts the heap | fired | The matched run stows 45 of 150 at the read's flags. The threshold is 43, the fixed teacher's count on the same three heaps under the same flags. The margin is 2 parts of 150. Without the hover jitter band it stows 67 against that same threshold. |
+| R-K, the primitive does not lift the heap | not fired | 45 of 150 is above 43 of 150 at the read's flags, and 67 of 150 is above it without the band. |
 
 R-D needs a note, because its literal firing is misleading. R-D was written to mean that both
 levers had a fair test and both lost. R-C did not give the primitive a fair test. It ran a
 changed descend against an unchanged selection model, so the teacher rejected the grasps the
-changed descend makes. R-J is the fair test, and the primitive wins it. The report therefore
-does not draw R-D's conclusion. That conclusion sends the owner to a smaller K, a different
-part catalog or a different task. R-D stands as written and as fired, and the conclusion it
-points at does not follow from this data.
+changed descend makes. R-J is the fair test, and it fires. The report therefore does not draw
+R-D's conclusion. That conclusion sends the owner to a smaller K, a different part catalog or a
+different task. R-D stands as written and as fired, and the conclusion it points at does not
+follow from this data.
+
+R-E needs a note too. Its wording asks experiment 1 for a drop band and settle with `outside`
+under 2 of 50 and `stacked` no higher than the current cell. Twelve cells meet it. Every one of
+those cells also changes the tray or the wall. The drop band alone is not what moved the
+ejections, and the best cell holds the current drop band unchanged. An earlier draft of this
+report marked R-E as not fired, which was wrong.
 
 ## 7. Findings nobody pre-registered
 
 Each item below is a finding the design did not pre-register.
 
+- Not pre-registered: the hover jitter band decides the primitive's measured gain. It lifts the
+  shipped teacher from 32 to 43 of 150 and cuts the matched primitive from 67 to 45. This round
+  does not separate why.
+- Not pre-registered: nearest-first pick ordering changes nothing for either teacher, on any
+  heap, in stowed count, cycles or pushes.
 - Not pre-registered: a lower and less jittered drop ejects more parts, not fewer. The fixed 20
   mm drop takes `outside` from 6.6 to 20.4 of 50 at the current tray, while it lowers `stacked`
   from 32.4 to 21.2.
@@ -367,37 +485,40 @@ Each item below is a finding the design did not pre-register.
 - Not pre-registered: a brick will not rest on the desk close to the arm's base, because the
   arm's own body occupies that space. 14 of 60 near-side rows carry a placement drift above 2
   mm, and the 0.04 m rows drift 76 to 163 mm.
-- Not pre-registered: the matched primitive lowers ejections rather than raising them, 36 to 11
-  over three heaps, with a grasp-phase bucket of zero.
+- Not pre-registered: the matched primitive lowers ejections rather than raising them, 36 to 21
+  at the read's flags and 36 to 11 without the band.
+- Not pre-registered: the bottom-open descend does not fix the flat-part loss. The 1x4 and 2x4
+  plates are lost at 70 mm from a wall under both descends.
 - Not pre-registered: a full heap episode is reproducible byte for byte. A repeat of heap 0 at
   the same seeds returned the same stowed count, the same cycle count and the same push list.
 
 ## 8. What the data does not separate, and what bounds the recommendation
 
+- The hover jitter band's interaction with the primitive is unmeasured. The band is a
+  corpus-level randomization of the hover height, and this round shows only that it helps one
+  descend and hurts the other. No read here says why, and no read here tries a retuned band.
 - The matched clearance is a single scalar of 17.5 mm. The real opening depends on the part
   width. 17.5 mm is the measured held gap for a 15.8 mm part. It is pessimistic for narrower
   parts and optimistic for wider ones. Near the 45 mm maximum grasp width the true held gap is
   about 26.5 mm. The gain spreads over all four part families, so no single size carries it. A
-  width-aware model is the honest next version, and it will not read 67 of 150 again without
-  being measured.
+  width-aware model is the honest next version, and its yield is unmeasured.
+- Three heaps are three heaps. 45 of 150 against 43 of 150 is a margin of 2 parts, which three
+  episodes cannot resolve. The report states the direction and not a significant difference.
+  The fixed teacher's own read over 121 episodes is 0.2676 and its three-heap read is 0.287.
+  That is some evidence that these three heaps are not pathological.
 - The rectangles of the reach map are conservative by about half a grid step. The rectangle
   builder pads a corner outward by half a step before the clip tests it. The current tray's own
   far corner is 0.2786 m unpadded and 0.2818 m padded, against the 0.280 m bound. The padded
-  clip therefore excludes the current tray at every grid step tried. That is a property of a
-  grid read, not a claim about the arm.
+  clip therefore excludes the current tray at every grid step tried.
 - The reach map is a solver read. The arm's own collisions with the desk and with a tray wall
   are not in it. The driven band covers a lone brick on a bare desk, not an arm reaching into a
   tray full of parts.
-- Three heaps are three heaps. 67 of 150 has a wide interval and it is not a campaign. The
-  fixed teacher's own read over 121 episodes is 0.2676, and the three-heap read of the same
-  teacher is 0.287. The two agree, which is some evidence that three heaps are not
-  pathological, and it is not a substitute for a campaign.
 - The sweep measures step zero only. It does not measure what a teacher does with a heap over
   an episode. A tray that starts better can still run worse.
 - The wall table is a lone part against a bare wall. It does not cover a part against a wall
   with neighbors around it.
-- The probe's `--part` flag runs a flat-part wall table that no test exercises and that this
-  report does not read.
+- The second row of the table in section 5.4 holds archived data for heap 0 only in its
+  without-the-band cell.
 - No read here measures the dataset. Whether a bottom-open pick can be recorded as a
   demonstration is not answered by any number above.
 
@@ -408,10 +529,11 @@ Each item below is a finding the design did not pre-register.
 Option 1A, open the pick primitive. Cost: it changes what a demonstration records during HOVER
 and DESCEND. The inspection report already named that as a design question and not as a fix. It
 also needs the ranking model changed with it, which is a change under `core/`. The number stays
-untrustworthy until the width-aware version of the clearance lands. The 17.5 mm scalar is a
-probe, not a design. Buys: 67 of 150 against 43 of 150 on three heaps, cycles per stowed part
-1.78 against 2.02, and ejections cut to under a third. It also makes every lone-part wall row
-work down to 20 mm.
+untrustworthy until the width-aware version of the clearance lands. Buys: at the configuration
+the corpus runs, 45 of 150 against 43 of 150, a gain of 2 parts. Without the hover jitter band,
+67 of 150 against 32 of 150. It also makes every lone-part wall row work down to 20 mm, and it
+cuts the ejections from 36 to 21. It does not fix the flat-part loss: the 1x4 and 2x4 plates
+are lost under both descends even at a clear wall.
 
 Option 1B, grow the tray. Cost: a new tray in sim and a physical twin later. It also needs a
 bin layout check, because the far corner sits 1 mm inside the measured reach bound. Buys: 3.6
@@ -424,7 +546,14 @@ with the matched primitive.
 Option 1D, do neither and change the task. Cost: the phase A design changes. Buys: nothing
 measured here. R-D pointed at this option and R-J removed its premise.
 
-Recommendation: option 1A, with the width-aware clearance model as its first piece of work.
+Option 1E, open the primitive and measure the hover jitter band with it. Cost: option 1A plus a
+band ladder, which is three heaps per rung. Buys: the one number this round does not supply,
+which is the primitive's gain at a band tuned for it. Interpretation: this is the cheapest way
+to find out whether the 2-part gain or the 35-part gain is the real one.
+
+Recommendation: option 1E. The primitive is the stronger lever. Its gain at the corpus
+configuration is 2 parts of 150, and the band is the reason. Measure the band before the
+dataset cost is paid.
 
 ### Decision 2: the drop band and the settle
 
@@ -437,20 +566,26 @@ hit on the way in. The sweep says the blockage does not rise, 32.0 to 30.6 at th
 Buys: `outside` from 6.6 to 4.0 of 50. Interpretation: this is the cheapest ejection lever
 measured, and it is not one of the two levers the question named.
 
-Option 2C, lower the drop or fix it. Cost: the sweep says it is worse. `outside` rises to 10.6
+Option 2C, take the long tray at a 40 mm wall, at the current drop band. Cost: a 120 by 340 mm
+tray, which is a bigger change than option 2B and narrows the short axis by 10 mm. Buys:
+`outside` from 6.6 to 0.4 of 50 and `stacked` from 32.4 to 30.0. This is the cell that fires
+R-E.
+
+Option 2D, lower the drop or fix it. Cost: the sweep says it is worse. `outside` rises to 10.6
 or 20.4 of 50. Buys: less stacking, 32.4 down to 21.2 at the fixed drop.
 
-Option 2D, lengthen the settle. Cost: run time. Buys: nothing measured. Settle 960 reads the
+Option 2E, lengthen the settle. Cost: run time. Buys: nothing measured. Settle 960 reads the
 same as settle 480 in all 24 cells.
 
-Recommendation: option 2A now. A later tray change for another reason then carries option 2B.
-R-E did not fire. No band measured reaches the pre-registered bar of 2 of 50. The drop is not
-the binding lever at this heap density.
+Recommendation: option 2B. A later tray change for another reason then carries option 2C. R-E
+fired, and it fired through the tray and the wall. The drop band itself is not the lever, and
+lowering it makes the ejections worse.
 
 ## 10. Reproduction
 
 Every command below ran from the integration worktree, not from `main`. Run them from a
-checkout that carries all three branches.
+checkout that carries all three branches. The read's flags are the ones campaign `a` runs, in
+`~/data/maker-arm-ms6/a/run_read.sh`.
 
 ```bash
 # Experiment 0, the reach map. CPU only, no MuJoCo. About one minute.
@@ -478,24 +613,36 @@ MUJOCO_GL=egl uv run python scripts/mj_probe_bottom_pick.py --mode reach_band \
     --radii_mm 40,50,60,70,80,90,100,110,120,130,140,200 \
     --out_dir ~/data/maker-arm-ms6/d/probe/band_near
 
-# Experiment 2, the corrected heap read. One command per heap.
-MUJOCO_GL=egl uv run python scripts/mj_probe_bottom_pick.py --mode heap --no_video \
-    --episode_draws --run_seed 20261000 --layout_seed 20261010 --out_dir /tmp/ed_0
-MUJOCO_GL=egl uv run python scripts/mj_probe_bottom_pick.py --mode heap --no_video \
-    --episode_draws --run_seed 20261001 --layout_seed 20261011 --out_dir /tmp/ed_1
-MUJOCO_GL=egl uv run python scripts/mj_probe_bottom_pick.py --mode heap --no_video \
-    --episode_draws --run_seed 20261002 --layout_seed 20261012 --out_dir /tmp/ed_2
+# The heap read. READ_FLAGS is what campaign a runs and what the corpus runs.
+READ_FLAGS="--heap_k 50 --cycle_budget 50 --parts_split heldout --parts_seed 20260915 \
+    --nearest_first_pick_order --hover_jitter_min 0.035 --hover_jitter_max 0.080 \
+    --episode_draws --frame_jitter --no_cameras"
 
-# Experiment 2, the matched clearance read, the same three heaps.
+# The fixed teacher, one command per heap, n = 0, 1, 2.
+MUJOCO_GL=egl uv run python scripts/mj_inspect_heap.py --no_video $READ_FLAGS \
+    --run_seed 2026100n --layout_seed 2026101n \
+    --out_dir ~/data/maker-arm-ms6/d/probe/base_readflags_n
+
+# The bottom-open probe at the read's flags, shipped model then matched model.
 MUJOCO_GL=egl uv run python scripts/mj_probe_bottom_pick.py --mode heap --no_video \
-    --matched_clearance --run_seed 20261000 --layout_seed 20261010 --out_dir /tmp/mc_0
+    $READ_FLAGS --run_seed 2026100n --layout_seed 2026101n \
+    --out_dir ~/data/maker-arm-ms6/d/probe/unmatched_n
 MUJOCO_GL=egl uv run python scripts/mj_probe_bottom_pick.py --mode heap --no_video \
-    --matched_clearance --run_seed 20261001 --layout_seed 20261011 --out_dir /tmp/mc_1
-MUJOCO_GL=egl uv run python scripts/mj_probe_bottom_pick.py --mode heap --no_video \
-    --matched_clearance --run_seed 20261002 --layout_seed 20261012 --out_dir /tmp/mc_2
+    $READ_FLAGS --matched_clearance --run_seed 2026100n --layout_seed 2026101n \
+    --out_dir ~/data/maker-arm-ms6/d/probe/matched_n
+
+# The isolation. Drop one flag at a time from the matched run.
+#   iso_nonearest_n: the same command without --nearest_first_pick_order
+#   iso_nojitter_n:  the same command without --hover_jitter_min/--hover_jitter_max
+#   base_nojitter_n: the fixed teacher without --hover_jitter_min/--hover_jitter_max
+#   base_defaults_n, minimal_matched_0, minimal_unmatched_0: no flags beyond
+#                    --mode heap, --no_video, --matched_clearance and --out_dir
+
+# Every group above sums through one reader.
+python3 scripts/heap_inspect_read.py ~/data/maker-arm-ms6/d/probe/matched_*/events.jsonl
 ```
 
 The runs used the worktree's own virtual environment, with `PYTHONPATH` on the worktree's
 `source` directory. A worktree then tests the code it carries, not the primary checkout's
-editable install. The fixed teacher's column comes from campaign `b`, under
-`~/data/maker-arm-ms6/b/k50/fixed_0` to `fixed_2`.
+editable install. The fixed teacher's campaign `b` column is at
+`~/data/maker-arm-ms6/b/k50/fixed_0` to `fixed_2`, and `base_readflags_*` reproduces it.
