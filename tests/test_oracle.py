@@ -86,6 +86,32 @@ def test_failed_pinch_retries_from_hover_then_abandons():
     assert orc.phase == oracle.Phase.ABANDON
 
 
+def test_a_lift_that_rose_advances_even_when_the_pinch_factors_refuse_it():
+    """MS6 rework section 4: 8 of 26 real holds on heap 0 failed a pinch factor
+    while the part rose 90 mm or more in the jaws."""
+    orc = _oracle()
+    scene = _snapshot()
+    _run_phase(orc, scene)  # SETTLE
+    _run_phase(orc, scene)  # HOVER
+    _run_phase(orc, scene, outcome="stalled")  # DESCEND
+    _run_phase(orc, scene)  # CLOSE
+    _run_phase(orc, scene, pinch_ok=False, lifted=True)  # LIFT
+    assert orc.phase is oracle.Phase.RAISE
+    assert orc.retries_used == 0
+
+
+def test_a_lift_that_did_not_rise_still_retries():
+    orc = _oracle()
+    scene = _snapshot()
+    _run_phase(orc, scene)  # SETTLE
+    _run_phase(orc, scene)  # HOVER
+    _run_phase(orc, scene, outcome="stalled")  # DESCEND
+    _run_phase(orc, scene)  # CLOSE
+    _run_phase(orc, scene, outcome="budget", pinch_ok=True, lifted=False)  # LIFT
+    assert orc.phase is oracle.Phase.REOPEN
+    assert orc.retries_used == 1
+
+
 def test_release_targets_track_the_permuted_bin():
     bl = layout.BinLayout(bin_x=0.45, bin_ys=(-0.20, -0.06, 0.08, 0.20), slot_colors=(3, 1, 2, 0))
     orc = oracle.EnvOracle(bl, num_bricks=1, draw=_draw())
@@ -200,6 +226,40 @@ def test_retreat_carries_the_release_tilt():
     # OpenYAM measured exhausting the same joints RAISE's tilt fix above
     # addresses; see RETREAT's comment in core/oracle.py.
     assert retreat_goal.tilt_rad == pytest.approx(oracle.RELEASE_TILT_RAD)
+
+
+def test_every_pick_phase_carries_the_pick_tilt():
+    orc = _oracle()
+    scene = _snapshot()
+    _run_phase(orc, scene)  # SETTLE -> HOVER
+    orc.next_goal(scene)  # HOVER's entry selects the target brick
+    for phase in (
+        oracle.Phase.HOVER,
+        oracle.Phase.DESCEND,
+        oracle.Phase.CLOSE,
+        oracle.Phase.LIFT,
+    ):
+        orc.phase = phase
+        goal = orc.next_goal(scene)
+        assert goal.tilt_rad == oracle.PICK_TILT_RAD
+
+
+def test_every_pick_phase_carries_a_raised_pick_tilt(monkeypatch):
+    """PICK_TILT_RAD == 0.0 makes the assertion above unable to fail; this pins the wiring."""
+    monkeypatch.setattr(oracle, "PICK_TILT_RAD", 0.4)
+    orc = _oracle()
+    scene = _snapshot()
+    _run_phase(orc, scene)  # SETTLE -> HOVER
+    orc.next_goal(scene)  # HOVER's entry selects the target brick
+    for phase in (
+        oracle.Phase.HOVER,
+        oracle.Phase.DESCEND,
+        oracle.Phase.CLOSE,
+        oracle.Phase.LIFT,
+    ):
+        orc.phase = phase
+        goal = orc.next_goal(scene)
+        assert goal.tilt_rad == 0.4
 
 
 def test_unreachable_brick_is_skipped_and_reachable_one_sorted():
@@ -1046,6 +1106,18 @@ def test_push_phases_are_pinned_after_abandon():
         {oracle.Phase.PUSH_HOVER, oracle.Phase.PUSH_DESCEND, oracle.Phase.PUSH_SWEEP}
     )
     assert len(oracle.PHASE_TO_INT) == len(oracle.Phase)
+
+
+def test_the_tip_phases_are_appended_and_never_renumbered():
+    assert oracle.TIP_PHASES == frozenset(
+        {oracle.Phase.TIP_HOVER, oracle.Phase.TIP_DESCEND, oracle.Phase.TIP_SWEEP}
+    )
+    assert oracle.PHASE_TO_INT["TIP_HOVER"] == 15
+    assert oracle.PHASE_TO_INT["TIP_DESCEND"] == 16
+    assert oracle.PHASE_TO_INT["TIP_SWEEP"] == 17
+    assert oracle.PHASE_TO_INT["PUSH_SWEEP"] == 14  # nothing renumbered
+    assert len(set(oracle.PHASE_TO_INT.values())) == len(oracle.PHASE_TO_INT)
+    assert set(oracle.PHASE_TO_INT) == {p.name for p in oracle.Phase}
 
 
 def test_goals_carry_the_brick_half_height_by_default():

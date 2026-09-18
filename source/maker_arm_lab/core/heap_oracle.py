@@ -12,6 +12,8 @@ What changes against the six-brick oracle, and nothing else:
 * after ``MAX_PUSHES_IN_A_ROW`` pushes with nothing clear, the top-ranked grasp whose tips
   land inside the tray is taken anyway as a forced pick (fix F2); with none, the pushes go
   on up to the push budget, so DONE comes only from a budget or an empty set;
+* a part whose best grasp grips less than ``TIP_MIN_GRIP_HEIGHT`` of face is tipped onto an
+  edge first, with a short stroke into it, and picked on a later scan (MS6 rework section 7);
 * the episode ends DONE, never ABANDON, at the cycle budget or with no candidate left.
 
 The phases, the correctives, the induction and the retry ladder are the base class's.
@@ -40,13 +42,38 @@ PUSH_Z = layout.BRICK_SIZE[2] / 2
 """Pick-point height of the sweep: the plate tips skim the desk at the brick pick offset."""
 PUSH_HALF_HEIGHT = layout.BRICK_SIZE[2] / 2
 PUSH_SWEEP_STEPS = 150
+TIP_MIN_GRIP_HEIGHT = 0.0
+"""A part whose best grasp grips less than this (m) of face is tipped up, not picked.
+
+0.0 means the tip-up is DISABLED: ``2.0 * chosen.half_height < TIP_MIN_GRIP_HEIGHT`` and
+``half_height`` is never negative, so the trigger never fires and no part is ever diverted
+into a tip (MS6 rework section 7). It ships off because the pre-registered ladder read it as
+a regression: with the trigger live the teacher stowed 16 of 150 parts against 49 of 150 for
+the rung below, and the Wilson interval did not overlap. Two measured causes: the tip fired
+54 times across three heaps and succeeded once, and a failed tip calls ``_mark_failure``,
+which closes a 50 mm cell and makes ``_candidates`` drop every part in that cell including
+bricks, so the tip became the only uncapped source of cell closures in the teacher.
+
+0.005 is the value the ladder measured: a plate is 3.2 mm thick and a brick is 9.6 mm tall,
+so the threshold takes the flat parts and leaves the bricks alone. Heap 0 of 2026-09-17:
+plates failed 13 of their 24 lifts.
+
+Enabling the tip means setting this back to 0.005. Before that, the tip needs a different
+descend geometry (the failed-lift cause above) and must stop feeding the cell failure memory
+(the closed-cell cause above) -- both machinery, not this constant.
+"""
+TIP_STROKE_M = 0.025
+TIP_HOVER_Z = PUSH_HOVER_Z
+TIP_Z = 0.004
+"""Pick-point height of the tip stroke: the closed tips skim under a lying plate's edge."""
+TIP_SWEEP_STEPS = PUSH_SWEEP_STEPS
 PUSH_HEADING_MIN_HALF_ARC = math.pi / 2
 """Narrowest half-arc a push heading is drawn from, right at a tray wall (see ``_push_heading``)."""
 # Design H6: the bin footprint, and twice the interior height so a pile over the rim counts.
 STOW_HALF_EXTENTS = (
-    layout.BIN_INTERIOR[0] / 2,
-    layout.BIN_INTERIOR[1] / 2,
-    layout.BIN_INTERIOR[2] * 2,
+    layout.HEAP_BIN_INTERIOR[0] / 2,
+    layout.HEAP_BIN_INTERIOR[1] / 2,
+    layout.HEAP_BIN_INTERIOR[2] * 2,
 )
 
 
@@ -54,6 +81,13 @@ STOW_HALF_EXTENTS = (
 class Push:
     start: tuple[float, float]
     end: tuple[float, float]
+
+
+@dataclass(frozen=True)
+class Tip:
+    start: tuple[float, float]
+    end: tuple[float, float]
+    part: int
 
 
 class HeapOracle(oracle.EnvOracle):
@@ -75,8 +109,11 @@ class HeapOracle(oracle.EnvOracle):
         self.grasp: grasp.Grasp | None = None
         self.grasp_min_size = min(layout.BRICK_SIZE)
         self.push: Push | None = None
+        self.tip: Tip | None = None
         self.cycles = 0
         self.pushes = 0
+        self.tips = 0
+        self.tips_ok = 0
         self.forced_picks = 0
         self.push_parts: list[int] = []
         self._give_up = False
@@ -90,11 +127,13 @@ class HeapOracle(oracle.EnvOracle):
     # -- grading against the destination -----------------------------------
 
     def _stowed(self, scene: oracle.SceneSnapshot) -> set[int]:
-        ids = torch.full((self.num_bricks,), self.destination, dtype=torch.long)
+        # The MS6 z-centre fix: heap mode has one physical bin, so grading reads
+        # layout.heap_bin_center directly instead of the six-brick per-color array.
+        ids = torch.zeros(self.num_bricks, dtype=torch.long)
         ok = checker.bricks_at_rest_in_bins(
             scene.brick_pos.unsqueeze(0),
             scene.brick_lin_vel.unsqueeze(0),
-            layout.bin_interior_centers(self.bl),
+            torch.tensor(layout.heap_bin_center(self.bl)).unsqueeze(0),
             torch.tensor(STOW_HALF_EXTENTS),
             ids,
         )[0]
@@ -110,7 +149,24 @@ class HeapOracle(oracle.EnvOracle):
         )
 
     def _no_target_phase(self, scene: oracle.SceneSnapshot) -> oracle.Phase:
+        if self.tip is not None:
+            return oracle.Phase.TIP_HOVER
         return oracle.Phase.PUSH_HOVER if self.push is not None else oracle.Phase.DONE
+
+    def standing(self, scene: oracle.SceneSnapshot, part: int, tilt_rad: float = 0.0) -> bool:
+        """Is the part's shortest axis within the closing band, so its wide face grips?
+
+        `core.grasp` counts a body axis as a closing axis only within AXIS_MAX_TILT_RAD of the
+        jaw plane (`grasp.off_plane_axes`, the same call `candidate_grasps` makes). A plate
+        lying flat holds its short axis along the plane's normal, and no tilt short of that
+        band makes the wide face a grip surface. ``tilt_rad`` must be the same value
+        `_ranked`/`candidate_grasps` picks the grasp against, or a tip could pass a jaw plane
+        the pick itself would refuse.
+        """
+        axes = grasp.body_axes_world(scene.brick_quat[part])
+        short = int(torch.as_tensor(self.sizes[part]).argmin())
+        off_plane = float(grasp.off_plane_axes(axes, tilt_rad)[short])
+        return off_plane <= math.sin(grasp.AXIS_MAX_TILT_RAD)
 
     # -- selection ------------------------------------------------------------
 
@@ -122,14 +178,13 @@ class HeapOracle(oracle.EnvOracle):
         """(B,) bool: parts still to pick that the arm can reach and whose cell is open."""
         done = self._stowed(scene) | self._sorted
         limit = layout.top_down_x_limit(self.bl)
-        (x0, x1), (y0, y1) = layout.tray_bounds()
         mask = torch.zeros(self.num_bricks, dtype=torch.bool)
         self.outside_tray = 0
         for b in range(self.num_bricks):
             x, y, z = scene.brick_pos[b].tolist()
             if b in done or z > CANDIDATE_MAX_Z:
                 continue
-            if not (x0 <= x <= x1 and y0 <= y <= y1):
+            if not layout.inside_tray(x, y):
                 self.outside_tray += 1
                 continue
             if x > limit or math.hypot(x, y) > layout.SCATTER_MAX_RADIUS:
@@ -140,35 +195,32 @@ class HeapOracle(oracle.EnvOracle):
         return mask
 
     def _ranked(self, scene: oracle.SceneSnapshot, mask: torch.Tensor) -> list[grasp.Grasp]:
-        return grasp.rank_grasps(self.sizes, scene.brick_pos, scene.brick_quat, mask, self.walls)
+        return grasp.rank_grasps(
+            self.sizes,
+            scene.brick_pos,
+            scene.brick_quat,
+            mask,
+            self.walls,
+            oracle.PICK_TILT_RAD,
+        )
 
     def _push_heading(self, center: tuple[float, float]) -> float:
-        """A push heading from ``self._push_rng``, biased away from the tray's nearest wall.
+        """A push heading from ``self._push_rng``, biased away from the dish rim.
 
-        Design H8 fixes the push's GEOMETRY -- two near-level legs, jaws closed, through the
-        densest cell -- and says nothing about the heading's distribution, so biasing that
-        distribution is an improvement on H8, not a violation of it. A plain uniform draw
-        sends about half of all pushes near a wall further into it, the opposite of what a
-        push is for.
+        Design H8 fixes the push's GEOMETRY and says nothing about the heading's
+        distribution, so biasing that distribution is an improvement on H8. A plain uniform
+        draw sends about half of all pushes near the rim further into it.
 
-        The draw stays a random ``uniform`` call on ``self._push_rng`` and nothing else, so a
-        seeded episode stays reproducible. It is centered on the heading that points straight
-        away from the tray wall nearest ``center`` (from ``layout.tray_bounds()``), within a
-        half-arc that shrinks toward ``PUSH_HEADING_MIN_HALF_ARC`` as the cell nears that wall
-        and grows back to a full circle -- the original uniform draw, unchanged -- once the
-        cell is at least half the tray's narrow span from every wall. A cell in the middle of
-        the tray is that far from every wall, so it keeps the old uniform behavior exactly.
+        The draw stays one ``uniform`` call, so a seeded episode stays reproducible. It is
+        centred on the heading that points at the dish centre, within a half-arc that shrinks
+        toward PUSH_HEADING_MIN_HALF_ARC as the cell nears the rim and opens back to a full
+        circle at the centre.
         """
-        (x0, x1), (y0, y1) = layout.tray_bounds()
-        cx, cy = center
-        nearest_dist, away = min(
-            (cx - x0, 0.0),
-            (x1 - cx, math.pi),
-            (cy - y0, math.pi / 2),
-            (y1 - cy, -math.pi / 2),
-        )
-        half_span = min(layout.TRAY_INTERIOR) / 2
-        bias = max(0.0, 1.0 - nearest_dist / half_span)
+        cx, cy = layout.TRAY_CENTER
+        dx, dy = center[0] - cx, center[1] - cy
+        radius = math.hypot(dx, dy)
+        away = math.atan2(-dy, -dx) if radius > 1e-6 else 0.0
+        bias = max(0.0, min(1.0, radius / layout.TRAY_RADIUS))
         half_arc = math.pi - bias * (math.pi - PUSH_HEADING_MIN_HALF_ARC)
         return away + self._push_rng.uniform(-half_arc, half_arc)
 
@@ -181,6 +233,7 @@ class HeapOracle(oracle.EnvOracle):
             return None
         ranked = self._ranked(scene, mask)
         chosen = grasp.select_grasp(ranked)
+        forced_pick = False
         if chosen is None:
             if not ranked:
                 return None
@@ -189,12 +242,22 @@ class HeapOracle(oracle.EnvOracle):
             inside = [g for g in ranked if g.wall >= 0.0]
             if inside and self.pushes_in_a_row >= MAX_PUSHES_IN_A_ROW:
                 chosen = inside[0]
-                self.forced_picks += 1
+                forced_pick = True
             elif self.pushes < PUSH_BUDGET:
                 self.push = self._plan_push(scene, mask, ranked)
                 return None
             else:
                 return None
+        if 2.0 * chosen.half_height < TIP_MIN_GRIP_HEIGHT:
+            # MS6 rework section 7: a flat part offers only its in-plane axes, so the jaws
+            # would grip its thickness. Tip it up first and pick it on a later scan. A
+            # forced pick that gets tipped instead never happened, so `forced_pick` stays
+            # unrecorded until the part is actually picked (below).
+            self.tip = self._plan_tip(scene, chosen.part)
+            if self.tip is not None:
+                return None
+        if forced_pick:
+            self.forced_picks += 1
         self.grasp = chosen
         self.grasp_width = chosen.width
         self.grasp_min_size = min(self.parts[chosen.part].size)
@@ -226,6 +289,31 @@ class HeapOracle(oracle.EnvOracle):
         self.push_parts.append(-1)
         return Push(*grasp.push_segment(center, heading))
 
+    def _plan_tip(self, scene: oracle.SceneSnapshot, part: int) -> Tip | None:
+        """A short stroke into the part's edge, from outside its footprint toward its centre.
+
+        The stroke runs along the part's SHORT in-plane axis, which is the edge a closed jaw
+        can catch, and it ends past the part's centre so the part rolls up onto that edge.
+        """
+        print_ = grasp.footprint(self.sizes[part], scene.brick_pos[part], scene.brick_quat[part])
+        axes = grasp.body_axes_world(scene.brick_quat[part])
+        sizes = torch.as_tensor(self.sizes[part])
+        order = sorted(range(3), key=lambda k: float(sizes[k]))
+        lateral = next((k for k in order if abs(float(axes[k, 2])) < 0.5), order[0])
+        heading = math.atan2(float(axes[lateral, 1]), float(axes[lateral, 0]))
+        centre = tuple(scene.brick_pos[part, :2].tolist())
+        for sign in (1.0, -1.0):
+            c, s = sign * math.cos(heading), sign * math.sin(heading)
+            offset = 0.5 * float(sizes[lateral]) + grasp.PUSH_START_GAP_M + grasp.TIP_HALF_FACE
+            start = grasp.clamp_to_tray((centre[0] + offset * c, centre[1] + offset * s))
+            if grasp.polygon_distance(grasp.tip_footprint(start), print_) < 0.0:
+                continue
+            end = grasp.clamp_to_tray((start[0] - TIP_STROKE_M * c, start[1] - TIP_STROKE_M * s))
+            if math.dist(start, end) < 0.5 * TIP_STROKE_M:
+                continue
+            return Tip(start, end, part)
+        return None
+
     def _regrasp(self, scene: oracle.SceneSnapshot) -> None:
         """After REOPEN: the same part at its live pose, best grasp even under the floor."""
         mask = torch.zeros(self.num_bricks, dtype=torch.bool)
@@ -248,8 +336,11 @@ class HeapOracle(oracle.EnvOracle):
 
     def next_goal(self, scene: oracle.SceneSnapshot) -> oracle.Goal | None:
         if self.phase == oracle.Phase.HOVER and self.target_brick is None:
-            goal = super().next_goal(scene)  # selects, or sets PUSH_HOVER / DONE via the hook
-            if goal is not None or self.phase != oracle.Phase.PUSH_HOVER:
+            goal = super().next_goal(scene)  # selects, or sets PUSH_HOVER / TIP_HOVER / DONE
+            if goal is not None or self.phase not in (
+                oracle.Phase.PUSH_HOVER,
+                oracle.Phase.TIP_HOVER,
+            ):
                 return goal
         if self.phase == oracle.Phase.PUSH_HOVER:
             target = torch.tensor([*self.push.start, PUSH_HOVER_Z])
@@ -290,6 +381,45 @@ class HeapOracle(oracle.EnvOracle):
                 PUSH_SWEEP_STEPS,
                 half_height=PUSH_HALF_HEIGHT,
             )
+        if self.phase == oracle.Phase.TIP_HOVER:
+            target = torch.tensor([*self.tip.start, TIP_HOVER_Z])
+            return self._goal(
+                oracle.Phase.TIP_HOVER,
+                target,
+                None,
+                0.0,
+                -1.0,
+                0.01,
+                0,
+                oracle.DEFAULT_MAX_STEPS,
+                half_height=PUSH_HALF_HEIGHT,
+            )
+        if self.phase == oracle.Phase.TIP_DESCEND:
+            target = torch.tensor([*self.tip.start, TIP_Z])
+            return self._goal(
+                oracle.Phase.TIP_DESCEND,
+                target,
+                None,
+                0.0,
+                -1.0,
+                0.003,
+                oracle.DESCEND_STALL_STEPS,
+                oracle.DEFAULT_MAX_STEPS,
+                half_height=PUSH_HALF_HEIGHT,
+            )
+        if self.phase == oracle.Phase.TIP_SWEEP:
+            target = torch.tensor([*self.tip.end, TIP_Z])
+            return self._goal(
+                oracle.Phase.TIP_SWEEP,
+                target,
+                None,
+                0.0,
+                -1.0,
+                0.01,
+                0,
+                TIP_SWEEP_STEPS,
+                half_height=PUSH_HALF_HEIGHT,
+            )
         return super().next_goal(scene)
 
     # -- transitions ---------------------------------------------------------
@@ -308,7 +438,29 @@ class HeapOracle(oracle.EnvOracle):
             self.push = None
             self.phase = oracle.Phase.HOVER
             return
-        failed_lift = phase == oracle.Phase.LIFT and not (result.pinch_ok and result.lifted)
+        if phase == oracle.Phase.TIP_HOVER:
+            self.phase = oracle.Phase.TIP_DESCEND
+            return
+        if phase == oracle.Phase.TIP_DESCEND:
+            self.phase = oracle.Phase.TIP_SWEEP
+            return
+        if phase == oracle.Phase.TIP_SWEEP:
+            part = self.tip.part
+            self.tips += 1
+            # A tip is a corrective like a push, and counts against the same
+            # forced-pick grace period: a successful tip costs nothing once the pick
+            # it enables resets the counter on the next scan, but a failed tip must
+            # count against the policy so a run of correctives on unrelated parts
+            # cannot pin the counter at MAX_PUSHES_IN_A_ROW forever.
+            self.pushes_in_a_row += 1
+            if self.standing(scene, part):
+                self.tips_ok += 1
+            else:
+                self._mark_failure(scene, part)
+            self.tip = None
+            self.phase = oracle.Phase.HOVER
+            return
+        failed_lift = phase == oracle.Phase.LIFT and not result.lifted
         if failed_lift and self.retries_used >= oracle.MAX_GRASP_RETRIES:
             # The base class abandons the episode here; a heap marks the cell and moves on,
             # through REOPEN so a part riding in the pocket is dropped here, not carried off
@@ -339,6 +491,8 @@ class HeapOracle(oracle.EnvOracle):
         return {
             "cycles": self.cycles,
             "pushes": self.pushes,
+            "tips": self.tips,
+            "tips_ok": self.tips_ok,
             "forced_picks": self.forced_picks,
             "push_parts": list(self.push_parts),
             "cycle_parts": list(self.cycle_parts),

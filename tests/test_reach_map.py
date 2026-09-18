@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import math
 import pathlib
 
 from maker_arm_lab.core import layout
@@ -215,17 +216,19 @@ def test_missing_required_out_becomes_a_fail_token(capsys):
     assert capsys.readouterr().out.startswith("REACH_FAIL ")
 
 
-def test_current_tray_corners_are_pickable_by_the_real_solver():
-    """The script's own sanity check: the current 0.13 by 0.20 tray sits inside
-    SCATTER_MAX_RADIUS by construction (tests/test_layout.py); this checks the solver actually
-    agrees that every one of its four corners is reachable at the descend attitude."""
+def test_the_dish_rim_is_pickable_by_the_real_solver():
+    """The script's own sanity check: the dish sits inside SCATTER_MAX_RADIUS by construction
+    (tests/test_layout.py); this checks the solver actually agrees that every one of eight
+    points spaced evenly around the rim is reachable at the descend attitude."""
     reach = _load(REACH)
-    (x0, x1), (y0, y1) = layout.tray_bounds()
+    cx, cy = layout.TRAY_CENTER
     ik = reach.GlobalIK()
     tilt = reach.MIN_DESCEND_TILT
     headings = reach.headings_over_half_turn(8)
     half_height = BRICK_HEIGHT / 2
-    for x in (x0, x1):
-        for y in (y0, y1):
-            converged = reach.probe_point(ik, x, y, half_height, tilt, headings)
-            assert all(converged), f"tray corner ({x}, {y}) is not pickable at every heading"
+    for k in range(8):
+        theta = 2.0 * math.pi * k / 8
+        x = cx + layout.TRAY_RADIUS * math.cos(theta)
+        y = cy + layout.TRAY_RADIUS * math.sin(theta)
+        converged = reach.probe_point(ik, x, y, half_height, tilt, headings)
+        assert all(converged), f"dish rim point ({x}, {y}) is not pickable at every heading"

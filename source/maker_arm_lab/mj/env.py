@@ -45,6 +45,7 @@ import random
 import re
 import types
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import mujoco
@@ -264,6 +265,11 @@ class MjLegoSortEnv:
             raise ValueError(f"context must be one of {sorted(CONTEXT_DIMS)}, got {context!r}")
         self.parts = tuple(parts) if parts is not None else None
         if self.parts is not None:
+            # MS6 rework section 6: heap mode has one bin, at y = 0.0. Flatten the layout
+            # this env starts with so self.bin_layouts, the built box, the release target and
+            # the grader's bin centre all agree from the first reset, not only after an
+            # episode_draws redraw.
+            bl = replace(bl, bin_ys=(0.0, 0.0, 0.0, 0.0))
             num_bricks = len(self.parts)
             self.cfg.num_bricks = num_bricks
             if context == "privileged":
@@ -488,9 +494,13 @@ class MjLegoSortEnv:
             bl = layout.BinLayout(
                 bin_x=ep["bin_x"], bin_ys=tuple(ep["bin_ys"]), slot_colors=tuple(ep["slot_colors"])
             )
+            if self.parts is not None:
+                # MS6 rework section 6: heap mode has one bin, at y = 0.0. The release target,
+                # the grader's bin centre and the built box are then the same box.
+                bl = replace(bl, bin_ys=(0.0, 0.0, 0.0, 0.0))
             self.episode_draws[i] = ep
             self.bin_layouts[i] = bl
-            scene.apply_bins(m, bl)
+            scene.apply_bins(m, bl, heap=self.parts is not None)
             scene.apply_lighting(m, ep)
             scene.apply_cameras(m, ep)
         # Physics DR first: mj_setConst re-derives the model constants AT qpos0 and resets the
@@ -563,17 +573,22 @@ class MjLegoSortEnv:
     def _drop_heap(self, i: int) -> None:
         """Design section 6: a destination, a color per part, a drop into the tray, a settle."""
         m, d, h = self.models[i], self.datas[i], self.handles
-        self.destination_bins[i] = self._rng.randrange(len(self.bin_layouts[i].bin_ys))
-        (x0, x1), (y0, y1) = layout.tray_bounds()
+        # MS6 rework section 6: heap mode has one bin, at y = 0.0. The release target, the
+        # grader's bin centre and the built box are then the same box.
+        self.destination_bins[i] = 0
         k = self.cfg.num_bricks
         z_top = layout.HEAP_DROP_Z_MIN + layout.HEAP_DROP_Z_PER_PART * k
         for b, part in enumerate(self.parts):
             rgba = layout.BRICK_RGBA[self._rng.choice(layout.BRICK_COLOR_ORDER)]
             for g in h.body_geoms[b]:
                 m.geom_rgba[g] = rgba
-            r = part.half_diagonal
-            x = self._rng.uniform(x0 + r, x1 - r)
-            y = self._rng.uniform(y0 + r, y1 - r)
+            # Uniform on the dish interior, shrunk by the part's own half diagonal so a
+            # part never starts over the rim. sqrt keeps the draw uniform per unit area.
+            reach = max(0.0, layout.TRAY_RADIUS - part.half_diagonal)
+            rho = reach * math.sqrt(self._rng.random())
+            phi = self._rng.uniform(0.0, 2.0 * math.pi)
+            x = layout.TRAY_CENTER[0] + rho * math.cos(phi)
+            y = layout.TRAY_CENTER[1] + rho * math.sin(phi)
             z = self._rng.uniform(layout.HEAP_DROP_Z_MIN, z_top)
             adr = h.brick_qpos[b]
             d.qpos[adr : adr + 3] = (x, y, z)

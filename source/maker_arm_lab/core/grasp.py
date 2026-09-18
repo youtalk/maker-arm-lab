@@ -72,16 +72,38 @@ def body_axes_world(quat: torch.Tensor) -> torch.Tensor:
     return quat_apply(quat.reshape(1, 4), torch.eye(3, dtype=torch.float32))
 
 
+def jaw_plane_normal(tilt_rad: float = 0.0) -> torch.Tensor:
+    """The jaw plane's normal in the world: horizontal at tilt_rad = 0.0, leaning toward +x.
+
+    ``candidate_grasps`` and ``HeapOracle.standing`` (core/heap_oracle.py) both call this
+    through ``off_plane_axes``, so a non-zero tilt cannot make the two disagree about which
+    body axis is a closing axis (MS6 rework section 7).
+    """
+    return torch.tensor([-math.sin(tilt_rad), 0.0, math.cos(tilt_rad)], dtype=torch.float32)
+
+
+def off_plane_axes(axes: torch.Tensor, tilt_rad: float = 0.0) -> torch.Tensor:
+    """(3,) each body axis's magnitude off the jaw plane's normal, at ``tilt_rad``."""
+    return (axes @ jaw_plane_normal(tilt_rad)).abs()
+
+
 def candidate_grasps(
-    part: int, size: torch.Tensor, pos: torch.Tensor, quat: torch.Tensor
+    part: int,
+    size: torch.Tensor,
+    pos: torch.Tensor,
+    quat: torch.Tensor,
+    tilt_rad: float = 0.0,
 ) -> list[Grasp]:
-    """Every closing axis within AXIS_MAX_TILT_RAD of horizontal and under MAX_GRASP_WIDTH."""
+    """Every closing axis within AXIS_MAX_TILT_RAD of the jaw plane, under MAX_GRASP_WIDTH.
+
+    The jaw plane is horizontal at ``tilt_rad = 0.0``.
+    """
     axes = body_axes_world(quat)
-    vertical = axes[:, 2].abs()
-    half_height = 0.5 * float(size[int(vertical.argmax())])
+    off_plane = off_plane_axes(axes, tilt_rad)
+    half_height = 0.5 * float(size[int(off_plane.argmax())])
     found = []
     for k in range(3):
-        if float(vertical[k]) > math.sin(AXIS_MAX_TILT_RAD):
+        if float(off_plane[k]) > math.sin(AXIS_MAX_TILT_RAD):
             continue
         width = float(size[k])
         if width > MAX_GRASP_WIDTH:
@@ -258,6 +280,7 @@ def rank_grasps(
     quat: torch.Tensor,
     candidates: torch.Tensor,
     wall_footprints: list[list[tuple[float, float]]],
+    tilt_rad: float = 0.0,
 ) -> list[Grasp]:
     """Every grasp of every candidate part with its clearance, best first.
 
@@ -273,7 +296,7 @@ def rank_grasps(
         others[b] = False
         other_pos, other_hz = pos[others], hz[others]
         other_prints = [prints[k] for k in torch.nonzero(others).flatten().tolist()]
-        for g in candidate_grasps(b, sizes[b], pos[b], quat[b]):
+        for g in candidate_grasps(b, sizes[b], pos[b], quat[b], tilt_rad):
             clearance, swept, wall = jaw_clearance(
                 pos[b],
                 g.heading,
@@ -316,11 +339,19 @@ PUSH_MIN_GAIN_M = 0.005
 def clamp_to_tray(
     point: tuple[float, float], margin: float = PUSH_WALL_MARGIN_M
 ) -> tuple[float, float]:
-    (x0, x1), (y0, y1) = layout.tray_bounds()
-    return (
-        min(max(point[0], x0 + margin), x1 - margin),
-        min(max(point[1], y0 + margin), y1 - margin),
-    )
+    """Pull a point back along its own radius until it is ``margin`` inside the rim.
+
+    A ``margin`` past ``layout.TRAY_RADIUS`` clamps to the dish centre rather than going
+    negative, which would reflect the point through the centre onto the far side.
+    """
+    cx, cy = layout.TRAY_CENTER
+    dx, dy = point[0] - cx, point[1] - cy
+    radius = math.hypot(dx, dy)
+    limit = max(0.0, layout.TRAY_RADIUS - margin)
+    if radius <= limit or radius == 0.0:
+        return point
+    scale = limit / radius
+    return (cx + dx * scale, cy + dy * scale)
 
 
 def push_toward_center(
@@ -387,13 +418,22 @@ def push_segment(
     )
 
 
+# ponytail: the rim is modelled as a vertical stop at its xy shadow, which refuses some
+# grasps the 45 degree slope would accept. Upgrade to a sloped stop if rung R2 reads a
+# clearance loss at the rim.
 def tray_wall_obstacles() -> list[list[tuple[float, float]]]:
-    """The four tray walls as world-xy rectangles, for ``rank_grasps``."""
+    """The dish rim segments as world-xy footprints, for ``rank_grasps``.
+
+    The rim leans outward, so its xy footprint is the leaning slab's shadow. The model still
+    treats it as a stop that stands where the shadow is.
+    """
     prints = []
-    for _, center, size in layout.tray_static_boxes():
-        cx, cy = center[0], center[1]
-        hx, hy = size[0] / 2, size[1] / 2
+    for _, center, size, quat in layout.tray_static_boxes():
         prints.append(
-            [(cx - hx, cy - hy), (cx + hx, cy - hy), (cx + hx, cy + hy), (cx - hx, cy + hy)]
+            footprint(
+                torch.tensor(size, dtype=torch.float32),
+                torch.tensor(center, dtype=torch.float32),
+                torch.tensor(quat, dtype=torch.float32),
+            )
         )
     return prints

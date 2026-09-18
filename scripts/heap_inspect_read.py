@@ -41,8 +41,12 @@ def read_episode(path: str) -> dict:
     lifts = [e for e in events if e["kind"] == "phase" and e["phase"] == "LIFT"]
     outcomes = Counter()
     for e in lifts:
-        ok = bool(e["pinch_ok"]) and bool(e["lifted"])
+        # R1 (rung, MS6 rework section 4) moved the LIFT transition to `lifted` alone. The old
+        # `pinch_ok and lifted` gate under-counts real lifts in any read taken after that rung.
+        # The refused-pinch information is not lost: it is the "rescued" count below.
+        ok = bool(e["lifted"])
         outcomes[(e["family"], "ok" if ok else "fail")] += 1
+    rescued = sum(1 for e in lifts if e.get("lifted") and e.get("pinch_ok") is False)
     stats = end["extra_stats"]
     stowed_by_family = Counter()
     families = {}
@@ -66,7 +70,10 @@ def read_episode(path: str) -> dict:
         "done_step": end["done_step"],
         "idle_steps": end["idle_steps"],
         "outside_at_start": sum(1 for p in first if not p["inside"]),
-        "outside_at_end": stats.get("parts_outside_tray", 0),
+        "outside_last": stats.get("parts_outside_tray", 0),
+        "tips": stats.get("tips", 0),
+        "tips_ok": stats.get("tips_ok", 0),
+        "rescued": rescued,
         "wall_blocked_at_start": sum(
             1 for p in first if p["inside"] and p["best_wall"] is not None and p["best_wall"] < 0
         ),
@@ -105,8 +112,12 @@ def summarize(episodes: list[dict]) -> dict:
         "pushes": sum(e["pushes"] for e in episodes),
         "forced_picks": sum(e["forced_picks"] for e in episodes),
         "outside_at_start_mean": sum(e["outside_at_start"] for e in episodes) / len(episodes),
+        "outside_last": sum(e["outside_last"] for e in episodes),
         "wall_blocked_at_start_mean": sum(e["wall_blocked_at_start"] for e in episodes)
         / len(episodes),
+        "tips": sum(e["tips"] for e in episodes),
+        "tips_ok": sum(e["tips_ok"] for e in episodes),
+        "rescued": sum(e["rescued"] for e in episodes),
         "exits": dict(exits),
         "lift_outcomes": dict(lifts),
         "stowed_by_family": dict(stowed),
@@ -121,13 +132,16 @@ def main(argv=None) -> int:
     episodes = [read_episode(p) for p in args.logs]
     print(
         f"{'episode':28s} {'stowed':>6s} {'cycles':>6s} {'pushes':>6s} {'forced':>6s} "
-        f"{'out0':>4s} {'wall0':>5s} {'reason':>8s} {'idle':>6s}  exits"
+        f"{'out0':>4s} {'wall0':>5s} {'outL':>4s} {'tips':>4s} {'tipsOk':>6s} {'resc':>4s} "
+        f"{'reason':>8s} {'idle':>6s}  exits"
     )
     for e in episodes:
         print(
             f"{e['name']:28s} {e['stowed']:3d}/{e['parts']:<3d} {e['cycles']:6d} "
             f"{e['pushes']:6d} {e['forced_picks']:6d} {e['outside_at_start']:4d} "
-            f"{e['wall_blocked_at_start']:5d} {e['reason']:>8s} {e['idle_steps']:6d}  {e['exits']}"
+            f"{e['wall_blocked_at_start']:5d} {e['outside_last']:4d} {e['tips']:4d} "
+            f"{e['tips_ok']:6d} {e['rescued']:4d} "
+            f"{e['reason']:>8s} {e['idle_steps']:6d}  {e['exits']}"
         )
     summary = summarize(episodes)
     print("INSPECT_READ " + json.dumps(summary), flush=True)

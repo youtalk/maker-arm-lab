@@ -77,6 +77,12 @@ def _place(env, poses) -> None:
     env._refresh([0], images=False)
 
 
+def test_the_viewer_flag_exists_and_is_off_by_default():
+    module = _load(SCRIPT)
+    args = module.parse_args(["--out_dir", "/tmp/x", "--num_envs", "1", "--heap_k", "3"])
+    assert args.viewer is False
+
+
 def test_the_logging_oracle_writes_a_scan_per_selection_and_a_phase_per_report(tmp_path):
     module = _load(SCRIPT)
     draw = layout.sample_run_draw(random.Random(5))
@@ -94,10 +100,12 @@ def test_the_logging_oracle_writes_a_scan_per_selection_and_a_phase_per_report(t
         return orc
 
     rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)
-    (x0, _x1), _ = layout.tray_bounds()
-    # Two bricks in the tray, one on the bare desk inside reach but outside the tray.
+    module._install_lift_wrapper(rig)
+    # Two bricks in the tray, one on the bare desk inside reach but outside the dish.
+    outside_x = layout.TRAY_CENTER[0] - layout.TRAY_RADIUS - 0.03
     _place(
-        env, [(0.195, -0.03, 0.006, 0.3), (0.195, 0.03, 0.006, -0.8), (x0 - 0.03, 0.0, 0.006, 0.0)]
+        env,
+        [(0.195, -0.03, 0.006, 0.3), (0.195, 0.03, 0.006, -0.8), (outside_x, 0.0, 0.006, 0.0)],
     )
     orc = holder[0]
     steps = 0
@@ -115,6 +123,19 @@ def test_the_logging_oracle_writes_a_scan_per_selection_and_a_phase_per_report(t
     assert phases and all("outcome" in e and "next_phase" in e for e in phases)
     lifts = [e for e in phases if e["phase"] == "LIFT"]
     assert lifts and all(e["pinch_ok"] is not None for e in lifts)
+    factors = {
+        "stall",
+        "left",
+        "right",
+        "asymmetry",
+        "min_stall",
+        "min_force",
+        "rise",
+        "xy_error",
+        "grasp_width",
+    }
+    assert all(factors <= set(e) for e in lifts)
+    assert all(e["stall"] >= 0.0 and e["min_force"] > 0.0 for e in lifts)
     first = scans[0]
     assert all({"inside", "best_clearance", "best_wall", "axes"} <= set(p) for p in first["parts"])
     outside = [p for p in first["parts"] if not p["inside"]]

@@ -207,6 +207,48 @@ RAISE_MAX_STEPS = 60
 # every tilt. The runtime advances straight to EXTEND on the legs it cannot plan.
 RAISE_TILT_RAD = 1.05
 
+PICK_TILT_RAD = 0.0
+"""Tool-axis tilt the pick phases hold. MS6 rework rung R5 tried to raise it off zero.
+
+At 0.0 the jaws come down flat, so a part offers only the body axes that are within
+`grasp.AXIS_MAX_TILT_RAD` of horizontal, and a lying plate offers its in-plane axes alone.
+Raising it moves the reach ceiling, the joint6 budget of `fold_jaw_heading` and the descend
+clearance model at the same time, which is why the rung ran last, and why it ran twice.
+
+The ladder read two non-zero values and rejected both, so the constant stays at 0.0.
+
+25.0 deg moved the commanded pose past `robots.frames.GRASP_TILT_DEG` (20.0 deg today), the
+runtime's own floor on the hover-approach tilt (`oracle_runtime`'s
+`max(goal.tilt_rad, GRASP_TILT_RAD)`, and `_plan_hover_ladder`'s hardcoded use of it). That
+moved attitude cost a grasp attempt in the bottom-pick probe and halved the heap teacher's
+completed cycles inside a fixed step budget.
+
+20.0 deg equals `GRASP_TILT_RAD` itself, so it never moves the commanded pose -- every
+request at or below the runtime's floor lands on the pose it already holds today. That floor
+comes from the D3 sweep's 18.42 deg worst case at the outer corners of the scatter band
+(`robots/frames.py`'s own comment), rounded up to the nearest whole degree. Holding the pose
+did not hold the grasp model steady, though: `grasp.candidate_grasps` measures a candidate
+closing axis against the JAW PLANE, and at 20.0 deg that plane is no longer level.
+`AXIS_MAX_TILT_RAD` (15.0 deg) was calibrated against a level plane, so tilting the plane
+20.0 deg while keeping that same 15.0 deg band refuses every closing axis that lies along the
+tilt direction -- a whole orientation class of parts the level-plane model used to accept.
+Driven, a three-part heap that stowed completely at 0.0 deg stalled at 20.0 deg:
+`sort_attempts` 2 of 3, `retries` 12, `unplanned_legs` 0, so the IK solver could still reach
+the part and the grasp model was the one that refused to offer it a grip. The arm never
+moved; only the model's own opinion of what it can hold did, so this is a modeling gap, not a
+measured hardware limit.
+
+This constant does not go non-zero again until `grasp.AXIS_MAX_TILT_RAD` is re-measured
+against a tilted jaw plane at the matching tilt, and that measured-constant change is outside
+this rung's scope. Until then 0.0 is the value every test, the bottom-pick probe and the heap
+teacher all still pass at, and it is the value that ships.
+
+`core/` never imports `robots.frames` -- it is the ported, arm-agnostic state machine, and
+the runtime owning the arm's floor is the whole reason that floor lives there instead of
+here -- so this duplicates the number rather than importing it, and the two must be read
+together, not assumed to track each other automatically.
+"""
+
 _JOINT_LIMIT_GUARD_RAD = 0.05
 _JOINT_SPEED_MAX = 6.0
 
@@ -396,6 +438,9 @@ class Phase(enum.Enum):
     PUSH_HOVER = enum.auto()
     PUSH_DESCEND = enum.auto()
     PUSH_SWEEP = enum.auto()
+    TIP_HOVER = enum.auto()
+    TIP_DESCEND = enum.auto()
+    TIP_SWEEP = enum.auto()
 
 
 # Explicit pin, NOT Phase.value: the recorded integers are a dataset schema
@@ -421,9 +466,15 @@ PHASE_TO_INT = {
     "PUSH_HOVER": 12,
     "PUSH_DESCEND": 13,
     "PUSH_SWEEP": 14,
+    # MS6 rework section 7. Appended, never renumbered, for the same reason as the pushes.
+    "TIP_HOVER": 15,
+    "TIP_DESCEND": 16,
+    "TIP_SWEEP": 17,
 }
 
 PUSH_PHASES = frozenset({Phase.PUSH_HOVER, Phase.PUSH_DESCEND, Phase.PUSH_SWEEP})
+TIP_PHASES = frozenset({Phase.TIP_HOVER, Phase.TIP_DESCEND, Phase.TIP_SWEEP})
+"""The tip-up: a corrective like a push, and recorded by the same actor ordinal."""
 
 
 @dataclass
@@ -884,7 +935,7 @@ class EnvOracle:
             Phase.DESCEND,
             target,
             yaw,
-            0.0,
+            PICK_TILT_RAD,
             1.0,
             0.0008,
             DESCEND_STALL_STEPS,
@@ -961,7 +1012,7 @@ class EnvOracle:
                 Phase.HOVER,
                 target,
                 yaw,
-                0.0,
+                PICK_TILT_RAD,
                 1.0,
                 0.005,
                 0,
@@ -972,7 +1023,7 @@ class EnvOracle:
             return self.descend_goal(self._target_yaw(scene))
         if self.phase == Phase.CLOSE:
             return self._goal(
-                Phase.CLOSE, None, None, 0.0, -1.0, None, 0, CLOSE_STEPS, hold=CLOSE_STEPS
+                Phase.CLOSE, None, None, PICK_TILT_RAD, -1.0, None, 0, CLOSE_STEPS, hold=CLOSE_STEPS
             )
         if self.phase == Phase.LIFT:
             target = scene.pick_point.clone()
@@ -998,7 +1049,7 @@ class EnvOracle:
             else:
                 target[2] += LIFT_HEIGHT
             return self._goal(
-                Phase.LIFT, target, None, 0.0, -1.0, 0.002, 0, DEFAULT_MAX_STEPS, hold=30
+                Phase.LIFT, target, None, PICK_TILT_RAD, -1.0, 0.002, 0, DEFAULT_MAX_STEPS, hold=30
             )
         if self.phase == Phase.REOPEN:
             return self._goal(Phase.REOPEN, None, None, 0.0, 1.0, None, 0, 20, hold=20)
@@ -1062,7 +1113,11 @@ class EnvOracle:
         elif self.phase == Phase.CLOSE:
             self.phase = Phase.LIFT
         elif self.phase == Phase.LIFT:
-            if result.pinch_ok and result.lifted:
+            # MS6 rework section 4: the decision is the measured rise, not the pinch
+            # factors. Heap 0 of 2026-09-17 rejected 8 of 26 real holds on the force floor,
+            # the asymmetry limit and the stall floor's own boundary, while the part rose
+            # 90 mm or more in the jaws. `pinch_ok` stays on the result as telemetry.
+            if result.lifted:
                 self.phase = Phase.RAISE
             elif self.retries_used < MAX_GRASP_RETRIES:
                 self.retries_used += 1

@@ -249,7 +249,7 @@ def build_spec(
     """The MjSpec for one run draw; ``compile_model`` turns it into a model and handles.
 
     ``parts`` (MS6) replaces the ``num_bricks`` identical box bricks with one body per part,
-    and ``tray`` adds the four walls of ``layout.tray_static_boxes``.
+    and ``tray`` adds the rim segments of ``layout.tray_static_boxes``.
     """
     if parts is not None:
         num_bricks = len(parts)
@@ -319,10 +319,13 @@ def build_spec(
             rgba=[0.6, 0.6, 0.6, 1.0],
         )
     )
-    for name, center, size in layout.bin_static_boxes(bl):
+    bin_boxes = layout.heap_bin_static_boxes(bl) if tray else layout.bin_static_boxes(bl)
+    for name, center, size in bin_boxes:
         color = name.split("_")[1]
         rgba = (
-            [*layout.BRICK_RGBA[color][:3], 1.0] if name.endswith("floor") else [0.55] * 3 + [1.0]
+            [*layout.BRICK_RGBA[color][:3], 1.0]
+            if name.endswith("floor") and color in layout.BRICK_RGBA
+            else [0.55] * 3 + [1.0]
         )
         scene_geoms.append(
             spec.worldbody.add_geom(
@@ -335,13 +338,14 @@ def build_spec(
         )
 
     if tray:
-        for name, center, size in layout.tray_static_boxes():
+        for name, center, size, quat in layout.tray_static_boxes():
             scene_geoms.append(
                 spec.worldbody.add_geom(
                     name=name,
                     type=mujoco.mjtGeom.mjGEOM_BOX,
                     size=_half(size),
                     pos=list(center),
+                    quat=list(quat),
                     rgba=[0.35, 0.35, 0.35, 1.0],
                 )
             )
@@ -493,9 +497,10 @@ def overhead_camera_pose(draw: dict) -> tuple[list[float], tuple[float, float, f
     return pos, rot
 
 
-def apply_bins(model: mujoco.MjModel, bl: layout.BinLayout) -> None:
-    """Move the 20 static bin geoms to ``bl``. Sizes and colors never change per episode."""
-    for name, center, _size in layout.bin_static_boxes(bl):
+def apply_bins(model: mujoco.MjModel, bl: layout.BinLayout, heap: bool = False) -> None:
+    """Move the static bin geoms to ``bl``. Sizes and colors never change per episode."""
+    boxes = layout.heap_bin_static_boxes(bl) if heap else layout.bin_static_boxes(bl)
+    for name, center, _size in boxes:
         model.geom_pos[model.geom(name).id] = center
 
 

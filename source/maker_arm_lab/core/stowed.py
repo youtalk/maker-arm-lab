@@ -8,7 +8,9 @@ The mdp modules re-export them so the Isaac cfgs are unchanged.
 
 ``per_brick_stowed`` also reads ``env.num_envs``, and, when present, ``env.destination_bins``
 and ``env.stow_half_extents`` (MuJoCo heap mode, MS6). Both are read with ``getattr(env, name,
-None)``, so a backend without them keeps grading by color, as before.
+None)``, so a backend without them keeps grading by color, as before. ``destination_bins``
+grades against the one heap bin (``layout.heap_bin_center``), not the six-brick per-color
+array; ``HeapOracle._stowed`` in ``core/heap_oracle.py`` reads the same function.
 """
 
 from functools import cache
@@ -55,6 +57,34 @@ def env_bin_centers(env, device: str) -> torch.Tensor:
     return torch.stack([layout.bin_interior_centers(bl) for bl in layouts]).to(device)
 
 
+def _heap_bin_centers(bl: layout.BinLayout) -> torch.Tensor:
+    """(4,3): the heap centre repeated once per bin slot.
+
+    A heap env has one physical bin. Repeating ``layout.heap_bin_center`` across the (4,3)
+    shape keeps a ``destination_bins`` index of 0-3 valid without a special case, and every
+    index reads the same, correct heap centre (the MS6 z-centre fix).
+    """
+    return torch.tensor(layout.heap_bin_center(bl)).unsqueeze(0).repeat(4, 1)
+
+
+@cache
+def _heap_bin_centers_cached(bl: layout.BinLayout, device: str) -> torch.Tensor:
+    return _heap_bin_centers(bl).to(device)
+
+
+def env_heap_bin_centers(env, device: str) -> torch.Tensor:
+    """(4,3) heap centers, or (N,4,3) when the env carries one layout per env.
+
+    The heap-mode companion to ``env_bin_centers``: every returned row is
+    ``layout.heap_bin_center(bl)`` (see ``_heap_bin_centers``), not the six-brick
+    per-color array.
+    """
+    layouts = getattr(env, "bin_layouts", None)
+    if layouts is None:
+        return _heap_bin_centers_cached(_env_bin_layout(env), device)
+    return torch.stack([_heap_bin_centers(bl) for bl in layouts]).to(device)
+
+
 @cache
 def _brick_color_ids_cached(num_bricks: int, device: str) -> torch.Tensor:
     return brick_color_ids(num_bricks).to(device)
@@ -78,17 +108,19 @@ def per_brick_stowed(env) -> torch.Tensor:
     """(N,B) bool: which bricks are at rest inside their target bin right now.
 
     The target is the brick's color bin, or, when the env carries ``destination_bins`` (N,)
-    (MuJoCo heap mode, MS6), that one bin for every part of the env. ``stow_half_extents`` (3,)
-    on the env replaces the bin interior half extents; the heap's box is taller than the rim so
-    a pile over it still counts (design H6).
+    (MuJoCo heap mode, MS6), the one heap bin (``layout.heap_bin_center``, the MS6 z-centre
+    fix) for every part of the env. ``stow_half_extents`` (3,) on the env replaces the bin
+    interior half extents; the heap's box is taller than the rim so a pile over it still
+    counts (design H6).
     """
     pos, vel = _brick_states(env)
     device = str(env.device)
-    centers = env_bin_centers(env, device)
     destination = getattr(env, "destination_bins", None)
     if destination is None:
+        centers = env_bin_centers(env, device)
         ids = _brick_color_ids_cached(env.cfg.num_bricks, device)
     else:
+        centers = env_heap_bin_centers(env, device)
         destination = torch.as_tensor(destination).to(device)
         if destination.shape[0] != env.num_envs:
             raise ValueError(
