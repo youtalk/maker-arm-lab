@@ -13,22 +13,24 @@ through R5 at `~/data/maker-arm-ms6/e/r{1,2,3,4,5}_{0,1,2}`, and the R2 diagnost
 under R2) at `~/data/maker-arm-ms6/e/r2diag_{0,1,2}`. The final reviewer independently re-derived
 every row of the table in section 3 from those logs.
 
-## 0. Read this first: do not merge past R3 without an owner decision
+## 0. Read this first: the owner decision on R4 and R5
 
 The pre-registered rule: a rung that reads below the rung under it is reported, and the owner
 decides whether it stays. R2 and R4 both read below. R4 reads below by three times the margin
-of R2.
+of R2. The owner decided: all five rungs merge.
 
 - R1 and R3 earned their place. Each reads at or above the rung under it and stays inside its
   own Wilson interval.
 - R2 and R3 are entangled. They must land together, because R3 recovers the whole shortfall
   R2 opens (section 3).
-- R4 and R5 must not merge without an owner decision. A merge of the whole stack as it stands
-  makes 0.1067 the teacher on `main`. A campaign launched after that merge then draws its
-  corpus from that teacher.
-
-The rungs are separate stacked pull requests. A merge up to R3 that holds R4 and R5 back needs
-no code change at all.
+- R4 and R5 merge too, and neither changes the teacher on `main`, so the merge is safe. R5
+  merges as it is, because it is inert: it ships `PICK_TILT_RAD = 0.0`, so
+  `grasp.candidate_grasps` reduces to exactly its old world-horizontal test. R5's ladder read
+  is identical to R4's on all four pre-registered numbers for that reason. R4 merges with its
+  trigger disabled: `heap_oracle.TIP_MIN_GRIP_HEIGHT` ships at `0.0`. The trigger reads
+  `2.0 * chosen.half_height < TIP_MIN_GRIP_HEIGHT`, and a half height is never negative, so no
+  part is ever diverted into a tip. The tip-up machinery lands reviewed and tested while the
+  default teacher stays where R3 left it. Enabling the tip is one constant.
 
 ## 1. What the GUI inspection saw
 
@@ -221,8 +223,12 @@ State this plainly: the tip-up as built does not stand a part up. The trigger di
 teacher can otherwise pick. The primitive needs a different descend geometry, not a longer
 stroke, because its depth is the push's depth. The tip must also stop writing to the cell
 failure memory before a retry. Then one resistant cell no longer locks out every part near it. R4
-read below the rung under it, by the largest margin in this ladder. The owner decides whether
-it stays.
+read below the rung under it, by the largest margin in this ladder.
+
+The 0.1067 read is what the trigger measures with `TIP_MIN_GRIP_HEIGHT = 0.005`, the value the
+ladder ran. The owner decided that R4 merges anyway, with the trigger disabled. The shipped
+default is `TIP_MIN_GRIP_HEIGHT = 0.0`, which turns the trigger off. No part is diverted into a
+tip, so this regression does not reach `main` (section 0).
 
 ### R5, the tilted pick: ships as wiring only, with a measured negative result
 
@@ -262,7 +268,8 @@ candidate set only once the jaw plane leans at least 75 degrees. That is far out
 is the only route to that grip, not an alternative.
 
 R5 ships as wiring, not as a behavior change, with a measured negative result on both tried
-tilt values.
+tilt values. The owner decided to merge it in that state (section 0). Shipping the inert wiring
+is the decision, not a placeholder for a later one.
 
 ## 4. The rung-to-rung differences
 
@@ -332,7 +339,7 @@ until someone runs it.
 
 ## 7. Open items
 
-Three items stay open after this rework:
+Four items stay open after this rework:
 
 - `core/dagger_loop.py` and `core/eval_loop.py` still read the six-brick observation array for
   the heap environment.
@@ -341,3 +348,8 @@ Three items stay open after this rework:
   currently reads better.
 - A non-zero `PICK_TILT_RAD` needs `AXIS_MAX_TILT_RAD` re-measured for the tilted jaw plane
   before `MS6 rework section 7.1` reopens.
+- `HeapOracle.standing`'s only production call site does not pass `tilt_rad`. It relies on the
+  default `0.0` instead of `oracle.PICK_TILT_RAD`, although the method's own docstring says the
+  two must agree. This stays inert while the shipped tilt is `0.0`. The moment someone tries a
+  non-zero tilt, the tip tests a jaw plane the pick itself refuses. That is the same class of
+  split the shared `off_plane_axes` helper was introduced to remove.
