@@ -15,7 +15,6 @@ from collections import Counter
 
 GRASP_PHASES = {"DESCEND", "CLOSE", "LIFT", "REOPEN"}
 TRANSIT_PHASES = {"RAISE", "EXTEND", "RELEASE", "RETREAT"}
-FAMILIES = ("brick", "round", "slope", "plate", "tile")
 
 
 def exit_bucket(event: dict) -> str:
@@ -63,6 +62,7 @@ def read_episode(path: str) -> dict:
         "name": os.path.basename(os.path.dirname(os.path.abspath(path))),
         "parts": end["parts"],
         "stowed": end["stowed"],
+        "stowed_at_rest": end.get("stowed_at_rest", end["stowed"]),
         "cycles": stats.get("cycles", 0),
         "pushes": stats.get("pushes", 0),
         "forced_picks": stats.get("forced_picks", 0),
@@ -100,11 +100,14 @@ def summarize(episodes: list[dict]) -> dict:
         stowed.update(e["stowed_by_family"])
     parts = sum(e["parts"] for e in episodes)
     done = sum(e["stowed"] for e in episodes)
+    at_rest = sum(e["stowed_at_rest"] for e in episodes)
     return {
         "episodes": len(episodes),
         "parts": parts,
         "stowed": done,
         "stowed_fraction": done / parts if parts else 0.0,
+        "stowed_at_rest": at_rest,
+        "stowed_at_rest_fraction": at_rest / parts if parts else 0.0,
         "cycles_per_stowed": (sum(e["cycles"] for e in episodes) / done) if done else None,
         "pushes": sum(e["pushes"] for e in episodes),
         "forced_picks": sum(e["forced_picks"] for e in episodes),

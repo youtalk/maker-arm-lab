@@ -97,6 +97,10 @@ def test_release_and_stowed_read_the_destination_bin():
     orc = _oracle([BRICK], destination=3)
     target = orc._release_target(0)
     assert target[1] == pytest.approx(BL.bin_ys[3]) and target[2] == oracle.RELEASE_Z
+    # The same release point as the six-brick oracle: a heap setback of 0.035 m opened the
+    # jaws 8 mm past the matched ceiling at RELEASE (driven, 2026-09-18), so the backstop
+    # wall alone catches the slide (layout.HEAP_BIN_BACKSTOP).
+    assert target[0] == pytest.approx(BL.bin_x - oracle.RELEASE_X_SETBACK)
     # _stowed grades against the one heap bin (the MS6 z-centre fix), so it reads the same
     # centre regardless of orc.destination.
     assert orc._stowed(_snapshot([[0.0, 0.0, 0.0]], stowed=(0,))) == {0}

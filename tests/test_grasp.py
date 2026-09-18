@@ -46,19 +46,21 @@ def test_a_brick_on_its_side_offers_its_height_as_a_width():
     assert thin.heading == pytest.approx(-math.pi / 2)
 
 
-def test_a_slope_offers_only_the_axis_across_its_side_faces():
-    slope = parts.make_part("slope", 2, 4)
+def test_a_slope_offers_its_side_faces_upright_and_its_flat_faces_on_its_side():
+    slope = parts.make_part("slope", 1, 3)
     found = grasp.candidate_grasps(
         0, _size(slope), torch.zeros(3), IDENTITY, 0.0, slope.closing_axes
     )
     assert [(round(g.heading, 6), round(g.width, 4)) for g in found] == [
-        (round(math.pi / 2, 6), 0.0158)
+        (round(math.pi / 2, 6), 0.0078)
     ]
-    # Rolled onto a side face, body y points up and the slope has no closing axis at all.
-    assert (
-        grasp.candidate_grasps(0, _size(slope), torch.zeros(3), ROLL_90, 0.0, slope.closing_axes)
-        == []
+    # Rolled onto a side face, body y points up and the jaws close along body z, between the
+    # flat bottom and the flat top, across the 9.6 mm height. Never along the 23.8 mm run.
+    on_side = grasp.candidate_grasps(
+        0, _size(slope), torch.zeros(3), ROLL_90, 0.0, slope.closing_axes
     )
+    assert [round(g.width, 4) for g in on_side] == [0.0096]
+    assert on_side[0].heading == pytest.approx(-math.pi / 2)
     # rank_grasps carries one axis tuple per part; a brick beside it still offers both axes.
     sizes, pos, quat = _heap(
         (slope, 0.16, 0.0, 0.0048, IDENTITY), (BRICK, 0.24, 0.0, 0.0048, IDENTITY)
@@ -71,7 +73,7 @@ def test_a_slope_offers_only_the_axis_across_its_side_faces():
         0.0,
         [slope.closing_axes, BRICK.closing_axes],
     )
-    assert [g.width for g in ranked if g.part == 0] == [pytest.approx(0.0158)]
+    assert [g.width for g in ranked if g.part == 0] == [pytest.approx(0.0078)]
     assert len([g for g in ranked if g.part == 1]) == 2
 
 

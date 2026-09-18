@@ -412,6 +412,9 @@ def run(args: argparse.Namespace) -> dict:
         "done_step": done_step,
         "idle_steps": 0 if done_step is None else int(env.max_episode_length) - done_step,
         "stowed": len(orc._sorted),
+        # What the bin holds at rest when the episode ends. `_sorted` counts a part only if
+        # RETREAT saw it at rest; a part that settled later is here and not there.
+        "stowed_at_rest": len(orc._stowed(rig.snapshot(0))),
         "parts": len(parts),
         "extra_stats": stats,
     }

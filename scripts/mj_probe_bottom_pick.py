@@ -547,7 +547,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     if args.mode == "heap":
         # The pre-registered read (Task 3 brief, step 3) is a set of DEFAULTS, not a pin. These
         # were once overwritten unconditionally, so three runs at three seed pairs were three
-        # copies of heap 0, down to the push_parts list. Accepting a flag and then discarding
+        # copies of heap 0, down to the push list of that time. Accepting a flag and then discarding
         # it is worse than either refusing it or honoring it, so a flag the caller passed wins.
         given = list(sys.argv[1:] if argv is None else argv)
         defaults = HEAP_PINS if args.no_read_flags else HEAP_PINS + HEAP_READ_FLAGS

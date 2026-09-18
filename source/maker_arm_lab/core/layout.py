@@ -7,6 +7,7 @@ All lengths in meters. Real 2x4 LEGO brick: 31.8 x 15.8 x 9.6 mm.
 import itertools
 import math
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -177,21 +178,44 @@ HEAP_CENTER = (0.21, 0.0)
 """The zone's centre: where the push heading's bias points (`HeapOracle._push_heading`)."""
 HEAP_RADIUS = 0.088
 """The radius over which that bias narrows to its floor: the old drop disc's."""
-HEAP_DROP_INSET = 0.01
-"""Extra inset (m) of the drop over a part's half diagonal, so a bounce stays in reach."""
+HEAP_DROP_INSET = 0.02
+"""Extra inset (m) of the drop over a part's half diagonal, so a bounce stays in reach.
+
+0.01 left 6 of 150 parts just past the reach radius before a single pick, at 0.280 to
+0.291 m (rung b3 of the bare-desk ladder, ~/data/maker-arm-ms6/j)."""
 SCATTER_MIN_RADIUS = 0.10
 """Nearest radius from the base a driven descend picked at: campaign d's reach band probe
 (docs/ms6-lever-verification.md), `scripts/mj_probe_bottom_pick.py --mode reach_band`. Like
 SCATTER_MAX_RADIUS it is a TRACKING bound read on a lone brick, not a solver report."""
 REACH_Y_SLACK = 0.02
-"""How far (m) past SCATTER_Y a part is still a target. D3 drove the zone's azimuths and no
-wider, so a part further out to the side is not known to be reachable."""
+"""How far (m) past SCATTER_Y a part is still a target: the overhead camera frames the zone
+(`overhead_view_region`) and a part further out to the side is not in the frame."""
+REACH_MAX_AZIMUTH_RAD = math.atan2(SCATTER_Y[1], SCATTER_X[0]) + math.radians(5.0)
+"""The widest azimuth from the base's +x a part is still a target: the zone's near corner,
+54 degrees, plus a little. D3 and campaign d drove the zone's azimuths and no wider. Without
+this cut the annulus admitted the half-plane behind the arm (branch review, 2026-09-18)."""
+REACH_WEDGE_AZIMUTH_RAD = math.radians(25.0)
+REACH_WEDGE_RADIUS = 0.295
+"""The driven reach is a wedge, not a circle (SCATTER_MAX_RADIUS's own table, and campaign
+d's reach band probe in docs/ms6-lever-verification.md). Near azimuth zero the descend stops
+short between 0.280 and 0.290 m, so SCATTER_MAX_RADIUS stays the drop's bound and the
+candidate bound there. At 25 degrees the D3 grid tracked clean at 0.295 m and at 30 degrees
+at 0.308 m; campaign d stowed the part at 0.30 and 0.32 m at plus and minus 40 degrees. A
+part that ends between 0.280 and 0.295 m at 25 degrees or more is therefore still a target.
+The drop never places a part there: this only keeps a nudged part in play."""
 
 # The heap drop (design section 6): part k lands at a height uniform in
-# [HEAP_DROP_Z_MIN, HEAP_DROP_Z_MIN + HEAP_DROP_Z_PER_PART * K], then the physics settles for
+# [HEAP_DROP_Z_MIN, HEAP_DROP_Z_MIN + HEAP_DROP_Z_PER_PART * K]. The parts are released in
+# batches of HEAP_DROP_BATCH, HEAP_DROP_BATCH_STEPS of physics apart, each batch's points
+# HEAP_DROP_GAP clear of one another (`sample_heap_batch`), so a later batch lands on a
+# settled one and a pile forms instead of an explosion. Then the physics settles for
 # HEAP_SETTLE_STEPS steps at 240 Hz (2 s) before the episode starts.
 HEAP_DROP_Z_MIN = 0.03
 HEAP_DROP_Z_PER_PART = 0.0012
+HEAP_DROP_BATCH = 5
+HEAP_DROP_BATCH_STEPS = 60
+HEAP_DROP_GAP = 0.005
+HEAP_DROP_TRIES = 500
 HEAP_SETTLE_STEPS = 480
 
 
@@ -257,13 +281,18 @@ def top_down_x_limit(bl: BinLayout) -> float:
 def in_reach(x: float, y: float, bl: BinLayout, margin: float = 0.0) -> bool:
     """Can a top-down descend pick at (x, y)? The driven reach band, short of the bins.
 
-    The band is the annulus SCATTER_MIN_RADIUS to SCATTER_MAX_RADIUS, cut at the top-down x
-    limit and at the scatter zone's y span plus REACH_Y_SLACK. ``margin`` shrinks it on every
-    edge (negative grows it), for a caller that wants hysteresis.
+    The band is the annulus SCATTER_MIN_RADIUS to SCATTER_MAX_RADIUS, widened to
+    REACH_WEDGE_RADIUS from REACH_WEDGE_AZIMUTH_RAD outward, within REACH_MAX_AZIMUTH_RAD of
+    +x, cut at the top-down x limit and at the scatter zone's y span plus REACH_Y_SLACK.
+    ``margin`` shrinks it on every edge (negative grows it), for a caller that wants
+    hysteresis; the azimuth cut does not move with it.
     """
     radius = math.hypot(x, y)
+    azimuth = abs(math.atan2(y, x))
+    outer = REACH_WEDGE_RADIUS if azimuth >= REACH_WEDGE_AZIMUTH_RAD else SCATTER_MAX_RADIUS
     return (
-        SCATTER_MIN_RADIUS + margin <= radius <= SCATTER_MAX_RADIUS - margin
+        SCATTER_MIN_RADIUS + margin <= radius <= outer - margin
+        and azimuth <= REACH_MAX_AZIMUTH_RAD
         and x <= top_down_x_limit(bl) - margin
         and abs(y) <= SCATTER_Y[1] + REACH_Y_SLACK - margin
     )
@@ -281,6 +310,42 @@ def sample_heap_point(rng: random.Random, bl: BinLayout, inset: float) -> tuple[
         x, y = rng.uniform(x0 + inset, x1 - inset), rng.uniform(y0 + inset, y1 - inset)
         if math.hypot(x, y) <= SCATTER_MAX_RADIUS - inset:
             return x, y
+
+
+def sample_heap_batch(
+    rng: random.Random,
+    bl: BinLayout,
+    half_diagonals: Sequence[float],
+    tries: int = HEAP_DROP_TRIES,
+) -> list[tuple[float, float]]:
+    """Drop points for parts released into the air together, one per half diagonal.
+
+    Two points are at least the two half diagonals plus HEAP_DROP_GAP apart, so no two parts
+    of the batch start inside each other. Writing 50 parts into the air at once interpenetrated
+    them and the solver flung them apart: 8 of 150 settled out of reach, up to 80 mm out
+    (branch review, 2026-09-18). After ``tries`` rejections the last draw is taken as it is,
+    the same escape ``sample_brick_poses`` uses, so a crowded batch cannot loop forever.
+
+    The zone's edge is inset by HEAP_DROP_INSET plus a quarter of the half diagonal, not the
+    whole: the edge is a reach bound on the part's CENTRE, not a wall, and the whole diagonal
+    left a 4x8 brick a sliver 5 cm wide to land in, so two of them could not keep apart. The
+    largest parts are placed first, so the small ones fill in around them. Measured over 300
+    batches of HEAP_DROP_BATCH catalog parts: no pair overlaps.
+    """
+    order = sorted(range(len(half_diagonals)), key=lambda k: -half_diagonals[k])
+    points: dict[int, tuple[float, float]] = {}
+    for k in order:
+        hd = half_diagonals[k]
+        for attempt in range(tries):
+            x, y = sample_heap_point(rng, bl, 0.25 * hd + HEAP_DROP_INSET)
+            clear = all(
+                math.dist((x, y), q) >= hd + half_diagonals[j] + HEAP_DROP_GAP
+                for j, q in points.items()
+            )
+            if clear or attempt == tries - 1:
+                points[k] = (x, y)
+                break
+    return [points[k] for k in range(len(half_diagonals))]
 
 
 def scatter_x(bl: BinLayout) -> tuple[float, float]:
@@ -427,6 +492,16 @@ def bin_static_boxes(
 # top_down_x_limit sits 0.10 m in front of it, so a wider x would pull the pick limit under
 # the drop disc's far edge.
 HEAP_BIN_INTERIOR = (0.09, 0.30, 0.06)
+HEAP_BIN_BACKSTOP = 0.18
+"""Height (m) of the heap bin's far wall, the one at +x, above the bin floor.
+
+RELEASE holds the tool 80 degrees over and opens the jaws in a near-vertical plane, so the
+part slides off the lower plate along the tool axis, toward +x, and leaves it at up to about
+0.9 m/s. From RELEASE_Z that carries it 5 to 15 cm past the release point. On rung b3 of the
+bare-desk ladder 6 of about 124 carried parts ended on the desk at x 0.50 to 0.69, past the
+0.06 m far wall (~/data/maker-arm-ms6/j). This wall rises to 0.335 m, above RELEASE_Z, so the
+slide hits it and drops into the bin. The three other walls keep HEAP_BIN_INTERIOR[2], and
+the grader's z band (STOW_HALF_EXTENTS, twice the interior height) does not move."""
 
 
 def heap_bin_center(bl: BinLayout | None = None) -> tuple[float, float, float]:
@@ -438,7 +513,10 @@ def heap_bin_center(bl: BinLayout | None = None) -> tuple[float, float, float]:
 def heap_bin_static_boxes(
     bl: BinLayout | None = None,
 ) -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
-    """(name, center, size) for the one heap bin: floor plus four walls."""
+    """(name, center, size) for the one heap bin: floor plus four walls.
+
+    The front wall, at +x, is the HEAP_BIN_BACKSTOP; the other three are the interior height.
+    """
     bl = bl or DEFAULT_BIN_LAYOUT
     ix, iy, iz = HEAP_BIN_INTERIOR
     floor_z = _BIN_FLOOR_TOP_Z - BIN_WALL / 2
@@ -448,8 +526,8 @@ def heap_bin_static_boxes(
         ("heap_bin_floor", (bl.bin_x, 0.0, floor_z), (outer_x, outer_y, BIN_WALL)),
         (
             "heap_bin_wall_front",
-            (bl.bin_x + ix / 2 + BIN_WALL / 2, 0.0, wall_z),
-            (BIN_WALL, outer_y, iz),
+            (bl.bin_x + ix / 2 + BIN_WALL / 2, 0.0, _BIN_FLOOR_TOP_Z + HEAP_BIN_BACKSTOP / 2),
+            (BIN_WALL, outer_y, HEAP_BIN_BACKSTOP),
         ),
         (
             "heap_bin_wall_back",

@@ -7,7 +7,7 @@ import random
 import pytest
 import torch
 
-from maker_arm_lab.core import layout, oracle
+from maker_arm_lab.core import layout, oracle, parts
 
 
 def test_bin_centers_within_reach():
@@ -374,6 +374,17 @@ def test_in_reach_is_the_band_short_of_the_bins_and_the_margin_shrinks_it():
         0.15, y_edge + 0.001, bl
     )
     assert not layout.in_reach(0.15, -y_edge - 0.001, bl)
+    # The reach is a wedge: past 25 degrees a part out to 0.295 m is still a target, and
+    # nothing behind the arm or past the zone's corner azimuth ever is.
+    far = layout.REACH_WEDGE_RADIUS - 0.002
+    assert not layout.in_reach(far, 0.0, bl)
+    az = layout.REACH_WEDGE_AZIMUTH_RAD + 0.01
+    assert layout.in_reach(far * math.cos(az), far * math.sin(az), bl)
+    assert not layout.in_reach(0.3, 0.16, bl)  # r 0.34
+    for x, y in ((-0.25, 0.0), (-0.20, 0.05), (-0.15, 0.15), (0.05, 0.19)):
+        assert not layout.in_reach(x, y, bl), (x, y)
+    corner = math.atan2(layout.SCATTER_Y[1], layout.SCATTER_X[0])
+    assert layout.in_reach(0.2 * math.cos(corner), 0.2 * math.sin(corner), bl)
     # A positive margin shrinks the band on every edge, a negative one grows it.
     edge = layout.SCATTER_MAX_RADIUS - 0.002
     assert layout.in_reach(edge, 0.0, bl) and not layout.in_reach(edge, 0.0, bl, margin=0.005)
@@ -389,6 +400,40 @@ def test_the_heap_bin_holds_the_heap_and_keeps_the_reach_limit():
     assert layout.HEAP_BIN_INTERIOR[0] == layout.BIN_INTERIOR[0]
     rim_z = layout._BIN_FLOOR_TOP_Z + layout.HEAP_BIN_INTERIOR[2]
     assert rim_z < oracle.RELEASE_Z - 0.05
+
+
+def test_the_heap_bin_backstop_stands_above_the_release_and_clear_of_the_tool():
+    """The far wall catches the part sliding off the 80 degree plate toward +x."""
+    boxes = {name: (center, size) for name, center, size in layout.heap_bin_static_boxes()}
+    (cx, _cy, cz), (_sx, _sy, sz) = boxes["heap_bin_wall_front"]
+    assert sz == layout.HEAP_BIN_BACKSTOP and cz + sz / 2 > oracle.RELEASE_Z
+    assert cz - sz / 2 == pytest.approx(layout._BIN_FLOOR_TOP_Z)
+    for name in ("heap_bin_wall_back", "heap_bin_wall_left", "heap_bin_wall_right"):
+        assert boxes[name][1][2] == layout.HEAP_BIN_INTERIOR[2]
+    # The tool releases RELEASE_X_SETBACK short of the bin centre with the part about 32 mm
+    # further along the tilted tool axis; the wall's inner face is still ahead of it.
+    release_x = layout.DEFAULT_BIN_LAYOUT.bin_x - oracle.RELEASE_X_SETBACK
+    assert cx - layout.BIN_WALL / 2 - (release_x + 0.032) > 0.01
+
+
+def test_a_drop_batch_keeps_its_parts_clear_of_one_another():
+    bl = layout.DEFAULT_BIN_LAYOUT
+    rng = random.Random(9)
+    cat = parts.catalog()
+    for _ in range(20):
+        batch = parts.sample_parts(rng, cat, layout.HEAP_DROP_BATCH)
+        hds = [p.half_diagonal for p in batch]
+        points = layout.sample_heap_batch(rng, bl, hds)
+        assert len(points) == len(batch)
+        assert all(layout.in_reach(x, y, bl) for x, y in points)
+        for a in range(len(points)):
+            for b in range(a):
+                assert (
+                    math.dist(points[a], points[b]) >= hds[a] + hds[b] + layout.HEAP_DROP_GAP - 1e-9
+                )
+    # A crowded batch still returns one point per part instead of looping forever.
+    big = [parts.make_part("brick", 4, 8).half_diagonal] * 40
+    assert len(layout.sample_heap_batch(random.Random(1), bl, big, tries=5)) == 40
 
 
 def test_the_heap_bin_is_one_box_on_the_shelf_at_y_zero():

@@ -62,7 +62,7 @@ def test_the_heap_teacher_stows_three_spread_parts():
     # Spread in y inside the pickable band (owner ruling, 2026-09-16): x=0.195,
     # y at -0.045, 0.0, +0.045, clear of each other. The outer
     # two parts need the full 45 mm offset: at 40 mm the best reachable grasp on those
-    # two parts reads 0.00287 m clearance, under CLEARANCE_MIN (0.003 m).
+    # two parts reads 0.00287 m clearance, under a CLEARANCE_MIN of 0.003 m, the value of that time (it is 0.0 now).
     _place(
         env, [(0.195, -0.045, 0.006, 0.3), (0.195, 0.0, 0.006, -0.8), (0.195, 0.045, 0.006, 1.2)]
     )

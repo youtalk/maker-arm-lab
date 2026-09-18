@@ -91,6 +91,8 @@ GRIPPER_RATE_M_PER_S = gripper_velocity_limit()
 DESK_COLOR_RANGE = {"r": (0.3, 0.7), "g": (0.25, 0.55), "b": (0.2, 0.45)}
 BRICK_MASS_SCALE = (0.7, 1.3)
 BRICK_FRICTION_SCALE = (0.8, 1.2)  # Isaac's static_friction_range; MuJoCo has one coefficient
+HEAP_PARK_X = 3.0
+"""Where a heap part waits (m along x, well past the 0.9 m desk) until its drop batch."""
 # Per-frame camera jitter (MS4 lever 1): resampled on every rendered frame, on top of the
 # per-episode camera draw, so the policy cannot read the camera pose off a static background.
 # The context feature reports the per-episode pose, not this jitter, which stands in for the
@@ -576,24 +578,31 @@ class MjLegoSortEnv:
         self.destination_bins[i] = 0
         k = self.cfg.num_bricks
         z_top = layout.HEAP_DROP_Z_MIN + layout.HEAP_DROP_Z_PER_PART * k
+        # Hold the arm where the reset left it while the heap settles; nothing is recorded.
+        d.ctrl[list(h.arm_actuators)] = d.qpos[list(h.joint_qpos[:6])]
+        d.ctrl[list(h.gripper_actuators)] = GRIPPER_OPEN_POS
         for b, part in enumerate(self.parts):
             rgba = layout.BRICK_RGBA[self._rng.choice(layout.BRICK_COLOR_ORDER)]
             for g in h.body_geoms[b]:
                 m.geom_rgba[g] = rgba
-            # Uniform over the scatter zone, inset by the part's own half diagonal and a
-            # little more, so a part never starts over the reach band's edge.
-            x, y = layout.sample_heap_point(
-                self._rng, self.bin_layouts[i], part.half_diagonal + layout.HEAP_DROP_INSET
-            )
-            z = self._rng.uniform(layout.HEAP_DROP_Z_MIN, z_top)
+            # Parked far off the desk until its batch is released; nothing is there to hit.
             adr = h.brick_qpos[b]
-            d.qpos[adr : adr + 3] = (x, y, z)
-            d.qpos[adr + 3 : adr + 7] = _random_quat(self._rng)
+            d.qpos[adr : adr + 3] = (HEAP_PARK_X, 0.1 * b, 0.0)
             d.qvel[h.brick_dof[b] : h.brick_dof[b] + 6] = 0.0
-        # Hold the arm where the reset left it while the heap settles; nothing is recorded.
-        d.ctrl[list(h.arm_actuators)] = d.qpos[list(h.joint_qpos[:6])]
-        d.ctrl[list(h.gripper_actuators)] = GRIPPER_OPEN_POS
-        mujoco.mj_forward(m, d)
+        # Batches released HEAP_DROP_BATCH_STEPS apart, each over points clear of one another,
+        # so the parts pile up on the desk instead of being written into each other in the air.
+        for start in range(0, k, layout.HEAP_DROP_BATCH):
+            batch = list(range(start, min(start + layout.HEAP_DROP_BATCH, k)))
+            points = layout.sample_heap_batch(
+                self._rng, self.bin_layouts[i], [self.parts[b].half_diagonal for b in batch]
+            )
+            for b, (x, y) in zip(batch, points):
+                adr = h.brick_qpos[b]
+                d.qpos[adr : adr + 3] = (x, y, self._rng.uniform(layout.HEAP_DROP_Z_MIN, z_top))
+                d.qpos[adr + 3 : adr + 7] = _random_quat(self._rng)
+                d.qvel[h.brick_dof[b] : h.brick_dof[b] + 6] = 0.0
+            mujoco.mj_forward(m, d)
+            mujoco.mj_step(m, d, nstep=layout.HEAP_DROP_BATCH_STEPS)
         mujoco.mj_step(m, d, nstep=layout.HEAP_SETTLE_STEPS)
 
     def _initial_state(self, i: int) -> dict[str, np.ndarray]:
