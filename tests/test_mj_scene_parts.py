@@ -77,19 +77,24 @@ def test_the_desk_is_a_hard_surface_under_a_pressed_part():
 
     Before the desk carried its own contact parameters the same press sank the brick 13 mm,
     more than its own height, because the time-constant form scales the stiffness with the
-    lighter body (measured 2026-09-18). The desk's priority keeps the part-part and jaw-part
-    pairs on their own tuning.
+    lighter body (measured 2026-09-18). The desk's solmix weight keeps the part-part and
+    jaw-part pairs on their own tuning, and the part-desk pair keeps the part's condim and
+    friction: a geom priority handed the pair condim 3 and friction 1.0 instead, in the
+    six-brick task too.
     """
     model, h = scene.build_model(_draw(), parts=[PARTS[0]], cameras_on=False)
     desk = h.desk_geom
-    assert model.geom_priority[desk] == 1
+    assert model.geom_priority[desk] == 0 and model.geom_solmix[desk] == scene.DESK_SOLMIX
     assert model.geom_solimp[desk][:2] == pytest.approx(scene.DESK_SOLIMP[:2])
-    assert model.geom_priority[h.brick_geoms[0]] == 0
+    model.geom_friction[h.brick_geoms[0], 0] = 1.2  # the top of mj/env.py's friction draw
     data = mujoco.MjData(model)
     adr = h.brick_qpos[0]
     data.qpos[adr : adr + 3] = (0.19, 0.0, PARTS[0].size[2] / 2 + 0.001)
     data.qpos[adr + 3 : adr + 7] = (1.0, 0.0, 0.0, 0.0)
     mujoco.mj_step(model, data, nstep=480)
+    pair = next(c for c in data.contact[: data.ncon] if desk in (c.geom1, c.geom2))
+    assert pair.dim == scene.BRICK_CONDIM and pair.friction[0] == pytest.approx(1.2)
+    assert pair.solimp[:2] == pytest.approx(scene.DESK_SOLIMP[:2], abs=1e-4)
     data.xfrc_applied[h.brick_bodies[0]] = [0.0, 0.0, -20.0, 0.0, 0.0, 0.0]
     mujoco.mj_step(model, data, nstep=480)
     sunk = PARTS[0].size[2] / 2 - data.qpos[adr + 2]

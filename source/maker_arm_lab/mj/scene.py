@@ -98,9 +98,14 @@ CONTACT_SOLREF = (0.005, 1.0)
 # the jaws' 2.9 N grip sank 1.9 mm into the desk and 13.0 mm under 20 N, more than its own
 # height (measured 2026-09-18 on a lone 2x4 brick). The lever is the impedance, not the time
 # constant: at (0.99, 0.999) the same presses read 0.16 mm and 0.55 mm, and a settled
-# 50-part heap rests at 0.01 mm mean. `priority` makes the desk's values the pair's values,
-# so the jaw-part and part-part pairs the pinch tuning sits on are untouched.
+# 50-part heap rests at 0.01 mm mean. `solmix` weights the pair's solref and solimp toward
+# the desk's values and nothing else: a geom priority would also hand the pair the desk's
+# condim 3 and friction 1.0, which drops the torsional friction of BRICK_CONDIM and the
+# per-episode friction draw of mj/env.py for every part-desk pair, in the six-brick task
+# too (branch review, 2026-09-18). The jaw-part and part-part pairs the pinch tuning sits on
+# are untouched either way.
 DESK_SOLIMP = (0.99, 0.999, 0.001, 0.5, 2.0)
+DESK_SOLMIX = 1.0e6
 
 # Contact tuning for a 3 g brick between convex-hull finger meshes. Nominal sliding friction
 # is the centre of the Isaac static-friction DR range (0.8-1.2); torsional and rolling terms
@@ -326,7 +331,7 @@ def build_spec(
         pos=list(layout.DESK_POS),
         rgba=[0.5, 0.4, 0.3, 1.0],
     )
-    desk.priority = 1
+    desk.solmix = DESK_SOLMIX
     desk.solref = list(CONTACT_SOLREF)
     desk.solimp = list(DESK_SOLIMP)
     scene_geoms.append(desk)
@@ -339,7 +344,9 @@ def build_spec(
             rgba=[0.6, 0.6, 0.6, 1.0],
         )
     )
-    bin_boxes = layout.heap_bin_static_boxes(bl) if parts else layout.bin_static_boxes(bl)
+    bin_boxes = (
+        layout.heap_bin_static_boxes(bl) if parts is not None else layout.bin_static_boxes(bl)
+    )
     for name, center, size in bin_boxes:
         color = name.split("_")[1]
         rgba = (
