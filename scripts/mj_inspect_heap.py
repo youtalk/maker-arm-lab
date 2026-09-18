@@ -57,6 +57,8 @@ CAMERA_AZIMUTH_DEG = 150.0
 VIDEO_FPS = 30
 
 
+AT_REST_STRIDE = 30
+"""Control steps between reads of what the bin holds at rest, for the end event."""
 EXIT_HYSTERESIS = 0.005
 """A part is logged out of reach once its center is this far (m) past the reach band's edge,
 and back in once it is this far inside. A part resting at the edge jitters across it by a
@@ -343,8 +345,13 @@ def run(args: argparse.Namespace) -> dict:
     step = 0
     done_step = None
     reason = "timeout"
+    at_rest = 0
     while True:
         orc.step = step
+        if step % AT_REST_STRIDE == 0:
+            # Read before the step: the step that ends the episode also resets the env, and a
+            # snapshot taken after it sees the next heap.
+            at_rest = len(orc._stowed(rig.snapshot(0)))
         out = rig.step()
         step += 1
         now = poses()
@@ -412,9 +419,11 @@ def run(args: argparse.Namespace) -> dict:
         "done_step": done_step,
         "idle_steps": 0 if done_step is None else int(env.max_episode_length) - done_step,
         "stowed": len(orc._sorted),
-        # What the bin holds at rest when the episode ends. `_sorted` counts a part only if
-        # RETREAT saw it at rest; a part that settled later is here and not there.
-        "stowed_at_rest": len(orc._stowed(rig.snapshot(0))),
+        # What the bin held at rest within AT_REST_STRIDE steps of the end. `_sorted` counts
+        # a part only if RETREAT saw it at rest; a part that settled later is here, not there.
+        "stowed_at_rest": max(
+            at_rest, len(orc._stowed(rig.snapshot(0))) if reason != "timeout" else 0
+        ),
         "parts": len(parts),
         "extra_stats": stats,
     }
