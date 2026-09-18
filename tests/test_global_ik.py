@@ -28,6 +28,7 @@ from maker_arm_lab.core.global_ik import (
     descend_tilt_ceiling,
     descend_tilt_ladder,
     fold_to_half_turn,
+    steepest_jaw_roll,
     tool_axis_world,
     wrap_to_pi,
 )
@@ -504,3 +505,39 @@ class TestDescendInfeasibleIsRaisable:
         message = str(excinfo.value)
         assert "10.00 deg" in message
         assert f"{math.degrees(descend_tilt_ceiling(self.HALF)):.2f} deg" in message
+
+
+def test_the_steepest_jaw_roll_stands_the_plane_up_at_the_release_attitude():
+    """MS6 rung 2: the roll that turns a flat opening plane into a sliding one.
+
+    At ``oracle.RELEASE_TILT_RAD`` the tool axis lies 80.2 degrees off vertical, so the
+    steepest direction square to it also stands 80.2 degrees up. The helper must find that
+    roll from any starting jaw axis, and must never ask for more than a quarter turn,
+    because both signs of the jaw axis are the same jaw.
+    """
+    tilt = 1.40
+    tool = torch.tensor([math.sin(tilt), 0.0, -math.cos(tilt)], dtype=torch.float64)
+    # The horizontal jaw axis square to that tool axis: the worst case, a free fall.
+    flat = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float64)
+    delta = steepest_jaw_roll(flat, tool)
+    assert abs(delta) <= math.pi / 2 + 1e-9
+
+    def rotated(axis, about, angle):
+        about = about / about.norm()
+        return (
+            axis * math.cos(angle)
+            + torch.linalg.cross(about, axis) * math.sin(angle)
+            + about * (about @ axis) * (1.0 - math.cos(angle))
+        )
+
+    stood = rotated(flat, tool, delta)
+    assert abs(float(stood @ tool)) < 1e-9, "the rolled axis must stay square to the tool"
+    elevation = math.degrees(math.asin(min(1.0, abs(float(stood[2])))))
+    assert elevation == pytest.approx(math.degrees(tilt), abs=0.5), elevation
+    # It is already the steepest reachable direction: no roll beats it.
+    for probe in (-0.4, -0.1, 0.1, 0.4):
+        other = rotated(flat, tool, delta + probe)
+        assert abs(float(other[2])) <= abs(float(stood[2])) + 1e-9
+
+    # From a jaw axis that already stands up, the helper asks for nothing.
+    assert steepest_jaw_roll(stood, tool) == pytest.approx(0.0, abs=1e-9)

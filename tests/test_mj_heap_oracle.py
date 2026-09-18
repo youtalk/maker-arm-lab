@@ -20,10 +20,10 @@ PARTS = [
 ]
 
 
-def _env_and_rig(seed: int = 11):
+def _env_and_rig(seed: int = 11, part_list=None):
     draw = sample_run_draw(random.Random(5))
     draw["slot_colors"] = (0, 1, 2, 3)
-    env = MjLegoSortEnv(1, draw, parts=PARTS, cameras=False)
+    env = MjLegoSortEnv(1, draw, parts=part_list or PARTS, cameras=False)
     env.reset(seed=seed)
     rng = random.Random(1)
 
@@ -124,3 +124,107 @@ def test_the_default_factory_builds_the_six_brick_oracle():
     assert type(rig.oracles[0]) is oracle.EnvOracle
     assert rig.oracles[0].grasp_width == pytest.approx(0.0158)
     env.close()
+
+
+def test_the_pick_approach_holds_the_grasp_width_not_the_full_opening():
+    """MS6 rung 1: the jaws come down beside the part, not ``OPEN_HALF_GAP`` out from it.
+
+    The fully open descend put both landing spots 52.4 mm out whatever the part, which
+    ``core.grasp`` had to model as required clear floor: it refused 84.1 % of every in-dish
+    part sighting on the three read heaps, 67.4 % of them at the rim alone. The jaws have to
+    hold the matched opening for the ranking to describe the arm.
+    """
+    from maker_arm_lab.core import grasp
+
+    env, rig = _env_and_rig()
+    _place(
+        env, [(0.195, -0.045, 0.006, 0.3), (0.195, 0.0, 0.006, -0.8), (0.195, 0.045, 0.006, 1.2)]
+    )
+    widest = 0.0
+    seen_descend = False
+    for _ in range(4500):
+        goal = rig.goals[0]
+        rig.step()
+        if goal is None or goal.phase is not oracle.Phase.DESCEND:
+            continue
+        seen_descend = True
+        gap = min(rig.robot.data.joint_pos[0, rig.finger_ids].tolist())
+        widest = max(widest, gap)
+        if rig.oracles[0].target_brick is None:
+            continue
+        ceiling = grasp.landing_half_gap(float(rig.oracles[0].grasp_width))
+        assert gap <= ceiling, (gap, ceiling)
+    env.close()
+    assert seen_descend, "the episode never descended on a part"
+    assert widest < grasp.OPEN_HALF_GAP - 0.010, widest
+
+
+def test_the_release_opens_only_far_enough_to_let_the_part_go():
+    """MS6 rung 2: the jaws let the part drop, they do not fling it.
+
+    RELEASE opened the jaws the whole way, about 44 mm of travel per jaw from a pinched
+    grip at roughly 3.3 mm per control step, with the tool tilted 80.2 deg over the bin. On
+    the three rung 1 read heaps 18 of 73 carried parts (25 %) never reached the bin, against
+    7 of 56 (12 %) before, and every traced one landed on the DESK 60-200 mm SHORT of the
+    release point: thrown back toward the arm, not dropped. One instrumented cycle left the
+    jaws at (0.417, 0.002, 0.300) and came to rest at (0.246, 0.018, 0.230).
+
+    Four mm of clearance per side is all the part needs to fall out.
+    """
+    from maker_arm_lab.core import grasp
+
+    env, rig = _env_and_rig()
+    _place(
+        env, [(0.195, -0.045, 0.006, 0.3), (0.195, 0.0, 0.006, -0.8), (0.195, 0.045, 0.006, 1.2)]
+    )
+    widest = 0.0
+    seen_release = False
+    for _ in range(4500):
+        goal = rig.goals[0]
+        rig.step()
+        if goal is None or goal.phase is not oracle.Phase.RELEASE:
+            continue
+        seen_release = True
+        ceiling = grasp.landing_half_gap(float(rig.oracles[0].grasp_width))
+        gap = min(rig.robot.data.joint_pos[0, rig.finger_ids].tolist())
+        widest = max(widest, gap)
+        assert gap <= ceiling, (gap, ceiling)
+    stats = rig.episode_stats(0)
+    env.close()
+    assert seen_release, "the episode never released a part"
+    assert widest < grasp.OPEN_HALF_GAP - 0.010, widest
+    # The part must still leave the jaws: a capped opening that never lets go is worse.
+    assert stats["bricks_delivered"] == 3, stats
+
+
+def test_a_lone_flat_part_survives_the_lift_instead_of_being_squeezed_out():
+    """MS6 rung 3: CLOSE stops at the part's own width, it does not drive the jaws shut.
+
+    The gripper channel is binary, so a close command runs the jaws all the way to
+    ``GRIPPER_CLOSED_POS``. A 9.6 mm brick stalls them at 5.9 mm and is held. A 3.2 mm plate
+    is not: traced per control step on a LONE plate_2x4 with nothing around it, CLOSE ends
+    with 2.9 N on both jaws and the part in the grip, and then LIFT keeps closing --
+    5.18, 4.81, 4.21, 3.70, 3.19, 2.69 mm -- while the force bleeds off 2.9, 1.0, 0.9, 0.33,
+    0.00 N. The plate is squeezed out like a pip, the jaws end at 0.02 mm holding nothing,
+    and the part is back on the desk. That is why the LIFT gate reads 0.00 N: it samples
+    AFTER the part has gone.
+    """
+    from maker_arm_lab.core import grasp
+    from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import CLOSE_SQUEEZE_M
+
+    plate = parts.make_part("plate", 2, 4)
+    env, rig = _env_and_rig(part_list=[plate])
+    _place(env, [(0.195, 0.0, 0.004, 0.0)])
+    tightest = grasp.OPEN_HALF_GAP
+    for _ in range(4000):
+        goal = rig.goals[0]
+        out = rig.step()
+        if goal is not None and goal.gripper < 0.0:
+            tightest = min(tightest, min(rig.robot.data.joint_pos[0, rig.finger_ids].tolist()))
+        if bool(out["dones"][0]) or bool(out["abandoned"][0]):
+            break
+    stats = rig.episode_stats(0)
+    env.close()
+    floor = 0.5 * min(plate.size[0], plate.size[1]) - CLOSE_SQUEEZE_M
+    assert tightest > floor - 0.002, (tightest, floor)
+    assert stats["bricks_delivered"] == 1, stats

@@ -65,7 +65,7 @@ import random
 
 import torch
 
-from maker_arm_lab.core import layout, oracle, trajectory
+from maker_arm_lab.core import grasp, layout, oracle, trajectory
 from maker_arm_lab.core.action_scale import IK_SCALE
 from maker_arm_lab.core.checker import (
     HELD_MIN_FORCE,
@@ -84,6 +84,7 @@ from maker_arm_lab.core.global_ik import (
     descend_pick_offset,
     descend_tilt_ladder,
     fold_to_half_turn,
+    steepest_jaw_roll,
     tool_axis_world,
 )
 from maker_arm_lab.core.oracle import PHASE_TO_INT
@@ -248,6 +249,61 @@ LIFT_MAX_XY_ERROR = 0.03  # m
 # on the joint-position action space a zero arm action commands every joint to fold to zero,
 # it does not ask the arm to stand still.
 GRIPPER_OPEN_ACTION = 1.0
+
+# These legs hold the jaws at the grasp's own opening instead of driving them fully open, for
+# an oracle that asks for it (`EnvOracle.matched_jaw_opening`). CLOSE already closes, and
+# REOPEN must open the whole way because its retry has to clear a part the jaws may still be
+# fouling.
+#
+# HOVER and DESCEND bring the tips down over the part (MS6 rung 1): the fully open landing
+# spots 52.4 mm out refused 84.1 % of in-dish part sightings on the three read heaps.
+#
+# RELEASE lets the part go (MS6 rung 2). Opening the whole way there is about 44 mm of travel
+# per jaw from a pinched grip, at roughly 3.3 mm per control step, with the tool tilted
+# 80.2 deg over the bin, and it THROWS the part: 18 of 73 carried parts never reached the bin
+# on the rung 1 heaps, every traced one landing on the desk 60-200 mm short of the release
+# point. The part only needs `JAW_APPROACH_CLEARANCE` per side to fall out.
+MATCHED_OPENING_PHASES = (oracle.Phase.HOVER, oracle.Phase.DESCEND, oracle.Phase.RELEASE)
+
+# The wrist roll EXTEND ends at, so RELEASE opens in a plane the part slides off rather than
+# one it free-falls from (`OracleRig._roll_waypoints`). The deadband keeps a roll that is
+# already steep from spending waypoints; the step cap keeps the whole turn, up to a quarter
+# of a revolution, from arriving inside one continuity step, the way every other leg is
+# walked rather than stepped.
+ROLL_DEADBAND_RAD = math.radians(5.0)
+ROLL_MAX_STEP_RAD = math.radians(6.0)
+
+# MS6 rung 3. The legs that CARRY hold the jaws at the part's own width instead of driving
+# them to `GRIPPER_CLOSED_POS`, for an oracle that asks for it.
+#
+# A binary close command runs the jaws all the way shut, and nothing stops them once a thin
+# part starts to slip. A 9.6 mm brick stalls them at 5.9 mm on a 15.8 mm grasp and is held.
+# A 3.2 mm plate is not: traced per control step on a LONE plate_2x4 with nothing around it,
+# CLOSE ends with 2.9 N on both jaws and the part in the grip, and LIFT then keeps closing --
+# 5.18, 4.81, 4.21, 3.70, 3.19, 2.69 mm -- while the force bleeds off 2.9, 1.0, 0.9, 0.33,
+# 0.00 N. The plate is squeezed out like a pip and the jaws end at 0.02 mm holding nothing.
+# RELEASE is not here: it opens, and MATCHED_OPENING_PHASES already bounds that.
+MATCHED_CLOSE_PHASES = (
+    oracle.Phase.CLOSE,
+    oracle.Phase.LIFT,
+    oracle.Phase.RAISE,
+    oracle.Phase.EXTEND,
+)
+CLOSE_SQUEEZE_M = 0.003
+"""How far past the part's half width the jaws may still close (m).
+
+The contact model penetrates, and by a varying amount: a held grip settles 2.0 to 4.25 mm
+inside the part's half width across the catalog, so this is a floor on the RUNAWAY, not a
+model of the grip. Swept on the lone-part wall table, counting the rows whose grip survived
+the lift: 2.0 mm holds 10 of 12 and cuts off plate_1x4, whose grip needs 2.6 mm; 3.0 mm
+holds 11 of 12; 4.0 mm holds 10 of 12 and 5.0 mm only 8, both starving the wider grasps.
+Read the FORCE in that table and not its `pick` column, which also counts the parts that
+were gripped and then lost on the way to the bin.
+
+For a narrow grasp the floor falls near zero and the jaws behave as they always did, which
+is what the 7.8 mm rows want; it binds on the wide thin parts, which is where the extrusion
+was.
+"""
 
 # Per-step joint jitter (rad) that one raw unit of `EpisodeDraw.action_noise_std` buys.
 # core.oracle calibrates its noise in the raw units of the action space this module used to
@@ -569,6 +625,10 @@ class OracleRig:
                 action[i, 6] = GRIPPER_OPEN_ACTION
             else:
                 action[i, 6] = goal.gripper
+                if goal.gripper > 0.0 and goal.phase in MATCHED_OPENING_PHASES:
+                    action[i, 6] = self._matched_opening_command(i, action[i, 6])
+                elif goal.gripper < 0.0 and goal.phase in MATCHED_CLOSE_PHASES:
+                    action[i, 6] = self._matched_close_command(i, action[i, 6])
                 self._advance_plan(i)
             target = self.q_cmd[i]
             self._planned.append(target)
@@ -637,6 +697,26 @@ class OracleRig:
         succeeded = self._succeeded(i)
         delivered = self.num_bricks if succeeded else int(self._stowed_sample[i].sum().item())
         return {"bricks_delivered": delivered, "succeeded": succeeded}
+
+    def _matched_opening_command(self, i: int, fully_open: float) -> float:
+        """Hold the jaws at this grasp's own opening instead of driving them fully open.
+
+        The gripper channel is BINARY by contract (raw >= 0 opens, < 0 closes), so an
+        intermediate opening is held by flipping the command around it. The jaw target ramps
+        at the URDF's jaw velocity, about 3.3 mm per control step, which is its own
+        hysteresis, so no further band is needed here: what this emits stays a binary gripper
+        command the real arm accepts. ``grasp.JAW_HOLD_BAND`` is what the MODEL adds on top
+        of this set point to follow the jaws rather than the command.
+
+        An oracle that does not ask for it keeps the fully open descend, so the six-brick
+        task and its gated corpus are untouched (MS6 rung 1).
+        """
+        orc = self.oracles[i]
+        if not getattr(orc, "matched_jaw_opening", False):
+            return fully_open
+        target = grasp.landing_half_gap(float(orc.grasp_width)) - grasp.JAW_HOLD_BAND
+        measured = min(self.robot.data.joint_pos[i, self.finger_ids].tolist())
+        return fully_open if measured <= target else -fully_open
 
     def _advance_plan(self, i: int) -> None:
         """Move the commanded joint target one control step along this phase's plan: the
@@ -1004,7 +1084,66 @@ class OracleRig:
             self.stats[i]["unplanned_legs"] += 1
             self.unplanned[i] = True
             return
+        if goal.phase == oracle.Phase.EXTEND and getattr(
+            self.oracles[i], "matched_jaw_opening", False
+        ):
+            plan = plan + self._roll_waypoints(plan[-1])
         self.plans[i] = plan
+
+    def _matched_close_command(self, i: int, fully_closed: float) -> float:
+        """Hold the jaws at the part's own width instead of driving them shut.
+
+        The floor is the grasp's half width less ``CLOSE_SQUEEZE_M``, which is where a brick
+        of the same grasp width settles on its own. Bang-bang around it, the same way
+        ``_matched_opening_command`` holds an opening: what this emits stays a binary gripper
+        command the real arm accepts.
+
+        An oracle that does not ask for it keeps driving the jaws shut, so the six-brick task
+        and its gated corpus are untouched (MS6 rung 3).
+        """
+        orc = self.oracles[i]
+        if not getattr(orc, "matched_jaw_opening", False):
+            return fully_closed
+        floor = max(0.0, 0.5 * float(orc.grasp_width) - CLOSE_SQUEEZE_M)
+        measured = min(self.robot.data.joint_pos[i, self.finger_ids].tolist())
+        return fully_closed if measured > floor else -fully_closed
+
+    def _roll_waypoints(self, arrival: torch.Tensor) -> list[torch.Tensor]:
+        """Extra EXTEND waypoints that stand the jaw plane up, turning the wrist and nothing else.
+
+        MS6 rung 2. RELEASE has no pose of its own -- it HOLDS what EXTEND left -- so the
+        plane the jaws open in is whatever roll the carry happened to end at, and a
+        near-horizontal one drops the part in free fall from the release height instead of
+        letting it slide off the lower plate (``core.global_ik.steepest_jaw_roll``).
+
+        Only ``WRIST_ROLL_INDEX`` moves. That joint turns about the tool axis, so these
+        waypoints move `grasp_center` by 0.00 mm and the tool axis by 0.00 degrees, and
+        ``PICK_OFFSET_MEASURED`` lies on that axis so the pick point does not move either.
+        Nothing is solved here and nothing can fail to solve, which is why the roll is NOT
+        asked of ``_plan_carry``: that method's own docstring records three six-brick
+        episodes lost to an EXTEND held at a heading the solver could not walk.
+
+        The wrist's travel is finite, so a roll that would leave the joint's range is dropped
+        rather than clamped: half a stood-up plane is not worth a servo against its stop.
+        """
+        _, rotation = self.ik.fk(arrival)
+        rotation = torch.as_tensor(rotation, dtype=torch.float64)
+        jaw = rotation @ torch.tensor(JAW_AXIS_BODY, dtype=torch.float64)
+        tool = rotation @ torch.tensor(TOOL_AXIS_BODY, dtype=torch.float64)
+        # `link_007_joint` turns the jaw axis by MINUS its own angle about the tool axis
+        # (measured 2026-09-17, ratio -1.000), so the joint moves against the roll.
+        delta = -steepest_jaw_roll(jaw, tool)
+        target = float(arrival[WRIST_ROLL_INDEX]) + delta
+        lo, hi = self.wrist_roll_limits
+        if not lo <= target <= hi or abs(delta) < ROLL_DEADBAND_RAD:
+            return []
+        steps = max(1, math.ceil(abs(delta) / ROLL_MAX_STEP_RAD))
+        out = []
+        for k in range(1, steps + 1):
+            q = arrival.clone()
+            q[WRIST_ROLL_INDEX] = float(arrival[WRIST_ROLL_INDEX]) + delta * k / steps
+            out.append(q)
+        return out
 
     def _plan_carry(
         self, i, goal, start, pick_from, tilt_from, pick_to, tilt_to, heading

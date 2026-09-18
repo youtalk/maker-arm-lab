@@ -239,40 +239,34 @@ def test_the_three_verified_commands_resolve_as_measured():
     module = _load(SCRIPT)
     out = ["--out_dir", "/tmp/x"]
 
-    # matched_0, 15 stowed: the read's flags, matched clearance.
-    bare = module.parse_args(["--mode", "heap", *out, "--matched_clearance"])
+    # matched_0, 15 stowed: the read's flags. The clearance model that run reached through
+    # --matched_clearance is the SHIPPED model since MS6 rung 1, so the flag is gone and the
+    # archived heap rows of docs/ms6-lever-verification.md no longer reproduce from this
+    # script. What still reproduces is WHICH HEAP each row drove and how.
+    bare = module.parse_args(["--mode", "heap", *out])
     assert (bare.hover_jitter_min, bare.hover_jitter_max) == module.HEAP_HOVER_JITTER
-    assert bare.matched_clearance is True and bare.heap_k == module.HEAP_K
+    assert bare.heap_k == module.HEAP_K
 
     # minimal_matched_0 / iso_nojitter_0, 18 stowed: same heap, no band.
-    no_band = module.parse_args(["--mode", "heap", *out, "--no_read_flags", "--matched_clearance"])
+    no_band = module.parse_args(["--mode", "heap", *out, "--no_read_flags"])
     assert (no_band.hover_jitter_min, no_band.hover_jitter_max) == (0.0, 0.0)
-    assert no_band.matched_clearance is True and no_band.heap_k == module.HEAP_K
+    assert no_band.heap_k == module.HEAP_K
 
-    # minimal_unmatched_0, 10 stowed: same heap, no band, shipped clearance model.
-    unmatched = module.parse_args(["--mode", "heap", *out, "--no_read_flags"])
-    assert (unmatched.hover_jitter_min, unmatched.hover_jitter_max) == (0.0, 0.0)
-    assert unmatched.matched_clearance is False and unmatched.heap_k == module.HEAP_K
-
-    # All three are the same heap; only the driving differs.
+    # Both are the same heap; only the driving differs.
     identity = ("heap_k", "parts_split", "run_seed", "layout_seed", "episode_draws")
     for name in identity:
-        assert getattr(bare, name) == getattr(no_band, name) == getattr(unmatched, name), name
+        assert getattr(bare, name) == getattr(no_band, name), name
 
 
 def test_the_resolved_configuration_is_reported():
     module = _load(SCRIPT)
-    args = module.parse_args(["--mode", "heap", "--out_dir", "/tmp/x", "--matched_clearance"])
+    args = module.parse_args(["--mode", "heap", "--out_dir", "/tmp/x"])
     config = module.resolved_config(args)
     assert config["hover_jitter"] == [0.035, 0.080]
     assert config["nearest_first_pick_order"] is True and config["frame_jitter"] is True
     assert config["episode_draws"] is True and config["read_flags"] is True
     assert (config["run_seed"], config["layout_seed"]) == (20261000, 20261010)
     assert config["heap_k"] == 50 and config["cycle_budget"] == args.cycle_budget
-    assert config["matched_clearance"] is True
-    assert config["matched_half_gap_m"] == module.MATCHED_HALF_GAP_M
-    off = module.resolved_config(module.parse_args(["--mode", "heap", "--out_dir", "/tmp/x"]))
-    assert off["matched_clearance"] is False and off["matched_half_gap_m"] is None
 
 
 def test_the_config_is_stamped_into_the_logs_end_event(tmp_path):
@@ -301,51 +295,6 @@ def _wall_blocked_grasp():
     quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]])  # yaw 0: the narrow axis lies along y
     ranked = grasp.rank_grasps(sizes, pos, quat, torch.tensor([True]), grasp.tray_wall_obstacles())
     return [g for g in ranked if abs(math.remainder(g.heading - math.pi / 2, math.pi)) < 0.1]
-
-
-def test_matched_clearance_reaches_rank_grasps_and_is_restored():
-    module = _load(SCRIPT)
-    before_gap = grasp.OPEN_HALF_GAP
-    before_defaults = grasp.sweep_footprints.__defaults__
-
-    # The shipped model lands the tips 52.4 mm out, so at 40 mm the wall is 12.4 mm inside
-    # them and the grasp is rejected: this is the row the wall table stows and the teacher
-    # will not select.
-    (shipped,) = _wall_blocked_grasp()
-    assert shipped.wall < 0.0
-    assert grasp.select_grasp([shipped]) is None
-
-    with module.matched_clearance() as half_gap:
-        assert half_gap == module.MATCHED_HALF_GAP_M
-        assert grasp.OPEN_HALF_GAP == module.MATCHED_HALF_GAP_M
-        # The default argument was bound at import, so patching the global alone would leave
-        # the swept count on the shipped radius.
-        assert grasp.sweep_footprints.__defaults__ == (module.MATCHED_HALF_GAP_M,)
-        (matched,) = _wall_blocked_grasp()
-        assert matched.wall > 0.0, matched
-        assert grasp.select_grasp([matched]) is matched
-
-    assert grasp.OPEN_HALF_GAP == before_gap
-    assert grasp.sweep_footprints.__defaults__ == before_defaults
-    (again,) = _wall_blocked_grasp()
-    assert again.wall == shipped.wall
-
-
-def test_matched_clearance_is_restored_when_the_body_raises():
-    module = _load(SCRIPT)
-    before_gap = grasp.OPEN_HALF_GAP
-    before_defaults = grasp.sweep_footprints.__defaults__
-    with pytest.raises(RuntimeError), module.matched_clearance():
-        raise RuntimeError("the run failed")
-    assert grasp.OPEN_HALF_GAP == before_gap
-    assert grasp.sweep_footprints.__defaults__ == before_defaults
-
-
-def test_the_matched_clearance_flag_is_off_by_default():
-    module = _load(SCRIPT)
-    base = ["--mode", "heap", "--out_dir", "/tmp/x"]
-    assert module.parse_args(base).matched_clearance is False
-    assert module.parse_args(base + ["--matched_clearance"]).matched_clearance is True
 
 
 def test_a_point_outside_the_solvers_reach_reads_no_solution_not_lost():
