@@ -899,20 +899,53 @@ class OracleRig:
 
     def _lift_result(self, i: int, outcome: str) -> oracle.PhaseResult:
         """LIFT end: pinch evidence + rise/xy, exactly the check script's gate (grasp_one)."""
-        brick = self.oracles[i].target_brick
+        orc = self.oracles[i]
+        brick = orc.target_brick
         brick_end = self._brick_pos(i, brick)
         rise = (brick_end[2] - self.brick_start[i][2]).item()
         xy_error = (brick_end[:2] - self.pick_point(i)[:2]).norm().item()
+        lifted = rise > LIFT_MIN_RISE and xy_error < LIFT_MAX_XY_ERROR
+        if not lifted and orc.accepts_any_held_part:
+            held = self._held_part(i, brick)
+            if held is not None:
+                # The target was missed but the jaws are not empty, and on a heap one bin
+                # takes every part (core.heap_oracle: 16 of 154 LIFT reports of 2026-09-17).
+                # The cycle follows the part actually held; REOPEN would drop it.
+                orc.adopt_held_part(held)
+                brick, lifted = held, True
         # MS6 design 7.4: the stall floor follows the width the jaws close across, and so
-        # does the force floor (the jaw drive's force is its stall times its stiffness).
-        orc = self.oracles[i]
+        # does the force floor (the jaw drive's force is its stall times its stiffness). The
+        # floors stay the ones the CHOSEN grasp set -- `pinch_ok` is telemetry here, not the
+        # decision (core.oracle's LIFT branch) -- but they are read against the held part.
         width = orc.grasp_width
         min_size = getattr(orc, "grasp_min_size", min(layout.BRICK_SIZE))
         pinch = self.pinch_evidence(
             i, brick, pinch_min_stall(width, min_size), pinch_min_force(width, min_size)
         )
-        lifted = rise > LIFT_MIN_RISE and xy_error < LIFT_MAX_XY_ERROR
         return oracle.PhaseResult(outcome=outcome, pinch_ok=pinch["ok"], lifted=lifted)
+
+    def _held_part(self, i: int, target: int) -> int | None:
+        """The part other than ``target`` that is up in the jaws, nearest the pick point.
+
+        A part counts as held on the same two numbers the target's gate uses: it stands clear
+        of the desk (layout.py: desk top at z = 0) by at least LIFT_MIN_RISE, and it sits
+        inside LIFT_MAX_XY_ERROR of the pick point. A part already in the bin is skipped --
+        it is resting there, not riding in the jaws, and it can be within reach of the pick
+        point once the arm has come back out.
+        """
+        pick = self.pick_point(i)
+        stowed = self.oracles[i].sorted_bricks
+        best, best_error = None, LIFT_MAX_XY_ERROR
+        for b in range(self.num_bricks):
+            if b == target or b in stowed:
+                continue
+            pos = self._brick_pos(i, b)
+            if pos[2].item() <= LIFT_MIN_RISE:
+                continue
+            error = (pos[:2] - pick[:2]).norm().item()
+            if error < best_error:
+                best, best_error = b, error
+        return best
 
     def _enter_phase(
         self, i: int, scene: oracle.SceneSnapshot, ending_phase: oracle.Phase | None = None

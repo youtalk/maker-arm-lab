@@ -1281,3 +1281,7 @@ def test_batch_and_convert_commands_carry_the_camera_and_context_flags(tmp_path)
     # Constraint case: --no_cameras --no_images (no --context) must fail
     with pytest.raises(SystemExit):
         gd._parse_args(base + ["--no_cameras", "--no_images"])
+    # MS6: camera_box is a converter context choice too, so it has to survive this composer.
+    box = gd._convert_command(_cmd_cfg(tmp_path, context="camera_box"), tmp_path / "s.hdf5")
+    assert box[box.index("--context") + 1] == "camera_box"
+    assert gd._build_cfg(gd._parse_args(base + ["--context", "camera_box"])).context == "camera_box"

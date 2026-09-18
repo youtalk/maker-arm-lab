@@ -11,7 +11,6 @@ from pathlib import Path
 
 import mujoco
 import pytest
-import torch
 
 from maker_arm_lab.core import grasp, layout, oracle, parts
 from maker_arm_lab.core.heap_oracle import HeapOracle
@@ -21,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "mj_probe_bottom_pick.py"
 
 # The hand-placed layout of tests/test_mj_heap_oracle.py: three spread parts in the pickable
-# band, clear of each other and of the tray walls, so the descend under test is an ordinary one.
+# band, clear of each other, so the descend under test is an ordinary one.
 PARTS = [
     parts.make_part("brick", 2, 4),
     parts.make_part("brick", 2, 2),
@@ -284,17 +283,6 @@ def test_the_config_is_stamped_into_the_logs_end_event(tmp_path):
     end = events[-1]
     assert end["kind"] == "end" and end["stowed"] == 3  # the log's own fields survive
     assert end["config"] == {"run_seed": 7, "hover_jitter": [0.035, 0.08]}
-
-
-def _wall_blocked_grasp():
-    """A lone 2x4 brick 40 mm from the +y wall, the section 3.2 row the shipped model rejects."""
-    part = parts.make_part("brick", 2, 4)
-    sizes = torch.tensor([part.size])
-    (_x0, _x1), (_y0, y1) = layout.tray_bounds()
-    pos = torch.tensor([[layout.TRAY_CENTER[0], y1 - 0.040, part.size[2] / 2]])
-    quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]])  # yaw 0: the narrow axis lies along y
-    ranked = grasp.rank_grasps(sizes, pos, quat, torch.tensor([True]), grasp.tray_wall_obstacles())
-    return [g for g in ranked if abs(math.remainder(g.heading - math.pi / 2, math.pi)) < 0.1]
 
 
 def test_a_point_outside_the_solvers_reach_reads_no_solution_not_lost():

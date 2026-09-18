@@ -24,7 +24,7 @@ def read_meta(paths: list[Path]) -> dict:
         "episodes": 0,
         "parts_total": 0,
         "parts_stowed": 0,
-        "parts_outside_tray": 0,
+        "parts_out_of_reach": 0,
         "cycles": 0,
         "pushes": 0,
         "runs": len(paths),
@@ -37,7 +37,7 @@ def read_meta(paths: list[Path]) -> dict:
             summary["episodes"] += 1
             summary["parts_total"] += len(names)
             summary["parts_stowed"] += int(episode.get("bricks_delivered", 0))
-            summary["parts_outside_tray"] += int(episode.get("parts_outside_tray", 0))
+            summary["parts_out_of_reach"] += int(episode.get("parts_out_of_reach", 0))
             summary["cycles"] += int(episode.get("cycles", 0))
             summary["pushes"] += int(episode.get("pushes", 0))
             outcomes = episode.get("cycle_outcomes", [])

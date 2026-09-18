@@ -1,4 +1,4 @@
-"""Parts and the tray in the MuJoCo scene (design sections 5 and 6)."""
+"""Parts in the MuJoCo scene (design sections 5 and 6). There is no dish since 2026-09-18."""
 
 import random
 
@@ -6,7 +6,7 @@ import mujoco
 import numpy as np
 import pytest
 
-from maker_arm_lab.core import layout, parts
+from maker_arm_lab.core import parts
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj import scene
 
@@ -20,13 +20,13 @@ def _draw():
 PARTS = [
     parts.make_part("brick", 2, 4),
     parts.make_part("slope", 1, 2),
-    parts.make_part("tile", 1, 1),
+    parts.make_part("round", 2, 2),
 ]
 
 
 @pytest.fixture(scope="module")
 def built():
-    return scene.build_model(_draw(), parts=PARTS, tray=True, cameras_on=False)
+    return scene.build_model(_draw(), parts=PARTS, cameras_on=False)
 
 
 def test_one_collider_per_part_and_visual_studs(built):
@@ -34,13 +34,15 @@ def test_one_collider_per_part_and_visual_studs(built):
     assert len(h.brick_bodies) == 3 and len(h.brick_geoms) == 3
     assert model.geom_type[h.brick_geoms[0]] == mujoco.mjtGeom.mjGEOM_BOX
     assert model.geom_type[h.brick_geoms[1]] == mujoco.mjtGeom.mjGEOM_MESH
+    assert model.geom_type[h.brick_geoms[2]] == mujoco.mjtGeom.mjGEOM_CYLINDER
+    assert model.geom_size[h.brick_geoms[2]][:2] == pytest.approx([0.0079, 0.0048])
     studs = [g for g in range(model.ngeom) if model.geom(g).name.startswith("brick_0_stud_")]
     assert len(studs) == 8
     assert all(model.geom_contype[g] == 0 and model.geom_conaffinity[g] == 0 for g in studs)
     assert all(model.geom_type[g] == mujoco.mjtGeom.mjGEOM_CYLINDER for g in studs)
-    assert not [g for g in range(model.ngeom) if model.geom(g).name.startswith("brick_2_stud_")]
+    assert not [g for g in range(model.ngeom) if model.geom(g).name.startswith("brick_1_stud_")]
     assert h.body_geoms[0][0] == h.brick_geoms[0] and len(h.body_geoms[0]) == 9
-    assert len(h.body_geoms[2]) == 1
+    assert len(h.body_geoms[1]) == 1 and len(h.body_geoms[2]) == 5
 
 
 def test_part_masses_and_sizes_reach_the_model(built):
@@ -49,26 +51,6 @@ def test_part_masses_and_sizes_reach_the_model(built):
         assert model.body_mass[h.brick_bodies[b]] == pytest.approx(part.mass, rel=1e-6)
     assert model.geom_size[h.brick_geoms[0]] == pytest.approx([s / 2 for s in PARTS[0].size])
     assert model.geom_contype[h.brick_geoms[1]] == 3 and model.geom_condim[h.brick_geoms[1]] == 4
-
-
-def test_the_tray_walls_are_static_colliders(built):
-    model, _ = built
-    boxes = layout.tray_static_boxes()
-    names = [name for name, _, _, _ in boxes]
-    assert len(names) == layout.TRAY_SEGMENTS
-    for name in names:
-        g = model.geom(name).id
-        assert model.geom_contype[g] == 3 and model.geom_bodyid[g] == 0
-    # tray_rim_00's pose and size reach the compiled model unchanged. This is the only
-    # check that reads back the quat the tray loop threads into add_geom, so it is what
-    # would catch a wrong element order or a degrees/radians mix-up in the quaternion, or
-    # MuJoCo silently renormalizing it. The model stores half extents (scene._half's
-    # convention), so the size compares against half of layout's full size.
-    name, center, size, quat = boxes[0]
-    g = model.geom(name).id
-    assert model.geom_pos[g] == pytest.approx(center, abs=1e-6)
-    assert model.geom_size[g] == pytest.approx([0.5 * s for s in size], abs=1e-6)
-    assert model.geom_quat[g] == pytest.approx(quat, abs=1e-6)
 
 
 def test_parts_settle_flat_on_the_desk(built):
@@ -86,10 +68,34 @@ def test_parts_settle_flat_on_the_desk(built):
 
 
 def test_the_legacy_scene_is_unchanged_without_parts():
-    model, h = scene.build_model(_draw(), num_bricks=2, cameras_on=False)
+    _model, h = scene.build_model(_draw(), num_bricks=2, cameras_on=False)
     assert len(h.brick_bodies) == 2 and all(len(g) == 1 for g in h.body_geoms)
-    # tray=False (the default here), so none of the round dish's rim segments are built.
-    # tray_rim_00 is a real geom name (see test_the_tray_walls_are_static_colliders above),
-    # so this is absent because the tray was never asked for, not because the name is stale.
-    with pytest.raises(KeyError):
-        model.geom("tray_rim_00")
+
+
+def test_the_desk_is_a_hard_surface_under_a_pressed_part():
+    """A 3 g brick pressed onto the desk with 20 N sinks under a millimetre.
+
+    Before the desk carried its own contact parameters the same press sank the brick 13 mm,
+    more than its own height, because the time-constant form scales the stiffness with the
+    lighter body (measured 2026-09-18). The desk's solmix weight keeps the part-part and
+    jaw-part pairs on their own tuning, and the part-desk pair keeps the part's condim and
+    friction: a geom priority handed the pair condim 3 and friction 1.0 instead, in the
+    six-brick task too.
+    """
+    model, h = scene.build_model(_draw(), parts=[PARTS[0]], cameras_on=False)
+    desk = h.desk_geom
+    assert model.geom_priority[desk] == 0 and model.geom_solmix[desk] == scene.DESK_SOLMIX
+    assert model.geom_solimp[desk][:2] == pytest.approx(scene.DESK_SOLIMP[:2])
+    model.geom_friction[h.brick_geoms[0], 0] = 1.2  # the top of mj/env.py's friction draw
+    data = mujoco.MjData(model)
+    adr = h.brick_qpos[0]
+    data.qpos[adr : adr + 3] = (0.19, 0.0, PARTS[0].size[2] / 2 + 0.001)
+    data.qpos[adr + 3 : adr + 7] = (1.0, 0.0, 0.0, 0.0)
+    mujoco.mj_step(model, data, nstep=480)
+    pair = next(c for c in data.contact[: data.ncon] if desk in (c.geom1, c.geom2))
+    assert pair.dim == scene.BRICK_CONDIM and pair.friction[0] == pytest.approx(1.2)
+    assert pair.solimp[:2] == pytest.approx(scene.DESK_SOLIMP[:2], abs=1e-4)
+    data.xfrc_applied[h.brick_bodies[0]] = [0.0, 0.0, -20.0, 0.0, 0.0, 0.0]
+    mujoco.mj_step(model, data, nstep=480)
+    sunk = PARTS[0].size[2] / 2 - data.qpos[adr + 2]
+    assert 0.0 <= sunk < 0.001, sunk

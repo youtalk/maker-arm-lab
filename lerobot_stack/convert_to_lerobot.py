@@ -19,11 +19,19 @@ Every exit path prints CONVERT_OK or CONVERT_FAIL on stdout. scripts/generate_da
 parses that line, and a run that terminates without either reads to it as a HANG rather
 than a failure -- a far worse outcome than a reported failure.
 
-``--context {camera,privileged}`` additionally reads a shard's ``obs/context_<name>``
-dataset and writes it as the single feature ``observation.environment_state``. The two
-context channels never mix in one dataset: one ``--context`` per conversion. ``--no_images``
-drops both image features (the privileged-state ceiling) and requires ``--context`` -- a
-dataset with neither images nor a context channel has nothing to condition the policy on.
+``--context`` additionally reads a shard's ``obs/context_<name>`` dataset(s) and writes
+them as the single feature ``observation.environment_state``. ``camera`` and ``privileged``
+read one channel each; ``camera_box`` (MS6 heap shards) concatenates the camera pose and the
+destination box pose into one 9-wide row, camera first. The context choices never mix in one
+dataset: one ``--context`` per conversion. ``--no_images`` drops both image features (the
+privileged-state ceiling) and requires ``--context`` -- a dataset with neither images nor a
+context channel has nothing to condition the policy on.
+
+``--dagger`` also turns the ``success`` attribute filter OFF. A heap run records EVERY episode
+(mj/recorder.py ``export_all``, MS6 design H7) and its ``success`` is True only when all of its
+parts stowed, which almost never happens, so filtering on it throws the corpus away before the
+positive-actor cut ever runs. Without ``--dagger`` the filter stays, because a six-brick shard
+is success-only by construction.
 
 ``--action_space delta_prev`` (MS4 c2 design 4.2) replaces the joint part of ``action`` with
 this frame's target minus the previous frame's target; the gripper column is unchanged.
@@ -38,6 +46,7 @@ import json
 import sys
 import traceback
 from pathlib import Path
+from typing import NamedTuple
 
 import h5py
 import numpy as np
@@ -78,9 +87,31 @@ IMAGE_FEATURES = {
         "names": ["height", "width", "channels"],
     },
 }
-CONTEXT_CHANNELS = ("camera", "privileged")
+# What each --context choice reads from a shard, in concatenation order. "camera_box" is the
+# MS6 heap channel (design section 9): the overhead camera pose followed by the destination box
+# pose, 6 + 3 = 9 wide, matching mj/context_names.py's CONTEXT_DIMS["camera_box"].
+CONTEXT_SOURCES = {
+    "camera": ("camera",),
+    "privileged": ("privileged",),
+    "camera_box": ("camera", "box"),
+}
+CONTEXT_CHANNELS = tuple(CONTEXT_SOURCES)
 ACTION_SPACES = ("absolute", "delta_prev")
 ACTION_SPACE_MARKER = "action_space.json"
+
+
+class Counts(NamedTuple):
+    """What one conversion did, straight onto the CONVERT_OK line.
+
+    ``read`` and ``skipped`` let a supervisor tell "this corpus had nothing in it" apart from
+    "the success filter ate it": a heap shard converted without ``--dagger`` reports a large
+    ``skipped``, the same shard converted with it reports 0.
+    """
+
+    episodes: int
+    total: int
+    read: int
+    skipped: int
 
 
 def write_action_space_marker(root: Path, action_space: str) -> None:
@@ -113,17 +144,24 @@ def build_features(context_names: list[str] | None, images: bool) -> dict:
     return features
 
 
+def context_keys(context: str | None) -> list[str]:
+    """The shard datasets one ``--context`` choice reads, in concatenation order."""
+    return [] if context is None else [f"obs/context_{s}" for s in CONTEXT_SOURCES[context]]
+
+
 def read_context_names(shard: Path, context: str) -> list[str]:
-    """The ``names`` attribute of the first demo's ``obs/context_<context>`` dataset."""
-    key = f"obs/context_{context}"
+    """The ``names`` attributes of the first demo's context datasets, concatenated in order."""
+    names: list[str] = []
     with h5py.File(shard, "r") as f:
         demos = sorted(f["data"].keys(), key=lambda k: int(k.split("_")[1]))
-        if not demos or key not in f["data"][demos[0]]:
-            raise RuntimeError(
-                f"{shard} has no {key} dataset -- --context {context} needs shards recorded "
-                "with the MS4 recorder (both context channels)"
-            )
-        return json.loads(f["data"][demos[0]][key].attrs["names"])
+        for key in context_keys(context):
+            if not demos or key not in f["data"][demos[0]]:
+                raise RuntimeError(
+                    f"{shard} has no {key} dataset -- --context {context} needs shards recorded "
+                    "with a recorder that writes every channel it reads"
+                )
+            names += json.loads(f["data"][demos[0]][key].attrs["names"])
+    return names
 
 
 # PHASE_TO_INT pins (recorders.py): dropped outright when splitting.
@@ -195,7 +233,7 @@ def convert(
     images: bool = True,
     action_space: str = "absolute",
     dagger: bool = False,
-) -> tuple[int, int]:
+) -> Counts:
     """Convert `shards` into (or append them onto) the LeRobot dataset at `root`.
 
     When `sidecar_dir` is set, every sub-episode written under `split_cycles` gets a
@@ -224,7 +262,7 @@ def convert(
     if not images and context is None:
         raise ValueError("a dataset without images needs a context channel (--context)")
     context_names = read_context_names(shards[0], context) if context is not None else None
-    context_key = f"obs/context_{context}" if context is not None else None
+    keys = context_keys(context)
     # Resume iff root/meta/info.json (the local LeRobot dataset marker) exists. A bare
     # root.exists() check is not enough: the campaign supervisor pre-creates dataset_root as an
     # empty directory before the first conversion ever runs, so root.exists() is True with no
@@ -269,14 +307,20 @@ def convert(
             use_videos=True,
         )
         write_action_space_marker(root, action_space)
-    converted = 0
+    converted = read = skipped = 0
     for shard in shards:
         with h5py.File(shard, "r") as f:
             data = f["data"]
             for demo in sorted(data.keys(), key=lambda k: int(k.split("_")[1])):
                 grp = data[demo]
-                if not bool(grp.attrs.get("success", False)):
-                    continue  # belt and braces: shards are success-only already
+                read += 1
+                # A six-brick shard is success-only already, so this is belt and braces there.
+                # A heap shard is not: it records every episode and its `success` means "every
+                # part stowed", so under --dagger the positive-actor cut is the filter and this
+                # one would throw nearly the whole corpus away before it ran (module docstring).
+                if not dagger and not bool(grp.attrs.get("success", False)):
+                    skipped += 1
+                    continue
                 actions = grp["actions"][:]  # (T, 7) raw pre-clamp oracle command
                 targets = grp["joint_targets"][:]  # (T, 8)
                 state = grp["obs/joint_pos_abs"][:]  # (T, 8): 6 arm + left/right jaw (m)
@@ -285,11 +329,13 @@ def convert(
                 lengths = [len(actions), len(targets), len(state)]
                 if images:
                     lengths += [len(wrist), len(overhead)]
-                if context_key is not None:
-                    if context_key not in grp:
-                        raise RuntimeError(f"{shard}:{demo} has no {context_key} dataset")
-                    ctx = grp[context_key][:]
-                    lengths.append(len(ctx))
+                if keys:
+                    for key in keys:
+                        if key not in grp:
+                            raise RuntimeError(f"{shard}:{demo} has no {key} dataset")
+                    ctx_steps = min(len(grp[key]) for key in keys)
+                    ctx = np.concatenate([grp[key][:ctx_steps] for key in keys], axis=1)
+                    lengths.append(ctx_steps)
                 steps = min(lengths)
                 # The right jaw is dropped, not averaged in: the two jaws are separately
                 # actuated here, and the left one is the declared reference (module docstring).
@@ -339,7 +385,7 @@ def convert(
                         if images:
                             frame["observation.images.wrist"] = wrist[t]
                             frame["observation.images.overhead"] = overhead[t]
-                        if context_key is not None:
+                        if keys:
                             frame["observation.environment_state"] = ctx[t].astype(np.float32)
                         dataset.add_frame(frame)
                     dataset.save_episode()
@@ -353,7 +399,7 @@ def convert(
                         )
                     converted += 1
     dataset.finalize()
-    return converted, dataset.meta.total_episodes
+    return Counts(converted, dataset.meta.total_episodes, read, skipped)
 
 
 class TokenArgumentParser(argparse.ArgumentParser):
@@ -400,7 +446,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--context",
         choices=CONTEXT_CHANNELS,
         default=None,
-        help="write obs/context_<name> as observation.environment_state (MS4 levers 1 and 3)",
+        help="write obs/context_<name> as observation.environment_state (MS4 levers 1 and 3); "
+        "camera_box concatenates the camera pose and the MS6 destination box pose, 9 wide",
     )
     parser.add_argument(
         "--no_images",
@@ -421,7 +468,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--dagger",
         action="store_true",
         help="keep only the oracle takeover cycles of a DAgger shard (positive obs/actor), "
-        "cut on actor change",
+        "cut on actor change; also drops the success-attribute filter, since a heap run "
+        "records every episode",
     )
     return parser
 
@@ -435,7 +483,7 @@ def main() -> int:
         args = parser.parse_args()
         if args.sidecar_dir is not None and not args.split_cycles:
             parser.error("--sidecar_dir requires --split_cycles")
-        converted, total = convert(
+        counts = convert(
             args.shards,
             args.root,
             args.repo_id,
@@ -452,7 +500,11 @@ def main() -> int:
         print(f"CONVERT_FAIL {type(exc).__name__}: {exc}", flush=True)
         traceback.print_exc()
         return 1
-    print(f"CONVERT_OK episodes={converted} total={total}", flush=True)
+    print(
+        f"CONVERT_OK episodes={counts.episodes} total={counts.total} "
+        f"read={counts.read} skipped={counts.skipped}",
+        flush=True,
+    )
     return 0
 
 

@@ -11,8 +11,6 @@ BRICK = parts.make_part("brick", 2, 4)
 PLATE = parts.make_part("plate", 2, 4)
 IDENTITY = torch.tensor([1.0, 0.0, 0.0, 0.0])
 ROLL_90 = torch.tensor([math.cos(math.pi / 4), math.sin(math.pi / 4), 0.0, 0.0])
-WALLS = grasp.tray_wall_obstacles()
-NO_WALLS: list = []
 DEFAULT_WIDTH = 0.0158  # the 2x4 brick's narrow axis, the width `_clearance` closes across
 GAP = grasp.landing_half_gap(DEFAULT_WIDTH)
 """Where the jaw inner faces land for that width, since the rig no longer descends fully open."""
@@ -48,6 +46,37 @@ def test_a_brick_on_its_side_offers_its_height_as_a_width():
     assert thin.heading == pytest.approx(-math.pi / 2)
 
 
+def test_a_slope_offers_its_side_faces_upright_and_its_flat_faces_on_its_side():
+    slope = parts.make_part("slope", 1, 3)
+    found = grasp.candidate_grasps(
+        0, _size(slope), torch.zeros(3), IDENTITY, 0.0, slope.closing_axes
+    )
+    assert [(round(g.heading, 6), round(g.width, 4)) for g in found] == [
+        (round(math.pi / 2, 6), 0.0078)
+    ]
+    # Rolled onto a side face, body y points up and the jaws close along body z, between the
+    # flat bottom and the flat top, across the 9.6 mm height. Never along the 23.8 mm run.
+    on_side = grasp.candidate_grasps(
+        0, _size(slope), torch.zeros(3), ROLL_90, 0.0, slope.closing_axes
+    )
+    assert [round(g.width, 4) for g in on_side] == [0.0096]
+    assert on_side[0].heading == pytest.approx(-math.pi / 2)
+    # rank_grasps carries one axis tuple per part; a brick beside it still offers both axes.
+    sizes, pos, quat = _heap(
+        (slope, 0.16, 0.0, 0.0048, IDENTITY), (BRICK, 0.24, 0.0, 0.0048, IDENTITY)
+    )
+    ranked = grasp.rank_grasps(
+        sizes,
+        pos,
+        quat,
+        torch.ones(2, dtype=torch.bool),
+        0.0,
+        [slope.closing_axes, BRICK.closing_axes],
+    )
+    assert [g.width for g in ranked if g.part == 0] == [pytest.approx(0.0078)]
+    assert len([g for g in ranked if g.part == 1]) == 2
+
+
 def test_a_tilted_axis_and_an_oversize_width_are_not_candidates():
     tilt = math.radians(20.0)
     pitched = torch.tensor([math.cos(tilt / 2), 0.0, math.sin(tilt / 2), 0.0])
@@ -60,7 +89,7 @@ def test_a_tilted_axis_and_an_oversize_width_are_not_candidates():
 def test_a_tilted_approach_opens_the_short_axis_of_a_lying_plate():
     plate = parts.make_part("plate", 2, 4)
     size = torch.tensor(list(plate.size))
-    pos = torch.tensor([layout.TRAY_CENTER[0], 0.0, 0.0016])
+    pos = torch.tensor([layout.HEAP_CENTER[0], 0.0, 0.0016])
     quat = torch.tensor([1.0, 0.0, 0.0, 0.0])
     flat = grasp.candidate_grasps(0, size, pos, quat)
     tilted_40 = grasp.candidate_grasps(0, size, pos, quat, tilt_rad=math.radians(40.0))
@@ -134,25 +163,25 @@ def _neighbors(*rows):
     return pos, hz, prints
 
 
-def _clearance(pos, heading, width=0.0158, half_height=0.0048, rows=(), walls=NO_WALLS):
-    return grasp.jaw_clearance(pos, heading, width, half_height, *_neighbors(*rows), walls)
+def _clearance(pos, heading, width=0.0158, half_height=0.0048, rows=()):
+    return grasp.jaw_clearance(pos, heading, width, half_height, *_neighbors(*rows))
 
 
 def test_clearance_is_infinite_alone_and_the_landing_spot_is_a_matched_jaw_out():
     pos = torch.tensor([0.2, 0.0, 0.0048])
-    assert _clearance(pos, 0.0) == (math.inf, 0, math.inf)
+    assert _clearance(pos, 0.0) == (math.inf, 0)
     # A 2x2 brick just past the sweep band, its near face under the landing spot.
     small = parts.make_part("brick", 2, 2)
     under = (small, 0.2 + GAP + 0.010, 0.0, 0.0048, IDENTITY)
-    clearance, swept, wall = _clearance(pos, 0.0, rows=[under])
-    assert clearance < 0.0 and swept == 0 and wall == math.inf
+    clearance, swept = _clearance(pos, 0.0, rows=[under])
+    assert clearance < 0.0 and swept == 0
 
 
 def test_a_neighbor_in_the_sweep_band_is_swept_not_blocking():
     pos = torch.tensor([0.2, 0.0, 0.0048])
     # A 1x2 brick inside the y stroke and clear of both the landing spot and the x stroke.
     beside = (parts.make_part("brick", 1, 2), 0.2, 0.014, 0.0048, IDENTITY)
-    clearance, swept, _ = _clearance(pos, math.pi / 2, rows=[beside])
+    clearance, swept = _clearance(pos, math.pi / 2, rows=[beside])
     assert swept == 1 and clearance > 0.0
     across = _clearance(pos, 0.0, rows=[beside])  # closing along x: the brick is beside a face
     assert across[1] == 0 and across[0] > 0.0
@@ -161,7 +190,7 @@ def test_a_neighbor_in_the_sweep_band_is_swept_not_blocking():
 def test_a_neighbor_under_the_grip_band_is_the_floor_not_an_obstacle():
     pos = torch.tensor([0.2, 0.0, 0.0048])
     flat = (PLATE, 0.2 + GAP, 0.0, 0.0016, IDENTITY)  # a plate under the tip
-    assert _clearance(pos, 0.0, rows=[flat]) == (math.inf, 0, math.inf)
+    assert _clearance(pos, 0.0, rows=[flat]) == (math.inf, 0)
     plate_target = torch.tensor([0.2, 0.0, 0.0016])
     # For a plate target every neighbor stands, and a plate under the tip blocks the descend.
     assert _clearance(plate_target, 0.0, half_height=0.0016, rows=[flat])[0] < 0.0
@@ -174,34 +203,6 @@ def test_the_landing_spot_grows_with_the_neighbor_height():
     tall = (parts.make_part("brick", 4, 4), x, 0.0, 0.0300, IDENTITY)  # 18 mm thick up there
     assert _clearance(pos, 0.0, rows=[low])[0] > 0.0
     assert _clearance(pos, 0.0, rows=[tall])[0] < 0.0
-
-
-def test_wall_clearance_matches_the_measured_landing_limit():
-    """Wall reads, adapted to the round dish (MS6 rework section 5): a tip landing a couple
-    mm inside the rim picks, one a couple mm past it does not, and one well past it has to
-    cross the rim on the way in. The dish is rotationally symmetric, so one radius stands
-    for every azimuth; the old rectangle's separate short/long wall reads do not carry over.
-    """
-    cx, cy = layout.TRAY_CENTER
-    reach = layout.TRAY_RADIUS - GAP - grasp.TIP_THICKNESS
-    picks = torch.tensor([cx, cy - (reach - 0.002), 0.0048])
-    fails = torch.tensor([cx, cy - (reach + 0.002), 0.0048])
-    beyond = torch.tensor([cx, cy - (reach + 0.026), 0.0048])
-    assert 0.0 < _clearance(picks, math.pi / 2, walls=WALLS)[2] < 0.003
-    assert _clearance(fails, math.pi / 2, walls=WALLS)[2] < 0.0
-    assert _clearance(beyond, math.pi / 2, walls=WALLS)[2] < -0.01
-
-
-def test_a_grasp_at_the_dish_centre_clears_the_rim_and_one_at_the_rim_does_not():
-    sizes = torch.tensor([list(layout.BRICK_SIZE)])
-    quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
-    middle = torch.tensor([[layout.TRAY_CENTER[0], layout.TRAY_CENTER[1], 0.005]])
-    edge = torch.tensor([[layout.TRAY_CENTER[0] + layout.TRAY_RADIUS - 0.005, 0.0, 0.005]])
-    mask = torch.tensor([True])
-    best_middle = grasp.rank_grasps(sizes, middle, quat, mask, WALLS)[0]
-    best_edge = grasp.rank_grasps(sizes, edge, quat, mask, WALLS)[0]
-    assert best_middle.wall > 0.0
-    assert best_edge.wall < best_middle.wall
 
 
 def _heap(*rows):
@@ -218,7 +219,7 @@ def test_rank_puts_the_highest_band_first_then_the_least_swept_then_the_clearest
         (BRICK, 0.19, 0.017, 0.0048, IDENTITY),  # in the first brick's y sweep band
     )
     mask = torch.ones(3, dtype=torch.bool)
-    ranked = grasp.rank_grasps(sizes, pos, quat, mask, WALLS)
+    ranked = grasp.rank_grasps(sizes, pos, quat, mask)
     assert ranked[0].part == 1 and ranked[0].height == pytest.approx(0.0144)
     assert ranked[0].clearance >= grasp.CLEARANCE_MIN  # the brick under it is below the band
     desk = [g for g in ranked if g.height < 0.01]
@@ -226,12 +227,24 @@ def test_rank_puts_the_highest_band_first_then_the_least_swept_then_the_clearest
     assert all(not math.isnan(g.clearance) for g in ranked)
 
 
+def test_rank_prefers_the_narrower_grasp_when_nothing_else_separates_them():
+    """A lone 2x4 brick offers a 15.8 mm and a 31.8 mm grasp at equal (infinite) clearance.
+
+    The dish rim used to break that tie by accident. With the heap on the bare desk the tie
+    is broken on purpose: where a choice existed, the narrow axis lifted 3 of 3 flat parts
+    and the wide axis 0 of 4 (docs/ms6-matched-jaw-opening.md section 5).
+    """
+    sizes, pos, quat = _heap((BRICK, 0.19, 0.0, 0.0048, IDENTITY))
+    ranked = grasp.rank_grasps(sizes, pos, quat, torch.tensor([True]))
+    assert [round(g.width, 4) for g in ranked] == [0.0158, 0.0318]
+
+
 def test_rank_honors_the_candidate_mask():
     sizes, pos, quat = _heap(
         (BRICK, 0.16, 0.0, 0.0048, IDENTITY), (BRICK, 0.24, 0.0, 0.0048, IDENTITY)
     )
     mask = torch.tensor([False, True])
-    assert {g.part for g in grasp.rank_grasps(sizes, pos, quat, mask, WALLS)} == {1}
+    assert {g.part for g in grasp.rank_grasps(sizes, pos, quat, mask)} == {1}
 
 
 def test_select_skips_grasps_under_the_clearance_floor():
@@ -242,81 +255,37 @@ def test_select_skips_grasps_under_the_clearance_floor():
     assert grasp.select_grasp([]) is None
 
 
-def test_densest_cell_and_push_segment_stay_inside_the_tray():
+def test_densest_cell_and_push_segment_stay_in_reach():
     xy = torch.tensor([[0.16, 0.01], [0.17, 0.02], [0.18, 0.03], [0.24, -0.08]])
     center = grasp.densest_cell(xy)
     assert center == (pytest.approx(0.175), pytest.approx(0.025))
     start, end = grasp.push_segment(center, math.pi / 2)
     assert start == (pytest.approx(0.175), pytest.approx(0.025 - grasp.PUSH_HALF_LENGTH_M))
     assert end == (pytest.approx(0.175), pytest.approx(0.025 + grasp.PUSH_HALF_LENGTH_M))
-    (x0, x1), (y0, y1) = layout.tray_bounds()
+    far = (layout.SCATTER_MAX_RADIUS - 0.005, 0.0)
+    near = (layout.SCATTER_MIN_RADIUS + 0.005, 0.0)
     for heading in (0.0, 1.0, 2.0, 3.0, 4.0, 5.0):
-        for point in grasp.push_segment((x1 - 0.005, y1 - 0.005), heading):
-            assert x0 < point[0] < x1 and y0 < point[1] < y1
+        for cell in (far, near):
+            for point in grasp.push_segment(cell, heading):
+                assert layout.SCATTER_MIN_RADIUS <= math.hypot(*point) <= layout.SCATTER_MAX_RADIUS
 
 
-def test_push_toward_center_lands_behind_the_part_and_sweeps_inward():
-    (x0, x1), (y0, y1) = layout.tray_bounds()
-    cx, cy = layout.TRAY_CENTER
-    part = (cx, cy - 0.06)  # wall-side: 28 mm shy of the rim, room for the sweep to start
-    print_ = grasp.footprint(
-        _size(parts.make_part("plate", 2, 8)), torch.tensor([*part, 0.0016]), IDENTITY
-    )
-    start, end = grasp.push_toward_center(part, print_, [])
-    assert x0 < start[0] < x1 and y0 < start[1] < y1
-    assert math.hypot(start[0] - cx, start[1] - cy) > math.hypot(part[0] - cx, part[1] - cy)
-    assert math.hypot(end[0] - cx, end[1] - cy) < math.hypot(part[0] - cx, part[1] - cy)
-    assert grasp.polygon_distance(grasp.tip_footprint(start), print_) >= grasp.PUSH_START_GAP_M
-    # A start under another part's footprint is refused, so the tips never land on a part.
-    blocker = grasp.footprint(_size(BRICK), torch.tensor([*start, 0.0048]), IDENTITY)
-    other = grasp.push_toward_center(part, print_, [blocker])
-    assert other is None or grasp.polygon_distance(grasp.tip_footprint(other[0]), blocker) >= 0.0
-
-
-def test_a_part_wedged_against_the_rim_has_no_push():
-    """The round dish has no corner; the analog is a part close enough to the rim that no
-    swing direction leaves room for the tips to land behind it."""
-    cx, cy = layout.TRAY_CENTER
-    part = (cx, cy - (layout.TRAY_RADIUS - 0.008))
-    print_ = grasp.footprint(
-        _size(parts.make_part("brick", 2, 2)), torch.tensor([*part, 0.0048]), IDENTITY
-    )
-    assert grasp.push_toward_center(part, print_, []) is None
-
-
-def test_the_wall_obstacles_ring_the_dish():
-    prints = grasp.tray_wall_obstacles()
-    assert len(prints) == layout.TRAY_SEGMENTS
-    cx, cy = layout.TRAY_CENTER
-    for poly in prints:
-        for x, y in poly:
-            assert math.hypot(x - cx, y - cy) > layout.TRAY_RADIUS - 0.006
-
-
-def test_clamp_to_tray_pulls_a_point_back_along_its_radius():
-    cx, cy = layout.TRAY_CENTER
-    inside = (cx + 0.01, cy + 0.01)
-    assert grasp.clamp_to_tray(inside) == inside
-    # Diagonal, off both cardinal axes: a box clamp and a radial clamp disagree here, so
-    # this is the direction that actually pins down the radial model.
-    far = (cx + 0.5, cy + 0.3)
-    clamped = grasp.clamp_to_tray(far)
+def test_clamp_to_reach_pulls_a_point_along_its_radius_from_the_base():
+    inside = (0.19, 0.03)
+    assert grasp.clamp_to_reach(inside) == inside
+    # Diagonal, off both cardinal axes: a box clamp and a radial clamp disagree here.
+    far = (0.5, 0.3)
+    clamped = grasp.clamp_to_reach(far)
     assert math.isclose(
-        math.hypot(clamped[0] - cx, clamped[1] - cy),
-        layout.TRAY_RADIUS - grasp.PUSH_WALL_MARGIN_M,
-        abs_tol=1e-9,
+        math.hypot(*clamped), layout.SCATTER_MAX_RADIUS - grasp.PUSH_REACH_MARGIN_M, abs_tol=1e-9
     )
-    away = math.atan2(far[1] - cy, far[0] - cx)
-    clamped_away = math.atan2(clamped[1] - cy, clamped[0] - cx)
-    assert math.isclose(away, clamped_away, abs_tol=1e-9)
-
-
-def test_clamp_to_tray_pins_the_centre_when_the_margin_exceeds_the_radius():
-    """A margin past TRAY_RADIUS must pin the centre, not reflect the point through it."""
-    cx, cy = layout.TRAY_CENTER
-    off_center = (cx + 1e-6, cy)
-    clamped = grasp.clamp_to_tray(off_center, margin=layout.TRAY_RADIUS + 0.05)
-    assert clamped == (cx, cy)
+    assert math.isclose(math.atan2(*far[::-1]), math.atan2(*clamped[::-1]), abs_tol=1e-9)
+    near = (0.05, 0.02)
+    pushed_out = grasp.clamp_to_reach(near)
+    assert math.isclose(
+        math.hypot(*pushed_out), layout.SCATTER_MIN_RADIUS + grasp.PUSH_REACH_MARGIN_M, abs_tol=1e-9
+    )
+    assert grasp.clamp_to_reach((0.0, 0.0)) == (0.0, 0.0)
 
 
 def test_the_landing_gap_follows_the_grasp_width():
@@ -333,18 +302,3 @@ def test_the_landing_gap_follows_the_grasp_width():
     assert narrow == pytest.approx(0.0158 / 2 + grasp.JAW_APPROACH_CLEARANCE + grasp.JAW_HOLD_BAND)
     # A part wider than the jaws can straddle never asks for more than the full opening.
     assert grasp.landing_half_gap(2.0 * grasp.OPEN_HALF_GAP) == pytest.approx(grasp.OPEN_HALF_GAP)
-
-
-def test_a_brick_beyond_the_full_open_dead_zone_now_has_a_legal_heading():
-    """The measured ceiling of the shipped teacher (MS6 rung 1 investigation).
-
-    ``TRAY_RADIUS`` is 88 mm and the fully open landing spots sit 52.4 mm out, so a part
-    more than about 66 mm from the dish centre had NO heading whose stroke cleared the rim:
-    44 % of the dish area was a geometric dead zone. Across the three R3 read heaps that
-    refused 84.1 % of every in-dish part sighting. The matched opening restores the heading.
-    """
-    cx, cy = layout.TRAY_CENTER
-    pos = torch.tensor([cx + 0.075, cy, 0.0048])
-    headings = [math.pi * k / 36 for k in range(36)]
-    clear = [h for h in headings if _clearance(pos, h, walls=WALLS)[2] >= 0.0]
-    assert clear, "a brick 75 mm from the dish centre must have a heading that clears the rim"

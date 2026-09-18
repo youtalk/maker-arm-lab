@@ -21,7 +21,7 @@ import pytest
 import torch
 
 from maker_arm_lab.assets import urdf_prep
-from maker_arm_lab.core import layout, oracle
+from maker_arm_lab.core import heap_oracle, layout, oracle, parts
 from maker_arm_lab.core.global_ik import JointTrim, tool_axis_world
 from maker_arm_lab.robots import frames
 
@@ -336,6 +336,100 @@ def _stub_rig(num_envs: int = 1, num_bricks: int = 4):
         random.Random(0),
     )
     return env, rig
+
+
+# --------------------------------------------------------------------------------------
+# The LIFT gate on a heap: the target missed, but the jaws are not empty. Measured on the
+# round-dish heaps of 2026-09-17: 16 of 154 LIFT reports, 10.4 %, gripped a NON-target part
+# 100-144 mm above the desk, and REOPEN opened the jaws and dropped it back into the heap.
+# --------------------------------------------------------------------------------------
+
+
+def _missed_lift(rig, orc, target=0, neighbour=1, neighbour_z=0.08):
+    """Env 0 at LIFT's end: ``target`` still on the desk, ``neighbour`` up in the jaws.
+
+    The target's `brick_start` is its live pose, so its rise is 0 and the gate misses it.
+    Both parts sit at the pick point's xy, which is where a part in the jaws is.
+    """
+    rig.oracles[0] = orc
+    orc.target_brick = target
+    orc.phase = oracle.Phase.LIFT
+    pick = rig.pick_point(0)
+    for brick, z in ((target, 0.0048), (neighbour, neighbour_z)):
+        rig.env.scene[f"brick_{brick}"].data.root_pos_w[0] = torch.tensor(
+            [float(pick[0]), float(pick[1]), z]
+        )
+    rig.brick_start[0] = rig._brick_pos(0, target)
+
+
+def _heap_oracle(rig, num_parts=3):
+    orc = heap_oracle.HeapOracle(
+        rig.bl,
+        [parts.make_part("brick", 2, 4)] * num_parts,
+        0,
+        oracle.nominal_draw(),
+        rng=random.Random(0),
+    )
+    orc.cycle_parts = [0]  # the cycle selection started, which the swap has to rewrite
+    return orc
+
+
+def test_a_heap_lift_carries_the_part_the_jaws_actually_hold():
+    _env, rig = _stub_rig(num_envs=1, num_bricks=3)
+    orc = _heap_oracle(rig)
+    _missed_lift(rig, orc)
+
+    result = rig._lift_result(0, "converged")
+
+    assert result.lifted is True
+    assert orc.target_brick == 1
+    assert orc.held_swaps == 1
+    assert orc.cycle_parts == [1]
+
+
+def test_a_six_brick_lift_stays_a_miss_when_the_jaws_hold_another_brick():
+    """The gated six-brick corpus grades by colour, so its LIFT is untouched: the same scene
+    is still a miss, and the target still the brick that was selected."""
+    _env, rig = _stub_rig(num_envs=1, num_bricks=3)
+    orc = rig.oracles[0]
+    _missed_lift(rig, orc)
+
+    result = rig._lift_result(0, "converged")
+
+    assert result.lifted is False
+    assert orc.target_brick == 0
+
+
+def test_a_lift_does_not_adopt_a_part_that_is_already_in_the_bin():
+    """A stowed part sits above LIFT_MIN_RISE inside the bin, and the retreat brings the tool
+    back over it -- so height and proximity alone would read it as held."""
+    _env, rig = _stub_rig(num_envs=1, num_bricks=3)
+    orc = _heap_oracle(rig)
+    _missed_lift(rig, orc)
+    orc._sorted = {1}
+
+    result = rig._lift_result(0, "converged")
+
+    assert result.lifted is False
+    assert orc.target_brick == 0
+    assert orc.held_swaps == 0
+    assert orc.cycle_parts == [0]
+
+
+def test_a_lift_adopts_the_held_part_nearest_the_pick_point():
+    _env, rig = _stub_rig(num_envs=1, num_bricks=3)
+    orc = _heap_oracle(rig)
+    _missed_lift(rig, orc, neighbour=2)
+    pick = rig.pick_point(0)
+    # Brick 1 is also up, but 20 mm out: inside the xy tolerance and further than brick 2.
+    rig.env.scene["brick_1"].data.root_pos_w[0] = torch.tensor(
+        [float(pick[0]) + 0.02, float(pick[1]), 0.08]
+    )
+
+    result = rig._lift_result(0, "converged")
+
+    assert result.lifted is True
+    assert orc.target_brick == 2
 
 
 def test_the_walk_moves_the_target_every_step_and_ends_on_the_last_waypoint():

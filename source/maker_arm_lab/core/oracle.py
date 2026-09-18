@@ -715,6 +715,13 @@ class EnvOracle:
 
         Off here, so the six-brick task keeps the fully open descend its gated corpus was
         recorded with. ``HeapOracle`` turns it on (MS6 rung 1)."""
+        self.accepts_any_held_part = False
+        """May a cycle carry off a part the jaws hold that is not the target?
+
+        Off here: the six-brick task grades by colour, so a brick in the wrong jaws belongs in
+        another bin, and the gated corpus was recorded with this LIFT. ``HeapOracle`` turns it
+        on, where one bin takes every part. The runtime's LIFT gate reads it
+        (``oracle_runtime.OracleRig._lift_result``)."""
         # One entry per completed pick cycle: did the brick reach its bin (RETREAT's read).
         # The heap batch loop negates the recorded frames of a False cycle (MS6 design H7).
         self.cycle_outcomes: list[bool] = []

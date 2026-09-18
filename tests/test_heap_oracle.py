@@ -65,7 +65,7 @@ def _to_hover(orc, scene):
 
 
 def _heap_with_parts(parts_list, flat):
-    """A heap oracle plus a scene with each part on the desk at the tray center.
+    """A heap oracle plus a scene with each part on the desk at the disc center.
 
     `flat=True` sits each part at the identity quaternion, so a plate lies with its 3.2 mm
     thickness straight up. `flat=False` rolls each part 90 degrees about its long axis, the
@@ -74,7 +74,7 @@ def _heap_with_parts(parts_list, flat):
     orc = _oracle(parts_list)
     quat = IDENTITY if flat else torch.tensor(quat_from_rpy_deg((90.0, 0.0, 0.0)))
     positions = [
-        [layout.TRAY_CENTER[0] + 0.03 * i, layout.TRAY_CENTER[1], p.size[2] / 2]
+        [layout.HEAP_CENTER[0] + 0.03 * i, layout.HEAP_CENTER[1], p.size[2] / 2]
         for i, p in enumerate(parts_list)
     ]
     scene = _snapshot(positions)
@@ -97,6 +97,10 @@ def test_release_and_stowed_read_the_destination_bin():
     orc = _oracle([BRICK], destination=3)
     target = orc._release_target(0)
     assert target[1] == pytest.approx(BL.bin_ys[3]) and target[2] == oracle.RELEASE_Z
+    # The same release point as the six-brick oracle: a heap setback of 0.035 m opened the
+    # jaws 8 mm past the matched ceiling at RELEASE (driven, 2026-09-18), so the backstop
+    # wall alone catches the slide (layout.HEAP_BIN_BACKSTOP).
+    assert target[0] == pytest.approx(BL.bin_x - oracle.RELEASE_X_SETBACK)
     # _stowed grades against the one heap bin (the MS6 z-centre fix), so it reads the same
     # centre regardless of orc.destination.
     assert orc._stowed(_snapshot([[0.0, 0.0, 0.0]], stowed=(0,))) == {0}
@@ -121,42 +125,10 @@ def _push_phases(orc, scene):
     assert orc.phase is oracle.Phase.HOVER and orc.push is None
 
 
-def test_a_wall_side_part_is_pushed_toward_the_tray_center_then_tipped(monkeypatch):
-    # A long plate just inside the rim, short side along y: its one closing axis lands a
-    # jaw past the rim. The blocking distance is the matched landing gap, not the old
-    # fully-open 52.4 mm, so it is derived from the plate's own grasp width.
-    monkeypatch.setattr(heap_oracle, "TIP_MIN_GRIP_HEIGHT", 0.005)
-    (x0, x1), (y0, y1) = layout.tray_bounds()
-    orc = _oracle([LONG_PLATE])
-    # Two bounds meet in a 2 mm window: closer to the rim than the landing gap plus a tip
-    # thickness, so a jaw lands past the rim; far enough in that the closed tips still fit
-    # behind the plate inside PUSH_WALL_MARGIN_M, or there is no push to plan.
-    inset = grasp.landing_half_gap(LONG_PLATE.size[1]) + 0.001
-    scene = _snapshot([[layout.TRAY_CENTER[0], y1 - inset, 0.0016]])
-    goal = _to_hover(orc, scene)
-    assert goal.phase is oracle.Phase.PUSH_HOVER and orc.push_parts == [0]
-    cx, cy = layout.TRAY_CENTER
-    start, end = orc.push.start, orc.push.end
-    assert x0 < start[0] < x1 and y0 < start[1] < y1
-    assert math.hypot(end[0] - cx, end[1] - cy) < math.hypot(start[0] - cx, start[1] - cy)
-    _push_phases(orc, scene)
-    assert orc.pushes == 1 and orc.pushes_in_a_row == 1
-    moved = _snapshot([[layout.TRAY_CENTER[0], 0.0, 0.0016]])
-    # A LONG_PLATE is 3.2 mm thick, under TIP_MIN_GRIP_HEIGHT, so the centered plate is
-    # tipped, not picked directly (task 8: the teacher tips a flat part before it picks it).
-    hover = orc.next_goal(moved)
-    assert hover.phase is oracle.Phase.TIP_HOVER and orc.tip is not None and orc.tip.part == 0
-    assert orc.forced_picks == 0
-    # The tip is a corrective like the push, and counts against the same forced-pick
-    # grace period: it raises pushes_in_a_row again once it completes.
-    _tip_phases(orc, moved)
-    assert orc.pushes_in_a_row == 2
-
-
 def test_a_landing_spot_under_a_stack_falls_back_to_the_densest_cell_push():
     # A tall stack one matched jaw gap out on every closing axis of the target blocks
     # both jaws. The gap follows the grasp width now, so the distance does too.
-    x, y = layout.TRAY_CENTER[0], 0.0
+    x, y = layout.HEAP_CENTER[0], 0.0
     d = TOWER_OFFSET
     orc = _oracle([BRICK, BRICK, BRICK, BRICK, BRICK])
     scene = _snapshot(
@@ -175,72 +147,65 @@ def test_a_landing_spot_under_a_stack_falls_back_to_the_densest_cell_push():
     assert goal.phase is oracle.Phase.HOVER and orc.target_brick in (1, 2, 3, 4)
 
 
-def test_three_pushes_then_a_forced_pick_and_done_only_at_a_budget():
-    (_x0, _x1), (_y0, y1) = layout.tray_bounds()
-    orc = _oracle([LONG_PLATE, BRICK])
-    # One plate wall-blocked on its only axis, one brick clear but in an excluded cell.
-    # Two bounds meet in a 2 mm window: closer to the rim than the landing gap plus a tip
-    # thickness, so a jaw lands past the rim; far enough in that the closed tips still fit
-    # behind the plate inside PUSH_WALL_MARGIN_M, or there is no push to plan.
-    inset = grasp.landing_half_gap(LONG_PLATE.size[1]) + 0.001
-    scene = _snapshot([[layout.TRAY_CENTER[0], y1 - inset, 0.0016], [0.19, 0.0, 0.0048]])
-    orc.failures[heap_oracle.HeapOracle.cell_of((0.19, 0.0))] = heap_oracle.CELL_FAILURE_CAP
-    _to_hover(orc, scene)
-    for _ in range(heap_oracle.MAX_PUSHES_IN_A_ROW):
-        _push_phases(orc, scene)
-    assert orc.pushes == heap_oracle.MAX_PUSHES_IN_A_ROW
-    # The pushes moved nothing (stub scene), and the only candidate lands a jaw past the wall,
-    # so no forced pick exists: the teacher keeps pushing instead of giving up.
-    goal = orc.next_goal(scene)
-    assert goal.phase is oracle.Phase.PUSH_HOVER and orc.forced_picks == 0
-    # A candidate whose tips land inside the tray but whose landing spots towers block on
-    # every closing axis becomes the forced pick after the push cap (the towers sit in
-    # excluded cells, so they are not candidates themselves).
-    orc.failures = {}
-    orc.push = None
-    orc.phase = oracle.Phase.HOVER
-    orc.pushes_in_a_row = heap_oracle.MAX_PUSHES_IN_A_ROW
+def _towered_brick():
+    """One brick whose landing spots four 48 mm towers block on every closing axis.
+
+    The towers sit in excluded cells, so they are not candidates themselves, and off the
+    50 mm cell boundary so the +y tower does not share the target's own cell.
+    """
     d = TOWER_OFFSET
-    # Off the 50 mm cell boundary: the towers' cells are excluded, and at y = 0 the +y
-    # tower shares the target's own cell, which would exclude the target with it.
     x, y = 0.19, -0.025
     towers = [[x + d, y], [x - d, y], [x, y + d], [x, y - d]]
     orc = _oracle([BRICK, BRICK, BRICK, BRICK, BRICK])
-    orc.pushes_in_a_row = heap_oracle.MAX_PUSHES_IN_A_ROW
     orc.sizes[1:] = torch.tensor([0.0158, 0.0158, 0.0480])
     for t in towers:
         orc.failures[heap_oracle.HeapOracle.cell_of(t)] = heap_oracle.CELL_FAILURE_CAP
-    blocked = _snapshot([[x, y, 0.0048]] + [[tx, ty, 0.0240] for tx, ty in towers])
-    hover = _to_hover(orc, blocked)
+    scene = _snapshot([[x, y, 0.0048]] + [[tx, ty, 0.0240] for tx, ty in towers])
+    return orc, scene
+
+
+def test_a_blocked_scan_is_a_forced_pick_at_once_and_never_a_push():
+    """MAX_PUSHES_IN_A_ROW is 0 on the bare desk: 20 of 21 forced picks stowed on the rA read
+    while the pushes before them took a third of every episode's steps."""
+    assert heap_oracle.MAX_PUSHES_IN_A_ROW == 0
+    orc, scene = _towered_brick()
+    hover = _to_hover(orc, scene)
+    assert hover.phase is oracle.Phase.HOVER and orc.target_brick == 0
+    assert orc.forced_picks == 1 and orc.pushes == 0 and orc.push is None
+    assert orc.grasp.clearance < 0.0
+    assert orc.extra_stats()["forced_picks"] == 1 and orc.extra_stats()["pushes"] == 0
+
+
+def test_three_pushes_then_a_forced_pick_and_done_only_at_a_budget(monkeypatch):
+    monkeypatch.setattr(heap_oracle, "MAX_PUSHES_IN_A_ROW", 3)
+    orc, scene = _towered_brick()
+    goal = _to_hover(orc, scene)
+    assert goal.phase is oracle.Phase.PUSH_HOVER and orc.target_brick is None
+    for _ in range(heap_oracle.MAX_PUSHES_IN_A_ROW):
+        _push_phases(orc, scene)
+    assert orc.pushes == heap_oracle.MAX_PUSHES_IN_A_ROW
+    # The pushes moved nothing (stub scene). With no dish there is no wall to land past, so
+    # the best grasp is taken anyway once the push cap is reached (fix F2).
+    hover = orc.next_goal(scene)
     assert hover.phase is oracle.Phase.HOVER and orc.target_brick == 0 and orc.forced_picks == 1
-    assert orc.grasp.clearance < 0.0 <= orc.grasp.wall
+    assert orc.grasp.clearance < 0.0
     # DONE comes from the push budget.
-    orc2 = _oracle([LONG_PLATE])
+    orc2, scene2 = _towered_brick()
     orc2.pushes = heap_oracle.PUSH_BUDGET
-    wall_side = _snapshot([[layout.TRAY_CENTER[0], y1 - 0.020, 0.0016]])
-    _to_hover(orc2, wall_side)
-    assert orc2.phase is oracle.Phase.DONE and orc2.next_goal(wall_side) is None
+    _to_hover(orc2, scene2)
+    assert orc2.phase is oracle.Phase.DONE and orc2.next_goal(scene2) is None
 
 
-def test_a_part_outside_the_tray_is_counted_but_never_a_target():
-    (x0, _x1), _ = layout.tray_bounds()
-    orc = _oracle([BRICK, BRICK])
-    scene = _snapshot([[x0 - 0.02, 0.0, 0.0048], [0.19, 0.0, 0.0048]])
+def test_a_part_out_of_reach_is_counted_but_never_a_target():
+    near = layout.SCATTER_MIN_RADIUS - 0.02
+    far = layout.SCATTER_MAX_RADIUS + 0.01
+    orc = _oracle([BRICK, BRICK, BRICK])
+    scene = _snapshot([[near, 0.0, 0.0048], [0.19, 0.0, 0.0048], [far, 0.0, 0.0048]])
     _to_hover(orc, scene)
-    assert orc.target_brick == 1 and orc.outside_tray == 1
+    assert orc.target_brick == 1 and orc.out_of_reach == 2
     alone = _oracle([BRICK])
-    _to_hover(alone, _snapshot([[x0 - 0.02, 0.0, 0.0048]]))
-    assert alone.phase is oracle.Phase.DONE and alone.outside_tray == 1
-
-
-def test_a_part_outside_the_circle_is_counted_and_never_a_target():
-    cx, cy = layout.TRAY_CENTER
-    corner = (cx + layout.TRAY_RADIUS * 0.9, cy + layout.TRAY_RADIUS * 0.9)
-    assert not layout.inside_tray(*corner)  # inside the old rectangle, outside the dish
-    orc = _oracle([BRICK, BRICK])
-    scene = _snapshot([[cx, cy, 0.0048], [corner[0], corner[1], 0.0048]])
-    _to_hover(orc, scene)
-    assert orc.target_brick == 0 and orc.outside_tray == 1
+    _to_hover(alone, _snapshot([[near, 0.0, 0.0048]]))
+    assert alone.phase is oracle.Phase.DONE and alone.out_of_reach == 1
 
 
 def test_a_lift_that_fails_after_the_retries_releases_before_the_next_cycle():
@@ -291,20 +256,20 @@ def test_the_heap_gives_up_on_a_lift_that_did_not_rise_and_keeps_one_that_did():
     assert orc.cycle_outcomes == [False]
 
 
-def test_push_heading_matches_the_old_uniform_draw_at_the_tray_center():
+def test_push_heading_matches_the_old_uniform_draw_at_the_disc_center():
     # At the exact centre, radius == 0, so away == 0.0 (radius <= 1e-6) and bias == 0
-    # (radius / TRAY_RADIUS), leaving heading == a plain uniform draw, exactly as before.
+    # (radius / HEAP_RADIUS), leaving heading == a plain uniform draw, exactly as before.
     orc = heap_oracle.HeapOracle(BL, [BRICK], 1, oracle.nominal_draw(), rng=random.Random(0))
     mirror = random.Random(0)
     for _ in range(20):
-        assert orc._push_heading(layout.TRAY_CENTER) == pytest.approx(
+        assert orc._push_heading(layout.HEAP_CENTER) == pytest.approx(
             mirror.uniform(-math.pi, math.pi)
         )
 
 
-def test_push_heading_never_points_into_the_rim_it_sits_against():
-    at_the_rim = (layout.TRAY_CENTER[0] + layout.TRAY_RADIUS, layout.TRAY_CENTER[1])
-    # radius == TRAY_RADIUS, so bias == 1 (max narrowing) and away == pi (points at the centre).
+def test_push_heading_never_points_out_of_the_disc_at_its_edge():
+    at_the_rim = (layout.HEAP_CENTER[0] + layout.HEAP_RADIUS, layout.HEAP_CENTER[1])
+    # radius == HEAP_RADIUS, so bias == 1 (max narrowing) and away == pi (points at the centre).
     orc = heap_oracle.HeapOracle(BL, [BRICK], 1, oracle.nominal_draw(), rng=random.Random(1))
     headings = [orc._push_heading(at_the_rim) for _ in range(200)]
     assert all(math.cos(h - math.pi) >= -1e-9 for h in headings)  # never > 90 deg from away (pi)
@@ -362,6 +327,47 @@ def test_a_lift_that_fails_after_the_retries_marks_the_cell_and_takes_a_new_cycl
     assert orc.cycles == 2 and len(orc.cycle_parts) == 2
 
 
+def test_a_swapped_hold_carries_the_new_part_through_retreat():
+    """The jaws missed the target and came up with the other part (what the runtime's LIFT
+    gate reports through `adopt_held_part`). Everything the cycle records afterwards must be
+    about the part that was carried: RETREAT grades IT, the cycle log names IT, and the
+    target's cell is not marked failed -- a part did leave the heap."""
+    orc = _oracle([BRICK, BRICK])
+    scene = _snapshot([[0.185, -0.045, 0.0048], [0.205, 0.045, 0.0048]])
+    _to_hover(orc, scene)
+    target = orc.target_brick
+    other = 1 - target
+    for outcome in ("converged", "stalled", "converged"):  # HOVER, DESCEND, CLOSE
+        orc.report(oracle.PhaseResult(outcome=outcome), scene)
+        orc.next_goal(scene)
+    assert orc.phase is oracle.Phase.LIFT and orc.cycle_parts == [target]
+
+    orc.adopt_held_part(other)
+    orc.report(oracle.PhaseResult(outcome="converged", pinch_ok=False, lifted=True), scene)
+
+    assert orc.phase is oracle.Phase.RAISE and orc.target_brick == other
+    for _ in range(3):  # RAISE, EXTEND, RELEASE
+        orc.next_goal(scene)
+        orc.report(oracle.PhaseResult(outcome="converged"), scene)
+    assert orc.phase is oracle.Phase.RETREAT
+    orc.next_goal(scene)
+    orc.report(
+        oracle.PhaseResult(outcome="converged"),
+        _snapshot([[0.185, -0.045, 0.0048], [0.205, 0.045, 0.0048]], stowed=(other,)),
+    )
+    assert orc.cycle_outcomes == [True]
+    assert orc.sorted_bricks == frozenset({other})
+    assert orc.cycle_parts == [other]
+    assert orc.held_swaps == 1 and orc.extra_stats()["held_swaps"] == 1
+    assert orc.failures == {}  # nothing was dropped, so no cell is marked
+
+
+def test_the_six_brick_oracle_never_accepts_another_part():
+    """The flag the runtime's LIFT gate reads: off on the base class, on for a heap."""
+    assert oracle.EnvOracle(BL, 6, oracle.nominal_draw()).accepts_any_held_part is False
+    assert _oracle([BRICK]).accepts_any_held_part is True
+
+
 def test_three_failures_exclude_a_cell_from_selection():
     orc = _oracle([BRICK])
     scene = _snapshot([[0.16, -0.045, 0.0048]])
@@ -379,7 +385,7 @@ def test_candidates_exclude_out_of_reach_lifted_and_stowed_parts():
     )
     mask = orc._candidates(scene)
     assert mask.tolist() == [True, False, False, False]
-    assert orc.outside_tray == 1  # the part at x = 0.35 lies outside the tray
+    assert orc.out_of_reach == 1  # the part at x = 0.35 lies past the reach band
 
 
 def test_extra_stats_report_the_counters():
@@ -391,11 +397,11 @@ def test_extra_stats_report_the_counters():
         "tips": 0,
         "tips_ok": 0,
         "forced_picks": 0,
-        "push_parts": [],
+        "held_swaps": 0,
         "cycle_parts": [],
         "cycle_outcomes": [],
         "cells_excluded": 0,
-        "parts_outside_tray": 0,
+        "parts_out_of_reach": 0,
     }
 
 
@@ -424,14 +430,14 @@ def test_the_shipped_default_never_tips_a_flat_plate():
     assert orc.tip is None
 
 
-def test_the_tip_stroke_starts_beside_the_part_and_stays_in_the_dish(monkeypatch):
+def test_the_tip_stroke_starts_beside_the_part_and_stays_in_reach(monkeypatch):
     monkeypatch.setattr(heap_oracle, "TIP_MIN_GRIP_HEIGHT", 0.005)
     plate = parts.make_part("plate", 2, 4)
     orc, scene = _heap_with_parts([plate], flat=True)
     orc._next_brick(scene)
     start, end = orc.tip.start, orc.tip.end
-    assert layout.inside_tray(*start, margin=0.0)
-    assert layout.inside_tray(*end, margin=0.0)
+    assert layout.in_reach(*start, BL)
+    assert layout.in_reach(*end, BL)
     assert math.isclose(math.dist(start, end), heap_oracle.TIP_STROKE_M, rel_tol=0.2)
 
 

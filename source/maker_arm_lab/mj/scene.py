@@ -93,6 +93,19 @@ LIMIT_SOLREF = (0.002, 1.0)
 # 7.6 N. The direct form (-50000, -300) matched Isaac closer (7.2 mm, 7.6 N) but puts a 50 kN/m
 # spring under every resting brick; the time-constant form is the standard, safer choice.
 CONTACT_SOLREF = (0.005, 1.0)
+# The desk is a hard surface (owner decision 2026-09-18: the parts sank into it). The
+# time-constant form scales a contact's stiffness with the lighter body, so a 3 g part under
+# the jaws' 2.9 N grip sank 1.9 mm into the desk and 13.0 mm under 20 N, more than its own
+# height (measured 2026-09-18 on a lone 2x4 brick). The lever is the impedance, not the time
+# constant: at (0.99, 0.999) the same presses read 0.16 mm and 0.55 mm, and a settled
+# 50-part heap rests at 0.01 mm mean. `solmix` weights the pair's solref and solimp toward
+# the desk's values and nothing else: a geom priority would also hand the pair the desk's
+# condim 3 and friction 1.0, which drops the torsional friction of BRICK_CONDIM and the
+# per-episode friction draw of mj/env.py for every part-desk pair, in the six-brick task
+# too (branch review, 2026-09-18). The jaw-part and part-part pairs the pinch tuning sits on
+# are untouched either way.
+DESK_SOLIMP = (0.99, 0.999, 0.001, 0.5, 2.0)
+DESK_SOLMIX = 1.0e6
 
 # Contact tuning for a 3 g brick between convex-hull finger meshes. Nominal sliding friction
 # is the centre of the Isaac static-friction DR range (0.8-1.2); torsional and rolling terms
@@ -206,9 +219,20 @@ def _add_position_actuator(spec, joint: str, kp: float, kd: float, force_limit: 
 
 
 def _add_part_geoms(spec, body, index: int, part: _parts.Part, rgba) -> mujoco.MjsGeom:
-    """One collider (box or slope hull) plus visual-only studs (design H3); returns the collider."""
+    """One collider (box, cylinder or slope hull) plus visual-only studs (design H3).
+
+    Returns the collider.
+    """
     name = f"brick_{index}_geom"
-    if part.hull is None:
+    if part.family == "round":
+        geom = body.add_geom(
+            name=name,
+            type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+            size=[part.size[0] / 2, part.size[2] / 2, 0.0],
+            rgba=list(rgba),
+            friction=list(BRICK_FRICTION),
+        )
+    elif part.hull is None:
         geom = body.add_geom(
             name=name,
             type=mujoco.mjtGeom.mjGEOM_BOX,
@@ -244,12 +268,11 @@ def build_spec(
     num_bricks: int = 6,
     cameras_on: bool = True,
     parts: Sequence[_parts.Part] | None = None,
-    tray: bool = False,
 ) -> mujoco.MjSpec:
     """The MjSpec for one run draw; ``compile_model`` turns it into a model and handles.
 
-    ``parts`` (MS6) replaces the ``num_bricks`` identical box bricks with one body per part,
-    and ``tray`` adds the rim segments of ``layout.tray_static_boxes``.
+    ``parts`` (MS6) replaces the ``num_bricks`` identical box bricks with one body per part.
+    A heap lies on the bare desk: there is no dish (owner decision 2026-09-18).
     """
     if parts is not None:
         num_bricks = len(parts)
@@ -301,15 +324,17 @@ def build_spec(
             rgba=[*draw["floor_color"], 1.0],
         )
     )
-    scene_geoms.append(
-        spec.worldbody.add_geom(
-            name="desk",
-            type=mujoco.mjtGeom.mjGEOM_BOX,
-            size=_half(layout.DESK_SIZE),
-            pos=list(layout.DESK_POS),
-            rgba=[0.5, 0.4, 0.3, 1.0],
-        )
+    desk = spec.worldbody.add_geom(
+        name="desk",
+        type=mujoco.mjtGeom.mjGEOM_BOX,
+        size=_half(layout.DESK_SIZE),
+        pos=list(layout.DESK_POS),
+        rgba=[0.5, 0.4, 0.3, 1.0],
     )
+    desk.solmix = DESK_SOLMIX
+    desk.solref = list(CONTACT_SOLREF)
+    desk.solimp = list(DESK_SOLIMP)
+    scene_geoms.append(desk)
     scene_geoms.append(
         spec.worldbody.add_geom(
             name="shelf",
@@ -319,7 +344,9 @@ def build_spec(
             rgba=[0.6, 0.6, 0.6, 1.0],
         )
     )
-    bin_boxes = layout.heap_bin_static_boxes(bl) if tray else layout.bin_static_boxes(bl)
+    bin_boxes = (
+        layout.heap_bin_static_boxes(bl) if parts is not None else layout.bin_static_boxes(bl)
+    )
     for name, center, size in bin_boxes:
         color = name.split("_")[1]
         rgba = (
@@ -336,19 +363,6 @@ def build_spec(
                 rgba=rgba,
             )
         )
-
-    if tray:
-        for name, center, size, quat in layout.tray_static_boxes():
-            scene_geoms.append(
-                spec.worldbody.add_geom(
-                    name=name,
-                    type=mujoco.mjtGeom.mjGEOM_BOX,
-                    size=_half(size),
-                    pos=list(center),
-                    quat=list(quat),
-                    rgba=[0.35, 0.35, 0.35, 1.0],
-                )
-            )
 
     # Bricks: free bodies; the default pose is overwritten by the first reset's scatter.
     for index in range(num_bricks):
@@ -479,12 +493,11 @@ def build_model(
     num_bricks: int = 6,
     cameras_on: bool = True,
     parts: Sequence[_parts.Part] | None = None,
-    tray: bool = False,
 ) -> tuple[mujoco.MjModel, SceneHandles]:
     """One call for callers that do not need to edit the spec."""
     if parts is not None:
         num_bricks = len(parts)
-    return compile_model(build_spec(draw, num_bricks, cameras_on, parts, tray), num_bricks)
+    return compile_model(build_spec(draw, num_bricks, cameras_on, parts), num_bricks)
 
 
 # -- per-episode draws: the same numbers as build_spec, written into a compiled model ----------

@@ -297,7 +297,7 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
     finally:
         wall_seconds = time.time() - start
         exported = env.recorder_manager.exported_successful_episode_count
-        # A heap episode's "success" needs every part in the tray stowed, so at the phase's
+        # A heap episode's "success" needs every part of the heap stowed, so at the phase's
         # own 0.90-per-part target `exported` undercounts a heap run's usable output badly.
         # `exported_written` is every episode the recorder wrote, success or not, which is
         # what a heap caller (mj_generate_batch.py) should gate BATCH_OK on instead.
@@ -374,7 +374,7 @@ def run_stats(
         stowed = sum(int(e.get("bricks_delivered", 0)) for e in episodes)
         stats["parts_total"] = num_bricks * len(episodes)
         stats["parts_stowed"] = stowed
-        stats["parts_outside_tray"] = sum(int(e.get("parts_outside_tray", 0)) for e in episodes)
+        stats["parts_out_of_reach"] = sum(int(e.get("parts_out_of_reach", 0)) for e in episodes)
         stats["cycles"] = sum(int(e.get("cycles", 0)) for e in episodes)
         stats["pushes"] = sum(int(e.get("pushes", 0)) for e in episodes)
         stats["cycles_per_stowed"] = stats["cycles"] / stowed if stowed else None
@@ -490,7 +490,7 @@ def add_batch_arguments(parser) -> None:
         "--heap_k",
         type=_heap_k_type(parser),
         default=0,
-        help="MuJoCo only: replace the six bricks with a heap of K mixed parts in a tray (MS6). "
+        help="MuJoCo only: replace the six bricks with a heap of K mixed parts on the desk (MS6). "
         f"0 is the six-brick task; K must be <= {MAX_HEAP_K} (mj/recorder.py's obs/cycle_brick "
         "and obs/target_part are int8).",
     )

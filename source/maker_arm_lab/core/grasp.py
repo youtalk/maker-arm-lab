@@ -7,21 +7,20 @@ descend has to clear is not the part's neighborhood but the two LANDING spots of
 the finger tips come down ``landing_half_gap(width)`` out from the part center on both sides
 of the closing axis. The jaws used to descend fully open, which asked for 52.4 mm of clear
 floor on both sides whatever the part; on the three MS6 read heaps that refused 84.1 % of
-every in-dish part sighting, and 67.4 % of those at the rim alone, because the dish radius is
-88 mm (MS6 rung 1).
+every part sighting in the dish of that time (MS6 rung 1).
 The closing stroke then sweeps everything between a tip and the part toward the part, which
 the physics tolerates (a brick target is stowed with a brick or a plate in the sweep band,
-lone-part reads 2026-09-16). A tray wall under a landing spot is a hard stop: a jaw whose
-inner face lands past the wall's inner face never picks, one that lands inside picks even
-when it brushes the wall top (wall reads 2026-09-16). A standing neighbor under a landing
-spot stalls the descend early. Grasps rank by height band, then by how many standing
-neighbors the stroke sweeps, then by clearance.
+lone-part reads 2026-09-16). A standing neighbor under a landing spot stalls the descend
+early. Grasps rank by height band, then by how many standing neighbors the stroke sweeps,
+then by clearance. The heap lies on the bare desk since 2026-09-18, so the only obstacles
+are other parts; the dish rim this module once modeled as a hard stop is gone.
 """
 
 from __future__ import annotations
 
 import math
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 import torch
@@ -33,11 +32,9 @@ from maker_arm_lab.core.quat import quat_apply
 AXIS_MAX_TILT_RAD = math.radians(15.0)
 """A body axis this far from horizontal still counts as a closing axis."""
 CLEARANCE_MIN = 0.0
-"""Landing clearance (m) a grasp needs to be selected.
-
-The model's own boundary already matches the physics: a jaw whose tip lands 0.6 mm inside
-the wall face picks, one that lands 2.6 mm past it does not (wall reads, 2026-09-16).
-"""
+"""Landing clearance (m) a grasp needs to be selected. A landing spot on a neighbor is a
+negative clearance, and the model's own boundary is the pick boundary (wall reads,
+2026-09-16, on the dish of that time)."""
 # The open jaw, measured in the MuJoCo model in the grasp frame (2026-09-16). Each finger's
 # collision hull ends in a flat tip 8 mm across the face and 2 mm along jaw travel, with a
 # vertical inner face ``OPEN_HALF_GAP`` from the tool axis when the jaws are open. Above the
@@ -83,10 +80,9 @@ class Grasp:
     heading: float  # world heading of the closing axis, rad
     width: float  # part size along the closing axis, m
     half_height: float  # half the part size along its most vertical axis, m
-    clearance: float  # m from the landing tips to the nearest wall or standing neighbor
+    clearance: float  # m from the landing tips to the nearest standing neighbor
     height: float  # part center z, m
     swept: int = 0  # standing neighbors the closing stroke pushes toward the part
-    wall: float = math.inf  # m from the landing tips to the nearest tray wall
 
 
 def landing_half_gap(width: float) -> float:
@@ -124,16 +120,18 @@ def candidate_grasps(
     pos: torch.Tensor,
     quat: torch.Tensor,
     tilt_rad: float = 0.0,
+    closing_axes: tuple[int, ...] = (0, 1, 2),
 ) -> list[Grasp]:
     """Every closing axis within AXIS_MAX_TILT_RAD of the jaw plane, under MAX_GRASP_WIDTH.
 
-    The jaw plane is horizontal at ``tilt_rad = 0.0``.
+    The jaw plane is horizontal at ``tilt_rad = 0.0``. ``closing_axes`` are the body axes the
+    part's shape allows (``parts.Part.closing_axes``): a slope offers only its y axis.
     """
     axes = body_axes_world(quat)
     off_plane = off_plane_axes(axes, tilt_rad)
     half_height = 0.5 * float(size[int(off_plane.argmax())])
     found = []
-    for k in range(3):
+    for k in closing_axes:
         if float(off_plane[k]) > math.sin(AXIS_MAX_TILT_RAD):
             continue
         width = float(size[k])
@@ -277,26 +275,20 @@ def jaw_clearance(
     other_pos: torch.Tensor,
     other_hz: torch.Tensor,
     other_footprints: list[list[tuple[float, float]]],
-    wall_footprints: list[list[tuple[float, float]]],
-) -> tuple[float, int, float]:
-    """``(clearance, swept, wall)`` for a grasp at ``pos`` closing along ``heading``.
+) -> tuple[float, int]:
+    """``(clearance, swept)`` for a grasp at ``pos`` closing along ``heading``.
 
-    ``clearance`` is the horizontal distance from the landing tips to the nearest wall or
-    standing neighbor, negative when a footprint overlaps a landing spot. A neighbor stands
-    when its top reaches into the target's grip band, the top ``MIN_GRIP_OVERLAP`` of its
-    side faces. ``swept`` counts the standing neighbors whose footprint crosses a closing
-    stroke. ``wall`` is the wall-only clearance of the whole stroke, landing spot
-    included, measured with the tip itself: the slanted hull above the tip slides off a wall
-    edge, so only the tip's own footprint counts, but a tip that lands past a wall has to
-    cross it on the way in.
+    ``clearance`` is the horizontal distance from the landing tips to the nearest standing
+    neighbor, negative when a footprint overlaps a landing spot and infinite with none. A
+    neighbor stands when its top reaches into the target's grip band, the top
+    ``MIN_GRIP_OVERLAP`` of its side faces. ``swept`` counts the standing neighbors whose
+    footprint crosses a closing stroke.
     """
     bottom = float(pos[2]) - half_height
     band = float(pos[2]) + half_height - MIN_GRIP_OVERLAP
     half_gap = landing_half_gap(width)
-    strokes = sweep_footprints(pos, heading, width, half_gap + TIP_THICKNESS)
-    wall = min((polygon_distance(t, w) for t in strokes for w in wall_footprints), default=math.inf)
     standing = torch.nonzero(other_pos[:, 2] + other_hz > band).flatten().tolist()
-    clearance = wall
+    clearance = math.inf
     swept = 0
     if standing:
         sweeps = sweep_footprints(pos, heading, width, half_gap)
@@ -306,7 +298,7 @@ def jaw_clearance(
             clearance = min(clearance, min(polygon_distance(t, other_footprints[k]) for t in spots))
             if any(polygon_distance(b, other_footprints[k]) < 0.0 for b in sweeps):
                 swept += 1
-    return clearance, swept, wall
+    return clearance, swept
 
 
 def rank_grasps(
@@ -314,14 +306,16 @@ def rank_grasps(
     pos: torch.Tensor,
     quat: torch.Tensor,
     candidates: torch.Tensor,
-    wall_footprints: list[list[tuple[float, float]]],
     tilt_rad: float = 0.0,
+    closing_axes: Sequence[tuple[int, ...]] | None = None,
 ) -> list[Grasp]:
     """Every grasp of every candidate part with its clearance, best first.
 
-    Other parts enter through ``neighbor_extents`` and ``footprint``; the walls come from
-    ``tray_wall_obstacles``. The order is the height band (highest first), then the swept
-    count, then the clearance.
+    Other parts enter through ``neighbor_extents`` and ``footprint``. ``closing_axes`` is
+    one axis tuple per part (``parts.Part.closing_axes``); None lets every part offer all
+    three. The order is the height band (highest first), then the swept count, then the
+    clearance, then the narrower width: a wide grasp closes on one side first and slides the
+    part away (docs/ms6-matched-jaw-opening.md section 5), so it is the last resort at a tie.
     """
     _, hz = neighbor_extents(sizes, quat)
     prints = [footprint(sizes[b], pos[b], quat[b]) for b in range(sizes.shape[0])]
@@ -331,19 +325,13 @@ def rank_grasps(
         others[b] = False
         other_pos, other_hz = pos[others], hz[others]
         other_prints = [prints[k] for k in torch.nonzero(others).flatten().tolist()]
-        for g in candidate_grasps(b, sizes[b], pos[b], quat[b], tilt_rad):
-            clearance, swept, wall = jaw_clearance(
-                pos[b],
-                g.heading,
-                g.width,
-                g.half_height,
-                other_pos,
-                other_hz,
-                other_prints,
-                wall_footprints,
+        axes_b = (0, 1, 2) if closing_axes is None else closing_axes[b]
+        for g in candidate_grasps(b, sizes[b], pos[b], quat[b], tilt_rad, axes_b):
+            clearance, swept = jaw_clearance(
+                pos[b], g.heading, g.width, g.half_height, other_pos, other_hz, other_prints
             )
-            ranked.append(replace(g, clearance=clearance, swept=swept, wall=wall))
-    ranked.sort(key=lambda g: (-math.floor(g.height / HEIGHT_BAND), g.swept, -g.clearance))
+            ranked.append(replace(g, clearance=clearance, swept=swept))
+    ranked.sort(key=lambda g: (-math.floor(g.height / HEIGHT_BAND), g.swept, -g.clearance, g.width))
     return ranked
 
 
@@ -364,72 +352,28 @@ def densest_cell(xy: torch.Tensor, cell: float = PUSH_CELL_M) -> tuple[float, fl
 
 PUSH_START_GAP_M = 0.004
 """Gap (m) between the pushed part's footprint and the closed tips' landing spot."""
-PUSH_WALL_MARGIN_M = TIP_HALF_FACE
-"""The closed tips' center stays this far (m) inside the tray interior: the tip touches a
-wall face at most, and the slanted hull above it slides off the wall edge (wall reads)."""
-PUSH_MIN_GAIN_M = 0.005
-"""A push must bring its part at least this much (m) closer to the tray center."""
+PUSH_REACH_MARGIN_M = TIP_HALF_FACE
+"""The closed tips' center stays this far (m) inside the reach band."""
 
 
-def clamp_to_tray(
-    point: tuple[float, float], margin: float = PUSH_WALL_MARGIN_M
+def clamp_to_reach(
+    point: tuple[float, float], margin: float = PUSH_REACH_MARGIN_M
 ) -> tuple[float, float]:
-    """Pull a point back along its own radius until it is ``margin`` inside the rim.
+    """Pull a point along its own radius from the base until it is ``margin`` inside the band.
 
-    A ``margin`` past ``layout.TRAY_RADIUS`` clamps to the dish centre rather than going
-    negative, which would reflect the point through the centre onto the far side.
+    The band is ``layout.SCATTER_MIN_RADIUS`` to ``layout.SCATTER_MAX_RADIUS``. A point
+    at the base itself has no radius and is returned as it is.
     """
-    cx, cy = layout.TRAY_CENTER
-    dx, dy = point[0] - cx, point[1] - cy
-    radius = math.hypot(dx, dy)
-    limit = max(0.0, layout.TRAY_RADIUS - margin)
-    if radius <= limit or radius == 0.0:
+    radius = math.hypot(*point)
+    if radius == 0.0:
         return point
-    scale = limit / radius
-    return (cx + dx * scale, cy + dy * scale)
-
-
-def push_toward_center(
-    part_xy: tuple[float, float],
-    part_footprint: list[tuple[float, float]],
-    blocked: list[list[tuple[float, float]]],
-    half_length: float = PUSH_HALF_LENGTH_M,
-) -> tuple[tuple[float, float], tuple[float, float]] | None:
-    """A sweep that moves a wall-side part toward the tray center, or None.
-
-    The closed tips land behind the part (on its far side from the tray center), a
-    ``PUSH_START_GAP_M`` off its footprint, clear of every footprint in ``blocked`` and
-    ``PUSH_WALL_MARGIN_M`` inside the walls, then sweep through the part's center toward the
-    tray center. When the straight-in approach has no room, the start swings to either side,
-    up to 115 degrees, as long as the sweep still brings the part ``PUSH_MIN_GAIN_M`` closer
-    to the tray center: a part in a corner is pushed out along one wall.
-    """
-    cx, cy = layout.TRAY_CENTER
-    dx, dy = part_xy[0] - cx, part_xy[1] - cy
-    radius = math.hypot(dx, dy)
-    away = math.atan2(dy, dx) if radius > 1e-6 else 0.0
-    for turn in (0.0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.0, -2.0):
-        heading = away + turn
-        c, s = math.cos(heading), math.sin(heading)
-        start = None
-        for k in range(1, 30):
-            point = (part_xy[0] + 0.002 * k * c, part_xy[1] + 0.002 * k * s)
-            if clamp_to_tray(point) != point:
-                break
-            tip = tip_footprint(point)
-            if polygon_distance(tip, part_footprint) < PUSH_START_GAP_M:
-                continue
-            if any(polygon_distance(tip, b) < 0.0 for b in blocked):
-                continue
-            start = point
-            break
-        if start is None:
-            continue
-        end = clamp_to_tray((part_xy[0] - half_length * c, part_xy[1] - half_length * s))
-        if math.hypot(end[0] - cx, end[1] - cy) > radius - PUSH_MIN_GAIN_M:
-            continue
-        return start, end
-    return None
+    low = layout.SCATTER_MIN_RADIUS + margin
+    high = layout.SCATTER_MAX_RADIUS - margin
+    target = min(max(radius, low), high)
+    if target == radius:
+        return point
+    scale = target / radius
+    return (point[0] * scale, point[1] * scale)
 
 
 def tip_footprint(point: tuple[float, float]) -> list[tuple[float, float]]:
@@ -446,29 +390,8 @@ def tip_footprint(point: tuple[float, float]) -> list[tuple[float, float]]:
 def push_segment(
     center: tuple[float, float], heading: float, half_length: float = PUSH_HALF_LENGTH_M
 ) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Start and end of a straight sweep through ``center`` along ``heading``, inside the tray."""
+    """Start and end of a straight sweep through ``center`` along ``heading``, in reach."""
     dx, dy = half_length * math.cos(heading), half_length * math.sin(heading)
-    return clamp_to_tray((center[0] - dx, center[1] - dy)), clamp_to_tray(
+    return clamp_to_reach((center[0] - dx, center[1] - dy)), clamp_to_reach(
         (center[0] + dx, center[1] + dy)
     )
-
-
-# ponytail: the rim is modelled as a vertical stop at its xy shadow, which refuses some
-# grasps the 45 degree slope would accept. Upgrade to a sloped stop if rung R2 reads a
-# clearance loss at the rim.
-def tray_wall_obstacles() -> list[list[tuple[float, float]]]:
-    """The dish rim segments as world-xy footprints, for ``rank_grasps``.
-
-    The rim leans outward, so its xy footprint is the leaning slab's shadow. The model still
-    treats it as a stop that stands where the shadow is.
-    """
-    prints = []
-    for _, center, size, quat in layout.tray_static_boxes():
-        prints.append(
-            footprint(
-                torch.tensor(size, dtype=torch.float32),
-                torch.tensor(center, dtype=torch.float32),
-                torch.tensor(quat, dtype=torch.float32),
-            )
-        )
-    return prints

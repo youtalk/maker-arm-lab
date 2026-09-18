@@ -8,11 +8,46 @@ import pytest
 from maker_arm_lab.core import layout, parts
 
 
-def test_catalog_has_62_parts_in_a_fixed_order():
+def test_catalog_has_29_parts_in_a_fixed_order_and_no_flat_or_round_part():
     names = [p.name for p in parts.catalog()]
-    assert len(names) == 62 and len(set(names)) == 62
+    assert len(names) == 29 and len(set(names)) == 29
     assert names[0] == "brick_1x1" and names[-1] == "slope_2x4"
-    assert names.count("plate_2x4") == 1 and "tile_4x8" in names
+    assert "brick_1x2x5" in names and "slope_1x2" in names
+    assert not [n for n in names if n.startswith(parts.FLAT_FAMILIES + parts.RETIRED_FAMILIES)]
+    assert parts.FAMILIES == ("brick", "slope")
+
+
+def test_the_retired_parts_left_the_catalog_and_still_replay():
+    """The 1x1 round lifted 15 of 44 and the two pure wedges 26 of 47 on the rA read; the
+    2x2 rounds rolled (21 of 43 lifts, two off the desk) on the b3 read."""
+    names = {p.name for p in parts.catalog()}
+    assert not names & {"round_1x1", "round_2x2", "round_2x2x2", "round_4x4"}
+    assert not names & {"slope_1x1", "slope_2x1"}
+    assert parts.by_name(["round_1x1", "round_2x2x2", "slope_2x1"]) == [
+        parts.make_part("round", 1, 1),
+        parts.make_part("round", 2, 2, 2),
+        parts.make_part("slope", 2, 1),
+    ]
+    with pytest.raises(ValueError):
+        parts.make_part("cone", 1, 1)
+
+
+def test_a_slope_never_closes_along_its_run():
+    """y across the side faces, z between the flat bottom and the flat top, never x."""
+    assert parts.make_part("slope", 2, 4).closing_axes == parts.SLOPE_AXES == (1, 2)
+    assert parts.make_part("brick", 2, 4).closing_axes == parts.BOX_AXES == (0, 1, 2)
+    assert parts.make_part("round", 2, 2).closing_axes == parts.BOX_AXES
+
+
+def test_tall_and_round_bricks_have_the_lego_sizes():
+    tall = parts.make_part("brick", 1, 2, 3)
+    assert tall.name == "brick_1x2x3" and tall.family == "brick"
+    assert tall.size == pytest.approx((0.0158, 0.0078, 3 * parts.BRICK_HEIGHT))
+    round_ = parts.make_part("round", 2, 2)
+    assert round_.size == pytest.approx((0.0158, 0.0158, parts.BRICK_HEIGHT))
+    assert round_.studs and round_.hull is None
+    box = parts.make_part("brick", 2, 2)
+    assert round_.mass == pytest.approx(box.mass * math.pi / 4)
 
 
 def test_the_2x4_brick_is_todays_brick():
@@ -51,9 +86,9 @@ def test_graspability_filter_drops_a_six_by_six():
 def test_split_is_stratified_deterministic_and_disjoint():
     cat = parts.catalog()
     train, held = parts.split(cat, 20260915)
-    assert len(held) == 14 and len(train) == 48
+    assert len(held) == 7 and len(train) == 22
     counts = {f: sum(1 for p in held if p.family == f) for f in parts.FAMILIES}
-    assert counts == {"brick": 4, "plate": 4, "tile": 4, "slope": 2}
+    assert counts == {"brick": 5, "slope": 2}
     assert not {p.name for p in train} & {p.name for p in held}
     again = parts.split(cat, 20260915)
     assert [p.name for p in again[1]] == [p.name for p in held]
@@ -77,8 +112,9 @@ def test_sample_parts_draws_with_replacement():
     assert len(drawn) == 10 and all(p in pool for p in drawn)
 
 
-def test_by_name_round_trips_the_catalog():
+def test_by_name_round_trips_the_catalog_and_still_replays_a_flat_part():
     cat = parts.catalog()
     assert parts.by_name([p.name for p in cat]) == cat
+    assert parts.by_name(["plate_2x4"]) == [parts.make_part("plate", 2, 4)]
     with pytest.raises(KeyError):
         parts.by_name(["brick_9x9"])
