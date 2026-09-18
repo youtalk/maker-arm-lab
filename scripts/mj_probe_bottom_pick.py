@@ -181,14 +181,18 @@ class BottomPickRig(OracleRig):
     # -- the descend --------------------------------------------------------
 
     def _matched_opening_command(self, i: int, fully_open: float) -> float:
-        """This rig drives the jaws itself, so the base class's jaw policy stands aside.
+        """The base class's jaw policy stands aside only while this rig drives the jaws.
 
         Since MS6 rung 1 ``OracleRig`` holds the grasp's own opening through HOVER and
         DESCEND for any oracle that asks for it, and ``HeapOracle`` does. That is a DIFFERENT
-        primitive from the one this probe measures: this one descends narrow and opens FULLY
-        at the pick depth. Letting both act would measure neither.
+        primitive from the one ``--bottom_open`` measures: this one descends narrow and opens
+        FULLY at the pick depth. Letting both act would measure neither.
+
+        ``--shipped`` is the control row, and what it must run is whatever the teacher runs
+        TODAY. Standing aside there too would have made it a fully-open descend and quietly
+        turned every control in this script into a reading of the pre-rung-1 teacher.
         """
-        return fully_open
+        return fully_open if self.bottom_open else super()._matched_opening_command(i, fully_open)
 
     def narrow_gap(self, i: int) -> float:
         """Half the opening the descend holds: the part width, two tip thicknesses and 4 mm."""

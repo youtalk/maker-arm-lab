@@ -273,6 +273,38 @@ MATCHED_OPENING_PHASES = (oracle.Phase.HOVER, oracle.Phase.DESCEND, oracle.Phase
 ROLL_DEADBAND_RAD = math.radians(5.0)
 ROLL_MAX_STEP_RAD = math.radians(6.0)
 
+# MS6 rung 3. The legs that CARRY hold the jaws at the part's own width instead of driving
+# them to `GRIPPER_CLOSED_POS`, for an oracle that asks for it.
+#
+# A binary close command runs the jaws all the way shut, and nothing stops them once a thin
+# part starts to slip. A 9.6 mm brick stalls them at 5.9 mm on a 15.8 mm grasp and is held.
+# A 3.2 mm plate is not: traced per control step on a LONE plate_2x4 with nothing around it,
+# CLOSE ends with 2.9 N on both jaws and the part in the grip, and LIFT then keeps closing --
+# 5.18, 4.81, 4.21, 3.70, 3.19, 2.69 mm -- while the force bleeds off 2.9, 1.0, 0.9, 0.33,
+# 0.00 N. The plate is squeezed out like a pip and the jaws end at 0.02 mm holding nothing.
+# RELEASE is not here: it opens, and MATCHED_OPENING_PHASES already bounds that.
+MATCHED_CLOSE_PHASES = (
+    oracle.Phase.CLOSE,
+    oracle.Phase.LIFT,
+    oracle.Phase.RAISE,
+    oracle.Phase.EXTEND,
+)
+CLOSE_SQUEEZE_M = 0.003
+"""How far past the part's half width the jaws may still close (m).
+
+The contact model penetrates, and by a varying amount: a held grip settles 2.0 to 4.25 mm
+inside the part's half width across the catalog, so this is a floor on the RUNAWAY, not a
+model of the grip. Swept on the lone-part wall table, counting the rows whose grip survived
+the lift: 2.0 mm holds 10 of 12 and cuts off plate_1x4, whose grip needs 2.6 mm; 3.0 mm
+holds 11 of 12; 4.0 mm holds 10 of 12 and 5.0 mm only 8, both starving the wider grasps.
+Read the FORCE in that table and not its `pick` column, which also counts the parts that
+were gripped and then lost on the way to the bin.
+
+For a narrow grasp the floor falls near zero and the jaws behave as they always did, which
+is what the 7.8 mm rows want; it binds on the wide thin parts, which is where the extrusion
+was.
+"""
+
 # Per-step joint jitter (rad) that one raw unit of `EpisodeDraw.action_noise_std` buys.
 # core.oracle calibrates its noise in the raw units of the action space this module used to
 # drive, where a raw unit was IK_SCALE metres of tool motion in one control step; the joint
@@ -595,6 +627,8 @@ class OracleRig:
                 action[i, 6] = goal.gripper
                 if goal.gripper > 0.0 and goal.phase in MATCHED_OPENING_PHASES:
                     action[i, 6] = self._matched_opening_command(i, action[i, 6])
+                elif goal.gripper < 0.0 and goal.phase in MATCHED_CLOSE_PHASES:
+                    action[i, 6] = self._matched_close_command(i, action[i, 6])
                 self._advance_plan(i)
             target = self.q_cmd[i]
             self._planned.append(target)
@@ -1055,6 +1089,24 @@ class OracleRig:
         ):
             plan = plan + self._roll_waypoints(plan[-1])
         self.plans[i] = plan
+
+    def _matched_close_command(self, i: int, fully_closed: float) -> float:
+        """Hold the jaws at the part's own width instead of driving them shut.
+
+        The floor is the grasp's half width less ``CLOSE_SQUEEZE_M``, which is where a brick
+        of the same grasp width settles on its own. Bang-bang around it, the same way
+        ``_matched_opening_command`` holds an opening: what this emits stays a binary gripper
+        command the real arm accepts.
+
+        An oracle that does not ask for it keeps driving the jaws shut, so the six-brick task
+        and its gated corpus are untouched (MS6 rung 3).
+        """
+        orc = self.oracles[i]
+        if not getattr(orc, "matched_jaw_opening", False):
+            return fully_closed
+        floor = max(0.0, 0.5 * float(orc.grasp_width) - CLOSE_SQUEEZE_M)
+        measured = min(self.robot.data.joint_pos[i, self.finger_ids].tolist())
+        return fully_closed if measured > floor else -fully_closed
 
     def _roll_waypoints(self, arrival: torch.Tensor) -> list[torch.Tensor]:
         """Extra EXTEND waypoints that stand the jaw plane up, turning the wrist and nothing else.

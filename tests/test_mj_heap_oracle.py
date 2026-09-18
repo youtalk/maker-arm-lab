@@ -20,10 +20,10 @@ PARTS = [
 ]
 
 
-def _env_and_rig(seed: int = 11):
+def _env_and_rig(seed: int = 11, part_list=None):
     draw = sample_run_draw(random.Random(5))
     draw["slot_colors"] = (0, 1, 2, 3)
-    env = MjLegoSortEnv(1, draw, parts=PARTS, cameras=False)
+    env = MjLegoSortEnv(1, draw, parts=part_list or PARTS, cameras=False)
     env.reset(seed=seed)
     rng = random.Random(1)
 
@@ -195,3 +195,36 @@ def test_the_release_opens_only_far_enough_to_let_the_part_go():
     assert widest < grasp.OPEN_HALF_GAP - 0.010, widest
     # The part must still leave the jaws: a capped opening that never lets go is worse.
     assert stats["bricks_delivered"] == 3, stats
+
+
+def test_a_lone_flat_part_survives_the_lift_instead_of_being_squeezed_out():
+    """MS6 rung 3: CLOSE stops at the part's own width, it does not drive the jaws shut.
+
+    The gripper channel is binary, so a close command runs the jaws all the way to
+    ``GRIPPER_CLOSED_POS``. A 9.6 mm brick stalls them at 5.9 mm and is held. A 3.2 mm plate
+    is not: traced per control step on a LONE plate_2x4 with nothing around it, CLOSE ends
+    with 2.9 N on both jaws and the part in the grip, and then LIFT keeps closing --
+    5.18, 4.81, 4.21, 3.70, 3.19, 2.69 mm -- while the force bleeds off 2.9, 1.0, 0.9, 0.33,
+    0.00 N. The plate is squeezed out like a pip, the jaws end at 0.02 mm holding nothing,
+    and the part is back on the desk. That is why the LIFT gate reads 0.00 N: it samples
+    AFTER the part has gone.
+    """
+    from maker_arm_lab.core import grasp
+    from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import CLOSE_SQUEEZE_M
+
+    plate = parts.make_part("plate", 2, 4)
+    env, rig = _env_and_rig(part_list=[plate])
+    _place(env, [(0.195, 0.0, 0.004, 0.0)])
+    tightest = grasp.OPEN_HALF_GAP
+    for _ in range(4000):
+        goal = rig.goals[0]
+        out = rig.step()
+        if goal is not None and goal.gripper < 0.0:
+            tightest = min(tightest, min(rig.robot.data.joint_pos[0, rig.finger_ids].tolist()))
+        if bool(out["dones"][0]) or bool(out["abandoned"][0]):
+            break
+    stats = rig.episode_stats(0)
+    env.close()
+    floor = 0.5 * min(plate.size[0], plate.size[1]) - CLOSE_SQUEEZE_M
+    assert tightest > floor - 0.002, (tightest, floor)
+    assert stats["bricks_delivered"] == 1, stats
