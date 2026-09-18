@@ -11,6 +11,8 @@ What changes against the six-brick oracle, and nothing else:
   (design H8), is off: ``MAX_PUSHES_IN_A_ROW`` is 0 and its docstring holds the read;
 * a part out of the arm's reach band is counted but never a target (fix F1). There is no
   dish since 2026-09-18, so nothing brings such a part back;
+* a LIFT that missed its target but holds another part carries that part off instead of
+  dropping it back into the heap (``adopt_held_part``, ``accepts_any_held_part``);
 * a part whose best grasp grips less than ``TIP_MIN_GRIP_HEIGHT`` of face is tipped onto an
   edge first, with a short stroke into it, and picked on a later scan (MS6 rework section 7);
 * the episode ends DONE, never ABANDON, at the cycle budget or with no candidate left.
@@ -120,6 +122,12 @@ class HeapOracle(oracle.EnvOracle):
         # MS6 rung 1: `core.grasp` ranks on a landing gap that follows the grasp width, so
         # the jaws have to descend at that opening for the model to describe the arm.
         self.matched_jaw_opening = True
+        # Batch picking (owner ruling, 2026-09-18): one bin takes every part, so a LIFT that
+        # came up holding a NON-target part has still picked something worth carrying. On the
+        # round-dish heaps of 2026-09-17 that was 16 of 154 LIFT reports, 10.4 %, each gripping
+        # a non-target part 100-144 mm above the desk, and REOPEN dropped every one of them
+        # back into the heap.
+        self.accepts_any_held_part = True
         self.push: Push | None = None
         self.tip: Tip | None = None
         self.cycles = 0
@@ -127,6 +135,7 @@ class HeapOracle(oracle.EnvOracle):
         self.tips = 0
         self.tips_ok = 0
         self.forced_picks = 0
+        self.held_swaps = 0
         self._give_up = False
         self.pushes_in_a_row = 0
         self.failures: dict[tuple[int, int], int] = {}
@@ -311,6 +320,20 @@ class HeapOracle(oracle.EnvOracle):
             self.grasp = ranked[0]
             self.grasp_width = ranked[0].width
 
+    def adopt_held_part(self, part: int) -> None:
+        """The LIFT found this part in the jaws, not the target: the rest of the cycle follows it.
+
+        Two things key on the part after LIFT, and both are here: ``target_brick``, which
+        RETREAT grades and ``_mark_failure`` reads, and the cycle log the yield reads pair with
+        ``cycle_outcomes`` by index (scripts/heap_yield_read.py). RAISE, EXTEND and RELEASE all
+        aim at the bin, never at the part, so no leg has to be re-planned. ``pick_order`` is
+        left alone: it records what selection CHOSE, and this is not a selection.
+        """
+        self.target_brick = part
+        self.held_swaps += 1
+        if self.cycle_parts:  # a resumed takeover enters LIFT with no cycle of its own
+            self.cycle_parts[-1] = part
+
     def _target_yaw(self, scene: oracle.SceneSnapshot) -> float:
         # Goal.yaw is a LONG-AXIS heading; the runtime folds yaw + pi/2 as the closing axis.
         if self.grasp is None:
@@ -482,6 +505,7 @@ class HeapOracle(oracle.EnvOracle):
             "tips": self.tips,
             "tips_ok": self.tips_ok,
             "forced_picks": self.forced_picks,
+            "held_swaps": self.held_swaps,
             "cycle_parts": list(self.cycle_parts),
             "cycle_outcomes": list(self.cycle_outcomes),
             "cells_excluded": sum(1 for v in self.failures.values() if v >= CELL_FAILURE_CAP),

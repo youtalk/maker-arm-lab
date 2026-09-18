@@ -327,6 +327,47 @@ def test_a_lift_that_fails_after_the_retries_marks_the_cell_and_takes_a_new_cycl
     assert orc.cycles == 2 and len(orc.cycle_parts) == 2
 
 
+def test_a_swapped_hold_carries_the_new_part_through_retreat():
+    """The jaws missed the target and came up with the other part (what the runtime's LIFT
+    gate reports through `adopt_held_part`). Everything the cycle records afterwards must be
+    about the part that was carried: RETREAT grades IT, the cycle log names IT, and the
+    target's cell is not marked failed -- a part did leave the heap."""
+    orc = _oracle([BRICK, BRICK])
+    scene = _snapshot([[0.185, -0.045, 0.0048], [0.205, 0.045, 0.0048]])
+    _to_hover(orc, scene)
+    target = orc.target_brick
+    other = 1 - target
+    for outcome in ("converged", "stalled", "converged"):  # HOVER, DESCEND, CLOSE
+        orc.report(oracle.PhaseResult(outcome=outcome), scene)
+        orc.next_goal(scene)
+    assert orc.phase is oracle.Phase.LIFT and orc.cycle_parts == [target]
+
+    orc.adopt_held_part(other)
+    orc.report(oracle.PhaseResult(outcome="converged", pinch_ok=False, lifted=True), scene)
+
+    assert orc.phase is oracle.Phase.RAISE and orc.target_brick == other
+    for _ in range(3):  # RAISE, EXTEND, RELEASE
+        orc.next_goal(scene)
+        orc.report(oracle.PhaseResult(outcome="converged"), scene)
+    assert orc.phase is oracle.Phase.RETREAT
+    orc.next_goal(scene)
+    orc.report(
+        oracle.PhaseResult(outcome="converged"),
+        _snapshot([[0.185, -0.045, 0.0048], [0.205, 0.045, 0.0048]], stowed=(other,)),
+    )
+    assert orc.cycle_outcomes == [True]
+    assert orc.sorted_bricks == frozenset({other})
+    assert orc.cycle_parts == [other]
+    assert orc.held_swaps == 1 and orc.extra_stats()["held_swaps"] == 1
+    assert orc.failures == {}  # nothing was dropped, so no cell is marked
+
+
+def test_the_six_brick_oracle_never_accepts_another_part():
+    """The flag the runtime's LIFT gate reads: off on the base class, on for a heap."""
+    assert oracle.EnvOracle(BL, 6, oracle.nominal_draw()).accepts_any_held_part is False
+    assert _oracle([BRICK]).accepts_any_held_part is True
+
+
 def test_three_failures_exclude_a_cell_from_selection():
     orc = _oracle([BRICK])
     scene = _snapshot([[0.16, -0.045, 0.0048]])
@@ -356,6 +397,7 @@ def test_extra_stats_report_the_counters():
         "tips": 0,
         "tips_ok": 0,
         "forced_picks": 0,
+        "held_swaps": 0,
         "cycle_parts": [],
         "cycle_outcomes": [],
         "cells_excluded": 0,
