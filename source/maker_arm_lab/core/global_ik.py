@@ -517,3 +517,43 @@ class JointTrim:
             return
         saturated = torch.as_tensor(saturated, dtype=torch.bool).reshape(ARM_DOF)
         self.value = torch.where(saturated, self.value, stepped)
+
+
+def steepest_jaw_roll(jaw_axis: torch.Tensor, tool_axis: torch.Tensor) -> float:
+    """Rotation about the tool axis (rad) that stands the jaw plane up as far as it goes.
+
+    MS6 rung 2. RELEASE holds the pose EXTEND left, and the wrist roll is the one degree of
+    freedom nothing commands there: ``extend_goal`` passes no jaw heading, so the plane the
+    jaws open in is inherited from the heading the PICK happened to need. Measured over one
+    instrumented episode it stood at 5.3, 56.4, 78.0 and 71.6 degrees off horizontal on four
+    consecutive releases. The near-horizontal one dropped its part 13.3 mm in ONE control
+    step, a free fall from the whole release height; the steep ones moved 1.3 mm, the part
+    sliding off the lower plate into the bin.
+
+    The roll cannot be asked for through ``GraspTarget.jaw_heading``. That row constrains the
+    jaw axis's HORIZONTAL heading, and a steep axis has almost no horizontal component, so
+    the row goes singular exactly where it is needed -- the same failure the lean azimuth has
+    at zero tilt. Driven, commanding the lean azimuth as the jaw heading produced a 2.6 degree
+    plane and commanding its quarter turn produced 0.00007 degrees. This function answers the
+    question in the non-singular parameter instead, the roll itself, which the wrist's last
+    joint drives exactly: ``link_007_joint`` turns about the tool axis, so rolling it moves
+    `grasp_center` by 0.00 mm and the tool axis by 0.00 degrees while the jaw axis follows
+    one for one (measured 2026-09-17, ratio -1.000).
+
+    Both signs of the jaw axis are the same jaw, so the nearer of the two is returned and the
+    result is always within a quarter turn.
+    """
+    t = tool_axis / tool_axis.norm()
+    e1 = jaw_axis - (jaw_axis @ t) * t
+    e1 = e1 / e1.norm()
+    e2 = torch.linalg.cross(t, e1)
+    # v(d) = cos(d) e1 + sin(d) e2 sweeps the plane the jaw axis lives in; its z component is
+    # extreme where its derivative vanishes, which is this angle.
+    delta = math.atan2(float(e2[2]), float(e1[2]))
+    # Fold in plain float: routing through a default-dtype tensor costs float32 and puts the
+    # quarter-turn bound a rounding step out of reach.
+    if delta > math.pi / 2:
+        delta -= math.pi
+    elif delta <= -math.pi / 2:
+        delta += math.pi
+    return delta

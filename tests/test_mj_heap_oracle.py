@@ -157,3 +157,41 @@ def test_the_pick_approach_holds_the_grasp_width_not_the_full_opening():
     env.close()
     assert seen_descend, "the episode never descended on a part"
     assert widest < grasp.OPEN_HALF_GAP - 0.010, widest
+
+
+def test_the_release_opens_only_far_enough_to_let_the_part_go():
+    """MS6 rung 2: the jaws let the part drop, they do not fling it.
+
+    RELEASE opened the jaws the whole way, about 44 mm of travel per jaw from a pinched
+    grip at roughly 3.3 mm per control step, with the tool tilted 80.2 deg over the bin. On
+    the three rung 1 read heaps 18 of 73 carried parts (25 %) never reached the bin, against
+    7 of 56 (12 %) before, and every traced one landed on the DESK 60-200 mm SHORT of the
+    release point: thrown back toward the arm, not dropped. One instrumented cycle left the
+    jaws at (0.417, 0.002, 0.300) and came to rest at (0.246, 0.018, 0.230).
+
+    Four mm of clearance per side is all the part needs to fall out.
+    """
+    from maker_arm_lab.core import grasp
+
+    env, rig = _env_and_rig()
+    _place(
+        env, [(0.195, -0.045, 0.006, 0.3), (0.195, 0.0, 0.006, -0.8), (0.195, 0.045, 0.006, 1.2)]
+    )
+    widest = 0.0
+    seen_release = False
+    for _ in range(4500):
+        goal = rig.goals[0]
+        rig.step()
+        if goal is None or goal.phase is not oracle.Phase.RELEASE:
+            continue
+        seen_release = True
+        ceiling = grasp.landing_half_gap(float(rig.oracles[0].grasp_width))
+        gap = min(rig.robot.data.joint_pos[0, rig.finger_ids].tolist())
+        widest = max(widest, gap)
+        assert gap <= ceiling, (gap, ceiling)
+    stats = rig.episode_stats(0)
+    env.close()
+    assert seen_release, "the episode never released a part"
+    assert widest < grasp.OPEN_HALF_GAP - 0.010, widest
+    # The part must still leave the jaws: a capped opening that never lets go is worse.
+    assert stats["bricks_delivered"] == 3, stats
