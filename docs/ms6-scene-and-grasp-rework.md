@@ -7,8 +7,28 @@ sits at `d/probe/base_readflags_{0,1,2}` (campaign d, already on record from
 `docs/ms6-lever-verification.md`). R1 through R5 sit at `e/r{1,2,3,4,5}_{0,1,2}`. Every rung
 runs the same three held-out heaps of 50 parts, `--run_seed 2026100n --layout_seed 2026101n`
 for n = 0, 1, 2. Every rung uses the read flags of `MS6 rework section 2`. Each rung therefore
-grades 150 parts. Every number in this report comes from `LADDER-EVIDENCE.md`, written by the
-controller who ran the campaign. Nothing here is recomputed.
+grades 150 parts. Every number in this report is recomputable from the `events.jsonl` logs with
+`scripts/heap_inspect_read.py`: R0 at `~/data/maker-arm-ms6/d/probe/base_readflags_{0,1,2}`, R1
+through R5 at `~/data/maker-arm-ms6/e/r{1,2,3,4,5}_{0,1,2}`, and the R2 diagnostic (section 3,
+under R2) at `~/data/maker-arm-ms6/e/r2diag_{0,1,2}`. The final reviewer independently re-derived
+every row of the table in section 3 from those logs.
+
+## 0. Read this first: do not merge past R3 without an owner decision
+
+The pre-registered rule: a rung that reads below the rung under it is reported, and the owner
+decides whether it stays. R2 and R4 both read below. R4 reads below by three times the margin
+of R2.
+
+- R1 and R3 earned their place. Each reads at or above the rung under it and stays inside its
+  own Wilson interval.
+- R2 and R3 are entangled. They must land together, because R3 recovers the whole shortfall
+  R2 opens (section 3).
+- R4 and R5 must not merge without an owner decision. A merge of the whole stack as it stands
+  makes 0.1067 the teacher on `main`. A campaign launched after that merge then draws its
+  corpus from that teacher.
+
+The rungs are separate stacked pull requests. A merge up to R3 that holds R4 and R5 back needs
+no code change at all.
 
 ## 1. What the GUI inspection saw
 
@@ -120,6 +140,14 @@ ran to the timeout on all three heaps. The dish drives the teacher into far more
 push budget binds where it was slack on the rectangle, and the episode ends early with time on
 the clock.
 
+The push count itself has a geometric cause. `grasp.OPEN_HALF_GAP` is 0.0524 m and
+`layout.TRAY_RADIUS` is 0.088 m. A jaw heading is free to point in any direction only for a
+part within about 35.6 mm of the dish center. The old rectangle gave that same freedom to any
+part within about 100 mm of center along y, a far wider band. A part outside the free zone
+needs a heading that clears the near wall. The round wall closes off headings on every side of
+the part instead of on one axis. That is the mechanism behind the extra pushes, not only the
+budget that later caps them.
+
 A diagnostic run with `PUSH_BUDGET = 200` and nothing else changed reads 47 of 150, 0.3133,
 Wilson [0.245, 0.391]. All three heaps run to the timeout again, with 71, 54 and 59 pushes.
 That diagnostic is NOT a rung. It lived in a scratch worktree on no branch, and the edit was
@@ -164,9 +192,37 @@ parts were being PICKED on R3, imperfectly but often. Section 2 of this report s
 failing 13 of 24 lift reports on one heap, so roughly half succeeded there. R4 trades a pick
 that works about half the time for a tip that works about one time in fifty.
 
+R4 also closes far more heap cells than R3. `HeapOracle._mark_failure` writes a cell into the
+`failures` map once a part in it fails `CELL_FAILURE_CAP` times. That cell stays excluded for
+the rest of the episode. A push carries no such memory: `PUSH_BUDGET` bounds a part's retries,
+but the cell itself stays open. The tip's near-total failure rate feeds the same memory, so a
+cell near a resistant part closes for good.
+
+| heap | cells excluded, R3 | cells excluded, R4 | parts locked out, R3 | parts locked out, R4 | cycles, R3 | cycles, R4 | exit step, R3 | exit step, R4 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | 2 | 5 | 5/12 | 15/22 | 25 | 7 | 29536 | 19091 |
+| 1 | 0 | 5 | 0/9 | 11/13 | 19 | 9 | 22371 | 19210 |
+| 2 | 1 | 5 | 1/8 | 19/26 | 38 | 10 | 30900 | 19253 |
+
+R4 excludes 5 cells on every heap, against 0 to 2 on R3. The parts locked out with those cells
+run from 15/22 to 19/26 on R4, against 0/9 to 5/12 on R3. R4's cycle count per heap falls to
+about a third of R3's. R4 also exits thousands of steps short of the 30900-step budget on every
+heap. The tip does not fail only on its own attempts. It removes the cells and the parts near
+them from the rest of the episode.
+
+The tip motion also shares its descend geometry with the push it replaces. `TIP_Z` is 0.004 m
+and `PUSH_Z` is 0.0048 m, and both come from the same `PUSH_HALF_HEIGHT`. The tip differs from
+the push mainly in its stroke: `TIP_STROKE_M` is 0.025 m, against a push stroke of 0.08 m from
+`PUSH_HALF_LENGTH_M` doubled. A 3.2 mm plate needs a jaw edge that reaches under it at a depth
+the push geometry was never built for. A shorter stroke at that same depth does not change what
+the edge can reach.
+
 State this plainly: the tip-up as built does not stand a part up. The trigger diverts parts the
-teacher can otherwise pick. R4 read below the rung under it, by the largest margin in this
-ladder. The owner decides whether it stays.
+teacher can otherwise pick. The primitive needs a different descend geometry, not a longer
+stroke, because its depth is the push's depth. The tip must also stop writing to the cell
+failure memory before a retry. Then one resistant cell no longer locks out every part near it. R4
+read below the rung under it, by the largest margin in this ladder. The owner decides whether
+it stays.
 
 ### R5, the tilted pick: ships as wiring only, with a measured negative result
 
@@ -273,3 +329,15 @@ the solver already fails there, on main, before this work. The remedy is to inst
 pyproject's pinned `maker-arm-rs` rev `e1541514` into `~/src/IsaacLab/.venv`. That is an owner
 decision about a shared environment. So the MS4 gate of 0.840 keeps its old-gate provenance
 until someone runs it.
+
+## 7. Open items
+
+Three items stay open after this rework:
+
+- `core/dagger_loop.py` and `core/eval_loop.py` still read the six-brick observation array for
+  the heap environment.
+- `_plan_tip` returns None on some parts and falls back to a direct pick. That fallback picks
+  worse than a working tip. The tip as built stands one part in 54 tries, so the direct pick
+  currently reads better.
+- A non-zero `PICK_TILT_RAD` needs `AXIS_MAX_TILT_RAD` re-measured for the tilted jaw plane
+  before `MS6 rework section 7.1` reopens.
