@@ -160,7 +160,20 @@ def _towered_brick():
     return orc, scene
 
 
-def test_three_pushes_then_a_forced_pick_and_done_only_at_a_budget():
+def test_a_blocked_scan_is_a_forced_pick_at_once_and_never_a_push():
+    """MAX_PUSHES_IN_A_ROW is 0 on the bare desk: 20 of 21 forced picks stowed on the rA read
+    while the pushes before them took a third of every episode's steps."""
+    assert heap_oracle.MAX_PUSHES_IN_A_ROW == 0
+    orc, scene = _towered_brick()
+    hover = _to_hover(orc, scene)
+    assert hover.phase is oracle.Phase.HOVER and orc.target_brick == 0
+    assert orc.forced_picks == 1 and orc.pushes == 0 and orc.push is None
+    assert orc.grasp.clearance < 0.0
+    assert orc.extra_stats()["forced_picks"] == 1 and orc.extra_stats()["pushes"] == 0
+
+
+def test_three_pushes_then_a_forced_pick_and_done_only_at_a_budget(monkeypatch):
+    monkeypatch.setattr(heap_oracle, "MAX_PUSHES_IN_A_ROW", 3)
     orc, scene = _towered_brick()
     goal = _to_hover(orc, scene)
     assert goal.phase is oracle.Phase.PUSH_HOVER and orc.target_brick is None

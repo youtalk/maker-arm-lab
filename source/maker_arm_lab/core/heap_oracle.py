@@ -6,12 +6,11 @@ What changes against the six-brick oracle, and nothing else:
   that grasp's closing axis instead of the brick's long axis;
 * every part goes to one destination bin drawn per episode, whatever its color (design H5);
 * a 5 cm cell holds a failure count; at three failures the cell is skipped (design 7.2);
-* when no grasp clears, a push sweeps the densest cell with the jaws closed (design H8);
+* when no grasp clears, the top-ranked grasp is taken anyway as a forced pick (fix F2). The
+  push that used to come first, a sweep through the densest cell with the jaws closed
+  (design H8), is off: ``MAX_PUSHES_IN_A_ROW`` is 0 and its docstring holds the read;
 * a part out of the arm's reach band is counted but never a target (fix F1). There is no
   dish since 2026-09-18, so nothing brings such a part back;
-* after ``MAX_PUSHES_IN_A_ROW`` pushes with nothing clear, the top-ranked grasp is taken
-  anyway as a forced pick (fix F2); the pushes otherwise go on up to the push budget, so DONE
-  comes only from a budget or an empty set;
 * a part whose best grasp grips less than ``TIP_MIN_GRIP_HEIGHT`` of face is tipped onto an
   edge first, with a short stroke into it, and picked on a later scan (MS6 rework section 7);
 * the episode ends DONE, never ABANDON, at the cycle budget or with no candidate left.
@@ -33,7 +32,17 @@ from maker_arm_lab.core.parts import Part
 
 CYCLE_BUDGET = 50
 CELL_FAILURE_CAP = 3
-MAX_PUSHES_IN_A_ROW = 3
+MAX_PUSHES_IN_A_ROW = 0
+"""Pushes with nothing clear before the top-ranked grasp is taken anyway (a forced pick).
+
+0 means the teacher never pushes: every blocked scan is a forced pick at once. The bare-desk
+read of 2026-09-18 (~/data/maker-arm-ms6/i/rA, 150 parts) decided it. Pushes took 34 % of
+every episode's control steps, 118 pushes against 119 picks, and all three episodes ran out
+of time with parts left. The forced picks the pushes delayed stowed 20 of 21. With no dish a
+landing spot is blocked only by a neighbor, and the closing stroke sweeps a neighbor toward
+the part (``core.grasp``), so the model's refusal is stricter than the physics. 3 was the
+value the dish ran; the push machinery stays and this constant turns it back on.
+"""
 PUSH_BUDGET = CYCLE_BUDGET
 CANDIDATE_MAX_Z = 0.10
 """A part above this height sits in a bin or on the shelf, never on the heap."""
