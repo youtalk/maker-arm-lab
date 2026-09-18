@@ -46,6 +46,35 @@ def test_a_brick_on_its_side_offers_its_height_as_a_width():
     assert thin.heading == pytest.approx(-math.pi / 2)
 
 
+def test_a_slope_offers_only_the_axis_across_its_side_faces():
+    slope = parts.make_part("slope", 2, 4)
+    found = grasp.candidate_grasps(
+        0, _size(slope), torch.zeros(3), IDENTITY, 0.0, slope.closing_axes
+    )
+    assert [(round(g.heading, 6), round(g.width, 4)) for g in found] == [
+        (round(math.pi / 2, 6), 0.0158)
+    ]
+    # Rolled onto a side face, body y points up and the slope has no closing axis at all.
+    assert (
+        grasp.candidate_grasps(0, _size(slope), torch.zeros(3), ROLL_90, 0.0, slope.closing_axes)
+        == []
+    )
+    # rank_grasps carries one axis tuple per part; a brick beside it still offers both axes.
+    sizes, pos, quat = _heap(
+        (slope, 0.16, 0.0, 0.0048, IDENTITY), (BRICK, 0.24, 0.0, 0.0048, IDENTITY)
+    )
+    ranked = grasp.rank_grasps(
+        sizes,
+        pos,
+        quat,
+        torch.ones(2, dtype=torch.bool),
+        0.0,
+        [slope.closing_axes, BRICK.closing_axes],
+    )
+    assert [g.width for g in ranked if g.part == 0] == [pytest.approx(0.0158)]
+    assert len([g for g in ranked if g.part == 1]) == 2
+
+
 def test_a_tilted_axis_and_an_oversize_width_are_not_candidates():
     tilt = math.radians(20.0)
     pitched = torch.tensor([math.cos(tilt / 2), 0.0, math.sin(tilt / 2), 0.0])

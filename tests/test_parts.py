@@ -8,12 +8,28 @@ import pytest
 from maker_arm_lab.core import layout, parts
 
 
-def test_catalog_has_34_parts_in_a_fixed_order_and_no_flat_part():
+def test_catalog_has_31_parts_in_a_fixed_order_and_no_flat_part():
     names = [p.name for p in parts.catalog()]
-    assert len(names) == 34 and len(set(names)) == 34
+    assert len(names) == 31 and len(set(names)) == 31
     assert names[0] == "brick_1x1" and names[-1] == "slope_2x4"
-    assert "brick_1x2x5" in names and "round_2x2" in names
+    assert "brick_1x2x5" in names and "round_2x2" in names and "round_2x2x2" in names
     assert not [n for n in names if n.startswith(parts.FLAT_FAMILIES)]
+
+
+def test_the_retired_parts_left_the_catalog_and_still_replay():
+    """The 1x1 round lifted 15 of 44 and the two pure wedges 26 of 47 on the rA read."""
+    names = {p.name for p in parts.catalog()}
+    assert not names & {"round_1x1", "round_4x4", "slope_1x1", "slope_2x1"}
+    assert parts.by_name(["round_1x1", "slope_2x1"]) == [
+        parts.make_part("round", 1, 1),
+        parts.make_part("slope", 2, 1),
+    ]
+
+
+def test_a_slope_closes_only_across_its_side_faces():
+    assert parts.make_part("slope", 2, 4).closing_axes == parts.SLOPE_AXES == (1,)
+    assert parts.make_part("brick", 2, 4).closing_axes == parts.BOX_AXES == (0, 1, 2)
+    assert parts.make_part("round", 2, 2).closing_axes == parts.BOX_AXES
 
 
 def test_tall_and_round_bricks_have_the_lego_sizes():
@@ -63,7 +79,7 @@ def test_graspability_filter_drops_a_six_by_six():
 def test_split_is_stratified_deterministic_and_disjoint():
     cat = parts.catalog()
     train, held = parts.split(cat, 20260915)
-    assert len(held) == 8 and len(train) == 26
+    assert len(held) == 8 and len(train) == 23
     counts = {f: sum(1 for p in held if p.family == f) for f in parts.FAMILIES}
     assert counts == {"brick": 5, "round": 1, "slope": 2}
     assert not {p.name for p in train} & {p.name for p in held}

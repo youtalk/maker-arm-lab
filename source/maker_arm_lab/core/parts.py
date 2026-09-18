@@ -16,6 +16,9 @@ LIFT squeezes a 3.2 mm part out of the jaws (docs/ms6-matched-jaw-opening.md sec
 the 31.8 mm grasps slide off one side (section 5). They stay constructible so a shard recorded
 with them still replays through ``by_name``. Tall bricks (two, three and five bricks high) and
 round bricks (cylinders) took their place so the heap still mixes four shapes.
+
+``closing_axes`` names the body axes the jaws may close along. A box offers all three and
+``core.grasp`` keeps the ones near the jaw plane; a slope offers only y (``SLOPE_AXES``).
 """
 
 from __future__ import annotations
@@ -44,8 +47,20 @@ _BOX_FOOTPRINTS = tuple(
 )
 # (nx, ny, nz) of the tall bricks LEGO makes: 1x1x3, 1x2x2, 1x2x3, 1x2x5 and 2x2x3.
 _TALL_BRICKS = ((1, 1, 3), (1, 2, 2), (1, 2, 3), (1, 2, 5), (2, 2, 3))
-_ROUND_DIAMETERS = (1, 2, 4)  # the 1x1, 2x2 and 4x4 round bricks
-_SLOPE_FOOTPRINTS = tuple((nx, ny) for nx in (1, 2) for ny in (1, 2, 3, 4))
+# (n, nz): the 2x2 round brick, one and two bricks high. The 1x1 round left on 2026-09-18:
+# it lifted 15 of 44 times on the bare-desk read (~/data/maker-arm-ms6/i/rA), the worst part
+# of that heap. The 4x4 round never shipped: a 31.8 mm grasp closes on one side first
+# (docs/ms6-matched-jaw-opening.md section 5). Both stay constructible for replays.
+_ROUND_BRICKS = ((2, 1), (2, 2))
+# ny is the run along the slope; ny = 1 is a pure wedge whose front edge has no height, and
+# the two wedges lifted 26 of 47 times on the same read. They stay constructible for replays.
+_SLOPE_FOOTPRINTS = tuple((nx, ny) for nx in (1, 2) for ny in (2, 3, 4))
+_RETIRED = (("round", 1, 1, 1), ("round", 4, 4, 1), ("slope", 1, 1, 1), ("slope", 2, 1, 1))
+BOX_AXES = (0, 1, 2)
+SLOPE_AXES = (1,)
+"""A slope's only closing axis is body y, across its two flat side faces. Closing along x
+puts one jaw on the slope face and squeezes the part out; closing along z grips the sloped
+top. The wedges' 26 of 47 lifts on the rA read closed along x at the narrower-width tie."""
 
 
 @dataclass(frozen=True)
@@ -58,6 +73,7 @@ class Part:
     studs: bool
     mass: float  # kg
     hull: tuple[tuple[float, float, float], ...] | None = None  # slope vertices, part frame
+    closing_axes: tuple[int, ...] = BOX_AXES  # body axes the jaws may close along
 
     @property
     def half_diagonal(self) -> float:
@@ -109,6 +125,7 @@ def make_part(family: str, nx: int, ny: int, nz: int = 1) -> Part:
         studs=family in ("brick", "plate", "round"),
         mass=part_mass(size, math.pi / 4 if family == "round" else 1.0),
         hull=slope_hull(size) if family == "slope" else None,
+        closing_axes=SLOPE_AXES if family == "slope" else BOX_AXES,
     )
 
 
@@ -132,15 +149,16 @@ def catalog() -> list[Part]:
     """Every generator part that passes the graspability filter, in a fixed order."""
     out = [make_part("brick", nx, ny) for nx, ny in _BOX_FOOTPRINTS]
     out += [make_part("brick", nx, ny, nz) for nx, ny, nz in _TALL_BRICKS]
-    out += [make_part("round", n, n) for n in _ROUND_DIAMETERS]
+    out += [make_part("round", n, n, nz) for n, nz in _ROUND_BRICKS]
     out += [make_part("slope", nx, ny) for nx, ny in _SLOPE_FOOTPRINTS]
     return [p for p in out if graspable(p)]
 
 
 def _replayable() -> list[Part]:
-    """The catalog plus the flat parts older shards were recorded with."""
+    """The catalog plus the flat and retired parts older shards were recorded with."""
     flat = [make_part(f, nx, ny) for f in FLAT_FAMILIES for nx, ny in _BOX_FOOTPRINTS]
-    return catalog() + [p for p in flat if graspable(p)]
+    retired = [make_part(*spec) for spec in _RETIRED]
+    return catalog() + [p for p in flat if graspable(p)] + retired
 
 
 def split(parts: Sequence[Part], seed: int) -> tuple[list[Part], list[Part]]:

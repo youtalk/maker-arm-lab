@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 import torch
@@ -119,16 +120,18 @@ def candidate_grasps(
     pos: torch.Tensor,
     quat: torch.Tensor,
     tilt_rad: float = 0.0,
+    closing_axes: tuple[int, ...] = (0, 1, 2),
 ) -> list[Grasp]:
     """Every closing axis within AXIS_MAX_TILT_RAD of the jaw plane, under MAX_GRASP_WIDTH.
 
-    The jaw plane is horizontal at ``tilt_rad = 0.0``.
+    The jaw plane is horizontal at ``tilt_rad = 0.0``. ``closing_axes`` are the body axes the
+    part's shape allows (``parts.Part.closing_axes``): a slope offers only its y axis.
     """
     axes = body_axes_world(quat)
     off_plane = off_plane_axes(axes, tilt_rad)
     half_height = 0.5 * float(size[int(off_plane.argmax())])
     found = []
-    for k in range(3):
+    for k in closing_axes:
         if float(off_plane[k]) > math.sin(AXIS_MAX_TILT_RAD):
             continue
         width = float(size[k])
@@ -304,13 +307,15 @@ def rank_grasps(
     quat: torch.Tensor,
     candidates: torch.Tensor,
     tilt_rad: float = 0.0,
+    closing_axes: Sequence[tuple[int, ...]] | None = None,
 ) -> list[Grasp]:
     """Every grasp of every candidate part with its clearance, best first.
 
-    Other parts enter through ``neighbor_extents`` and ``footprint``. The order is the
-    height band (highest first), then the swept count, then the clearance, then the
-    narrower width: a wide grasp closes on one side first and slides the part away
-    (docs/ms6-matched-jaw-opening.md section 5), so it is the last resort at a tie.
+    Other parts enter through ``neighbor_extents`` and ``footprint``. ``closing_axes`` is
+    one axis tuple per part (``parts.Part.closing_axes``); None lets every part offer all
+    three. The order is the height band (highest first), then the swept count, then the
+    clearance, then the narrower width: a wide grasp closes on one side first and slides the
+    part away (docs/ms6-matched-jaw-opening.md section 5), so it is the last resort at a tie.
     """
     _, hz = neighbor_extents(sizes, quat)
     prints = [footprint(sizes[b], pos[b], quat[b]) for b in range(sizes.shape[0])]
@@ -320,7 +325,8 @@ def rank_grasps(
         others[b] = False
         other_pos, other_hz = pos[others], hz[others]
         other_prints = [prints[k] for k in torch.nonzero(others).flatten().tolist()]
-        for g in candidate_grasps(b, sizes[b], pos[b], quat[b], tilt_rad):
+        axes_b = (0, 1, 2) if closing_axes is None else closing_axes[b]
+        for g in candidate_grasps(b, sizes[b], pos[b], quat[b], tilt_rad, axes_b):
             clearance, swept = jaw_clearance(
                 pos[b], g.heading, g.width, g.half_height, other_pos, other_hz, other_prints
             )

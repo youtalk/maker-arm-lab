@@ -199,6 +199,7 @@ class HeapOracle(oracle.EnvOracle):
             scene.brick_quat,
             mask,
             oracle.PICK_TILT_RAD,
+            [p.closing_axes for p in self.parts],
         )
 
     def _push_heading(self, center: tuple[float, float]) -> float:
