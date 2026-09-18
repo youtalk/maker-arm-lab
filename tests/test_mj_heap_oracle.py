@@ -124,3 +124,36 @@ def test_the_default_factory_builds_the_six_brick_oracle():
     assert type(rig.oracles[0]) is oracle.EnvOracle
     assert rig.oracles[0].grasp_width == pytest.approx(0.0158)
     env.close()
+
+
+def test_the_pick_approach_holds_the_grasp_width_not_the_full_opening():
+    """MS6 rung 1: the jaws come down beside the part, not ``OPEN_HALF_GAP`` out from it.
+
+    The fully open descend put both landing spots 52.4 mm out whatever the part, which
+    ``core.grasp`` had to model as required clear floor: it refused 84.1 % of every in-dish
+    part sighting on the three read heaps, 67.4 % of them at the rim alone. The jaws have to
+    hold the matched opening for the ranking to describe the arm.
+    """
+    from maker_arm_lab.core import grasp
+
+    env, rig = _env_and_rig()
+    _place(
+        env, [(0.195, -0.045, 0.006, 0.3), (0.195, 0.0, 0.006, -0.8), (0.195, 0.045, 0.006, 1.2)]
+    )
+    widest = 0.0
+    seen_descend = False
+    for _ in range(4500):
+        goal = rig.goals[0]
+        rig.step()
+        if goal is None or goal.phase is not oracle.Phase.DESCEND:
+            continue
+        seen_descend = True
+        gap = min(rig.robot.data.joint_pos[0, rig.finger_ids].tolist())
+        widest = max(widest, gap)
+        if rig.oracles[0].target_brick is None:
+            continue
+        ceiling = grasp.landing_half_gap(float(rig.oracles[0].grasp_width))
+        assert gap <= ceiling, (gap, ceiling)
+    env.close()
+    assert seen_descend, "the episode never descended on a part"
+    assert widest < grasp.OPEN_HALF_GAP - 0.010, widest

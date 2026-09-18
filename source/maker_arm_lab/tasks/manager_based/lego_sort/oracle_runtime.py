@@ -65,7 +65,7 @@ import random
 
 import torch
 
-from maker_arm_lab.core import layout, oracle, trajectory
+from maker_arm_lab.core import grasp, layout, oracle, trajectory
 from maker_arm_lab.core.action_scale import IK_SCALE
 from maker_arm_lab.core.checker import (
     HELD_MIN_FORCE,
@@ -248,6 +248,13 @@ LIFT_MAX_XY_ERROR = 0.03  # m
 # on the joint-position action space a zero arm action commands every joint to fold to zero,
 # it does not ask the arm to stand still.
 GRIPPER_OPEN_ACTION = 1.0
+
+# The pick approach holds the jaws at the grasp's own opening instead of fully open, for an
+# oracle that asks for it (`EnvOracle.matched_jaw_opening`). Only the two legs that bring the
+# tips down over the part: CLOSE already closes, and RELEASE/REOPEN must open the whole way
+# to let the part go. MS6 rung 1, from the measurement that the fully open landing spots
+# 52.4 mm out refused 84.1 % of in-dish part sightings on the three read heaps.
+MATCHED_OPENING_PHASES = (oracle.Phase.HOVER, oracle.Phase.DESCEND)
 
 # Per-step joint jitter (rad) that one raw unit of `EpisodeDraw.action_noise_std` buys.
 # core.oracle calibrates its noise in the raw units of the action space this module used to
@@ -569,6 +576,8 @@ class OracleRig:
                 action[i, 6] = GRIPPER_OPEN_ACTION
             else:
                 action[i, 6] = goal.gripper
+                if goal.gripper > 0.0 and goal.phase in MATCHED_OPENING_PHASES:
+                    action[i, 6] = self._matched_opening_command(i, action[i, 6])
                 self._advance_plan(i)
             target = self.q_cmd[i]
             self._planned.append(target)
@@ -637,6 +646,26 @@ class OracleRig:
         succeeded = self._succeeded(i)
         delivered = self.num_bricks if succeeded else int(self._stowed_sample[i].sum().item())
         return {"bricks_delivered": delivered, "succeeded": succeeded}
+
+    def _matched_opening_command(self, i: int, fully_open: float) -> float:
+        """Hold the jaws at this grasp's own opening instead of driving them fully open.
+
+        The gripper channel is BINARY by contract (raw >= 0 opens, < 0 closes), so an
+        intermediate opening is held by flipping the command around it. The jaw target ramps
+        at the URDF's jaw velocity, about 3.3 mm per control step, which is its own
+        hysteresis, so no further band is needed here: what this emits stays a binary gripper
+        command the real arm accepts. ``grasp.JAW_HOLD_BAND`` is what the MODEL adds on top
+        of this set point to follow the jaws rather than the command.
+
+        An oracle that does not ask for it keeps the fully open descend, so the six-brick
+        task and its gated corpus are untouched (MS6 rung 1).
+        """
+        orc = self.oracles[i]
+        if not getattr(orc, "matched_jaw_opening", False):
+            return fully_open
+        target = grasp.landing_half_gap(float(orc.grasp_width)) - grasp.JAW_HOLD_BAND
+        measured = min(self.robot.data.joint_pos[i, self.finger_ids].tolist())
+        return fully_open if measured <= target else -fully_open
 
     def _advance_plan(self, i: int) -> None:
         """Move the commanded joint target one control step along this phase's plan: the

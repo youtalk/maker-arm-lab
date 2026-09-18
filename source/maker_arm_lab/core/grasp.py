@@ -2,9 +2,13 @@
 
 Torch and stdlib only. A part pose gives three body axes in the world. Every axis near the
 horizontal is a closing axis: the jaws close across the part's size along it, at that axis's
-heading. The approach is from above with the jaws fully open, so what the descend has to
-clear is not the part's neighborhood but the two LANDING spots of the open jaws: the finger
-tips come down ``OPEN_HALF_GAP`` out from the part center on both sides of the closing axis.
+heading. The approach is from above at an opening MATCHED to that closing axis, so what the
+descend has to clear is not the part's neighborhood but the two LANDING spots of the jaws:
+the finger tips come down ``landing_half_gap(width)`` out from the part center on both sides
+of the closing axis. The jaws used to descend fully open, which asked for 52.4 mm of clear
+floor on both sides whatever the part; on the three MS6 read heaps that refused 84.1 % of
+every in-dish part sighting, and 67.4 % of those at the rim alone, because the dish radius is
+88 mm (MS6 rung 1).
 The closing stroke then sweeps everything between a tip and the part toward the part, which
 the physics tolerates (a brick target is stowed with a brick or a plate in the sweep band,
 lone-part reads 2026-09-16). A tray wall under a landing spot is a hard stop: a jaw whose
@@ -39,6 +43,24 @@ the wall face picks, one that lands 2.6 mm past it does not (wall reads, 2026-09
 # vertical inner face ``OPEN_HALF_GAP`` from the tool axis when the jaws are open. Above the
 # tip the hull widens: about 0.46 mm of thickness and 0.32 mm of half face per mm of height.
 OPEN_HALF_GAP = 0.0524
+JAW_APPROACH_CLEARANCE = 0.004
+"""Slack (m) each jaw inner face keeps over the grasp width while the tips descend.
+
+The rig holds this opening from HOVER to CLOSE instead of descending fully open
+(``OracleRig.actions``), so the landing spots come down beside the part rather than
+``OPEN_HALF_GAP`` out from it. 4 mm is the value the bottom-pick probe drove on a lone 2x4
+brick at every wall distance from 70 mm down to 20 mm, stowing 12 of 12 (the lone-part wall
+table of ``docs/ms6-lever-verification.md``).
+"""
+JAW_HOLD_BAND = 0.008
+"""How far past the commanded opening the bang-bang hold coasts (m).
+
+The gripper channel is binary by contract, so an intermediate opening is held by flipping
+the command around it, and the jaw target ramps at the URDF's jaw velocity, about 3.3 mm per
+control step. The model follows the JAWS, not the set point, so it carries the flip band
+plus one control step of travel. This is the direction that makes the model stricter than
+the hardware, which is the safe side for a clearance test.
+"""
 TIP_THICKNESS = 0.002
 TIP_HALF_FACE = 0.004
 TIP_THICKNESS_PER_M = 0.46
@@ -65,6 +87,15 @@ class Grasp:
     height: float  # part center z, m
     swept: int = 0  # standing neighbors the closing stroke pushes toward the part
     wall: float = math.inf  # m from the landing tips to the nearest tray wall
+
+
+def landing_half_gap(width: float) -> float:
+    """The jaw inner face's distance (m) from the tool axis while the tips come down.
+
+    Never more than ``OPEN_HALF_GAP``: a part too wide for the jaws to straddle asks for the
+    full opening, which is all the jaws have.
+    """
+    return min(OPEN_HALF_GAP, 0.5 * width + JAW_APPROACH_CLEARANCE + JAW_HOLD_BAND)
 
 
 def body_axes_world(quat: torch.Tensor) -> torch.Tensor:
@@ -203,9 +234,12 @@ def polygon_distance(a: list[tuple[float, float]], b: list[tuple[float, float]])
 
 
 def landing_footprints(
-    pos: torch.Tensor, heading: float, height_above_tips: float
+    pos: torch.Tensor,
+    heading: float,
+    height_above_tips: float,
+    half_gap: float = OPEN_HALF_GAP,
 ) -> list[list[tuple[float, float]]]:
-    """The two open-jaw landing spots as world-xy rectangles, at a height above the tips."""
+    """The two jaw landing spots as world-xy rectangles, at a height above the tips."""
     h = max(0.0, height_above_tips)
     thickness = TIP_THICKNESS + TIP_THICKNESS_PER_M * h
     half_face = TIP_HALF_FACE + TIP_HALF_FACE_PER_M * h
@@ -213,7 +247,7 @@ def landing_footprints(
     boxes = []
     for side in (1.0, -1.0):
         corners = []
-        for lx in (side * OPEN_HALF_GAP, side * (OPEN_HALF_GAP + thickness)):
+        for lx in (side * half_gap, side * (half_gap + thickness)):
             for ly in (-half_face, half_face):
                 corners.append((float(pos[0]) + c * lx - s * ly, float(pos[1]) + s * lx + c * ly))
         boxes.append(convex_hull(corners))
@@ -258,16 +292,17 @@ def jaw_clearance(
     """
     bottom = float(pos[2]) - half_height
     band = float(pos[2]) + half_height - MIN_GRIP_OVERLAP
-    strokes = sweep_footprints(pos, heading, width, OPEN_HALF_GAP + TIP_THICKNESS)
+    half_gap = landing_half_gap(width)
+    strokes = sweep_footprints(pos, heading, width, half_gap + TIP_THICKNESS)
     wall = min((polygon_distance(t, w) for t in strokes for w in wall_footprints), default=math.inf)
     standing = torch.nonzero(other_pos[:, 2] + other_hz > band).flatten().tolist()
     clearance = wall
     swept = 0
     if standing:
-        sweeps = sweep_footprints(pos, heading, width)
+        sweeps = sweep_footprints(pos, heading, width, half_gap)
         for k in standing:
             reach = float(other_pos[k, 2] + other_hz[k]) - bottom
-            spots = landing_footprints(pos, heading, reach)
+            spots = landing_footprints(pos, heading, reach, half_gap)
             clearance = min(clearance, min(polygon_distance(t, other_footprints[k]) for t in spots))
             if any(polygon_distance(b, other_footprints[k]) < 0.0 for b in sweeps):
                 swept += 1

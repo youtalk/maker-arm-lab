@@ -13,6 +13,14 @@ BL = layout.DEFAULT_BIN_LAYOUT
 BRICK = parts.make_part("brick", 2, 4)
 SMALL = parts.make_part("brick", 1, 2)
 LONG_PLATE = parts.make_part("plate", 2, 8)  # one closing axis: its 15.8 mm side
+TOWER_OFFSET = 0.044
+"""How far out a 48 mm tower sits to block the target's landing spot but not another tower.
+
+The jaws now descend at an opening matched to the grasp, so the landing spot of a 15.8 mm
+grasp starts 19.9 mm out and the tip hull reaches 43.9 mm out at a tower's height. A tower
+blocks the target between 27.8 mm and 51.8 mm; the towers clear EACH OTHER, which sets the
+floor, because the nearest pair is sqrt(2) times this apart.
+"""
 IDENTITY = torch.tensor([1.0, 0.0, 0.0, 0.0])
 
 
@@ -114,14 +122,17 @@ def _push_phases(orc, scene):
 
 
 def test_a_wall_side_part_is_pushed_toward_the_tray_center_then_tipped(monkeypatch):
-    # A long plate 22 mm off the rim, short side along y: its one closing axis lands a jaw
-    # past the rim. 20 mm put the push start exactly on the dish's clamp radius (TRAY_RADIUS
-    # - TIP_HALF_FACE), where float32 scene positions tip the comparison either way; 22 mm
-    # keeps it clear of that boundary.
+    # A long plate just inside the rim, short side along y: its one closing axis lands a
+    # jaw past the rim. The blocking distance is the matched landing gap, not the old
+    # fully-open 52.4 mm, so it is derived from the plate's own grasp width.
     monkeypatch.setattr(heap_oracle, "TIP_MIN_GRIP_HEIGHT", 0.005)
     (x0, x1), (y0, y1) = layout.tray_bounds()
     orc = _oracle([LONG_PLATE])
-    scene = _snapshot([[layout.TRAY_CENTER[0], y1 - 0.022, 0.0016]])
+    # Two bounds meet in a 2 mm window: closer to the rim than the landing gap plus a tip
+    # thickness, so a jaw lands past the rim; far enough in that the closed tips still fit
+    # behind the plate inside PUSH_WALL_MARGIN_M, or there is no push to plan.
+    inset = grasp.landing_half_gap(LONG_PLATE.size[1]) + 0.001
+    scene = _snapshot([[layout.TRAY_CENTER[0], y1 - inset, 0.0016]])
     goal = _to_hover(orc, scene)
     assert goal.phase is oracle.Phase.PUSH_HOVER and orc.push_parts == [0]
     cx, cy = layout.TRAY_CENTER
@@ -143,9 +154,10 @@ def test_a_wall_side_part_is_pushed_toward_the_tray_center_then_tipped(monkeypat
 
 
 def test_a_landing_spot_under_a_stack_falls_back_to_the_densest_cell_push():
-    # A tall stack OPEN_HALF_GAP out on every closing axis of the target blocks both jaws.
+    # A tall stack one matched jaw gap out on every closing axis of the target blocks
+    # both jaws. The gap follows the grasp width now, so the distance does too.
     x, y = layout.TRAY_CENTER[0], 0.0
-    d = grasp.OPEN_HALF_GAP + 0.006
+    d = TOWER_OFFSET
     orc = _oracle([BRICK, BRICK, BRICK, BRICK, BRICK])
     scene = _snapshot(
         [
@@ -167,7 +179,11 @@ def test_three_pushes_then_a_forced_pick_and_done_only_at_a_budget():
     (_x0, _x1), (_y0, y1) = layout.tray_bounds()
     orc = _oracle([LONG_PLATE, BRICK])
     # One plate wall-blocked on its only axis, one brick clear but in an excluded cell.
-    scene = _snapshot([[layout.TRAY_CENTER[0], y1 - 0.020, 0.0016], [0.19, 0.0, 0.0048]])
+    # Two bounds meet in a 2 mm window: closer to the rim than the landing gap plus a tip
+    # thickness, so a jaw lands past the rim; far enough in that the closed tips still fit
+    # behind the plate inside PUSH_WALL_MARGIN_M, or there is no push to plan.
+    inset = grasp.landing_half_gap(LONG_PLATE.size[1]) + 0.001
+    scene = _snapshot([[layout.TRAY_CENTER[0], y1 - inset, 0.0016], [0.19, 0.0, 0.0048]])
     orc.failures[heap_oracle.HeapOracle.cell_of((0.19, 0.0))] = heap_oracle.CELL_FAILURE_CAP
     _to_hover(orc, scene)
     for _ in range(heap_oracle.MAX_PUSHES_IN_A_ROW):
@@ -184,8 +200,10 @@ def test_three_pushes_then_a_forced_pick_and_done_only_at_a_budget():
     orc.push = None
     orc.phase = oracle.Phase.HOVER
     orc.pushes_in_a_row = heap_oracle.MAX_PUSHES_IN_A_ROW
-    d = grasp.OPEN_HALF_GAP + 0.006
-    x, y = 0.19, 0.0
+    d = TOWER_OFFSET
+    # Off the 50 mm cell boundary: the towers' cells are excluded, and at y = 0 the +y
+    # tower shares the target's own cell, which would exclude the target with it.
+    x, y = 0.19, -0.025
     towers = [[x + d, y], [x - d, y], [x, y + d], [x, y - d]]
     orc = _oracle([BRICK, BRICK, BRICK, BRICK, BRICK])
     orc.pushes_in_a_row = heap_oracle.MAX_PUSHES_IN_A_ROW

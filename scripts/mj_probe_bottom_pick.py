@@ -31,7 +31,6 @@ is installed the way the inspection tool installs its oracle subclass.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import importlib.util
 import json
 import math
@@ -104,24 +103,6 @@ REACH_AZIMUTHS_DEG = (-40, -20, 0, 20, 40)
 REACH_CONTROL_RADIUS_M = 0.20
 """The control point, well inside ``layout.SCATTER_MAX_RADIUS``, read at every azimuth."""
 REACH_EPISODE_LENGTH_S = 120.0
-
-MATCHED_HALF_GAP_M = 0.0175
-"""The landing half gap ``--matched_clearance`` gives the ranking, against the shipped 0.0524.
-
-``core.grasp.jaw_clearance`` models the landing spots of a jaw that descends FULLY OPEN. The
-bottom-open descend does not, so the teacher keeps rejecting as unpickable exactly the grasps
-the new primitive can make, and a heap read taken that way measures the old model rather than
-the new pick. This is the number the wall table MEASURED the jaws holding while the tips were
-below the 20 mm wall top on the 2x4's narrow axis (`gap_below_wall_mm`, 17.5 mm), not the
-11.9 mm the opening formula commands: the bang-bang hold sits about 5.6 mm above its floor and
-the model should follow the jaws, not the set point.
-
-One scalar stands in for a width-dependent quantity, and the direction of that approximation
-matters for reading any yield gain. Against the formula it is the STRICTER of the two. Against
-the real jaws it is exact at 15.8 mm, pessimistic for narrower parts and optimistic for wider
-ones, so a part wider than 15.8 mm may be selected on a clearance its jaws would not really
-have. `MAX_GRASP_WIDTH` is 45 mm, where the true held gap would be near 26.5 mm.
-"""
 
 HEAP_HOVER_JITTER = (0.035, 0.080)
 """The read's corrective-approach band, the MS3 Phase 4 t4 window.
@@ -198,6 +179,16 @@ class BottomPickRig(OracleRig):
         self.last_pinch: dict | None = None
 
     # -- the descend --------------------------------------------------------
+
+    def _matched_opening_command(self, i: int, fully_open: float) -> float:
+        """This rig drives the jaws itself, so the base class's jaw policy stands aside.
+
+        Since MS6 rung 1 ``OracleRig`` holds the grasp's own opening through HOVER and
+        DESCEND for any oracle that asks for it, and ``HeapOracle`` does. That is a DIFFERENT
+        primitive from the one this probe measures: this one descends narrow and opens FULLY
+        at the pick depth. Letting both act would measure neither.
+        """
+        return fully_open
 
     def narrow_gap(self, i: int) -> float:
         """Half the opening the descend holds: the part width, two tip thicknesses and 4 mm."""
@@ -642,8 +633,6 @@ def resolved_config(args) -> dict:
         "hover_jitter": [args.hover_jitter_min, args.hover_jitter_max],
         "noise_scale": args.noise_scale,
         "transport_speed": args.transport_speed,
-        "matched_clearance": bool(args.matched_clearance),
-        "matched_half_gap_m": MATCHED_HALF_GAP_M if args.matched_clearance else None,
         "read_flags": not args.no_read_flags,
     }
 
@@ -663,34 +652,6 @@ def stamp_config(log: str, config: dict) -> None:
         f.writelines(line + "\n" for line in lines)
 
 
-@contextlib.contextmanager
-def matched_clearance():
-    """Give ``core.grasp``'s ranking the landing half gap the bottom-open descend holds.
-
-    WHAT THIS REACHES, because a patched constant that leaked would make the run measure more
-    than the model. ``OPEN_HALF_GAP`` appears in exactly three expressions, all inside
-    ``core.grasp``: the landing spots in ``landing_footprints``, and the two stroke bands in
-    ``jaw_clearance``. ``landing_footprints`` and ``sweep_footprints`` are called from nowhere
-    but ``jaw_clearance``, and ``jaw_clearance`` from nowhere but ``rank_grasps``. No module
-    binds the name by ``from ... import``, so there is no second copy to miss. The push
-    planner, the footprint model, ``tray_wall_obstacles``, the oracle's phases and the rig's
-    own descend geometry never read it. So this reaches the ranking and stops there.
-
-    ``sweep_footprints``'s ``outer`` default was bound to the shipped value when the module was
-    imported, so setting the module global alone would leave the swept count measuring the old
-    radius; ``__defaults__`` is patched with it and restored with it.
-    """
-    saved_gap = grasp.OPEN_HALF_GAP
-    saved_defaults = grasp.sweep_footprints.__defaults__
-    grasp.OPEN_HALF_GAP = MATCHED_HALF_GAP_M
-    grasp.sweep_footprints.__defaults__ = (MATCHED_HALF_GAP_M,)
-    try:
-        yield MATCHED_HALF_GAP_M
-    finally:
-        grasp.OPEN_HALF_GAP = saved_gap
-        grasp.sweep_footprints.__defaults__ = saved_defaults
-
-
 def heap(args) -> dict:
     """One K = 50 held-out heap through the inspection tool's driver loop and its log."""
     path = Path(__file__).resolve().with_name("mj_inspect_heap.py")
@@ -698,12 +659,10 @@ def heap(args) -> dict:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.OracleRig = BottomPickRig
-    patch = matched_clearance() if args.matched_clearance else contextlib.nullcontext(None)
-    with patch as half_gap:
-        summary = module.run(args)
+    summary = module.run(args)
     config = resolved_config(args)
     stamp_config(summary["events"], config)
-    return {"mode": "heap", "matched_half_gap_m": half_gap, "config": config, **summary}
+    return {"mode": "heap", "config": config, **summary}
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -749,13 +708,6 @@ def parse_args(argv=None) -> argparse.Namespace:
         "one-liner. Needed to reproduce the archived runs measured without the band: "
         "~/data/maker-arm-ms6/d/probe/iso_nojitter_*, minimal_matched_0 and "
         "minimal_unmatched_0.",
-    )
-    parser.add_argument(
-        "--matched_clearance",
-        action="store_true",
-        help="heap mode only: give the grasp ranking the bottom-open descend's own landing "
-        "half gap instead of the fully-open one, so the teacher stops rejecting the grasps "
-        "the new primitive can make. Off by default.",
     )
     parser.add_argument(
         "--shipped",

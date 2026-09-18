@@ -108,6 +108,9 @@ class HeapOracle(oracle.EnvOracle):
         self.cycle_budget = cycle_budget
         self.grasp: grasp.Grasp | None = None
         self.grasp_min_size = min(layout.BRICK_SIZE)
+        # MS6 rung 1: `core.grasp` ranks on a landing gap that follows the grasp width, so
+        # the jaws have to descend at that opening for the model to describe the arm.
+        self.matched_jaw_opening = True
         self.push: Push | None = None
         self.tip: Tip | None = None
         self.cycles = 0

@@ -710,6 +710,11 @@ class EnvOracle:
         # derives the pinch stall floor from it (core.checker.pinch_min_stall); the six-brick
         # task always squares the jaws to the 2x4's short side. A heap subclass sets it per pick.
         self.grasp_width = layout.BRICK_SIZE[1]
+        self.matched_jaw_opening = False
+        """Hold the jaws at ``grasp_width``'s own opening on the approach, not fully open.
+
+        Off here, so the six-brick task keeps the fully open descend its gated corpus was
+        recorded with. ``HeapOracle`` turns it on (MS6 rung 1)."""
         # One entry per completed pick cycle: did the brick reach its bin (RETREAT's read).
         # The heap batch loop negates the recorded frames of a False cycle (MS6 design H7).
         self.cycle_outcomes: list[bool] = []
