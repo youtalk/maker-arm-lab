@@ -88,5 +88,8 @@ def test_parts_settle_flat_on_the_desk(built):
 def test_the_legacy_scene_is_unchanged_without_parts():
     model, h = scene.build_model(_draw(), num_bricks=2, cameras_on=False)
     assert len(h.brick_bodies) == 2 and all(len(g) == 1 for g in h.body_geoms)
+    # tray=False (the default here), so none of the round dish's rim segments are built.
+    # tray_rim_00 is a real geom name (see test_the_tray_walls_are_static_colliders above),
+    # so this is absent because the tray was never asked for, not because the name is stale.
     with pytest.raises(KeyError):
-        model.geom("tray_wall_near")
+        model.geom("tray_rim_00")
