@@ -73,7 +73,7 @@ def test_round_trip(tmp_path):
     shard = tmp_path / "shard.hdf5"
     _write_shard(shard)
     root = tmp_path / "dataset"
-    converted, total = convert([shard], root, "youtalk/maker-arm-legosort-test", fps=30)
+    converted, total, *_ = convert([shard], root, "youtalk/maker-arm-legosort-test", fps=30)
     assert (converted, total) == (2, 2)
 
     ds = LeRobotDataset("youtalk/maker-arm-legosort-test", root=root)
@@ -114,7 +114,7 @@ def test_resume_appends(tmp_path):
     convert([shard], root, "youtalk/maker-arm-legosort-test", fps=30)
     shard2 = tmp_path / "shard2.hdf5"
     _write_shard(shard2, demos=1)
-    converted, total = convert([shard2], root, "youtalk/maker-arm-legosort-test", fps=30)
+    converted, total, *_ = convert([shard2], root, "youtalk/maker-arm-legosort-test", fps=30)
     assert (converted, total) == (1, 3)
 
 
@@ -126,7 +126,7 @@ def test_create_into_pre_existing_empty_dir(tmp_path):
     _write_shard(shard)
     root = tmp_path / "dataset"
     root.mkdir()
-    converted, total = convert([shard], root, "youtalk/maker-arm-legosort-test", fps=30)
+    converted, total, *_ = convert([shard], root, "youtalk/maker-arm-legosort-test", fps=30)
     assert (converted, total) == (2, 2)
 
     ds = LeRobotDataset("youtalk/maker-arm-legosort-test", root=root)
@@ -189,7 +189,7 @@ def test_split_cycles_roundtrip_with_sidecars(tmp_path):
     _add_cycle_channels(shard, [phase], [brick])
     _add_initial_state(shard)
     root, sidecars = tmp_path / "dataset", tmp_path / "sidecars"
-    converted, total = convert(
+    converted, total, *_ = convert(
         [shard],
         root,
         "youtalk/maker-arm-legosort-test",
@@ -213,7 +213,7 @@ def test_split_cycles_lead_keep_extends_the_first_cycle(tmp_path):
     _write_shard(shard, demos=1, steps=10)
     _add_cycle_channels(shard, [[0, 0, 1, 2, 3, 8, 1, 2, 3, 8]], [[-1, -1, 0, 0, 0, 0, 1, 1, 1, 1]])
     root = tmp_path / "dataset"
-    converted, total = convert(
+    converted, total, *_ = convert(
         [shard], root, "youtalk/maker-arm-legosort-test", fps=30, split_cycles=True, lead_keep=1
     )
     assert (converted, total) == (2, 2)
@@ -237,7 +237,7 @@ def test_split_cycles_roundtrip_without_sidecars(tmp_path):
     _add_cycle_channels(shard, [phase], [brick])
     _add_initial_state(shard)
     root = tmp_path / "dataset"
-    converted, total = convert(
+    converted, total, *_ = convert(
         [shard],
         root,
         "youtalk/maker-arm-legosort-test",
@@ -297,7 +297,7 @@ def test_sidecar_dir_non_empty_on_resume_appends(tmp_path):
     _write_shard(shard2, demos=1, steps=10)
     _add_cycle_channels(shard2, [phase], [brick])
     _add_initial_state(shard2)
-    converted, total = convert(
+    converted, total, *_ = convert(
         [shard2],
         root,
         "youtalk/maker-arm-legosort-test",

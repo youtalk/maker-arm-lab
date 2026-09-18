@@ -1058,7 +1058,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--context",
-        choices=("camera", "privileged"),
+        # Mirrors convert_to_lerobot.py's CONTEXT_SOURCES; this module is stdlib-only and
+        # cannot import it. camera_box is the MS6 heap channel (camera pose + box pose).
+        choices=("camera", "privileged", "camera_box"),
         default=None,
         help="convert this context channel into observation.environment_state",
     )

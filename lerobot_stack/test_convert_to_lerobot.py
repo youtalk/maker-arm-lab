@@ -1,6 +1,9 @@
 """convert_to_lerobot.py on a tiny synthetic shard, in the LeRobot venv."""
 
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -8,13 +11,16 @@ import pytest
 
 import convert_to_lerobot as c2l
 
+SCRIPT = Path(__file__).resolve().parent / "convert_to_lerobot.py"
 
-def _shard(path, frames=8, context=True, bricks=None, actor=None):
+
+def _shard(path, frames=8, context=True, bricks=None, actor=None, success=True, demo=0, box=False):
     if bricks is None:
         bricks = np.zeros(frames, np.int8)
-    with h5py.File(path, "w") as f:
-        g = f.create_group("data/demo_0")
-        g.attrs["success"] = True
+    mode = "a" if Path(path).exists() else "w"
+    with h5py.File(path, mode) as f:
+        g = f.create_group(f"data/demo_{demo}")
+        g.attrs["success"] = success
         g.attrs["num_samples"] = frames
         g.create_dataset("actions", data=np.zeros((frames, 7), np.float32))
         targets = np.zeros((frames, 8), np.float32)
@@ -40,6 +46,9 @@ def _shard(path, frames=8, context=True, bricks=None, actor=None):
                 "obs/context_privileged", data=np.zeros((frames, 42), np.float32)
             )
             priv.attrs["names"] = json.dumps([f"v{i}" for i in range(42)])
+        if box:
+            bx = g.create_dataset("obs/context_box", data=np.full((frames, 3), 0.75, np.float32))
+            bx.attrs["names"] = json.dumps(["box_x", "box_y", "box_yaw"])
         init = g.create_group("initial_state")
         robot = init.create_group("articulation/robot")
         for key, width in (
@@ -57,7 +66,7 @@ def _shard(path, frames=8, context=True, bricks=None, actor=None):
 
 def test_camera_context_becomes_the_environment_state(tmp_path):
     shard = _shard(tmp_path / "s.hdf5")
-    converted, total = c2l.convert([shard], tmp_path / "ds", "t/x", 30, context="camera")
+    converted, total, *_ = c2l.convert([shard], tmp_path / "ds", "t/x", 30, context="camera")
     assert (converted, total) == (1, 1)
     info = json.loads((tmp_path / "ds" / "meta" / "info.json").read_text())
     feat = info["features"]["observation.environment_state"]
@@ -165,7 +174,7 @@ def test_cycle_segments_cut_on_actor_changes_and_drop_nonpositive_actors():
 
 def test_dagger_conversion_keeps_takeover_cycles_only(tmp_path):
     shard = _shard(tmp_path / "s.hdf5", actor=[1, 1, 1, 0, 0, -2, -2, -2])
-    converted, total = c2l.convert(
+    converted, total, *_ = c2l.convert(
         [shard], tmp_path / "ds", "t/x", 30, split_cycles=True, dagger=True, context="camera"
     )
     assert (converted, total) == (1, 1)
@@ -180,3 +189,79 @@ def test_dagger_conversion_keeps_takeover_cycles_only(tmp_path):
     plain = _shard(tmp_path / "p.hdf5")
     with pytest.raises(RuntimeError, match="obs/actor"):
         c2l.convert([plain], tmp_path / "ds4", "t/x", 30, split_cycles=True, dagger=True)
+
+
+def test_dagger_keeps_a_failed_episode_but_not_its_negated_cycles(tmp_path):
+    # MS6: a heap episode's success attr means "every part stowed", so it is almost always
+    # False. Under --dagger the positive-actor cut is the filter, and the success attr must not
+    # get a veto over it -- see G1 of the pipeline verification run (8 episodes vs 15).
+    shard = _shard(
+        tmp_path / "s.hdf5",
+        actor=[1, 1, 1, -2, -2, 3, 3, 3],
+        success=False,
+        bricks=np.array([0, 0, 0, 1, 1, 2, 2, 2], np.int8),
+    )
+    counts = c2l.convert(
+        [shard],
+        tmp_path / "ds",
+        "t/x",
+        30,
+        split_cycles=True,
+        dagger=True,
+        images=False,
+        context="camera",
+    )
+    # Cycles 1 and 3 survive, cycle 2 is negated and dropped; nothing is skipped up front.
+    assert counts == (2, 2, 1, 0)
+    info = json.loads((tmp_path / "ds" / "meta" / "info.json").read_text())
+    assert info["total_frames"] == 6
+
+
+def test_without_dagger_a_failed_episode_is_still_skipped(tmp_path):
+    shard = _shard(tmp_path / "s.hdf5", success=False)
+    counts = c2l.convert([shard], tmp_path / "ds", "t/x", 30, images=False, context="camera")
+    assert counts == (0, 0, 1, 1)
+
+
+def test_camera_box_context_is_the_camera_pose_then_the_box_pose(tmp_path):
+    shard = _shard(tmp_path / "s.hdf5", box=True)
+    c2l.convert([shard], tmp_path / "ds", "t/x", 30, context="camera_box", images=False)
+    info = json.loads((tmp_path / "ds" / "meta" / "info.json").read_text())
+    feat = info["features"]["observation.environment_state"]
+    assert feat["shape"] == [9]
+    assert feat["names"][0] == "overhead_cam_x" and feat["names"][6] == "box_x"
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    row = LeRobotDataset("t/x", root=tmp_path / "ds")[0]["observation.environment_state"]
+    # Camera first (0.25 from _shard), then the box (0.75) -- not the other way round.
+    assert row.tolist() == pytest.approx([0.25] * 6 + [0.75] * 3)
+
+
+def test_camera_box_needs_the_box_channel(tmp_path):
+    shard = _shard(tmp_path / "s.hdf5")  # camera and privileged only
+    with pytest.raises(RuntimeError, match="context_box"):
+        c2l.convert([shard], tmp_path / "ds", "t/x", 30, context="camera_box", images=False)
+
+
+def test_convert_ok_reports_what_was_read_and_skipped(tmp_path):
+    # A supervisor has to be able to tell "the corpus was empty" from "the success filter ate
+    # it", so read= and skipped= are part of the stdout contract, not just the return value.
+    shard = tmp_path / "s.hdf5"
+    _shard(shard, demo=0, success=True)
+    _shard(shard, demo=1, success=False)
+    argv = [
+        "--shards",
+        str(shard),
+        "--root",
+        str(tmp_path / "ds"),
+        "--repo_id",
+        "t/x",
+        "--no_images",
+        "--context",
+        "camera",
+    ]
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), *argv], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert "CONVERT_OK episodes=1 total=1 read=2 skipped=1" in result.stdout
