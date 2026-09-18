@@ -1,7 +1,6 @@
 """Heap mode of MjLegoSortEnv and the recorder's heap datasets (design sections 6, 8, 9)."""
 
 import json
-import math
 import random
 
 import h5py
@@ -103,14 +102,13 @@ def heap():
     e.close()
 
 
-def test_a_heap_reset_drops_the_parts_on_the_disc_at_rest(heap):
-    cx, cy = layout.HEAP_CENTER
+def test_a_heap_reset_drops_the_parts_in_reach_at_rest(heap):
     for i in range(2):
         for b in range(6):
             p = heap.scene[f"brick_{b}"].data.root_pos_w[i]
             v = heap.scene[f"brick_{b}"].data.root_lin_vel_w[i]
             # No dish holds them, so a bounce off a neighbor can carry a part a little out.
-            assert math.hypot(p[0] - cx, p[1] - cy) <= layout.HEAP_RADIUS + 0.03, (i, b, p)
+            assert layout.in_reach(float(p[0]), float(p[1]), heap.bin_layouts[i], -0.03), (i, b, p)
             assert p[2] < 0.05 and v.norm() < 0.05
     assert heap.cfg.num_bricks == 6 and heap.parts == tuple(PARTS)
     assert heap.destination_bins.shape == (2,) and set(heap.destination_bins.tolist()) <= {
@@ -124,19 +122,20 @@ def test_a_heap_reset_drops_the_parts_on_the_disc_at_rest(heap):
     assert "overhead_depth" not in heap.obs_buf["images"]  # cameras off
 
 
-def test_every_dropped_part_starts_on_the_disc():
+def test_every_dropped_part_starts_in_reach_and_the_drop_uses_the_sides():
     draw = layout.sample_run_draw(random.Random(3))
     draw["slot_colors"] = (0, 1, 2, 3)
     parts_list = parts.sample_parts(random.Random(7), parts.catalog(), 12)
     env = MjLegoSortEnv(1, draw, num_bricks=12, parts=parts_list, cameras=False)
     env.reset(seed=5)
+    ys = []
     for b in range(12):
-        x, y = env._brick_pos_np(0, b)[:2] if hasattr(env, "_brick_pos_np") else (None, None)
-        if x is None:
-            adr = env.handles.brick_qpos[b]
-            x, y = env.datas[0].qpos[adr], env.datas[0].qpos[adr + 1]
-        cx, cy = layout.HEAP_CENTER
-        assert math.hypot(float(x) - cx, float(y) - cy) <= layout.HEAP_RADIUS + 0.03
+        adr = env.handles.brick_qpos[b]
+        x, y = float(env.datas[0].qpos[adr]), float(env.datas[0].qpos[adr + 1])
+        assert layout.in_reach(x, y, env.bin_layouts[0], -0.03), (b, x, y)
+        ys.append(y)
+    # The parts spread over the six-brick zone, past the 0.088 m disc they were dumped on.
+    assert max(abs(y) for y in ys) > layout.HEAP_RADIUS
     env.close()
 
 

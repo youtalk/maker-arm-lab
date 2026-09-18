@@ -342,15 +342,19 @@ def test_spatial_scale_widens_the_camera_and_bin_x_draws_only():
     )
 
 
-def test_the_drop_disc_fills_the_driven_reach_band():
-    """Campaign d: the near edge is driven-bounded at 0.10 m, the far edge at 0.280 m."""
-    near = layout.HEAP_CENTER[0] - layout.HEAP_RADIUS
-    far = layout.HEAP_CENTER[0] + layout.HEAP_RADIUS
-    assert near >= layout.SCATTER_MIN_RADIUS
-    assert far <= layout.SCATTER_MAX_RADIUS
-    # The far edge must also clear the TIGHTEST bin layout the run draw can produce.
-    tightest = layout.BinLayout(bin_x=0.43)  # the smallest bin_x the run draw produces
-    assert far <= layout.top_down_x_limit(tightest)
+def test_the_heap_drop_spreads_over_the_scatter_zone_inside_the_reach_band():
+    """The parts use the desk to the arm's left and right, not only the old 0.088 m disc."""
+    bl = layout.DEFAULT_BIN_LAYOUT
+    rng = random.Random(3)
+    points = [layout.sample_heap_point(rng, bl, 0.02) for _ in range(500)]
+    (x0, x1), (y0, y1) = layout.scatter_x(bl), layout.SCATTER_Y
+    assert all(x0 + 0.02 <= x <= x1 - 0.02 and y0 + 0.02 <= y <= y1 - 0.02 for x, y in points)
+    assert all(math.hypot(x, y) <= layout.SCATTER_MAX_RADIUS - 0.02 for x, y in points)
+    assert all(layout.in_reach(x, y, bl) for x, y in points)
+    assert sum(1 for _, y in points if abs(y) > layout.HEAP_RADIUS) > 150
+    # The tightest bin layout the run draw produces still leaves a zone to sample.
+    tightest = layout.BinLayout(bin_x=0.43)
+    assert layout.scatter_x(tightest)[1] - layout.scatter_x(tightest)[0] > 0.10
 
 
 def test_in_reach_is_the_band_short_of_the_bins_and_the_margin_shrinks_it():
@@ -358,16 +362,23 @@ def test_in_reach_is_the_band_short_of_the_bins_and_the_margin_shrinks_it():
     assert layout.in_reach(*layout.HEAP_CENTER, bl)
     assert not layout.in_reach(layout.SCATTER_MIN_RADIUS - 0.001, 0.0, bl)
     assert layout.in_reach(layout.SCATTER_MIN_RADIUS + 0.001, 0.0, bl)
-    assert layout.in_reach(0.0, layout.SCATTER_MAX_RADIUS - 0.001, bl)
-    assert not layout.in_reach(0.0, layout.SCATTER_MAX_RADIUS + 0.001, bl)
+    assert layout.in_reach(layout.SCATTER_MAX_RADIUS - 0.001, 0.0, bl)
+    assert not layout.in_reach(layout.SCATTER_MAX_RADIUS + 0.001, 0.0, bl)
     # Short of the bins: a point inside the radius but past the top-down x limit is out.
     limit = layout.top_down_x_limit(bl)
     assert limit < layout.SCATTER_MAX_RADIUS + 0.05
     assert not layout.in_reach(limit + 0.001, 0.0, bl)
-    # A positive margin shrinks the band on both edges, a negative one grows it.
+    # No wider than the zone D3 drove: past SCATTER_Y plus the slack a part is out.
+    y_edge = layout.SCATTER_Y[1] + layout.REACH_Y_SLACK
+    assert layout.in_reach(0.15, y_edge - 0.001, bl) and not layout.in_reach(
+        0.15, y_edge + 0.001, bl
+    )
+    assert not layout.in_reach(0.15, -y_edge - 0.001, bl)
+    # A positive margin shrinks the band on every edge, a negative one grows it.
     edge = layout.SCATTER_MAX_RADIUS - 0.002
-    assert layout.in_reach(0.0, edge, bl) and not layout.in_reach(0.0, edge, bl, margin=0.005)
-    assert layout.in_reach(0.0, layout.SCATTER_MAX_RADIUS + 0.002, bl, margin=-0.005)
+    assert layout.in_reach(edge, 0.0, bl) and not layout.in_reach(edge, 0.0, bl, margin=0.005)
+    assert layout.in_reach(layout.SCATTER_MAX_RADIUS + 0.002, 0.0, bl, margin=-0.005)
+    assert layout.in_reach(0.15, y_edge + 0.002, bl, margin=-0.005)
 
 
 def test_the_heap_bin_holds_the_heap_and_keeps_the_reach_limit():

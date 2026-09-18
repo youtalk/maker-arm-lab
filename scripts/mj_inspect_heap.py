@@ -185,7 +185,7 @@ class Video:
         self.renderer = mujoco.Renderer(env.models[0], VIDEO_SIZE[1], VIDEO_SIZE[0])
         self.camera = mujoco.MjvCamera()
         self.camera.type = mujoco.mjtCamera.mjCAMERA_FREE
-        self.camera.lookat[:] = (*layout.TRAY_CENTER, 0.0)
+        self.camera.lookat[:] = (*layout.HEAP_CENTER, 0.0)
         self.camera.distance = CAMERA_DISTANCE
         self.camera.elevation = CAMERA_ELEVATION_DEG
         self.camera.azimuth = CAMERA_AZIMUTH_DEG

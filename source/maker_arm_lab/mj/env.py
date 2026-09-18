@@ -580,13 +580,11 @@ class MjLegoSortEnv:
             rgba = layout.BRICK_RGBA[self._rng.choice(layout.BRICK_COLOR_ORDER)]
             for g in h.body_geoms[b]:
                 m.geom_rgba[g] = rgba
-            # Uniform on the drop disc, shrunk by the part's own half diagonal so a part
-            # never starts over its edge. sqrt keeps the draw uniform per unit area.
-            reach = max(0.0, layout.HEAP_RADIUS - part.half_diagonal)
-            rho = reach * math.sqrt(self._rng.random())
-            phi = self._rng.uniform(0.0, 2.0 * math.pi)
-            x = layout.HEAP_CENTER[0] + rho * math.cos(phi)
-            y = layout.HEAP_CENTER[1] + rho * math.sin(phi)
+            # Uniform over the scatter zone, inset by the part's own half diagonal and a
+            # little more, so a part never starts over the reach band's edge.
+            x, y = layout.sample_heap_point(
+                self._rng, self.bin_layouts[i], part.half_diagonal + layout.HEAP_DROP_INSET
+            )
             z = self._rng.uniform(layout.HEAP_DROP_Z_MIN, z_top)
             adr = h.brick_qpos[b]
             d.qpos[adr : adr + 3] = (x, y, z)

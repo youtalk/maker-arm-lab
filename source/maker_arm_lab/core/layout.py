@@ -165,16 +165,27 @@ TOP_DOWN_X_LIMIT = 0.29
 SHELF_SIZE = (0.10, 0.54, 0.15)
 SHELF_POS = (0.44, 0.0, 0.075)
 
-# The heap drop disc. Owner decision 2026-09-18: no dish and no box. The parts are dumped on
-# the bare desk over a disc that fills the driven reach band, SCATTER_MIN_RADIUS to
-# SCATTER_MAX_RADIUS from the base, and nothing holds them there. A part that slides out of
-# the band is out of reach and stays where it is (`core.heap_oracle`).
-HEAP_CENTER = (0.19, 0.0)
+# The heap drop zone. Owner decision 2026-09-18: no dish and no box, and the parts spread
+# over the whole six-brick scatter zone, SCATTER_X by SCATTER_Y clipped to the driven reach
+# band, so the desk to the arm's left and right is used. That zone is what Task D3 drove and
+# what the overhead camera frames (`overhead_view_region`). Before the spread the heap was
+# dumped on a disc of radius 0.088 m at (0.19, 0.0), 243 cm2 against the zone's ~470 cm2, and
+# 50 parts there blocked each other's landing spots (~/data/maker-arm-ms6/i/rA). Nothing
+# holds the parts on the desk: a part that slides out of the band is out of reach and stays
+# where it is (`core.heap_oracle`).
+HEAP_CENTER = (0.21, 0.0)
+"""The zone's centre: where the push heading's bias points (`HeapOracle._push_heading`)."""
 HEAP_RADIUS = 0.088
+"""The radius over which that bias narrows to its floor: the old drop disc's."""
+HEAP_DROP_INSET = 0.01
+"""Extra inset (m) of the drop over a part's half diagonal, so a bounce stays in reach."""
 SCATTER_MIN_RADIUS = 0.10
 """Nearest radius from the base a driven descend picked at: campaign d's reach band probe
 (docs/ms6-lever-verification.md), `scripts/mj_probe_bottom_pick.py --mode reach_band`. Like
 SCATTER_MAX_RADIUS it is a TRACKING bound read on a lone brick, not a solver report."""
+REACH_Y_SLACK = 0.02
+"""How far (m) past SCATTER_Y a part is still a target. D3 drove the zone's azimuths and no
+wider, so a part further out to the side is not known to be reachable."""
 
 # The heap drop (design section 6): part k lands at a height uniform in
 # [HEAP_DROP_Z_MIN, HEAP_DROP_Z_MIN + HEAP_DROP_Z_PER_PART * K], then the physics settles for
@@ -246,13 +257,30 @@ def top_down_x_limit(bl: BinLayout) -> float:
 def in_reach(x: float, y: float, bl: BinLayout, margin: float = 0.0) -> bool:
     """Can a top-down descend pick at (x, y)? The driven reach band, short of the bins.
 
-    ``margin`` shrinks the band (negative grows it), for a caller that wants hysteresis.
+    The band is the annulus SCATTER_MIN_RADIUS to SCATTER_MAX_RADIUS, cut at the top-down x
+    limit and at the scatter zone's y span plus REACH_Y_SLACK. ``margin`` shrinks it on every
+    edge (negative grows it), for a caller that wants hysteresis.
     """
     radius = math.hypot(x, y)
     return (
         SCATTER_MIN_RADIUS + margin <= radius <= SCATTER_MAX_RADIUS - margin
         and x <= top_down_x_limit(bl) - margin
+        and abs(y) <= SCATTER_Y[1] + REACH_Y_SLACK - margin
     )
+
+
+def sample_heap_point(rng: random.Random, bl: BinLayout, inset: float) -> tuple[float, float]:
+    """A drop point uniform over the scatter zone shrunk by ``inset`` on every edge.
+
+    The zone is ``scatter_x(bl)`` by SCATTER_Y with the far corners clipped at
+    SCATTER_MAX_RADIUS, the same region the six-brick task scatters over. Rejection on the
+    radius keeps the draw uniform per unit area instead of piling parts on the arc.
+    """
+    (x0, x1), (y0, y1) = scatter_x(bl), SCATTER_Y
+    while True:
+        x, y = rng.uniform(x0 + inset, x1 - inset), rng.uniform(y0 + inset, y1 - inset)
+        if math.hypot(x, y) <= SCATTER_MAX_RADIUS - inset:
+            return x, y
 
 
 def scatter_x(bl: BinLayout) -> tuple[float, float]:
