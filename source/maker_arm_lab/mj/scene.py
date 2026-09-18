@@ -206,9 +206,20 @@ def _add_position_actuator(spec, joint: str, kp: float, kd: float, force_limit: 
 
 
 def _add_part_geoms(spec, body, index: int, part: _parts.Part, rgba) -> mujoco.MjsGeom:
-    """One collider (box or slope hull) plus visual-only studs (design H3); returns the collider."""
+    """One collider (box, cylinder or slope hull) plus visual-only studs (design H3).
+
+    Returns the collider.
+    """
     name = f"brick_{index}_geom"
-    if part.hull is None:
+    if part.family == "round":
+        geom = body.add_geom(
+            name=name,
+            type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+            size=[part.size[0] / 2, part.size[2] / 2, 0.0],
+            rgba=list(rgba),
+            friction=list(BRICK_FRICTION),
+        )
+    elif part.hull is None:
         geom = body.add_geom(
             name=name,
             type=mujoco.mjtGeom.mjGEOM_BOX,

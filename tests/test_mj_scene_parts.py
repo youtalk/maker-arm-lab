@@ -20,7 +20,7 @@ def _draw():
 PARTS = [
     parts.make_part("brick", 2, 4),
     parts.make_part("slope", 1, 2),
-    parts.make_part("tile", 1, 1),
+    parts.make_part("round", 2, 2),
 ]
 
 
@@ -34,13 +34,15 @@ def test_one_collider_per_part_and_visual_studs(built):
     assert len(h.brick_bodies) == 3 and len(h.brick_geoms) == 3
     assert model.geom_type[h.brick_geoms[0]] == mujoco.mjtGeom.mjGEOM_BOX
     assert model.geom_type[h.brick_geoms[1]] == mujoco.mjtGeom.mjGEOM_MESH
+    assert model.geom_type[h.brick_geoms[2]] == mujoco.mjtGeom.mjGEOM_CYLINDER
+    assert model.geom_size[h.brick_geoms[2]][:2] == pytest.approx([0.0079, 0.0048])
     studs = [g for g in range(model.ngeom) if model.geom(g).name.startswith("brick_0_stud_")]
     assert len(studs) == 8
     assert all(model.geom_contype[g] == 0 and model.geom_conaffinity[g] == 0 for g in studs)
     assert all(model.geom_type[g] == mujoco.mjtGeom.mjGEOM_CYLINDER for g in studs)
-    assert not [g for g in range(model.ngeom) if model.geom(g).name.startswith("brick_2_stud_")]
+    assert not [g for g in range(model.ngeom) if model.geom(g).name.startswith("brick_1_stud_")]
     assert h.body_geoms[0][0] == h.brick_geoms[0] and len(h.body_geoms[0]) == 9
-    assert len(h.body_geoms[2]) == 1
+    assert len(h.body_geoms[1]) == 1 and len(h.body_geoms[2]) == 5
 
 
 def test_part_masses_and_sizes_reach_the_model(built):

@@ -15,7 +15,7 @@ from collections import Counter
 
 GRASP_PHASES = {"DESCEND", "CLOSE", "LIFT", "REOPEN"}
 TRANSIT_PHASES = {"RAISE", "EXTEND", "RELEASE", "RETREAT"}
-FAMILIES = ("brick", "slope", "plate", "tile")
+FAMILIES = ("brick", "round", "slope", "plate", "tile")
 
 
 def exit_bucket(event: dict) -> str:
