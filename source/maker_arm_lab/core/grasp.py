@@ -72,16 +72,38 @@ def body_axes_world(quat: torch.Tensor) -> torch.Tensor:
     return quat_apply(quat.reshape(1, 4), torch.eye(3, dtype=torch.float32))
 
 
+def jaw_plane_normal(tilt_rad: float = 0.0) -> torch.Tensor:
+    """The jaw plane's normal in the world: horizontal at tilt_rad = 0.0, leaning toward +x.
+
+    ``candidate_grasps`` and ``HeapOracle.standing`` (core/heap_oracle.py) both call this
+    through ``off_plane_axes``, so a non-zero tilt cannot make the two disagree about which
+    body axis is a closing axis (MS6 rework section 7).
+    """
+    return torch.tensor([-math.sin(tilt_rad), 0.0, math.cos(tilt_rad)], dtype=torch.float32)
+
+
+def off_plane_axes(axes: torch.Tensor, tilt_rad: float = 0.0) -> torch.Tensor:
+    """(3,) each body axis's magnitude off the jaw plane's normal, at ``tilt_rad``."""
+    return (axes @ jaw_plane_normal(tilt_rad)).abs()
+
+
 def candidate_grasps(
-    part: int, size: torch.Tensor, pos: torch.Tensor, quat: torch.Tensor
+    part: int,
+    size: torch.Tensor,
+    pos: torch.Tensor,
+    quat: torch.Tensor,
+    tilt_rad: float = 0.0,
 ) -> list[Grasp]:
-    """Every closing axis within AXIS_MAX_TILT_RAD of horizontal and under MAX_GRASP_WIDTH."""
+    """Every closing axis within AXIS_MAX_TILT_RAD of the jaw plane, under MAX_GRASP_WIDTH.
+
+    The jaw plane is horizontal at ``tilt_rad = 0.0``.
+    """
     axes = body_axes_world(quat)
-    vertical = axes[:, 2].abs()
-    half_height = 0.5 * float(size[int(vertical.argmax())])
+    off_plane = off_plane_axes(axes, tilt_rad)
+    half_height = 0.5 * float(size[int(off_plane.argmax())])
     found = []
     for k in range(3):
-        if float(vertical[k]) > math.sin(AXIS_MAX_TILT_RAD):
+        if float(off_plane[k]) > math.sin(AXIS_MAX_TILT_RAD):
             continue
         width = float(size[k])
         if width > MAX_GRASP_WIDTH:

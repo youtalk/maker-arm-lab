@@ -412,6 +412,31 @@ def test_standing_reads_the_short_axis_against_the_closing_band():
     assert orc.standing(upright_scene, 0)
 
 
+def test_standing_and_candidate_grasps_agree_at_a_non_zero_jaw_tilt():
+    """MS6 rework section 7: standing() must read the same jaw plane candidate_grasps ranks
+    against, or a tip could pass a jaw plane the pick itself would refuse.
+
+    The plate's 3.2 mm thickness (its short axis) lies along world +x here: in the jaw plane
+    when level, 0.342 = sin(20 deg) off it once the jaw plane tilts, over the 0.259 =
+    sin(15 deg) = sin(AXIS_MAX_TILT_RAD) band both must refuse it by. World +y stays
+    unaffected by an about-y tilt, so +x is the axis that would show a drift.
+    """
+    plate = parts.make_part("plate", 2, 4)
+    orc, scene = _heap_with_parts([plate], flat=True)
+    scene.brick_quat = torch.tensor(quat_from_rpy_deg((0.0, 90.0, 0.0))).expand(1, 4).clone()
+    tilt = math.radians(20.0)
+    short_width = min(plate.size)
+    size = torch.tensor(plate.size)
+
+    assert orc.standing(scene, 0, tilt_rad=0.0)
+    assert not orc.standing(scene, 0, tilt_rad=tilt)
+
+    level = grasp.candidate_grasps(0, size, scene.brick_pos[0], scene.brick_quat[0], 0.0)
+    tilted = grasp.candidate_grasps(0, size, scene.brick_pos[0], scene.brick_quat[0], tilt)
+    assert any(g.width == pytest.approx(short_width) for g in level)
+    assert not any(g.width == pytest.approx(short_width) for g in tilted)
+
+
 def test_the_tip_phases_run_in_order_and_a_failed_tip_marks_the_cell():
     plate = parts.make_part("plate", 2, 4)
     orc, scene = _heap_with_parts([plate], flat=True)

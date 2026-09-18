@@ -139,16 +139,20 @@ class HeapOracle(oracle.EnvOracle):
             return oracle.Phase.TIP_HOVER
         return oracle.Phase.PUSH_HOVER if self.push is not None else oracle.Phase.DONE
 
-    def standing(self, scene: oracle.SceneSnapshot, part: int) -> bool:
+    def standing(self, scene: oracle.SceneSnapshot, part: int, tilt_rad: float = 0.0) -> bool:
         """Is the part's shortest axis within the closing band, so its wide face grips?
 
-        `core.grasp` counts a body axis as a closing axis only within AXIS_MAX_TILT_RAD of
-        horizontal. A plate lying flat holds its short axis straight up, and no tilt short of
-        that band makes the wide face a grip surface.
+        `core.grasp` counts a body axis as a closing axis only within AXIS_MAX_TILT_RAD of the
+        jaw plane (`grasp.off_plane_axes`, the same call `candidate_grasps` makes). A plate
+        lying flat holds its short axis along the plane's normal, and no tilt short of that
+        band makes the wide face a grip surface. ``tilt_rad`` must be the same value
+        `_ranked`/`candidate_grasps` picks the grasp against, or a tip could pass a jaw plane
+        the pick itself would refuse.
         """
         axes = grasp.body_axes_world(scene.brick_quat[part])
         short = int(torch.as_tensor(self.sizes[part]).argmin())
-        return abs(float(axes[short, 2])) <= math.sin(grasp.AXIS_MAX_TILT_RAD)
+        off_plane = float(grasp.off_plane_axes(axes, tilt_rad)[short])
+        return off_plane <= math.sin(grasp.AXIS_MAX_TILT_RAD)
 
     # -- selection ------------------------------------------------------------
 
