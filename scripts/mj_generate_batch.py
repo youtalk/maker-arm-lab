@@ -51,7 +51,7 @@ NUM_BRICKS = 6
 def exported_count(counters: dict, heap: bool) -> int:
     """The count BATCH_OK reports and gates on.
 
-    A heap episode's "exported" only rises when every part in the tray got stowed, but the
+    A heap episode's "exported" only rises when every part of the heap got stowed, but the
     phase's own target is a 0.90 stowed fraction per part, so a heap run counts every episode
     the recorder wrote instead (``exported_written``). The six-brick run is unchanged: it
     keeps counting only fully-successful episodes (``exported``).

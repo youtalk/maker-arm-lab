@@ -11,8 +11,6 @@ from dataclasses import dataclass
 
 import torch
 
-from maker_arm_lab.core.quat import quat_from_rpy_deg, quat_mul
-
 BRICK_SIZE = (0.0318, 0.0158, 0.0096)
 BRICK_MASS = 0.003  # kg; real brick ~2.3 g, slightly rounded up for solver health
 BRICK_COLOR_ORDER = ("red", "blue", "yellow", "green")
@@ -167,18 +165,16 @@ TOP_DOWN_X_LIMIT = 0.29
 SHELF_SIZE = (0.10, 0.54, 0.15)
 SHELF_POS = (0.44, 0.0, 0.075)
 
-# MS6 rework section 5. The tray is a round dish. The rectangle's walls blocked the parts at
-# the edge: heap 0 of 2026-09-17 ended with 26 of 50 parts outside the tray. The dish fills
-# the driven reach band, 0.10 m to SCATTER_MAX_RADIUS, and its rim leans outward so a part
-# that slides out rides back in instead of resting on a wall top.
-TRAY_CENTER = (0.19, 0.0)
-TRAY_RADIUS = 0.088
-TRAY_WALL_HEIGHT = 0.02
-TRAY_WALL = 0.005
-TRAY_RIM_TILT_RAD = math.radians(45.0)
-TRAY_SEGMENTS = 24
-"""Box segments in the rim ring. Boxes and not a mesh: the contact cost stays flat, and
-`core.grasp` already models the wall as a footprint per box."""
+# The heap drop disc. Owner decision 2026-09-18: no dish and no box. The parts are dumped on
+# the bare desk over a disc that fills the driven reach band, SCATTER_MIN_RADIUS to
+# SCATTER_MAX_RADIUS from the base, and nothing holds them there. A part that slides out of
+# the band is out of reach and stays where it is (`core.heap_oracle`).
+HEAP_CENTER = (0.19, 0.0)
+HEAP_RADIUS = 0.088
+SCATTER_MIN_RADIUS = 0.10
+"""Nearest radius from the base a driven descend picked at: campaign d's reach band probe
+(docs/ms6-lever-verification.md), `scripts/mj_probe_bottom_pick.py --mode reach_band`. Like
+SCATTER_MAX_RADIUS it is a TRACKING bound read on a lone brick, not a solver report."""
 
 # The heap drop (design section 6): part k lands at a height uniform in
 # [HEAP_DROP_Z_MIN, HEAP_DROP_Z_MIN + HEAP_DROP_Z_PER_PART * K], then the physics settles for
@@ -186,51 +182,6 @@ TRAY_SEGMENTS = 24
 HEAP_DROP_Z_MIN = 0.03
 HEAP_DROP_Z_PER_PART = 0.0012
 HEAP_SETTLE_STEPS = 480
-
-
-def inside_tray(x: float, y: float, margin: float = 0.0) -> bool:
-    """Is (x, y) inside the dish interior, grown by ``margin`` (negative shrinks it)?"""
-    return math.hypot(x - TRAY_CENTER[0], y - TRAY_CENTER[1]) <= TRAY_RADIUS + margin
-
-
-def tray_bounds() -> tuple[tuple[float, float], tuple[float, float]]:
-    """((x_min, x_max), (y_min, y_max)) of the dish interior's bounding box.
-
-    The region test is `inside_tray`. This stays for the callers that want a box: the camera
-    framing and any sampler that rejects to the circle afterwards.
-    """
-    cx, cy = TRAY_CENTER
-    return ((cx - TRAY_RADIUS, cx + TRAY_RADIUS), (cy - TRAY_RADIUS, cy + TRAY_RADIUS))
-
-
-def tray_static_boxes() -> list[
-    tuple[str, tuple[float, float, float], tuple[float, float, float], tuple[float, ...]]
-]:
-    """(name, center, size, quat) for the dish rim segments, as static colliders on the desk.
-
-    Each segment is a slab of thickness TRAY_WALL that starts at the interior circle on the
-    desk and leans outward by TRAY_RIM_TILT_RAD. The segments overlap a little, so the ring
-    has no gap for a plate to slide through.
-    """
-    tilt = TRAY_RIM_TILT_RAD
-    span = TRAY_WALL_HEIGHT / math.cos(tilt)
-    radius = TRAY_RADIUS + 0.5 * span * math.sin(tilt) + 0.5 * TRAY_WALL * math.cos(tilt)
-    z = 0.5 * span * math.cos(tilt) - 0.5 * TRAY_WALL * math.sin(tilt)
-    chord = 1.15 * 2.0 * math.pi * radius / TRAY_SEGMENTS
-    boxes = []
-    for k in range(TRAY_SEGMENTS):
-        theta = 2.0 * math.pi * k / TRAY_SEGMENTS
-        center = (
-            TRAY_CENTER[0] + radius * math.cos(theta),
-            TRAY_CENTER[1] + radius * math.sin(theta),
-            z,
-        )
-        quat = quat_mul(
-            quat_from_rpy_deg((0.0, 0.0, math.degrees(theta))),
-            quat_from_rpy_deg((0.0, math.degrees(tilt), 0.0)),
-        )
-        boxes.append((f"tray_rim_{k:02d}", center, (TRAY_WALL, chord, span), quat))
-    return boxes
 
 
 BIN_INTERIOR = (0.09, 0.09, 0.04)
@@ -290,6 +241,18 @@ def bin_front_x(bl: BinLayout) -> float:
 
 def top_down_x_limit(bl: BinLayout) -> float:
     return bin_front_x(bl) - X_LIMIT_MARGIN
+
+
+def in_reach(x: float, y: float, bl: BinLayout, margin: float = 0.0) -> bool:
+    """Can a top-down descend pick at (x, y)? The driven reach band, short of the bins.
+
+    ``margin`` shrinks the band (negative grows it), for a caller that wants hysteresis.
+    """
+    radius = math.hypot(x, y)
+    return (
+        SCATTER_MIN_RADIUS + margin <= radius <= SCATTER_MAX_RADIUS - margin
+        and x <= top_down_x_limit(bl) - margin
+    )
 
 
 def scatter_x(bl: BinLayout) -> tuple[float, float]:
@@ -434,7 +397,7 @@ def bin_static_boxes(
 # overflows: 0.09 by 0.09 by 0.04 m is 324 cm3 against 159 cm3 of solid parts, which piles
 # over the rim. This box grows along y only. bin_front_x reads BIN_INTERIOR[0] and
 # top_down_x_limit sits 0.10 m in front of it, so a wider x would pull the pick limit under
-# the dish's far edge.
+# the drop disc's far edge.
 HEAP_BIN_INTERIOR = (0.09, 0.30, 0.06)
 
 

@@ -65,7 +65,7 @@ def test_read_meta_aggregates_parts_cycles_and_families(tmp_path):
                 "bricks_delivered": 3,
                 "cycles": 4,
                 "pushes": 1,
-                "parts_outside_tray": 0,
+                "parts_out_of_reach": 0,
                 "cycle_parts": [0, 1, 1, 2],
                 "cycle_outcomes": [True, False, True, True],
             }
@@ -79,7 +79,7 @@ def test_read_meta_aggregates_parts_cycles_and_families(tmp_path):
                 "bricks_delivered": 2,
                 "cycles": 3,
                 "pushes": 0,
-                "parts_outside_tray": 1,
+                "parts_out_of_reach": 1,
                 "cycle_parts": [0, 2, 1],
                 "cycle_outcomes": [True, True],
             }
@@ -89,7 +89,7 @@ def test_read_meta_aggregates_parts_cycles_and_families(tmp_path):
     assert summary["episodes"] == 2 and summary["parts_total"] == 6 and summary["parts_stowed"] == 5
     assert summary["stowed_fraction"] == pytest.approx(5 / 6)
     assert summary["cycles"] == 7 and summary["cycles_per_stowed"] == pytest.approx(7 / 5)
-    assert summary["pushes"] == 1 and summary["parts_outside_tray"] == 1
+    assert summary["pushes"] == 1 and summary["parts_out_of_reach"] == 1
     assert summary["families"]["plate"] == {"attempts": 3, "stowed": 1}
     assert summary["families"]["brick"] == {"attempts": 2, "stowed": 2}
     assert summary["families"]["slope"] == {"attempts": 2, "stowed": 2}
@@ -109,7 +109,7 @@ def test_main_prints_a_token_on_every_path(tmp_path, capsys):
                 "bricks_delivered": 1,
                 "cycles": 1,
                 "pushes": 0,
-                "parts_outside_tray": 0,
+                "parts_out_of_reach": 0,
                 "cycle_parts": [0],
                 "cycle_outcomes": [True],
             }

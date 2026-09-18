@@ -101,8 +101,8 @@ def test_the_logging_oracle_writes_a_scan_per_selection_and_a_phase_per_report(t
 
     rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)
     module._install_lift_wrapper(rig)
-    # Two bricks in the tray, one on the bare desk inside reach but outside the dish.
-    outside_x = layout.TRAY_CENTER[0] - layout.TRAY_RADIUS - 0.03
+    # Two bricks in the heap, one on the desk short of the reach band's near edge.
+    outside_x = layout.SCATTER_MIN_RADIUS - 0.02
     _place(
         env,
         [(0.195, -0.03, 0.006, 0.3), (0.195, 0.03, 0.006, -0.8), (outside_x, 0.0, 0.006, 0.0)],
@@ -137,10 +137,10 @@ def test_the_logging_oracle_writes_a_scan_per_selection_and_a_phase_per_report(t
     assert all(factors <= set(e) for e in lifts)
     assert all(e["stall"] >= 0.0 and e["min_force"] > 0.0 for e in lifts)
     first = scans[0]
-    assert all({"inside", "best_clearance", "best_wall", "axes"} <= set(p) for p in first["parts"])
-    outside = [p for p in first["parts"] if not p["inside"]]
+    assert all({"reach", "best_clearance", "axes"} <= set(p) for p in first["parts"])
+    outside = [p for p in first["parts"] if not p["reach"]]
     assert [p["id"] for p in outside] == [2] and not outside[0]["candidate"]
-    assert first["outside_tray"] == 1 and first["chosen"]["part"] in (0, 1)
+    assert first["out_of_reach"] == 1 and first["chosen"]["part"] in (0, 1)
 
 
 def test_the_read_script_sums_a_fixture_log(tmp_path):
@@ -153,16 +153,14 @@ def test_the_read_script_sums_a_fixture_log(tmp_path):
         "x": 0.2,
         "y": 0.0,
         "z": 0.005,
-        "inside": True,
         "reach": True,
         "cell_open": True,
         "candidate": True,
         "axes": 2,
         "best_clearance": 0.01,
-        "best_wall": 0.01,
         "min_swept": 0,
     }
-    wall_side = dict(part, id=1, x=0.2, y=0.09, best_wall=-0.01, best_clearance=-0.01)
+    blocked = dict(part, id=1, x=0.2, y=0.09, best_clearance=-0.01)
     events = [
         {
             "step": 0,
@@ -180,13 +178,13 @@ def test_the_read_script_sums_a_fixture_log(tmp_path):
             "phase": "HOVER",
             "kind": "scan",
             "candidates": 2,
-            "parts": [part, wall_side],
+            "parts": [part, blocked],
             "chosen": {"part": 0},
             "push": None,
             "pushes_in_a_row": 0,
             "cycles": 1,
             "budget_left": 49,
-            "outside_tray": 1,
+            "out_of_reach": 1,
         },
         {
             "step": 40,
@@ -239,7 +237,7 @@ def test_the_read_script_sums_a_fixture_log(tmp_path):
                 "cycle_parts": [0],
                 "cycle_outcomes": [True],
                 "cells_excluded": 0,
-                "parts_outside_tray": 2,
+                "parts_out_of_reach": 2,
             },
         },
     ]
@@ -259,7 +257,6 @@ def test_the_read_script_sums_a_fixture_log(tmp_path):
     assert summary["stowed_fraction"] == pytest.approx(1 / 3)
     assert summary["exits"] == {"settle": 1, "carried": 1, "push": 1}
     assert summary["outside_at_start_mean"] == 0  # the settle exit is not a scan row
-    assert summary["wall_blocked_at_start_mean"] == 1
     assert summary["lift_outcomes"] == {"brick_ok": 1}
     assert summary["stowed_by_family"] == {"brick": 1}
     assert torch.tensor(summary["idle_steps_median"]).item() == 5

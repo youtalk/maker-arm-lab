@@ -35,7 +35,7 @@ def _env_and_rig(seed: int = 11, part_list=None):
 
 
 def _place(env, poses) -> None:
-    """(x, y, z, yaw) per part on the tray floor, settled, and read back into the surface."""
+    """(x, y, z, yaw) per part on the desk, settled, and read back into the surface."""
     m, d, h = env.models[0], env.datas[0], env.handles
     for b, (x, y, z, yaw) in enumerate(poses):
         adr = h.brick_qpos[b]
@@ -60,7 +60,7 @@ def _run(rig, budget: int = 9000) -> int:
 def test_the_heap_teacher_stows_three_spread_parts():
     env, rig = _env_and_rig()
     # Spread in y inside the pickable band (owner ruling, 2026-09-16): x=0.195,
-    # y at -0.045, 0.0, +0.045, clear of each other and of the tray walls. The outer
+    # y at -0.045, 0.0, +0.045, clear of each other. The outer
     # two parts need the full 45 mm offset: at 40 mm the best reachable grasp on those
     # two parts reads 0.00287 m clearance, under CLEARANCE_MIN (0.003 m).
     _place(
@@ -208,12 +208,32 @@ def test_a_lone_flat_part_survives_the_lift_instead_of_being_squeezed_out():
     0.00 N. The plate is squeezed out like a pip, the jaws end at 0.02 mm holding nothing,
     and the part is back on the desk. That is why the LIFT gate reads 0.00 N: it samples
     AFTER the part has gone.
+
+    The pin is the LIFT itself: the plate rises in the jaws at least once. Whether the
+    carry then delivers it is a plate's own RAISE weakness (docs/ms6-matched-jaw-opening.md
+    section 5), which is why the flat families left the catalog on 2026-09-18.
     """
     from maker_arm_lab.core import grasp
     from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import CLOSE_SQUEEZE_M
 
     plate = parts.make_part("plate", 2, 4)
-    env, rig = _env_and_rig(part_list=[plate])
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(1, draw, parts=[plate], cameras=False)
+    env.reset(seed=11)
+    rng = random.Random(1)
+    lifts: list[bool] = []
+
+    class LiftLog(HeapOracle):
+        def report(self, result, scene):
+            if self.phase is oracle.Phase.LIFT:
+                lifts.append(bool(result.lifted))
+            super().report(result, scene)
+
+    def factory(i, bl, episode_draw):
+        return LiftLog(bl, env.parts, int(env.destination_bins[i]), episode_draw, rng=rng)
+
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)
     _place(env, [(0.195, 0.0, 0.004, 0.0)])
     tightest = grasp.OPEN_HALF_GAP
     for _ in range(4000):
@@ -223,8 +243,7 @@ def test_a_lone_flat_part_survives_the_lift_instead_of_being_squeezed_out():
             tightest = min(tightest, min(rig.robot.data.joint_pos[0, rig.finger_ids].tolist()))
         if bool(out["dones"][0]) or bool(out["abandoned"][0]):
             break
-    stats = rig.episode_stats(0)
     env.close()
     floor = 0.5 * min(plate.size[0], plate.size[1]) - CLOSE_SQUEEZE_M
     assert tightest > floor - 0.002, (tightest, floor)
-    assert stats["bricks_delivered"] == 1, stats
+    assert any(lifts), lifts

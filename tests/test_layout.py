@@ -342,54 +342,32 @@ def test_spatial_scale_widens_the_camera_and_bin_x_draws_only():
     )
 
 
-def test_the_dish_fills_the_driven_reach_band():
+def test_the_drop_disc_fills_the_driven_reach_band():
     """Campaign d: the near edge is driven-bounded at 0.10 m, the far edge at 0.280 m."""
-    near = layout.TRAY_CENTER[0] - layout.TRAY_RADIUS
-    far = layout.TRAY_CENTER[0] + layout.TRAY_RADIUS
-    assert near >= 0.10
+    near = layout.HEAP_CENTER[0] - layout.HEAP_RADIUS
+    far = layout.HEAP_CENTER[0] + layout.HEAP_RADIUS
+    assert near >= layout.SCATTER_MIN_RADIUS
     assert far <= layout.SCATTER_MAX_RADIUS
-    assert far <= layout.top_down_x_limit(layout.DEFAULT_BIN_LAYOUT)
-    # Carried forward from the rectangular tray's test: the far edge must also clear the
-    # TIGHTEST bin layout the run draw can produce, not only the default one.
+    # The far edge must also clear the TIGHTEST bin layout the run draw can produce.
     tightest = layout.BinLayout(bin_x=0.43)  # the smallest bin_x the run draw produces
     assert far <= layout.top_down_x_limit(tightest)
 
 
-def test_inside_tray_is_the_circle_and_the_bounds_are_its_box():
-    cx, cy = layout.TRAY_CENTER
-    assert layout.inside_tray(cx, cy)
-    assert layout.inside_tray(cx + layout.TRAY_RADIUS - 0.001, cy)
-    assert not layout.inside_tray(cx + layout.TRAY_RADIUS + 0.001, cy)
-    assert layout.inside_tray(cx + layout.TRAY_RADIUS + 0.002, cy, margin=0.005)
-    assert not layout.inside_tray(cx + layout.TRAY_RADIUS - 0.002, cy, margin=-0.005)
-    (x0, x1), (y0, y1) = layout.tray_bounds()
-    assert (x0, x1) == (cx - layout.TRAY_RADIUS, cx + layout.TRAY_RADIUS)
-    assert (y0, y1) == (cy - layout.TRAY_RADIUS, cy + layout.TRAY_RADIUS)
-
-
-def test_the_rim_segments_ring_the_dish_and_lean_outward():
-    boxes = layout.tray_static_boxes()
-    assert len(boxes) == layout.TRAY_SEGMENTS
-    radii = []
-    for name, center, size, quat in boxes:
-        assert name.startswith("tray_rim_")
-        assert len(center) == 3 and len(size) == 3 and len(quat) == 4
-        radii.append(
-            math.hypot(center[0] - layout.TRAY_CENTER[0], center[1] - layout.TRAY_CENTER[1])
-        )
-        assert center[2] > 0.0
-    # Every segment sits at the same radius, and the ring closes: neighbouring centres are
-    # no further apart than the segment's own length.
-    assert max(radii) - min(radii) < 1e-9
-    step = 2.0 * math.pi * radii[0] / layout.TRAY_SEGMENTS
-    assert step <= boxes[0][2][1]
-
-
-def test_a_part_at_the_rim_top_is_outside_the_interior_circle():
-    """The rim leans out, so its top edge is TRAY_WALL_HEIGHT further out than its base."""
-    top_radius = layout.TRAY_RADIUS + layout.TRAY_WALL_HEIGHT * math.tan(layout.TRAY_RIM_TILT_RAD)
-    assert top_radius > layout.TRAY_RADIUS
-    assert layout.TRAY_CENTER[0] + top_radius <= layout.SCATTER_MAX_RADIUS + layout.TRAY_WALL_HEIGHT
+def test_in_reach_is_the_band_short_of_the_bins_and_the_margin_shrinks_it():
+    bl = layout.DEFAULT_BIN_LAYOUT
+    assert layout.in_reach(*layout.HEAP_CENTER, bl)
+    assert not layout.in_reach(layout.SCATTER_MIN_RADIUS - 0.001, 0.0, bl)
+    assert layout.in_reach(layout.SCATTER_MIN_RADIUS + 0.001, 0.0, bl)
+    assert layout.in_reach(0.0, layout.SCATTER_MAX_RADIUS - 0.001, bl)
+    assert not layout.in_reach(0.0, layout.SCATTER_MAX_RADIUS + 0.001, bl)
+    # Short of the bins: a point inside the radius but past the top-down x limit is out.
+    limit = layout.top_down_x_limit(bl)
+    assert limit < layout.SCATTER_MAX_RADIUS + 0.05
+    assert not layout.in_reach(limit + 0.001, 0.0, bl)
+    # A positive margin shrinks the band on both edges, a negative one grows it.
+    edge = layout.SCATTER_MAX_RADIUS - 0.002
+    assert layout.in_reach(0.0, edge, bl) and not layout.in_reach(0.0, edge, bl, margin=0.005)
+    assert layout.in_reach(0.0, layout.SCATTER_MAX_RADIUS + 0.002, bl, margin=-0.005)
 
 
 def test_the_heap_bin_holds_the_heap_and_keeps_the_reach_limit():

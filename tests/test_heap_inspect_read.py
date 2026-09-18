@@ -50,7 +50,7 @@ def _write_log(tmp_path: Path) -> Path:
                 "cycle_parts": [0],
                 "cycle_outcomes": [True],
                 "cells_excluded": 0,
-                "parts_outside_tray": 4,
+                "parts_out_of_reach": 4,
                 "tips": 3,
                 "tips_ok": 1,
             },

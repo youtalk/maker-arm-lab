@@ -295,9 +295,7 @@ class MjLegoSortEnv:
         self.run_draw = dict(draw)
         self.episode_draws = [self.run_draw] * num_envs
         self.bin_layouts: list[layout.BinLayout] = [bl] * num_envs
-        base_model, self.handles = scene.build_model(
-            draw, num_bricks, cameras, parts=self.parts, tray=self.parts is not None
-        )
+        base_model, self.handles = scene.build_model(draw, num_bricks, cameras, parts=self.parts)
         self.models = [base_model] + [copy.copy(base_model) for _ in range(num_envs - 1)]
         self.datas = [mujoco.MjData(m) for m in self.models]
         self._nominal_inertia = base_model.body_inertia[list(self.handles.brick_bodies)].copy()
@@ -571,7 +569,7 @@ class MjLegoSortEnv:
             )
 
     def _drop_heap(self, i: int) -> None:
-        """Design section 6: a destination, a color per part, a drop into the tray, a settle."""
+        """Design section 6: a destination, a color per part, a drop on the desk, a settle."""
         m, d, h = self.models[i], self.datas[i], self.handles
         # MS6 rework section 6: heap mode has one bin, at y = 0.0. The release target, the
         # grader's bin centre and the built box are then the same box.
@@ -582,13 +580,13 @@ class MjLegoSortEnv:
             rgba = layout.BRICK_RGBA[self._rng.choice(layout.BRICK_COLOR_ORDER)]
             for g in h.body_geoms[b]:
                 m.geom_rgba[g] = rgba
-            # Uniform on the dish interior, shrunk by the part's own half diagonal so a
-            # part never starts over the rim. sqrt keeps the draw uniform per unit area.
-            reach = max(0.0, layout.TRAY_RADIUS - part.half_diagonal)
+            # Uniform on the drop disc, shrunk by the part's own half diagonal so a part
+            # never starts over its edge. sqrt keeps the draw uniform per unit area.
+            reach = max(0.0, layout.HEAP_RADIUS - part.half_diagonal)
             rho = reach * math.sqrt(self._rng.random())
             phi = self._rng.uniform(0.0, 2.0 * math.pi)
-            x = layout.TRAY_CENTER[0] + rho * math.cos(phi)
-            y = layout.TRAY_CENTER[1] + rho * math.sin(phi)
+            x = layout.HEAP_CENTER[0] + rho * math.cos(phi)
+            y = layout.HEAP_CENTER[1] + rho * math.sin(phi)
             z = self._rng.uniform(layout.HEAP_DROP_Z_MIN, z_top)
             adr = h.brick_qpos[b]
             d.qpos[adr : adr + 3] = (x, y, z)

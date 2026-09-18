@@ -6,9 +6,9 @@ idle tail after the give-up were never seen. This script builds one heap env exa
 ``HeapOracle``, and writes:
 
 * ``<out_dir>/events.jsonl``: one JSON object per line. ``scan`` on every selection, ``phase``
-  on every phase report, ``exit`` / ``enter`` when a part crosses the tray interior, ``end``
+  on every phase report, ``exit`` / ``enter`` when a part crosses the reach band, ``end``
   once.
-* ``<out_dir>/inspect.mp4``: a free camera over the tray, one frame per ``--video_stride``
+* ``<out_dir>/inspect.mp4``: a free camera over the heap, one frame per ``--video_stride``
   control steps, with the teacher's state stamped on it.
 
     MUJOCO_GL=egl uv run python scripts/mj_inspect_heap.py --out_dir /tmp/i0 --heap_k 12 \\
@@ -58,9 +58,9 @@ VIDEO_FPS = 30
 
 
 EXIT_HYSTERESIS = 0.005
-"""A part is logged out of the tray once its center is this far (m) past a wall's inner face,
-and back in once it is this far inside. A part resting on a wall top jitters across the face
-by a millimeter for thousands of steps; without the band every jitter is an exit."""
+"""A part is logged out of reach once its center is this far (m) past the reach band's edge,
+and back in once it is this far inside. A part resting at the edge jitters across it by a
+millimeter for thousands of steps; without the band every jitter is an exit."""
 
 
 class InspectHeapOracle(HeapOracle):
@@ -81,7 +81,6 @@ class InspectHeapOracle(HeapOracle):
 
     def _next_brick(self, scene: oracle.SceneSnapshot) -> int | None:
         done = self._stowed(scene) | self._sorted
-        limit = layout.top_down_x_limit(self.bl)
         alive = torch.tensor([b not in done for b in range(self.num_bricks)])
         by_part: dict[int, list[grasp.Grasp]] = {}
         for g in self._ranked(scene, alive):
@@ -99,13 +98,11 @@ class InspectHeapOracle(HeapOracle):
                     "x": round(x, 4),
                     "y": round(y, 4),
                     "z": round(z, 4),
-                    "inside": layout.inside_tray(x, y),
-                    "reach": x <= limit and math.hypot(x, y) <= layout.SCATTER_MAX_RADIUS,
+                    "reach": layout.in_reach(x, y, self.bl),
                     "cell_open": self.failures.get(self.cell_of((x, y)), 0) < 3,
                     "candidate": bool(mask[b]),
                     "axes": len(grasps),
                     "best_clearance": max((g.clearance for g in grasps), default=None),
-                    "best_wall": max((getattr(g, "wall", math.inf) for g in grasps), default=None),
                     "min_swept": min((getattr(g, "swept", 0) for g in grasps), default=None),
                 }
             )
@@ -126,7 +123,6 @@ class InspectHeapOracle(HeapOracle):
                 "half_height": round(g.half_height, 4),
                 "clearance": None if math.isinf(g.clearance) else round(g.clearance, 4),
                 "swept": getattr(g, "swept", None),
-                "wall": None if math.isinf(getattr(g, "wall", math.inf)) else round(g.wall, 4),
                 "height": round(g.height, 4),
             },
             push=None
@@ -135,7 +131,7 @@ class InspectHeapOracle(HeapOracle):
             pushes_in_a_row=pushes_before,
             cycles=self.cycles,
             budget_left=self.cycle_budget - self.cycles,
-            outside_tray=self.outside_tray,
+            out_of_reach=self.out_of_reach,
         )
         return chosen
 
@@ -328,7 +324,7 @@ def run(args: argparse.Namespace) -> dict:
 
     prev = poses()
     crossings: list[dict] = []
-    outside = [not layout.inside_tray(x, y, EXIT_HYSTERESIS) for x, y, _ in prev]
+    outside = [not layout.in_reach(x, y, bl, -EXIT_HYSTERESIS) for x, y, _ in prev]
     for b, (x, y, _) in enumerate(prev):
         if outside[b]:
             crossings.append(
@@ -355,8 +351,8 @@ def run(args: argparse.Namespace) -> dict:
         finished = bool(out["dones"][0]) or bool(out["abandoned"][0])
         for b in range(len(parts) if not finished else 0):
             x, y = now[b][:2]
-            left = not outside[b] and not layout.inside_tray(x, y, EXIT_HYSTERESIS)
-            back = outside[b] and layout.inside_tray(x, y, -EXIT_HYSTERESIS)
+            left = not outside[b] and not layout.in_reach(x, y, bl, -EXIT_HYSTERESIS)
+            back = outside[b] and layout.in_reach(x, y, bl, EXIT_HYSTERESIS)
             if left or back:
                 outside[b] = left
                 crossings.append(
@@ -388,7 +384,7 @@ def run(args: argparse.Namespace) -> dict:
                     f"target {orc.target_brick} {target_name}",
                     f"clearance {'' if g is None or math.isinf(g.clearance) else f'{g.clearance * 1000:.1f} mm'}",
                     f"pushes_in_a_row {orc.pushes_in_a_row}  cycles {orc.cycles}",
-                    f"stowed {len(orc._sorted)}  outside {orc.outside_tray}  retries {orc.retries_used}",
+                    f"stowed {len(orc._sorted)}  out of reach {orc.out_of_reach}  retries {orc.retries_used}",
                 ],
             )
         if bool(out["abandoned"][0]):

@@ -255,12 +255,11 @@ def build_spec(
     num_bricks: int = 6,
     cameras_on: bool = True,
     parts: Sequence[_parts.Part] | None = None,
-    tray: bool = False,
 ) -> mujoco.MjSpec:
     """The MjSpec for one run draw; ``compile_model`` turns it into a model and handles.
 
-    ``parts`` (MS6) replaces the ``num_bricks`` identical box bricks with one body per part,
-    and ``tray`` adds the rim segments of ``layout.tray_static_boxes``.
+    ``parts`` (MS6) replaces the ``num_bricks`` identical box bricks with one body per part.
+    A heap lies on the bare desk: there is no dish (owner decision 2026-09-18).
     """
     if parts is not None:
         num_bricks = len(parts)
@@ -330,7 +329,7 @@ def build_spec(
             rgba=[0.6, 0.6, 0.6, 1.0],
         )
     )
-    bin_boxes = layout.heap_bin_static_boxes(bl) if tray else layout.bin_static_boxes(bl)
+    bin_boxes = layout.heap_bin_static_boxes(bl) if parts else layout.bin_static_boxes(bl)
     for name, center, size in bin_boxes:
         color = name.split("_")[1]
         rgba = (
@@ -347,19 +346,6 @@ def build_spec(
                 rgba=rgba,
             )
         )
-
-    if tray:
-        for name, center, size, quat in layout.tray_static_boxes():
-            scene_geoms.append(
-                spec.worldbody.add_geom(
-                    name=name,
-                    type=mujoco.mjtGeom.mjGEOM_BOX,
-                    size=_half(size),
-                    pos=list(center),
-                    quat=list(quat),
-                    rgba=[0.35, 0.35, 0.35, 1.0],
-                )
-            )
 
     # Bricks: free bodies; the default pose is overwritten by the first reset's scatter.
     for index in range(num_bricks):
@@ -490,12 +476,11 @@ def build_model(
     num_bricks: int = 6,
     cameras_on: bool = True,
     parts: Sequence[_parts.Part] | None = None,
-    tray: bool = False,
 ) -> tuple[mujoco.MjModel, SceneHandles]:
     """One call for callers that do not need to edit the spec."""
     if parts is not None:
         num_bricks = len(parts)
-    return compile_model(build_spec(draw, num_bricks, cameras_on, parts, tray), num_bricks)
+    return compile_model(build_spec(draw, num_bricks, cameras_on, parts), num_bricks)
 
 
 # -- per-episode draws: the same numbers as build_spec, written into a compiled model ----------

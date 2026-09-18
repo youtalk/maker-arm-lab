@@ -24,7 +24,7 @@ def exit_bucket(event: dict) -> str:
     if event.get("in_push"):
         return "push"
     if event.get("target") is not None and event["part"] == event["target"]:
-        return "carried"  # the target leaving the tray in the jaws, not an ejection
+        return "carried"  # the target leaving the reach band in the jaws, not an ejection
     if event["phase"] in GRASP_PHASES:
         return "grasp"
     if event["phase"] in TRANSIT_PHASES:
@@ -69,14 +69,11 @@ def read_episode(path: str) -> dict:
         "reason": end["reason"],
         "done_step": end["done_step"],
         "idle_steps": end["idle_steps"],
-        "outside_at_start": sum(1 for p in first if not p["inside"]),
-        "outside_last": stats.get("parts_outside_tray", 0),
+        "outside_at_start": sum(1 for p in first if not p["reach"]),
+        "outside_last": stats.get("parts_out_of_reach", 0),
         "tips": stats.get("tips", 0),
         "tips_ok": stats.get("tips_ok", 0),
         "rescued": rescued,
-        "wall_blocked_at_start": sum(
-            1 for p in first if p["inside"] and p["best_wall"] is not None and p["best_wall"] < 0
-        ),
         "exits": dict(exits),
         "last_scan": None
         if last is None
@@ -113,8 +110,6 @@ def summarize(episodes: list[dict]) -> dict:
         "forced_picks": sum(e["forced_picks"] for e in episodes),
         "outside_at_start_mean": sum(e["outside_at_start"] for e in episodes) / len(episodes),
         "outside_last": sum(e["outside_last"] for e in episodes),
-        "wall_blocked_at_start_mean": sum(e["wall_blocked_at_start"] for e in episodes)
-        / len(episodes),
         "tips": sum(e["tips"] for e in episodes),
         "tips_ok": sum(e["tips_ok"] for e in episodes),
         "rescued": sum(e["rescued"] for e in episodes),
@@ -132,14 +127,14 @@ def main(argv=None) -> int:
     episodes = [read_episode(p) for p in args.logs]
     print(
         f"{'episode':28s} {'stowed':>6s} {'cycles':>6s} {'pushes':>6s} {'forced':>6s} "
-        f"{'out0':>4s} {'wall0':>5s} {'outL':>4s} {'tips':>4s} {'tipsOk':>6s} {'resc':>4s} "
+        f"{'out0':>4s} {'outL':>4s} {'tips':>4s} {'tipsOk':>6s} {'resc':>4s} "
         f"{'reason':>8s} {'idle':>6s}  exits"
     )
     for e in episodes:
         print(
             f"{e['name']:28s} {e['stowed']:3d}/{e['parts']:<3d} {e['cycles']:6d} "
             f"{e['pushes']:6d} {e['forced_picks']:6d} {e['outside_at_start']:4d} "
-            f"{e['wall_blocked_at_start']:5d} {e['outside_last']:4d} {e['tips']:4d} "
+            f"{e['outside_last']:4d} {e['tips']:4d} "
             f"{e['tips_ok']:6d} {e['rescued']:4d} "
             f"{e['reason']:>8s} {e['idle_steps']:6d}  {e['exits']}"
         )

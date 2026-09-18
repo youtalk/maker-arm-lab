@@ -1,4 +1,4 @@
-"""Parts and the tray in the MuJoCo scene (design sections 5 and 6)."""
+"""Parts in the MuJoCo scene (design sections 5 and 6). There is no dish since 2026-09-18."""
 
 import random
 
@@ -6,7 +6,7 @@ import mujoco
 import numpy as np
 import pytest
 
-from maker_arm_lab.core import layout, parts
+from maker_arm_lab.core import parts
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj import scene
 
@@ -26,7 +26,7 @@ PARTS = [
 
 @pytest.fixture(scope="module")
 def built():
-    return scene.build_model(_draw(), parts=PARTS, tray=True, cameras_on=False)
+    return scene.build_model(_draw(), parts=PARTS, cameras_on=False)
 
 
 def test_one_collider_per_part_and_visual_studs(built):
@@ -53,26 +53,6 @@ def test_part_masses_and_sizes_reach_the_model(built):
     assert model.geom_contype[h.brick_geoms[1]] == 3 and model.geom_condim[h.brick_geoms[1]] == 4
 
 
-def test_the_tray_walls_are_static_colliders(built):
-    model, _ = built
-    boxes = layout.tray_static_boxes()
-    names = [name for name, _, _, _ in boxes]
-    assert len(names) == layout.TRAY_SEGMENTS
-    for name in names:
-        g = model.geom(name).id
-        assert model.geom_contype[g] == 3 and model.geom_bodyid[g] == 0
-    # tray_rim_00's pose and size reach the compiled model unchanged. This is the only
-    # check that reads back the quat the tray loop threads into add_geom, so it is what
-    # would catch a wrong element order or a degrees/radians mix-up in the quaternion, or
-    # MuJoCo silently renormalizing it. The model stores half extents (scene._half's
-    # convention), so the size compares against half of layout's full size.
-    name, center, size, quat = boxes[0]
-    g = model.geom(name).id
-    assert model.geom_pos[g] == pytest.approx(center, abs=1e-6)
-    assert model.geom_size[g] == pytest.approx([0.5 * s for s in size], abs=1e-6)
-    assert model.geom_quat[g] == pytest.approx(quat, abs=1e-6)
-
-
 def test_parts_settle_flat_on_the_desk(built):
     model, h = built
     data = mujoco.MjData(model)
@@ -88,10 +68,5 @@ def test_parts_settle_flat_on_the_desk(built):
 
 
 def test_the_legacy_scene_is_unchanged_without_parts():
-    model, h = scene.build_model(_draw(), num_bricks=2, cameras_on=False)
+    _model, h = scene.build_model(_draw(), num_bricks=2, cameras_on=False)
     assert len(h.brick_bodies) == 2 and all(len(g) == 1 for g in h.body_geoms)
-    # tray=False (the default here), so none of the round dish's rim segments are built.
-    # tray_rim_00 is a real geom name (see test_the_tray_walls_are_static_colliders above),
-    # so this is absent because the tray was never asked for, not because the name is stale.
-    with pytest.raises(KeyError):
-        model.geom("tray_rim_00")
