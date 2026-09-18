@@ -42,11 +42,25 @@ PUSH_Z = layout.BRICK_SIZE[2] / 2
 """Pick-point height of the sweep: the plate tips skim the desk at the brick pick offset."""
 PUSH_HALF_HEIGHT = layout.BRICK_SIZE[2] / 2
 PUSH_SWEEP_STEPS = 150
-TIP_MIN_GRIP_HEIGHT = 0.005
+TIP_MIN_GRIP_HEIGHT = 0.0
 """A part whose best grasp grips less than this (m) of face is tipped up, not picked.
 
-A plate is 3.2 mm thick and a brick is 9.6 mm tall, so the threshold takes the flat parts
-and leaves the bricks alone. Heap 0 of 2026-09-17: plates failed 13 of their 24 lifts.
+0.0 means the tip-up is DISABLED: ``2.0 * chosen.half_height < TIP_MIN_GRIP_HEIGHT`` and
+``half_height`` is never negative, so the trigger never fires and no part is ever diverted
+into a tip (MS6 rework section 7). It ships off because the pre-registered ladder read it as
+a regression: with the trigger live the teacher stowed 16 of 150 parts against 49 of 150 for
+the rung below, and the Wilson interval did not overlap. Two measured causes: the tip fired
+54 times across three heaps and succeeded once, and a failed tip calls ``_mark_failure``,
+which closes a 50 mm cell and makes ``_candidates`` drop every part in that cell including
+bricks, so the tip became the only uncapped source of cell closures in the teacher.
+
+0.005 is the value the ladder measured: a plate is 3.2 mm thick and a brick is 9.6 mm tall,
+so the threshold takes the flat parts and leaves the bricks alone. Heap 0 of 2026-09-17:
+plates failed 13 of their 24 lifts.
+
+Enabling the tip means setting this back to 0.005. Before that, the tip needs a different
+descend geometry (the failed-lift cause above) and must stop feeding the cell failure memory
+(the closed-cell cause above) -- both machinery, not this constant.
 """
 TIP_STROKE_M = 0.025
 TIP_HOVER_Z = PUSH_HOVER_Z

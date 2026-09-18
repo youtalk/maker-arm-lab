@@ -113,11 +113,12 @@ def _push_phases(orc, scene):
     assert orc.phase is oracle.Phase.HOVER and orc.push is None
 
 
-def test_a_wall_side_part_is_pushed_toward_the_tray_center_then_tipped():
+def test_a_wall_side_part_is_pushed_toward_the_tray_center_then_tipped(monkeypatch):
     # A long plate 22 mm off the rim, short side along y: its one closing axis lands a jaw
     # past the rim. 20 mm put the push start exactly on the dish's clamp radius (TRAY_RADIUS
     # - TIP_HALF_FACE), where float32 scene positions tip the comparison either way; 22 mm
     # keeps it clear of that boundary.
+    monkeypatch.setattr(heap_oracle, "TIP_MIN_GRIP_HEIGHT", 0.005)
     (x0, x1), (y0, y1) = layout.tray_bounds()
     orc = _oracle([LONG_PLATE])
     scene = _snapshot([[layout.TRAY_CENTER[0], y1 - 0.022, 0.0016]])
@@ -380,8 +381,9 @@ def test_extra_stats_report_the_counters():
     }
 
 
-def test_a_flat_plate_is_tipped_and_a_brick_is_picked():
+def test_a_flat_plate_is_tipped_and_a_brick_is_picked(monkeypatch):
     """A 3.2 mm plate grips 3.2 mm of face, under TIP_MIN_GRIP_HEIGHT. A brick grips 9.6."""
+    monkeypatch.setattr(heap_oracle, "TIP_MIN_GRIP_HEIGHT", 0.005)
     plate = parts.make_part("plate", 2, 4)
     brick = parts.make_part("brick", 2, 4)
     orc, scene = _heap_with_parts([plate], flat=True)
@@ -394,7 +396,18 @@ def test_a_flat_plate_is_tipped_and_a_brick_is_picked():
     assert orc.tip is None
 
 
-def test_the_tip_stroke_starts_beside_the_part_and_stays_in_the_dish():
+def test_the_shipped_default_never_tips_a_flat_plate():
+    """Pins TIP_MIN_GRIP_HEIGHT's shipped value (0.0): the trigger is unsatisfiable, so even
+    a flat plate is picked, not tipped. Re-enabling the tip by mistake would fail this."""
+    assert heap_oracle.TIP_MIN_GRIP_HEIGHT == 0.0
+    plate = parts.make_part("plate", 2, 4)
+    orc, scene = _heap_with_parts([plate], flat=True)
+    assert orc._next_brick(scene) == 0
+    assert orc.tip is None
+
+
+def test_the_tip_stroke_starts_beside_the_part_and_stays_in_the_dish(monkeypatch):
+    monkeypatch.setattr(heap_oracle, "TIP_MIN_GRIP_HEIGHT", 0.005)
     plate = parts.make_part("plate", 2, 4)
     orc, scene = _heap_with_parts([plate], flat=True)
     orc._next_brick(scene)
@@ -437,7 +450,8 @@ def test_standing_and_candidate_grasps_agree_at_a_non_zero_jaw_tilt():
     assert not any(g.width == pytest.approx(short_width) for g in tilted)
 
 
-def test_the_tip_phases_run_in_order_and_a_failed_tip_marks_the_cell():
+def test_the_tip_phases_run_in_order_and_a_failed_tip_marks_the_cell(monkeypatch):
+    monkeypatch.setattr(heap_oracle, "TIP_MIN_GRIP_HEIGHT", 0.005)
     plate = parts.make_part("plate", 2, 4)
     orc, scene = _heap_with_parts([plate], flat=True)
     orc._next_brick(scene)
@@ -467,13 +481,14 @@ def _tip_phases(orc, scene):
     assert orc.phase is oracle.Phase.HOVER and orc.tip is None
 
 
-def test_next_goal_drives_a_flat_part_through_a_tip_end_to_end():
+def test_next_goal_drives_a_flat_part_through_a_tip_end_to_end(monkeypatch):
     """Correction 1: the widened HOVER guard must hand back the TIP_HOVER goal, not None.
 
     Before the guard widened, `HeapOracle.next_goal` saw a phase that was not PUSH_HOVER and
     returned None from the HOVER branch, which the rig reads as the episode ending instead of
     tipping.
     """
+    monkeypatch.setattr(heap_oracle, "TIP_MIN_GRIP_HEIGHT", 0.005)
     plate = parts.make_part("plate", 2, 4)
     orc, scene = _heap_with_parts([plate], flat=True)
     hover = _to_hover(orc, scene)
@@ -482,9 +497,10 @@ def test_next_goal_drives_a_flat_part_through_a_tip_end_to_end():
     assert orc.tips == 1
 
 
-def test_a_forced_pick_that_gets_tipped_does_not_inflate_forced_picks():
+def test_a_forced_pick_that_gets_tipped_does_not_inflate_forced_picks(monkeypatch):
     """Correction 2: a candidate reached through the forced-pick branch that turns out to be
     flat gets tipped, not picked, and `forced_picks` must not count a pick that never ran."""
+    monkeypatch.setattr(heap_oracle, "TIP_MIN_GRIP_HEIGHT", 0.005)
     x, y = 0.19, 0.0
     d = grasp.OPEN_HALF_GAP + 0.006
     towers = [[x + d, y], [x - d, y], [x, y + d], [x, y - d]]
