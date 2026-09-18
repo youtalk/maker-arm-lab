@@ -93,6 +93,14 @@ LIMIT_SOLREF = (0.002, 1.0)
 # 7.6 N. The direct form (-50000, -300) matched Isaac closer (7.2 mm, 7.6 N) but puts a 50 kN/m
 # spring under every resting brick; the time-constant form is the standard, safer choice.
 CONTACT_SOLREF = (0.005, 1.0)
+# The desk is a hard surface (owner decision 2026-09-18: the parts sank into it). The
+# time-constant form scales a contact's stiffness with the lighter body, so a 3 g part under
+# the jaws' 2.9 N grip sank 1.9 mm into the desk and 13.0 mm under 20 N, more than its own
+# height (measured 2026-09-18 on a lone 2x4 brick). The lever is the impedance, not the time
+# constant: at (0.99, 0.999) the same presses read 0.16 mm and 0.55 mm, and a settled
+# 50-part heap rests at 0.01 mm mean. `priority` makes the desk's values the pair's values,
+# so the jaw-part and part-part pairs the pinch tuning sits on are untouched.
+DESK_SOLIMP = (0.99, 0.999, 0.001, 0.5, 2.0)
 
 # Contact tuning for a 3 g brick between convex-hull finger meshes. Nominal sliding friction
 # is the centre of the Isaac static-friction DR range (0.8-1.2); torsional and rolling terms
@@ -311,15 +319,17 @@ def build_spec(
             rgba=[*draw["floor_color"], 1.0],
         )
     )
-    scene_geoms.append(
-        spec.worldbody.add_geom(
-            name="desk",
-            type=mujoco.mjtGeom.mjGEOM_BOX,
-            size=_half(layout.DESK_SIZE),
-            pos=list(layout.DESK_POS),
-            rgba=[0.5, 0.4, 0.3, 1.0],
-        )
+    desk = spec.worldbody.add_geom(
+        name="desk",
+        type=mujoco.mjtGeom.mjGEOM_BOX,
+        size=_half(layout.DESK_SIZE),
+        pos=list(layout.DESK_POS),
+        rgba=[0.5, 0.4, 0.3, 1.0],
     )
+    desk.priority = 1
+    desk.solref = list(CONTACT_SOLREF)
+    desk.solimp = list(DESK_SOLIMP)
+    scene_geoms.append(desk)
     scene_geoms.append(
         spec.worldbody.add_geom(
             name="shelf",

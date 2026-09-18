@@ -70,3 +70,27 @@ def test_parts_settle_flat_on_the_desk(built):
 def test_the_legacy_scene_is_unchanged_without_parts():
     _model, h = scene.build_model(_draw(), num_bricks=2, cameras_on=False)
     assert len(h.brick_bodies) == 2 and all(len(g) == 1 for g in h.body_geoms)
+
+
+def test_the_desk_is_a_hard_surface_under_a_pressed_part():
+    """A 3 g brick pressed onto the desk with 20 N sinks under a millimetre.
+
+    Before the desk carried its own contact parameters the same press sank the brick 13 mm,
+    more than its own height, because the time-constant form scales the stiffness with the
+    lighter body (measured 2026-09-18). The desk's priority keeps the part-part and jaw-part
+    pairs on their own tuning.
+    """
+    model, h = scene.build_model(_draw(), parts=[PARTS[0]], cameras_on=False)
+    desk = h.desk_geom
+    assert model.geom_priority[desk] == 1
+    assert model.geom_solimp[desk][:2] == pytest.approx(scene.DESK_SOLIMP[:2])
+    assert model.geom_priority[h.brick_geoms[0]] == 0
+    data = mujoco.MjData(model)
+    adr = h.brick_qpos[0]
+    data.qpos[adr : adr + 3] = (0.19, 0.0, PARTS[0].size[2] / 2 + 0.001)
+    data.qpos[adr + 3 : adr + 7] = (1.0, 0.0, 0.0, 0.0)
+    mujoco.mj_step(model, data, nstep=480)
+    data.xfrc_applied[h.brick_bodies[0]] = [0.0, 0.0, -20.0, 0.0, 0.0, 0.0]
+    mujoco.mj_step(model, data, nstep=480)
+    sunk = PARTS[0].size[2] / 2 - data.qpos[adr + 2]
+    assert 0.0 <= sunk < 0.001, sunk
