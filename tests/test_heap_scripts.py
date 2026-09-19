@@ -4,12 +4,15 @@ import ast
 import importlib.util
 import json
 import pathlib
+import sys
 
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BATCH = ROOT / "scripts" / "mj_generate_batch.py"
 READ = ROOT / "scripts" / "heap_yield_read.py"
+
+sys.path.insert(0, str(ROOT / "scripts"))
 
 
 def _load(path):
@@ -124,3 +127,42 @@ def test_main_prints_a_token_on_every_path(tmp_path, capsys):
     with pytest.raises(SystemExit):
         read.main(["--nonsense"])
     assert capsys.readouterr().out.startswith("YIELD_FAIL usage")
+
+
+def test_mj_eval_heap_oracle_driver_prints_eval_ok_on_a_tiny_heap(tmp_path, capsys):
+    import importlib
+
+    script = importlib.import_module("mj_eval_heap")
+    code = script.main(
+        [
+            "--num_envs",
+            "1",
+            "--heap_k",
+            "3",
+            "--parts_split",
+            "train",
+            "--run_seed",
+            "11",
+            "--layout_seed",
+            "5",
+            "--oracle_driver",
+            "--max_wall_minutes",
+            "5",
+            "--out",
+            str(tmp_path / "eval.json"),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == 0 and out.count("EVAL_OK ") == 1, out
+    payload = json.loads((tmp_path / "eval.json").read_text())
+    assert payload["policy_id"] == "oracle" and payload["heap_k"] == 3
+    assert payload["cycle_budget"] == 4 and len(payload["episodes"]) == 1
+
+
+def test_mj_eval_heap_refuses_a_zero_heap_with_the_fail_token(capsys):
+    import importlib
+
+    script = importlib.import_module("mj_eval_heap")
+    with pytest.raises(SystemExit):
+        script.main(["--heap_k", "0", "--oracle_driver"])
+    assert "EVAL_FAIL " in capsys.readouterr().out
