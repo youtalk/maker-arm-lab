@@ -1496,11 +1496,13 @@ class OracleRig:
             if not idle:
                 self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE
 
-    def resume(self, i: int) -> bool:
+    def resume(self, i: int, target: int | None = None) -> bool:
         """Take idle env ``i`` over from the policy for one brick cycle (MS4 c2 design 6.2).
 
         Returns False, and leaves the env idle, when the oracle answers DONE or ABANDON at
-        entry or the first leg cannot be planned.
+        entry or the first leg cannot be planned. With ``target`` (the heap outer loop, phase
+        B design 5.5) a takeover that holds nothing works that part instead of letting HOVER
+        select; it is declined when no grasp ranks on the part any more.
         """
         if not self.idle[i]:
             raise RuntimeError(f"env {i} is not idle")
@@ -1548,6 +1550,9 @@ class OracleRig:
             self._go_idle(i, None)
             return False
         orc.resume(scene, held)
+        if target is not None and held < 0 and not orc.aim_hover_at(scene, target):
+            self._go_idle(i, None)
+            return False
         self.brick_start[i] = self._brick_pos(i, held) if held >= 0 else None
         self.idle[i] = False
         self.single_cycle[i] = True

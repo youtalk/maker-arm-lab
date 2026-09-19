@@ -10,6 +10,7 @@ import torch
 from maker_arm_lab.core import oracle, parts
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
+from maker_arm_lab.core.quat import quat_from_rpy_deg
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 
@@ -247,3 +248,35 @@ def test_a_lone_flat_part_survives_the_lift_instead_of_being_squeezed_out():
     floor = 0.5 * min(plate.size[0], plate.size[1]) - CLOSE_SQUEEZE_M
     assert tightest > floor - 0.002, (tightest, floor)
     assert any(lifts), lifts
+
+
+def test_a_takeover_with_a_target_works_that_part_and_not_the_teachers_choice():
+    env, rig = _env_and_rig()
+    _place(
+        env, [(0.195, -0.045, 0.006, 0.3), (0.195, 0.0, 0.006, -0.8), (0.195, 0.045, 0.006, 1.2)]
+    )
+    rig.rearm([0], idle=True)
+    assert rig.resume(0, target=2)
+    orc = rig.oracles[0]
+    assert orc.target_brick == 2 and orc.pick_order == [2] and orc.cycles == 0
+    assert rig.goals[0].phase is oracle.Phase.HOVER
+    hover = rig.goals[0].target_pos
+    assert hover[:2].tolist() == pytest.approx(rig.snapshot(0).brick_pos[2, :2].tolist(), abs=0.02)
+    env.close()
+
+
+def test_a_takeover_with_a_target_that_has_no_grasp_is_declined():
+    env, rig = _env_and_rig()
+    _place(
+        env, [(0.195, -0.045, 0.006, 0.3), (0.195, 0.0, 0.006, -0.8), (0.195, 0.045, 0.006, 1.2)]
+    )
+    rig.rearm([0], idle=True)
+    # Stand part 1 on a corner: no body axis lies within the closing band.
+    m, d, h = env.models[0], env.datas[0], env.handles
+    adr = h.brick_qpos[1]
+    d.qpos[adr + 3 : adr + 7] = quat_from_rpy_deg((45.0, 45.0, 0.0))
+    mujoco.mj_forward(m, d)
+    env._refresh([0], images=False)
+    assert rig.resume(0, target=1) is False
+    assert rig.idle[0] is True and rig.takeover_result[0] is None
+    env.close()
