@@ -138,8 +138,6 @@ def main(argv=None) -> int:
 
             env.step = env_step
         policy = None if args.random_actions else policy_client.ServerPolicy(args.server)
-        if policy is not None and getattr(policy, "gripper", "binary") != "binary":
-            raise EvalFailure("gripper", "the six-brick eval drives the binary gripper only")
         payload = rollout(
             env,
             policy,

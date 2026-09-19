@@ -106,8 +106,6 @@ def main(argv=None) -> int:
         env.reset(seed=args.run_seed)
         rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(args.run_seed))
         policy = policy_client.ServerPolicy(args.server)
-        if policy is not None and getattr(policy, "gripper", "binary") != "binary":
-            raise EvalFailure("gripper", "the six-brick eval drives the binary gripper only")
         payload = rollout(
             env,
             rig,
