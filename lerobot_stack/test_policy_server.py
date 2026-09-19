@@ -13,6 +13,7 @@ from policy_server import (
     PolicyServer,
     blank_streams,
     find_gripper_bce_marker,
+    find_gripper_marker,
     inference_policy_id,
     resolve_inference_overrides,
     squash_gripper_logit,
@@ -27,7 +28,14 @@ def _obs(batch=2):
     }
 
 
-def _start_server(policy_fn, calls, context_dim=0, policy_id="fake:test", action_space="absolute"):
+def _start_server(
+    policy_fn,
+    calls,
+    context_dim=0,
+    policy_id="fake:test",
+    action_space="absolute",
+    gripper="binary",
+):
     srv = PolicyServer(
         policy_fn=policy_fn,
         reset_fn=lambda: calls.__setitem__("reset", calls["reset"] + 1),
@@ -36,6 +44,7 @@ def _start_server(policy_fn, calls, context_dim=0, policy_id="fake:test", action
         n_action_steps=100,
         context_dim=context_dim,
         action_space=action_space,
+        gripper=gripper,
     )
     port = srv.bind()
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -415,6 +424,7 @@ def test_bind_announces_readiness_with_the_port_protocol_and_identity(capsys):
             "inference": {},  # nothing was loaded, so nothing is served
             "context_dim": 0,
             "action_space": "absolute",
+            "gripper": "binary",
         }
     finally:
         # PolicyServer has no public teardown (the serve loop owns its socket for the
@@ -513,3 +523,22 @@ def test_integrate_delta_adds_the_anchor_and_keeps_the_gripper():
 def test_policy_id_marks_delta_prev_checkpoints():
     assert inference_policy_id("ck", {}, action_space="delta_prev").endswith("+dprev")
     assert "+d" not in inference_policy_id("ck", {})
+
+
+def test_the_handshake_carries_the_gripper_contract(tmp_path):
+    marker = tmp_path / "action_space.json"
+    marker.write_text(json.dumps({"action_space": "absolute", "gripper": "continuous"}))
+    ckpt = tmp_path / "checkpoints" / "000100" / "pretrained_model"
+    ckpt.mkdir(parents=True)
+    assert find_gripper_marker(str(ckpt)) == "continuous"
+    marker.write_text(json.dumps({"action_space": "absolute"}))
+    assert find_gripper_marker(str(tmp_path)) == "binary"
+    srv = PolicyServer(
+        policy_fn=lambda *a: None,
+        reset_fn=lambda: None,
+        policy_id="id",
+        port=0,
+        n_action_steps=1,
+        gripper="continuous",
+    )
+    assert srv._hello_ack()["gripper"] == "continuous"
