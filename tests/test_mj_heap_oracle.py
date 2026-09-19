@@ -390,12 +390,23 @@ def test_the_continuous_rig_releases_on_a_level_jaw_plane_and_lets_go():
     _place(env, SPREAD)
     m, d = env.models[0], env.datas[0]
     left, right = m.body("gripper_left").id, m.body("gripper_right").id
-    slopes, heights = [], []
+    from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import (
+        LEVEL_ROLL_MARGIN_RAD,
+        ROLL_MAX_STEP_RAD,
+        WRIST_ROLL_INDEX,
+    )
+
+    lo, hi = rig.wrist_roll_limits
+    slopes, heights, wrist_steps, release_wrist = [], [], [], []
     for _ in range(9000):
         goal = rig.goals[0]
         target = rig.oracles[0].target_brick
+        before = float(rig.q_cmd[0][WRIST_ROLL_INDEX])
         out = rig.step()
+        if goal is not None and goal.phase is oracle.Phase.RETREAT:
+            wrist_steps.append(abs(float(rig.q_cmd[0][WRIST_ROLL_INDEX]) - before))
         if goal is not None and goal.phase is oracle.Phase.RELEASE:
+            release_wrist.append(float(rig.q_cmd[0][WRIST_ROLL_INDEX]))
             axis = d.xpos[left] - d.xpos[right]
             slopes.append(abs(axis[2]) / float((axis**2).sum() ** 0.5))
             if rig.goals[0] is not None and rig.goals[0].phase is oracle.Phase.RETREAT:
@@ -409,3 +420,7 @@ def test_the_continuous_rig_releases_on_a_level_jaw_plane_and_lets_go():
     # The last part's stow ends the episode inside its RELEASE, so it has no RETREAT entry.
     assert len(heights) >= 2 and max(heights) < 0.25, heights
     assert stats["succeeded"] is True and stats["bricks_delivered"] == 3, stats
+    # The released wrist sits off its stops, and RETREAT turns it back without a jump.
+    assert min(release_wrist) >= lo + LEVEL_ROLL_MARGIN_RAD - 1e-9, (min(release_wrist), lo)
+    assert max(release_wrist) <= hi - LEVEL_ROLL_MARGIN_RAD + 1e-9, (max(release_wrist), hi)
+    assert wrist_steps and max(wrist_steps) <= ROLL_MAX_STEP_RAD, max(wrist_steps)

@@ -503,7 +503,7 @@ class OracleRig:
         self.plans: list[list[torch.Tensor]] = [[] for _ in range(self.num_envs)]
         self.walk_steps = [1] * self.num_envs
         self.walk_step = [0] * self.num_envs
-        self.unroll: list[list[torch.Tensor] | None] = [None] * self.num_envs
+        self.unroll: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * self.num_envs
         # Where a desk-resting brick sits in `grasp_center` coordinates. Per env because the
         # descend ladder picks its own offset per rung (the offset balancing desk clearance
         # against tip margin moves with tilt), and that choice then has to survive into the
@@ -1076,7 +1076,7 @@ class OracleRig:
         if goal.phase is not oracle.Phase.RETREAT:
             self.unroll[i] = None
         elif self.unroll[i] is not None:
-            start = self.unroll[i][-1]
+            start = self.unroll[i][1]
         pick_from, tilt_from = self._commanded_pick_pose(i, start)
         pick_to = goal.target_pos.double().cpu()
         heading = self.commanded_yaw[i]
@@ -1160,19 +1160,33 @@ class OracleRig:
         ):
             roll = self._roll_waypoints(plan[-1])
             if roll and self.gripper_mode != "binary":
-                # The walk splits its steps by segment count; keep the carry's own pace and
-                # give the roll steps of its own. RETREAT turns the wrist back first.
-                self.walk_steps[i] = math.ceil(
-                    self.walk_steps[i] * (len(plan) + len(roll)) / len(plan)
-                )
-                self.unroll[i] = roll[-2::-1] + [plan[-1]]
+                roll = self._paced_roll(i, plan, plan[-1], roll[-1])
+                # RETREAT turns the wrist back from where RELEASE holds to the carry's end.
+                self.unroll[i] = (roll[-1], plan[-1])
             plan = plan + roll
         elif goal.phase == oracle.Phase.RETREAT and self.unroll[i] is not None:
-            self.walk_steps[i] = math.ceil(
-                self.walk_steps[i] * (len(plan) + len(self.unroll[i])) / len(plan)
-            )
-            plan = self.unroll[i] + plan
+            (rolled, arrival), self.unroll[i] = self.unroll[i], None
+            # The carry plan starts at `arrival`; the walk starts where RELEASE holds.
+            plan = [rolled] + self._paced_roll(i, plan, rolled, arrival) + plan[1:]
         self.plans[i] = plan
+
+    def _paced_roll(
+        self, i: int, plan: list[torch.Tensor], start: torch.Tensor, end: torch.Tensor
+    ) -> list[torch.Tensor]:
+        """Wrist-only waypoints after ``start`` up to ``end``, walked with ``plan``.
+
+        The walk gives every segment the same share of its steps (``polyline_point``), and the
+        carry's steps come from its Cartesian length, which a wrist roll does not add to. So
+        the roll is cut into as many segments as keep the wrist under ``ROLL_MAX_STEP_RAD``
+        per control step at the minimum-jerk peak, and the walk grows by the carry's own
+        steps per segment for each one: the carry keeps its pace.
+        """
+        per_segment = self.walk_steps[i] / len(plan)
+        turn = abs(float(end[WRIST_ROLL_INDEX] - start[WRIST_ROLL_INDEX]))
+        peak = trajectory.MIN_JERK_PEAK_VELOCITY * turn / (ROLL_MAX_STEP_RAD * per_segment)
+        n = max(1, math.ceil(peak))
+        self.walk_steps[i] = math.ceil(self.walk_steps[i] * (len(plan) + n) / len(plan))
+        return [start + (end - start) * k / n for k in range(1, n + 1)]
 
     def _matched_close_command(self, i: int, fully_closed: float) -> float:
         """Hold the jaws at the part's own width instead of driving them shut.
@@ -1214,7 +1228,9 @@ class OracleRig:
         The wrist's travel is finite, so a roll that would leave the joint's range is dropped
         rather than clamped: half a stood-up plane is not worth a servo against its stop.
 
-        Under the continuous gripper the roll levels the plane instead (LEVEL_ROLL_MARGIN_RAD).
+        Under the continuous gripper the roll levels the plane instead: of the two level rolls,
+        a quarter turn either way off the steepest one, the shorter that keeps
+        ``LEVEL_ROLL_MARGIN_RAD`` off both wrist stops, and none if neither does.
         """
         _, rotation = self.ik.fk(arrival)
         rotation = torch.as_tensor(rotation, dtype=torch.float64)
