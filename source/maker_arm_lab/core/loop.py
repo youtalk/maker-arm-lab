@@ -75,6 +75,8 @@ class TakeoverConfig:
     of the budget"); a loop cycle holds at most one takeover, since a takeover's end ends it."""
 
     random_interval: float | None
+    # At the default 2.0 this cap cannot bind: a loop cycle holds at most one takeover and an
+    # episode runs at most cycle_budget cycles. It exists to cap rounds that lower it.
     max_per_episode_factor: float = 2.0
 
 
