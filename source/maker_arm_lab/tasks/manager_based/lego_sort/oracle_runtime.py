@@ -87,7 +87,7 @@ from maker_arm_lab.core.global_ik import (
     steepest_jaw_roll,
     tool_axis_world,
 )
-from maker_arm_lab.core.oracle import PHASE_TO_INT
+from maker_arm_lab.core.oracle import LIFT_MIN_RISE, PHASE_TO_INT
 from maker_arm_lab.core.quat import quat_apply
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.robots.frames import (
@@ -237,7 +237,8 @@ ROT_CONVERGED = 0.02
 # as min(BRICK_SIZE)/2 = 0.0048 m, and core.checker carries the derivation. PINCH_MIN_FORCE
 # was validated against Task D3's 10/10 gate on this arm and closed; PINCH_MAX_ASYMMETRY
 # remains inherited from OpenYAM. Read core.checker for which is which.
-LIFT_MIN_RISE = 0.05  # m
+# LIFT_MIN_RISE (0.05 m) lives in core.oracle, next to LIFT_HEIGHT, so the torch-only heap
+# loop reads the same rise gate (phase B design 5.5).
 LIFT_MAX_XY_ERROR = 0.03  # m
 
 # `resume` calls a brick pinched at core.checker.HELD_MIN_FORCE (imported above), the

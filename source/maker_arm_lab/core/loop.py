@@ -61,9 +61,10 @@ points, while one fixed threshold cannot: across the catalog the landings span 1
 47.8 mm and the closes 1.8 to 33.8 mm. An env with no cycle has no w. Half the full gap
 keeps a fully open coast reading open and a zero command reading closed. Triggers and
 duty-cycle stats read the threshold; the metric never does."""
-HALF_BUDGET_NO_HOLD = "half_budget_no_hold"
-"""The heap trigger of phase B design 5.5: the cycle is at half its step budget and the jaws
-hold nothing."""
+HALF_BUDGET_NO_LIFT = "half_budget_no_lift"
+"""The heap trigger of phase B design 5.5: the cycle is at half its step budget with no lift.
+No lift means the jaws hold nothing, or hold a part that has not risen ``oracle.LIFT_MIN_RISE``
+above where it was when the cycle opened (``Cycle.start_z``)."""
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,7 @@ class Cycle:
     # hold a part is not an answer: the cycle runs on (``_take_over``).
     takeover_end: str | None = None
     taken_over: bool = False  # one takeover per loop cycle (phase B design 5.5)
+    start_z: torch.Tensor | None = None  # (k,) part heights when the cycle opened, for the lift
 
 
 @dataclass
@@ -341,6 +343,7 @@ def rollout(
                 start_step=step,
                 stowed_before=stowed_now,
                 close_below=cycle_close_below(st.selector, scene, target),
+                start_z=pos[i, :, 2].clone(),
             )
             env.target_part[i] = target
             if policy is None:
@@ -599,12 +602,14 @@ class _TriggerState:
                 random_draw=self.rng.random(),
                 random_p=self.random_p,
             )
+            h = int(held[i])
+            lifted = h >= 0 and float(pos[i, h, 2] - st.cycle.start_z[h]) >= oracle.LIFT_MIN_RISE
             if (
                 reason is None
-                and int(held[i]) < 0
+                and not lifted
                 and step - st.cycle.start_step >= CYCLE_STEP_BUDGET // 2
             ):
-                reason = HALF_BUDGET_NO_HOLD
+                reason = HALF_BUDGET_NO_LIFT
             if reason is None or st.cycle.taken_over or st.takeovers >= self.max_per_episode:
                 continue
             # Reset on both branches: an answered trigger must not fire again off the same count.

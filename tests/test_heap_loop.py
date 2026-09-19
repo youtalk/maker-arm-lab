@@ -504,7 +504,44 @@ def test_the_half_budget_trigger_fires_without_a_hold(monkeypatch):
         env, rig, _HoldPolicy(), budget=3, takeover=loop.TakeoverConfig(random_interval=None)
     )
     env.close()
-    assert payload["triggers"].get("half_budget_no_hold", 0) >= 1, payload["triggers"]
+    assert payload["triggers"].get("half_budget_no_lift", 0) >= 1, payload["triggers"]
+
+
+def _half_budget_triggers(monkeypatch, rise):
+    """Triggers of a one-cycle episode where the loop reads part 0 held and ``rise`` m above
+    its height at the cycle's open on every step after it."""
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 60)
+    monkeypatch.setattr(dagger_loop, "NO_CLOSE_STEPS", 10_000)
+    env, rig = _env_and_rig(budget=1)
+    _place(env, SPREAD)
+    _hold_part_zero(monkeypatch)
+    real_states = loop._brick_states
+    calls = []
+
+    def brick_states(env):
+        pos, vel = real_states(env)
+        if calls:  # the first call opens the cycle and records its heights
+            pos = pos.clone()
+            pos[:, 0, 2] += rise
+        calls.append(1)
+        return pos, vel
+
+    monkeypatch.setattr(loop, "_brick_states", brick_states)
+    payload = _rollout(
+        env, rig, _HoldPolicy(), budget=1, takeover=loop.TakeoverConfig(random_interval=None)
+    )
+    env.close()
+    return payload["triggers"]
+
+
+def test_the_half_budget_trigger_fires_on_a_held_part_with_no_lift(monkeypatch):
+    triggers = _half_budget_triggers(monkeypatch, rise=0.0)
+    assert triggers.get("half_budget_no_lift", 0) == 1, triggers
+
+
+def test_the_half_budget_trigger_spares_a_held_part_lifted_past_the_rise(monkeypatch):
+    triggers = _half_budget_triggers(monkeypatch, rise=oracle.LIFT_MIN_RISE + 0.01)
+    assert "half_budget_no_lift" not in triggers, triggers
 
 
 def test_a_failed_takeover_ends_its_cycle_and_the_episode_cap_holds(monkeypatch):
