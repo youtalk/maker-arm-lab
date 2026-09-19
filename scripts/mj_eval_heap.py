@@ -30,7 +30,7 @@ from maker_arm_lab.core.batch_loop import PARTS_SPLITS, heap_parts
 from maker_arm_lab.core.eval_loop import EvalFailure
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
-from maker_arm_lab.core.loop import cycle_budget, episode_length_s, rollout
+from maker_arm_lab.core.loop import CYCLE_STEP_BUDGET, cycle_budget, episode_length_s, rollout
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 
@@ -69,7 +69,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--oracle_driver", action="store_true", help="the rig drives every cycle; no server"
     )
-    parser.add_argument("--max_wall_minutes", type=float, default=120.0)
+    parser.add_argument(
+        "--max_wall_minutes",
+        type=float,
+        default=None,
+        help="the wall-clock cap; the default allows a generous 0.15 s per step of the episode "
+        "(every cycle of the budget at its full step budget)",
+    )
     args = parser.parse_args(argv)
     for name in ("run_seed", "layout_seed"):
         if not (0 <= getattr(args, name) < 2**32):
@@ -78,6 +84,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         parser.error("--heap_k must be positive: this client evaluates heap episodes only")
     if args.cycle_budget is None:
         args.cycle_budget = cycle_budget(args.heap_k)
+    if args.max_wall_minutes is None:
+        args.max_wall_minutes = args.cycle_budget * CYCLE_STEP_BUDGET * 0.15 / 60.0
     return args
 
 

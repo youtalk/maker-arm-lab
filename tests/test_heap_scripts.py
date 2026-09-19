@@ -157,6 +157,16 @@ def test_mj_eval_heap_oracle_driver_prints_eval_ok_on_a_tiny_heap(tmp_path, caps
     payload = json.loads((tmp_path / "eval.json").read_text())
     assert payload["policy_id"] == "oracle" and payload["heap_k"] == 3
     assert payload["cycle_budget"] == 4 and len(payload["episodes"]) == 1
+    assert payload["episodes"][0]["bricks_stowed"] > 0, payload["episodes"][0]
+
+
+def test_mj_eval_heap_defaults_the_wall_cap_from_the_episode_length():
+    import importlib
+
+    script = importlib.import_module("mj_eval_heap")
+    args = script.parse_args(["--heap_k", "50"])
+    assert args.max_wall_minutes == pytest.approx(65 * script.CYCLE_STEP_BUDGET * 0.15 / 60)
+    assert script.parse_args(["--heap_k", "50", "--max_wall_minutes", "7"]).max_wall_minutes == 7
 
 
 def test_mj_eval_heap_refuses_a_zero_heap_with_the_fail_token(capsys):
