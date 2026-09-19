@@ -562,3 +562,67 @@ def test_aggregate_gate_applies_the_cycles_rule_on_a_heap():
     # No cycles rule: the six-brick gate reads as before, and cycles are reported as None.
     six = ge.aggregate_gate([_payload(draw, [_episode(0)])], threshold=0.15)["gate"]
     assert six["cycles_per_stowed"] is None and six["max_cycles_per_stowed"] is None
+
+
+def test_aggregate_gate_refuses_the_cycles_rule_on_an_episode_without_cycles():
+    draw = ge.make_eval_draws(1, 20261400)[0]
+    heap = dict(_episode(0), num_bricks=50, bricks_stowed=45, cycles=55)
+    with pytest.raises(ValueError, match="cycles"):
+        ge.aggregate_gate(
+            [_payload(draw, [heap, _episode(6)])], threshold=0.85, max_cycles_per_stowed=1.3
+        )
+
+
+def _heap_payload(draw, **extra):
+    heap = {"heap_k": 50, "parts_split": "heldout", "parts_seed": 20260915, "cycle_budget": 65}
+    heap.update(extra)
+    ep = dict(_episode(0), num_bricks=50, bricks_stowed=45, cycles=55)
+    return _payload(draw, [ep], **heap)
+
+
+def test_cached_payload_matches_the_task_as_well_as_the_draw(tmp_path):
+    ledger = _fake_ledger(tmp_path)
+    heap_cfg = _cfg(tmp_path, ledger, processes=1, backend="mujoco", heap_k=50)
+    six_cfg = _cfg(tmp_path, ledger, processes=1)
+    heap_cfg.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    path = heap_cfg.out_dir / "eval_000.json"
+
+    def cached(cfg, payload):
+        path.write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    six = _payload(draw, [_episode(6, success=True)])
+    assert cached(six_cfg, six) and not cached(heap_cfg, six)
+    assert cached(heap_cfg, _heap_payload(draw)) and not cached(six_cfg, _heap_payload(draw))
+    for other in ({"heap_k": 20}, {"parts_split": "train"}, {"parts_seed": 1}, {"cycle_budget": 9}):
+        assert not cached(heap_cfg, _heap_payload(draw, **other)), other
+    heap_cfg.cycle_budget = 70
+    assert cached(heap_cfg, _heap_payload(draw, cycle_budget=70))
+
+
+def test_a_heap_gate_defaults_the_cycles_rule_and_refuses_the_isaac_backend(
+    monkeypatch, capsys, tmp_path
+):
+    base = [
+        "--checkpoint",
+        "ck",
+        "--out_dir",
+        str(tmp_path),
+        "--ledger",
+        "l",
+        "--threshold",
+        "0.85",
+        "--seed",
+        "1",
+        "--heap_k",
+        "50",
+    ]
+    cfg = ge._build_cfg(ge._parse_args(base + ["--backend", "mujoco"]))
+    assert cfg.max_cycles_per_stowed == 1.3
+    explicit = ge._parse_args(base + ["--backend", "mujoco", "--max_cycles_per_stowed", "2"])
+    assert ge._build_cfg(explicit).max_cycles_per_stowed == 2.0
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(base + ["--backend", "isaac"]) == 2
+    out = capsys.readouterr()
+    assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--backend mujoco" in out.err

@@ -161,6 +161,9 @@ def aggregate_gate(
     cycles per stowed part at most this. None (the six-brick task) reports cycles but does
     not gate on them."""
     episodes = [ep for p in process_payloads for ep in p["episodes"]]
+    if max_cycles_per_stowed is not None and any("cycles" not in ep for ep in episodes):
+        # A six-brick payload has no cycles; counting it as 0 would pass the rule for free.
+        raise ValueError("the cycles rule needs every episode's cycles; a payload lacks them")
     bricks_total = sum(ep["num_bricks"] for ep in episodes)
     bricks_stowed = sum(ep["bricks_stowed"] for ep in episodes)
     rate = bricks_stowed / bricks_total if bricks_total else 0.0
@@ -412,7 +415,16 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
         and list(payload.get("permutation", [])) == list(draw.permutation)
     )
     same_policy = str(payload.get("policy_id", "")).startswith(f"act:{cfg.checkpoint}")
-    return payload if same_draw and same_policy else None
+    # A six-brick payload carries no heap keys, so it never matches a heap gate or back.
+    same_task = payload.get("heap_k", 0) == cfg.heap_k
+    if cfg.heap_k > 0:
+        budget = cfg.cycle_budget or math.ceil(1.3 * cfg.heap_k)  # the client's default
+        same_task = same_task and (
+            payload.get("parts_split") == cfg.parts_split
+            and payload.get("parts_seed") == cfg.parts_seed
+            and payload.get("cycle_budget") == budget
+        )
+    return payload if same_draw and same_policy and same_task else None
 
 
 def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
@@ -570,12 +582,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--max_cycles_per_stowed",
         type=float,
         default=None,
-        help="the second gate rule of MS6 phase B: pick cycles per stowed part at most this",
+        help="the second gate rule of MS6 phase B: pick cycles per stowed part at most this "
+        "(default 1.3 when --heap_k > 0, else not applied)",
     )
     return parser.parse_args(argv)
 
 
 def _build_cfg(args: argparse.Namespace) -> GateCfg:
+    if args.heap_k > 0:
+        if args.backend != "mujoco":
+            raise ValueError("--heap_k needs --backend mujoco: the Isaac env has no heap")
+        if args.max_cycles_per_stowed is None:
+            args.max_cycles_per_stowed = 1.3  # the heap gate's rule (phase B design 5.3)
     return GateCfg(
         checkpoint=args.checkpoint,
         out_dir=args.out_dir,
@@ -606,8 +624,9 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
 
 
 def main(argv: list[str] | None = None) -> int:
-    cfg = _build_cfg(_parse_args(argv))
+    args = _parse_args(argv)
     try:
+        cfg = _build_cfg(args)
         results = run_gate(
             cfg,
             run_eval=lambda draw: _run_eval_subprocess(cfg, draw),
