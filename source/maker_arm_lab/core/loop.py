@@ -68,11 +68,12 @@ hold nothing."""
 @dataclass(frozen=True)
 class TakeoverConfig:
     """The DAgger mode (phase B design 5.5). ``random_interval`` is the mean control steps
-    between random takeovers, None for trouble triggers only. ``max_per_cycle`` caps the
-    takeovers one loop cycle may spend."""
+    between random takeovers, None for trouble triggers only. An episode may spend
+    ``max_per_episode_factor`` takeovers per cycle of its budget (the design's "two per cycle
+    of the budget"); a loop cycle holds at most one takeover, since a takeover's end ends it."""
 
     random_interval: float | None
-    max_per_cycle: int = 2
+    max_per_episode_factor: float = 2.0
 
 
 def cycle_budget(k: int) -> int:
@@ -135,8 +136,10 @@ class Cycle:
     stowed_before: set[int]
     close_below: float = IDLE_CLOSE_GAP  # m, the continuous close threshold (cycle_close_below)
     takeover: int = 0  # the rig's takeover ordinal while the rig holds this cycle, else 0
-    takeover_failed: bool = False
-    takeovers: int = 0  # takeovers this cycle spent, against TakeoverConfig.max_per_cycle
+    # "takeover_failed" or "takeover_declined": the rig's answer ends the cycle as a failure
+    # (phase B design 5.5), after the stowed rule had its chance.
+    takeover_end: str | None = None
+    taken_over: bool = False  # one takeover per loop cycle (phase B design 5.5)
 
 
 @dataclass
@@ -182,8 +185,8 @@ def cycle_end(
     new = sorted(stowed_now - cycle.stowed_before - credited)
     if new:
         return "stowed", new
-    if cycle.takeover_failed:
-        return "takeover_failed", []
+    if cycle.takeover_end is not None:
+        return cycle.takeover_end, []
     if step - cycle.start_step >= CYCLE_STEP_BUDGET:
         return "budget", []
     if resting_out_of_reach:
@@ -281,7 +284,9 @@ def rollout(
             )
     ordinal = [0] * num_envs  # the recorder's takeover ordinal per env
     loop_done = torch.zeros(num_envs, dtype=torch.bool)
-    triggers = _TriggerState(num_envs, takeover, run_seed) if takeover is not None else None
+    triggers = (
+        _TriggerState(num_envs, takeover, run_seed, cycle_budget) if takeover is not None else None
+    )
 
     started = time.monotonic()
     max_steps = int(env.max_episode_length)
@@ -390,8 +395,10 @@ def rollout(
                 st.takeovers_failed += 1
                 if recorder is not None:
                     recorder.negate_actor(i, ordinal[i])
-                if st.cycle is not None and policy is None:
-                    st.cycle.takeover_failed = True
+                if st.cycle is not None:
+                    # Phase B design 5.5: the loop grades the takeover's cycle like any other,
+                    # so a failed hand-back ends it (next pass 1, after the stowed rule).
+                    st.cycle.takeover_end = "takeover_failed"
             if st.cycle is not None:
                 st.cycle.takeover = 0
             rig.takeover_result[i] = None
@@ -419,6 +426,12 @@ def rollout(
             st.done_reason = st.done_reason or ("all_stowed" if bool(success[i]) else "time_out")
             rig.rearm([i], idle=True)
             env.oracle_actor[i] = 0
+        if recorder is not None:
+            # An episode the loop ends (selector dry or cycle budget spent) never reaches the
+            # env's own end: export its takeover frames here. No takeover runs on a loop-done
+            # env (pass 1 sees only idle rigs), and ``end`` is a no-op on an env already ended.
+            for i in torch.nonzero(loop_done).flatten().tolist():
+                recorder.end(i, states[i].done_reason == "all_stowed")
         loop_done.zero_()
         step += 1
         if step % 500 == 0:
@@ -504,17 +517,19 @@ def _close_cycle_unmarked(st: EnvState, step: int) -> None:
 
 
 def _take_over(rig, env, st: EnvState, i: int, ordinal: list[int], *, reason: str) -> bool:
-    """Hand env ``i`` to the rig on the loop's target; False when the rig declines."""
+    """Hand env ``i`` to the rig on the loop's target; False when the rig declines.
+
+    A decline ends the cycle as a failure in either mode (phase B design 5.5: "the cycle
+    ends as a failure, and the loop moves on"); ``_close_cycle`` marks the selector's failure
+    memory."""
+    st.cycle.taken_over = True
     if rig.resume(i, target=st.cycle.target):
         ordinal[i] += 1
         st.takeovers += 1
         st.cycle.takeover = ordinal[i]
         env.oracle_actor[i] = ordinal[i]
         return True
-    if reason == "driver":
-        # The driver has no one to hand the cycle back to; a declined trigger leaves the
-        # policy on the cycle.
-        st.cycle.takeover_failed = True
+    st.cycle.takeover_end = "takeover_declined"
     return False
 
 
@@ -522,10 +537,12 @@ class _TriggerState:
     """Per-env trigger counters and the offer of a takeover: the six-brick DAgger loop's logic
     on the loop's cycles (the MS4 four triggers, the random draw, the decline cooldown) plus
     the half-budget trigger (phase B design 5.5). ``offer`` runs once per step before the
-    actions are composed, on the envs the policy holds."""
+    actions are composed, on the envs the policy holds. Caps (design 5.5): one takeover per
+    loop cycle, ``max_per_episode_factor * cycle_budget`` per episode."""
 
-    def __init__(self, num_envs: int, config: TakeoverConfig, run_seed: int):
+    def __init__(self, num_envs: int, config: TakeoverConfig, run_seed: int, cycle_budget: int):
         self.config = config
+        self.max_per_episode = math.floor(config.max_per_episode_factor * cycle_budget)
         self.rng = random.Random(run_seed)
         self.random_p = 0.0 if config.random_interval is None else 1.0 / config.random_interval
         self.since_open = [0] * num_envs
@@ -578,15 +595,16 @@ class _TriggerState:
                 and step - st.cycle.start_step >= CYCLE_STEP_BUDGET // 2
             ):
                 reason = HALF_BUDGET_NO_HOLD
-            if reason is None or st.cycle.takeovers >= self.config.max_per_cycle:
+            if reason is None or st.cycle.taken_over or st.takeovers >= self.max_per_episode:
                 continue
             # Reset on both branches: an answered trigger must not fire again off the same count.
             self.since_open[i] = 0
             self.closed_no_pinch[i] = 0
             if _take_over(rig, env, st, i, ordinal, reason=reason):
-                st.cycle.takeovers += 1
                 self.counts[reason] += 1
             else:
+                # The decline ends this cycle, so the cooldown (design 5.5: it stays) only
+                # spaces the first trigger of the next cycle from a scene the rig just refused.
                 self.declined += 1
                 self.cooldown[i] = DECLINE_COOLDOWN
         self.grip_open_prev = grip_open

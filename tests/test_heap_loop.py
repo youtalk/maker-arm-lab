@@ -484,7 +484,7 @@ def test_a_takeover_the_time_out_cuts_short_is_failed_and_negated(tmp_path, monk
         rig,
         _HoldPolicy(),
         budget=3,
-        takeover=loop.TakeoverConfig(random_interval=None, max_per_cycle=1),
+        takeover=loop.TakeoverConfig(random_interval=None),
     )
     env.close()
     ep = payload["episodes"][0]
@@ -507,23 +507,58 @@ def test_the_half_budget_trigger_fires_without_a_hold(monkeypatch):
     assert payload["triggers"].get("half_budget_no_hold", 0) >= 1, payload["triggers"]
 
 
-def test_the_per_cycle_takeover_cap_holds(monkeypatch):
-    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 600)
+def test_a_failed_takeover_ends_its_cycle_and_the_episode_cap_holds(monkeypatch):
+    # Every 50 open steps trigger and every takeover fails at once. A failed hand-back ends the
+    # loop cycle (one takeover per cycle, phase B design 5.5); a factor of 0.5 on a budget of
+    # four caps the episode at two takeovers, so the last two cycles run to their step budget.
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 200)
     monkeypatch.setattr(dagger_loop, "NO_CLOSE_STEPS", 50)
-    env, rig = _env_and_rig(budget=3)
+    env, rig = _env_and_rig(budget=4)
     _place(env, SPREAD)
     _resume_then_fail(rig, monkeypatch)
     payload = _rollout(
         env,
         rig,
         _HoldPolicy(),
-        budget=3,
-        takeover=loop.TakeoverConfig(random_interval=None, max_per_cycle=2),
+        budget=4,
+        takeover=loop.TakeoverConfig(random_interval=None, max_per_episode_factor=0.5),
     )
     env.close()
     ep = payload["episodes"][0]
-    # Every 50 open steps trigger, every takeover fails at once: the cap of two per cycle holds.
-    assert ep["takeovers"] == 2 * ep["cycles"], ep
+    assert ep["takeovers"] == ep["takeovers_failed"] == 2 and ep["cycles"] == 4, ep
+    assert ep["cycle_reasons"] == ["takeover_failed"] * 2 + ["budget"] * 2, ep
+    assert all(s <= 52 for s in ep["cycle_steps"][:2]), ep
+
+
+def test_one_takeover_per_cycle_under_the_default_cap(monkeypatch):
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 200)
+    monkeypatch.setattr(dagger_loop, "NO_CLOSE_STEPS", 50)
+    env, rig = _env_and_rig(budget=3)
+    _place(env, SPREAD)
+    _resume_then_fail(rig, monkeypatch)
+    payload = _rollout(
+        env, rig, _HoldPolicy(), budget=3, takeover=loop.TakeoverConfig(random_interval=None)
+    )
+    env.close()
+    ep = payload["episodes"][0]
+    assert ep["takeovers"] == ep["cycles"] == 3, ep
+    assert ep["cycle_reasons"] == ["takeover_failed"] * 3, ep
+
+
+def test_a_declined_takeover_ends_its_cycle_as_a_failure(monkeypatch):
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 200)
+    monkeypatch.setattr(dagger_loop, "NO_CLOSE_STEPS", 50)
+    env, rig = _env_and_rig(budget=3)
+    _place(env, SPREAD)
+    monkeypatch.setattr(rig, "resume", lambda i, target=None: False)
+    payload = _rollout(
+        env, rig, _HoldPolicy(), budget=3, takeover=loop.TakeoverConfig(random_interval=None)
+    )
+    env.close()
+    ep = payload["episodes"][0]
+    assert ep["takeovers"] == 0 and payload["takeovers_declined"] >= 1, payload
+    assert ep["cycle_reasons"][0] == "takeover_declined", ep
+    assert set(ep["cycle_reasons"]) <= {"takeover_declined", "budget"}, ep
 
 
 def test_a_takeover_on_a_target_out_of_reach_is_declined_not_raised():
