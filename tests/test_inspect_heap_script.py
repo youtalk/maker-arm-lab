@@ -83,7 +83,7 @@ def test_the_viewer_flag_exists_and_is_off_by_default():
     assert args.viewer is False
 
 
-def test_inspect_heap_builds_a_continuous_env_on_request(tmp_path):
+def test_inspect_heap_parses_the_continuous_gripper_flag(tmp_path):
     module = _load(SCRIPT)
     args = module.parse_args(
         [
