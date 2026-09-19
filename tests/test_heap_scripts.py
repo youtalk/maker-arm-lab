@@ -166,3 +166,33 @@ def test_mj_eval_heap_refuses_a_zero_heap_with_the_fail_token(capsys):
     with pytest.raises(SystemExit):
         script.main(["--heap_k", "0", "--oracle_driver"])
     assert "EVAL_FAIL " in capsys.readouterr().out
+
+
+def test_mj_eval_heap_reports_a_bad_out_path_with_exactly_one_fail_token(tmp_path, capsys):
+    import importlib
+
+    script = importlib.import_module("mj_eval_heap")
+    code = script.main(
+        [
+            "--num_envs",
+            "1",
+            "--heap_k",
+            "3",
+            "--parts_split",
+            "train",
+            "--run_seed",
+            "11",
+            "--layout_seed",
+            "5",
+            "--oracle_driver",
+            "--max_wall_minutes",
+            "5",
+            "--out",
+            str(tmp_path / "missing_dir" / "eval.json"),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == 1 and out.count("EVAL_FAIL ") == 1, out
+    assert out.count("EVAL_OK ") == 0
+    fail_line = next(line for line in out.splitlines() if line.startswith("EVAL_FAIL "))
+    assert json.loads(fail_line[len("EVAL_FAIL ") :])["reason"] == "write_out"

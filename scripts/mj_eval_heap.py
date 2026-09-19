@@ -85,6 +85,7 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     policy = None
     env = None
+    close_error = None
     try:
         perm = tuple(int(v) for v in args.permutation.split(","))
         if sorted(perm) != [0, 1, 2, 3]:
@@ -144,12 +145,25 @@ def main(argv=None) -> int:
         )
         return 1
     finally:
-        if policy is not None:
-            policy.close()
-        if env is not None:
-            env.close()
-    if args.out:
-        Path(args.out).write_text(json.dumps(payload, indent=2))
+        try:
+            if policy is not None:
+                policy.close()
+            if env is not None:
+                env.close()
+        except Exception as err:  # noqa: BLE001 -- the token contract
+            # The token is printed AFTER the try/except/finally, not here: a body that
+            # already returned printed its own token and that return wins over this block,
+            # so exactly one token is printed on either path (mj_dagger_batch.py's rule).
+            close_error = f"{err}\n{traceback.format_exc()}"
+    if close_error is not None:
+        print("EVAL_FAIL " + json.dumps({"reason": "close", "detail": close_error}), flush=True)
+        return 1
+    try:
+        if args.out:
+            Path(args.out).write_text(json.dumps(payload, indent=2))
+    except Exception as err:  # noqa: BLE001 -- the rollout already ran; still print a token
+        print("EVAL_FAIL " + json.dumps({"reason": "write_out", "detail": str(err)}), flush=True)
+        return 1
     print("EVAL_OK " + json.dumps(payload), flush=True)
     return 0
 
