@@ -561,6 +561,46 @@ def test_a_declined_takeover_ends_its_cycle_as_a_failure(monkeypatch):
     assert set(ep["cycle_reasons"]) <= {"takeover_declined", "budget"}, ep
 
 
+def _hold_part_zero(monkeypatch):
+    """The loop reads part 0 between the jaws on every step (the rig keeps its own read)."""
+    monkeypatch.setattr(
+        loop,
+        "held_brick_from_forces",
+        lambda left, right, min_force: torch.zeros(left.shape[0], dtype=torch.long),
+    )
+
+
+def test_a_decline_on_a_held_part_keeps_its_cycle_with_a_cooldown(monkeypatch):
+    # RULING P32 declines most of a correct carry. A random trigger fires on every step and
+    # the rig declines each one while the loop reads a held part: the cycle runs on until the
+    # episode's time-out (one cycle of budget), the cooldown spaces the declines, and no
+    # decline marks the failure memory.
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 150)
+    env, rig = _env_and_rig(budget=1)
+    _place(env, SPREAD)
+    _hold_part_zero(monkeypatch)
+    monkeypatch.setattr(rig, "resume", lambda i, target=None: False)
+    marks = []
+    real_selector = loop._selector
+
+    def selector(rig, i):
+        sel = real_selector(rig, i)
+        real_mark = sel._mark_failure
+        sel._mark_failure = lambda scene, b: (marks.append(b), real_mark(scene, b))[1]
+        return sel
+
+    monkeypatch.setattr(loop, "_selector", selector)
+    payload = _rollout(
+        env, rig, _HoldPolicy(), budget=1, takeover=loop.TakeoverConfig(random_interval=1)
+    )
+    env.close()
+    ep = payload["episodes"][0]
+    assert ep["cycle_reasons"] == ["episode_end"] and ep["takeovers"] == 0, ep
+    # Declines at steps 0, 61 and 122 of 150: one per cooldown of 60 steps.
+    assert payload["takeovers_declined"] == 3, payload
+    assert marks == [], marks
+
+
 def test_a_takeover_on_a_target_out_of_reach_is_declined_not_raised():
     env, rig = _env_and_rig(budget=3)
     _place(env, [(0.60, 0.0, 0.006, 0.0)] + SPREAD[1:])

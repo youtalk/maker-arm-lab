@@ -138,7 +138,8 @@ class Cycle:
     close_below: float = IDLE_CLOSE_GAP  # m, the continuous close threshold (cycle_close_below)
     takeover: int = 0  # the rig's takeover ordinal while the rig holds this cycle, else 0
     # "takeover_failed" or "takeover_declined": the rig's answer ends the cycle as a failure
-    # (phase B design 5.5), after the stowed rule had its chance.
+    # (phase B design 5.5), after the stowed rule had its chance. A decline while the jaws
+    # hold a part is not an answer: the cycle runs on (``_take_over``).
     takeover_end: str | None = None
     taken_over: bool = False  # one takeover per loop cycle (phase B design 5.5)
 
@@ -517,20 +518,28 @@ def _close_cycle_unmarked(st: EnvState, step: int) -> None:
     st.cycle = None
 
 
-def _take_over(rig, env, st: EnvState, i: int, ordinal: list[int], *, reason: str) -> bool:
+def _take_over(
+    rig, env, st: EnvState, i: int, ordinal: list[int], *, reason: str, holding: bool = False
+) -> bool:
     """Hand env ``i`` to the rig on the loop's target; False when the rig declines.
 
-    A decline ends the cycle as a failure in either mode (phase B design 5.5: "the cycle
+    A decline with nothing held ends the cycle as a failure (phase B design 5.5: "the cycle
     ends as a failure, and the loop moves on"); ``_close_cycle`` marks the selector's failure
-    memory."""
-    st.cycle.taken_over = True
+    memory. A decline while the jaws hold a part (``holding``, the loop's held read) keeps the
+    six-brick behavior: the cycle runs on and the caller's cooldown spaces the next trigger.
+    ``OracleRig.resume`` declines most of a correct carry (RULING P32: a part above
+    ``LIFT_HEIGHT - LIFT_MIN_RISE``), and ending the cycle there would spend it and mark the
+    failure memory at a point in the air."""
     if rig.resume(i, target=st.cycle.target):
+        st.cycle.taken_over = True
         ordinal[i] += 1
         st.takeovers += 1
         st.cycle.takeover = ordinal[i]
         env.oracle_actor[i] = ordinal[i]
         return True
-    st.cycle.takeover_end = "takeover_declined"
+    if not holding:
+        st.cycle.taken_over = True
+        st.cycle.takeover_end = "takeover_declined"
     return False
 
 
@@ -601,11 +610,13 @@ class _TriggerState:
             # Reset on both branches: an answered trigger must not fire again off the same count.
             self.since_open[i] = 0
             self.closed_no_pinch[i] = 0
-            if _take_over(rig, env, st, i, ordinal, reason=reason):
+            if _take_over(rig, env, st, i, ordinal, reason=reason, holding=int(held[i]) >= 0):
                 self.counts[reason] += 1
             else:
-                # The decline ends this cycle, so the cooldown (design 5.5: it stays) only
-                # spaces the first trigger of the next cycle from a scene the rig just refused.
+                # The decline cooldown stays (phase B design 5.5). A decline on a held part
+                # leaves the cycle running and the cooldown spaces the next trigger on it; a
+                # decline with nothing held ends the cycle, and the cooldown spaces the next
+                # cycle's first trigger from a scene the rig just refused.
                 self.declined += 1
                 self.cooldown[i] = DECLINE_COOLDOWN
         self.grip_open_prev = grip_open
