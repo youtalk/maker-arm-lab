@@ -273,6 +273,17 @@ MATCHED_OPENING_PHASES = (oracle.Phase.HOVER, oracle.Phase.DESCEND, oracle.Phase
 # walked rather than stepped.
 ROLL_DEADBAND_RAD = math.radians(5.0)
 ROLL_MAX_STEP_RAD = math.radians(6.0)
+# The continuous gripper releases with the jaw plane LEVEL instead (phase B release rung): a
+# position-held jaw opens smoothly, and a part resting on the lower jaw of a stood-up plane
+# stays there -- the jaw face slopes about 10 degrees against a sliding friction of 1.0.
+# Traced on the corpus heaps, 20 to 26 of about 49 releases per heap still held their part.
+# A level plane has no jaw under the part. On the corpus seeds p0..p3 (K=50) it stows 180 of
+# 200 against 158 on the stood-up plane; p4..p7 read 188 of 200, binary 190. A first probe
+# that rolled level without the unroll lost RETREATs: planned from the rolled wrist, 3 to 13
+# per heap came back unplanned, and two episodes were abandoned. RETREAT now turns the wrist
+# back along the same waypoints before it plans. The margin keeps the level roll off the wrist
+# stop; 10 degrees is chosen, not swept.
+LEVEL_ROLL_MARGIN_RAD = math.radians(10.0)
 
 # MS6 rung 3. The legs that CARRY hold the jaws at the part's own width instead of driving
 # them to `GRIPPER_CLOSED_POS`, for an oracle that asks for it.
@@ -492,6 +503,7 @@ class OracleRig:
         self.plans: list[list[torch.Tensor]] = [[] for _ in range(self.num_envs)]
         self.walk_steps = [1] * self.num_envs
         self.walk_step = [0] * self.num_envs
+        self.unroll: list[list[torch.Tensor] | None] = [None] * self.num_envs
         # Where a desk-resting brick sits in `grasp_center` coordinates. Per env because the
         # descend ladder picks its own offset per rung (the offset balancing desk clearance
         # against tip margin moves with tilt), and that choice then has to survive into the
@@ -1061,6 +1073,10 @@ class OracleRig:
         if goal.target_pos is None:
             return  # hold phase: keep commanding the joint target the last leg left
         start = self.q_cmd[i]
+        if goal.phase is not oracle.Phase.RETREAT:
+            self.unroll[i] = None
+        elif self.unroll[i] is not None:
+            start = self.unroll[i][-1]
         pick_from, tilt_from = self._commanded_pick_pose(i, start)
         pick_to = goal.target_pos.double().cpu()
         heading = self.commanded_yaw[i]
@@ -1142,7 +1158,20 @@ class OracleRig:
         if goal.phase == oracle.Phase.EXTEND and getattr(
             self.oracles[i], "matched_jaw_opening", False
         ):
-            plan = plan + self._roll_waypoints(plan[-1])
+            roll = self._roll_waypoints(plan[-1])
+            if roll and self.gripper_mode != "binary":
+                # The walk splits its steps by segment count; keep the carry's own pace and
+                # give the roll steps of its own. RETREAT turns the wrist back first.
+                self.walk_steps[i] = math.ceil(
+                    self.walk_steps[i] * (len(plan) + len(roll)) / len(plan)
+                )
+                self.unroll[i] = roll[-2::-1] + [plan[-1]]
+            plan = plan + roll
+        elif goal.phase == oracle.Phase.RETREAT and self.unroll[i] is not None:
+            self.walk_steps[i] = math.ceil(
+                self.walk_steps[i] * (len(plan) + len(self.unroll[i])) / len(plan)
+            )
+            plan = self.unroll[i] + plan
         self.plans[i] = plan
 
     def _matched_close_command(self, i: int, fully_closed: float) -> float:
@@ -1184,6 +1213,8 @@ class OracleRig:
 
         The wrist's travel is finite, so a roll that would leave the joint's range is dropped
         rather than clamped: half a stood-up plane is not worth a servo against its stop.
+
+        Under the continuous gripper the roll levels the plane instead (LEVEL_ROLL_MARGIN_RAD).
         """
         _, rotation = self.ik.fk(arrival)
         rotation = torch.as_tensor(rotation, dtype=torch.float64)
@@ -1192,8 +1223,20 @@ class OracleRig:
         # `link_007_joint` turns the jaw axis by MINUS its own angle about the tool axis
         # (measured 2026-09-17, ratio -1.000), so the joint moves against the roll.
         delta = -steepest_jaw_roll(jaw, tool)
-        target = float(arrival[WRIST_ROLL_INDEX]) + delta
         lo, hi = self.wrist_roll_limits
+        if self.gripper_mode != "binary":
+            # Level: a quarter turn off the steepest roll, either way. Take the shorter one
+            # that keeps LEVEL_ROLL_MARGIN_RAD off both wrist stops.
+            here = float(arrival[WRIST_ROLL_INDEX])
+            options = [
+                d
+                for d in (delta + math.pi / 2, delta - math.pi / 2)
+                if lo + LEVEL_ROLL_MARGIN_RAD <= here + d <= hi - LEVEL_ROLL_MARGIN_RAD
+            ]
+            if not options:
+                return []
+            delta = min(options, key=abs)
+        target = float(arrival[WRIST_ROLL_INDEX]) + delta
         if not lo <= target <= hi or abs(delta) < ROLL_DEADBAND_RAD:
             return []
         steps = max(1, math.ceil(abs(delta) / ROLL_MAX_STEP_RAD))

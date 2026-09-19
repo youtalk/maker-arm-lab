@@ -380,3 +380,32 @@ def test_the_binary_rig_still_flips_around_the_matched_opening():
             break
     assert commands <= {1.0, -1.0} and len(commands) == 2
     env.close()
+
+
+def test_the_continuous_rig_releases_on_a_level_jaw_plane_and_lets_go():
+    """Phase B release rung: a position-held jaw opens smoothly, so a part resting on the lower
+    jaw of a stood-up plane rides it down and stays. The continuous rig levels the jaw plane
+    for RELEASE, and every part leaves the jaws before RETREAT."""
+    env, rig = _env_and_rig(gripper_mode="continuous")
+    _place(env, SPREAD)
+    m, d = env.models[0], env.datas[0]
+    left, right = m.body("gripper_left").id, m.body("gripper_right").id
+    slopes, heights = [], []
+    for _ in range(9000):
+        goal = rig.goals[0]
+        target = rig.oracles[0].target_brick
+        out = rig.step()
+        if goal is not None and goal.phase is oracle.Phase.RELEASE:
+            axis = d.xpos[left] - d.xpos[right]
+            slopes.append(abs(axis[2]) / float((axis**2).sum() ** 0.5))
+            if rig.goals[0] is not None and rig.goals[0].phase is oracle.Phase.RETREAT:
+                heights.append(float(rig._brick_pos(0, target)[2]))
+        if bool(out["dones"][0]) or bool(out["abandoned"][0]):
+            break
+    stats = rig.episode_stats(0)
+    env.close()
+    assert slopes and max(slopes) < math.sin(math.radians(10.0)), max(slopes)
+    # The release point is 0.30 m up; a part still in the jaws is within a jaw length of it.
+    # The last part's stow ends the episode inside its RELEASE, so it has no RETREAT entry.
+    assert len(heights) >= 2 and max(heights) < 0.25, heights
+    assert stats["succeeded"] is True and stats["bricks_delivered"] == 3, stats
