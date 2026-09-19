@@ -5,7 +5,9 @@ rule) names the target, the loop writes it into ``env.target_part`` so the overh
 moves, the policy drives, and the privileged grader ends the cycle. Three ends: a part that
 was not stowed when the cycle began is at rest in the bin (the target, or any part the jaws
 carried, rung b5's rule), the cycle spent ``CYCLE_STEP_BUDGET`` control steps, or the target
-left ``layout.in_reach``. A failed cycle marks its cell in the selector's failure memory.
+came to rest outside ``layout.in_reach`` and outside the bin (knocked out of reach; a carry
+crosses out-of-reach space in flight). A failed cycle marks its cell in the selector's failure
+memory.
 There is no reset between cycles. The episode ends when the selector returns None (no
 candidate, or the cycle budget is spent) or every part is stowed.
 
@@ -39,6 +41,8 @@ about 400 steps (17094 to 20677 steps over about 50 cycles, docs/ms6-bare-desk-h
 section 3). The phase B preflight (plan Task 15) fixes it from the corpus shards."""
 CYCLE_BUDGET_FACTOR = 1.3
 """Pick cycles per part an episode may spend: the gate's own cycles-per-stowed rule."""
+AT_REST_SPEED = 0.02
+"""m/s: the grader's at-rest speed, ``checker.bricks_at_rest_in_bins``'s ``max_speed``."""
 CONTINUOUS_CLOSE_GAP = 0.030
 """m: under the continuous gripper a commanded jaw gap below this reads as a close. The
 smallest matched landing gap in the catalog is 31.8 mm (a 7.8 mm slope) and the widest close
@@ -111,9 +115,14 @@ def _selector(rig, i: int):
 
 
 def cycle_end(
-    cycle: Cycle, stowed_now: set[int], target_xy, bl, step: int
+    cycle: Cycle, stowed_now: set[int], resting_out_of_reach: bool, step: int
 ) -> tuple[str, list[int]] | None:
-    """Why the cycle ends now and the parts it stowed, or None while it runs. Pure."""
+    """Why the cycle ends now and the parts it stowed, or None while it runs. Pure.
+
+    ``resting_out_of_reach`` is ``resting_out_of_reach()`` on the target: a carry passes
+    through out-of-reach space on its way to the bin, so only a part knocked out and at rest
+    ends the cycle.
+    """
     new = sorted(stowed_now - cycle.stowed_before)
     if new:
         return "stowed", new
@@ -121,9 +130,18 @@ def cycle_end(
         return "takeover_failed", []
     if step - cycle.start_step >= CYCLE_STEP_BUDGET:
         return "budget", []
-    if not layout.in_reach(float(target_xy[0]), float(target_xy[1]), bl):
+    if resting_out_of_reach:
         return "out_of_reach", []
     return None
+
+
+def resting_out_of_reach(xy, speed: float, bl, stow_half_xy) -> bool:
+    """A part at rest (the grader's speed rule) outside ``layout.in_reach`` and outside the
+    destination bin's footprint: knocked out of reach, not carried or stowed."""
+    x, y = float(xy[0]), float(xy[1])
+    cx, cy, _ = layout.heap_bin_center(bl)
+    in_bin = abs(x - cx) <= float(stow_half_xy[0]) and abs(y - cy) <= float(stow_half_xy[1])
+    return speed <= AT_REST_SPEED and not in_bin and not layout.in_reach(x, y, bl)
 
 
 def _close_cycle(st: EnvState, reason: str, stowed: list[int], step: int, scene) -> None:
@@ -193,6 +211,12 @@ def rollout(
     env.oracle_actor = torch.zeros(num_envs, dtype=torch.int16)
     env.target_part[:] = -1
     states = [EnvState(selector=_selector(rig, i)) for i in range(num_envs)]
+    for st in states:
+        if st.selector.cycle_budget != cycle_budget:
+            raise EvalFailure(
+                "cycle_budget",
+                f"the selector spends {st.selector.cycle_budget} cycles, the loop {cycle_budget}",
+            )
     ordinal = [0] * num_envs  # the recorder's takeover ordinal per env
     loop_done = torch.zeros(num_envs, dtype=torch.bool)
     triggers = _TriggerState(num_envs, takeover, run_seed) if takeover is not None else None
@@ -205,8 +229,8 @@ def rollout(
             raise EvalFailure("wall_clock", f"exceeded {max_wall_minutes} min at step {step}")
         per_brick = per_brick_stowed(env).to("cpu")
         tracker.latch_pre_step(per_brick)
-        pos, _ = _brick_states(env)
-        pos = pos.to("cpu")
+        pos, vel = _brick_states(env)
+        pos, speed = pos.to("cpu"), vel.norm(dim=-1).to("cpu")
         # 1. Grade and select on the envs the loop holds: episode live, rig idle.
         for i in range(num_envs):
             if bool(tracker.done[i]) or not rig.idle[i]:
@@ -214,9 +238,11 @@ def rollout(
             st = states[i]
             stowed_now = {b for b in range(k) if bool(per_brick[i, b])}
             if st.cycle is not None:
-                end = cycle_end(
-                    st.cycle, stowed_now, pos[i, st.cycle.target, :2], _layout_of(rig, i), step
+                b = st.cycle.target
+                out = resting_out_of_reach(
+                    pos[i, b, :2], float(speed[i, b]), _layout_of(rig, i), env.stow_half_extents
                 )
+                end = cycle_end(st.cycle, stowed_now, out, step)
                 if end is not None:
                     _close_cycle(st, end[0], end[1], step, rig.snapshot(i))
             if st.cycle is not None:
@@ -270,6 +296,7 @@ def rollout(
             for i in range(num_envs):
                 if int(env.oracle_actor[i]) > 0:
                     recorder.negate_actor(i, ordinal[i])
+                    states[i].takeovers_failed += 1
                     env.oracle_actor[i] = 0
         _, _, terminated, truncated, _ = env.step(clamped.to(env.device))
         dones = (terminated | truncated).cpu()

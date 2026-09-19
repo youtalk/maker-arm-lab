@@ -86,14 +86,23 @@ def test_grip_open_flags_read_both_gripper_contracts():
 
 
 def test_cycle_end_names_the_three_ends():
-    bl = layout.DEFAULT_BIN_LAYOUT
     cycle = loop.Cycle(ordinal=1, target=0, start_step=100, stowed_before={2})
-    inside = torch.tensor([0.20, 0.0])
-    assert loop.cycle_end(cycle, {2}, inside, bl, 100) is None
-    assert loop.cycle_end(cycle, {0, 2}, inside, bl, 100) == ("stowed", [0])
-    assert loop.cycle_end(cycle, {2, 1}, inside, bl, 100) == ("stowed", [1])  # rung b5: any part
-    assert loop.cycle_end(cycle, {2}, inside, bl, 100 + loop.CYCLE_STEP_BUDGET) == ("budget", [])
-    assert loop.cycle_end(cycle, {2}, torch.tensor([0.60, 0.0]), bl, 100) == ("out_of_reach", [])
+    assert loop.cycle_end(cycle, {2}, False, 100) is None
+    assert loop.cycle_end(cycle, {0, 2}, False, 100) == ("stowed", [0])
+    assert loop.cycle_end(cycle, {2, 1}, False, 100) == ("stowed", [1])  # rung b5: any part
+    assert loop.cycle_end(cycle, {2}, False, 100 + loop.CYCLE_STEP_BUDGET) == ("budget", [])
+    assert loop.cycle_end(cycle, {2}, True, 100) == ("out_of_reach", [])
+
+
+def test_only_a_resting_part_off_the_reach_band_and_off_the_bin_is_out_of_reach():
+    bl = layout.DEFAULT_BIN_LAYOUT
+    half = (0.05, 0.05)
+    bin_xy = layout.heap_bin_center(bl)[:2]
+    assert not layout.in_reach(*bin_xy, bl)
+    assert loop.resting_out_of_reach(torch.tensor([0.60, 0.0]), 0.0, bl, half)
+    assert not loop.resting_out_of_reach(torch.tensor([0.60, 0.0]), 0.3, bl, half)  # carried
+    assert not loop.resting_out_of_reach(torch.tensor(bin_xy), 0.0, bl, half)  # over the bin
+    assert not loop.resting_out_of_reach(torch.tensor([0.20, 0.0]), 0.0, bl, half)  # in reach
 
 
 def test_the_oracle_driver_stows_three_spread_parts_through_the_loop():
@@ -119,9 +128,11 @@ def test_a_still_policy_spends_its_budget_and_the_failure_memory_excludes_the_ce
     ep = payload["episodes"][0]
     assert ep["bricks_stowed"] == 0 and ep["success"] is False
     assert set(ep["cycle_reasons"]) == {"budget"} and all(s <= 41 for s in ep["cycle_steps"])
-    # Parts 1 and 2 share a 5 cm cell, so three failures close it for both, and part 0's cell
-    # takes three more: the selector runs dry at six cycles, under the budget of nine.
-    assert 3 <= ep["cycles"] <= 9 and ep["done_reason"] in ("no_candidate", "cycle_budget")
+    # Three failures close a cell. Part 0's cell takes three, then parts 1 and 2 share a 5 cm
+    # cell that three failures on part 2 close for both: the selector runs dry at six cycles,
+    # under the budget of nine.
+    assert ep["cycles"] == 6 and ep["done_reason"] == "no_candidate"
+    assert ep["cycle_targets"] == [0, 0, 0, 2, 2, 2]
     assert ep["takeovers"] == 0 and payload["policy_id"] == "fake:hold"
     assert payload["stowed_total"] == 0 and payload["cycles_per_stowed"] is None
 
@@ -171,6 +182,54 @@ def test_a_target_that_leaves_reach_ends_its_cycle(monkeypatch):
     assert ep["cycle_reasons"][0] == "out_of_reach" and ep["cycle_steps"][0] < 10
 
 
+class _CarryPolicy(_HoldPolicy):
+    """Holds the arm still and carries the target, lifted and moving, into the bin."""
+
+    PATH_STEPS = 30
+
+    def __init__(self, env):
+        super().__init__()
+        self.env = env
+        self.calls = 0
+        self.path = []
+
+    def step(self, state, wrist, overhead, context=None, anchor=None):
+        self.calls += 1
+        n = self.calls - 2
+        if 0 <= n <= self.PATH_STEPS:
+            m, d, h = self.env.models[0], self.env.datas[0], self.env.handles
+            b = int(self.env.target_part[0])
+            adr, dof = h.brick_qpos[b], h.brick_dof[b]
+            if n == 0:
+                self.start = np.array(d.qpos[adr : adr + 2])
+            cx, cy, cz = layout.heap_bin_center(self.env.bin_layouts[0])
+            goal = np.array((cx, cy))
+            s = n / self.PATH_STEPS
+            xy = self.start + s * (goal - self.start)
+            z = cz + (0.08 if n < self.PATH_STEPS else 0.0)  # over the raised bin's walls
+            d.qpos[adr : adr + 3] = (xy[0], xy[1], z)
+            d.qvel[dof : dof + 6] = 0.0
+            if n < self.PATH_STEPS:
+                d.qvel[dof : dof + 2] = (goal - self.start) / self.PATH_STEPS * 30.0
+            mujoco.mj_forward(m, d)
+            self.env._refresh([0], images=False)
+            self.path.append(tuple(xy))
+        return super().step(state, wrist, overhead, context=context, anchor=anchor)
+
+
+def test_a_carry_through_out_of_reach_space_ends_as_stowed(monkeypatch):
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 200)
+    env, rig = _env_and_rig(budget=1)
+    _place(env, SPREAD)
+    policy = _CarryPolicy(env)
+    payload = _rollout(env, rig, policy, budget=1)
+    bl = env.bin_layouts[0]
+    env.close()
+    assert any(not layout.in_reach(x, y, bl) for x, y in policy.path)
+    ep = payload["episodes"][0]
+    assert ep["cycle_reasons"] == ["stowed"] and ep["bricks_stowed"] == 1, ep
+
+
 def test_the_loop_refuses_a_six_brick_env_and_a_context_mismatch():
     draw = sample_run_draw(random.Random(5))
     draw["slot_colors"] = (0, 1, 2, 3)
@@ -181,3 +240,22 @@ def test_the_loop_refuses_a_six_brick_env_and_a_context_mismatch():
         _rollout(env, rig, None, budget=3)
     env.close()
     assert err.value.reason == "scene"
+
+    wide = _HoldPolicy()
+    wide.context_dim = 9
+    continuous = _HoldPolicy()
+    continuous.gripper = "continuous"
+    for policy, reason in ((wide, "context"), (continuous, "gripper")):
+        env, rig = _env_and_rig()
+        with pytest.raises(loop.EvalFailure) as err:
+            _rollout(env, rig, policy)
+        env.close()
+        assert err.value.reason == reason
+
+
+def test_the_loop_refuses_a_selector_with_another_cycle_budget():
+    env, rig = _env_and_rig(budget=4)
+    with pytest.raises(loop.EvalFailure) as err:
+        _rollout(env, rig, None, budget=5)
+    env.close()
+    assert err.value.reason == "cycle_budget"
