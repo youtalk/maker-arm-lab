@@ -319,6 +319,47 @@ def test_the_continuous_rig_commands_the_matched_gap_without_a_flip():
     env.close()
 
 
+def test_the_continuous_rig_closes_holds_and_releases_at_its_set_points():
+    """Phase B design 5.8: the close and release gaps value by value, and a matched-gap hold
+    that stays within JAW_HOLD_BAND of its set point for 100 steps with no command flip."""
+    from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import CLOSE_SQUEEZE_M
+
+    env, rig = _env_and_rig(gripper_mode="continuous")
+    _place(env, SPREAD)
+    held_phases = (oracle.Phase.LIFT, oracle.Phase.RAISE, oracle.Phase.EXTEND)
+    closes, releases, held = [], [], []
+    width = None
+    for _ in range(4000):
+        goal = rig.goals[0]
+        action, out = _step(rig)
+        if goal is None:
+            continue
+        if goal.phase is oracle.Phase.HOVER and releases:
+            break  # the second cycle's approach: the first cycle is over
+        width = float(rig.oracles[0].grasp_width)
+        command = float(action[0, 6])
+        if goal.phase is oracle.Phase.CLOSE:
+            closes.append((command, width))
+        elif goal.phase in held_phases:
+            jaws = rig.robot.data.joint_pos[0, rig.finger_ids].tolist()
+            held.append((command, jaws))
+        elif goal.phase is oracle.Phase.RELEASE:
+            releases.append((command, width))
+        if bool(out["dones"][0]) or bool(out["abandoned"][0]):
+            break
+    env.close()
+    assert closes and releases and len(held) >= 100, (len(closes), len(releases), len(held))
+    for command, w in closes:
+        assert command == pytest.approx(2.0 * max(0.0, 0.5 * w - CLOSE_SQUEEZE_M))
+    for command, w in releases:
+        assert command == pytest.approx(2.0 * (grasp.landing_half_gap(w) - grasp.JAW_HOLD_BAND))
+    hold = held[:100]
+    set_point = hold[0][0]
+    assert all(command == set_point for command, _ in hold)
+    worst = max(abs(j - 0.5 * set_point) for _, jaws in hold for j in jaws)
+    assert worst <= grasp.JAW_HOLD_BAND, worst
+
+
 def test_the_continuous_rig_stows_three_spread_parts():
     env, rig = _env_and_rig(gripper_mode="continuous")
     _place(env, SPREAD)
