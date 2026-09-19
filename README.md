@@ -169,6 +169,19 @@ lerobot_stack/.venv/bin/python lerobot_stack/convert_to_lerobot.py \
     --shards /tmp/batch0/shard.hdf5 --root ~/data/maker-arm-ms1/dataset   # CONVERT_OK episodes=<n> total=<n> read=<n> skipped=<n>
 ```
 
+## Evaluation and gating
+
+The heap gate (MS6 phase B) drives `scripts/mj_eval_heap.py` through `core/loop.py`. A `HeapOracle` selects each target. The policy drives. The privileged grader ends the cycle. With `--oracle_driver`, the rig drives every cycle instead of the policy.
+
+```bash
+uv run python scripts/mj_eval_heap.py --num_envs 1 --heap_k 50 --parts_split heldout \
+    --run_seed 20261300 --layout_seed 20261310 --oracle_driver --out /tmp/preflight.json
+python3 scripts/run_gate_eval.py --backend mujoco --checkpoint <pretrained_model> \
+    --ledger ~/data/maker-arm-ms6/l/ledger.json --threshold 0.85 --max_cycles_per_stowed 1.3 \
+    --seed 20261400 --processes 8 --num_envs 5 --heap_k 50 --parts_split heldout \
+    --episode_draws --frame_jitter --context camera_box --out_dir ~/data/maker-arm-ms6/l/gate
+```
+
 ## Training smoke
 
 ```bash
