@@ -163,6 +163,7 @@ def run_meta(
         "parts_seed": int(getattr(args, "parts_seed", 0)),
         "parts_split": getattr(args, "parts_split", "train"),
         "cycle_budget": int(getattr(args, "cycle_budget", 0)),
+        "gripper": getattr(args, "gripper", "binary"),
         "parts": None if parts is None else [p.name for p in parts],
         "episode_length_s": (
             episode_length_s
@@ -505,6 +506,13 @@ def add_batch_arguments(parser) -> None:
     )
     parser.add_argument(
         "--cycle_budget", type=int, default=50, help="pick cycles a heap episode may spend"
+    )
+    parser.add_argument(
+        "--gripper",
+        choices=("binary", "continuous"),
+        default="binary",
+        help="MuJoCo only: the gripper contract of the recorded action's seventh column "
+        "(MS6 phase B design 5.4): binary is raw >= 0 opens, continuous is the jaw gap in m",
     )
     parser.add_argument(
         "--episode_length_s",

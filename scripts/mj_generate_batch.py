@@ -103,6 +103,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         export_all=args.export_mode == "all" or parts is not None,
         episode_draws=args.episode_draws,
         frame_jitter=args.frame_jitter,
+        gripper_mode=args.gripper,
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)
