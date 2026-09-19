@@ -7,11 +7,12 @@ import mujoco
 import pytest
 import torch
 
-from maker_arm_lab.core import oracle, parts
+from maker_arm_lab.core import grasp, oracle, parts
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.core.quat import quat_from_rpy_deg
 from maker_arm_lab.mj.env import MjLegoSortEnv
+from maker_arm_lab.robots import frames
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 
 PARTS = [
@@ -21,10 +22,10 @@ PARTS = [
 ]
 
 
-def _env_and_rig(seed: int = 11, part_list=None):
+def _env_and_rig(seed: int = 11, part_list=None, gripper_mode: str = "binary"):
     draw = sample_run_draw(random.Random(5))
     draw["slot_colors"] = (0, 1, 2, 3)
-    env = MjLegoSortEnv(1, draw, parts=part_list or PARTS, cameras=False)
+    env = MjLegoSortEnv(1, draw, parts=part_list or PARTS, cameras=False, gripper_mode=gripper_mode)
     env.reset(seed=seed)
     rng = random.Random(1)
 
@@ -46,6 +47,16 @@ def _place(env, poses) -> None:
     mujoco.mj_forward(m, d)
     mujoco.mj_step(m, d, nstep=120)
     env._refresh([0], images=False)
+
+
+def _step(rig):
+    """``rig.step()`` split in its two halves, so the test sees the one action it sent.
+
+    ``actions()`` advances the plan, so calling it beside ``rig.step()`` would walk twice.
+    """
+    action = rig.actions()
+    _, _, terminated, truncated, _ = rig.env.step(action)
+    return action, rig.observe((terminated | truncated).cpu())
 
 
 def _run(rig, budget: int = 9000) -> int:
@@ -279,4 +290,52 @@ def test_a_takeover_with_a_target_that_has_no_grasp_is_declined():
     env._refresh([0], images=False)
     assert rig.resume(0, target=1) is False
     assert rig.idle[0] is True and rig.takeover_result[0] is None
+    env.close()
+
+
+SPREAD = [(0.195, -0.045, 0.006, 0.3), (0.195, 0.0, 0.006, -0.8), (0.195, 0.045, 0.006, 1.2)]
+
+
+def test_the_continuous_rig_commands_the_matched_gap_without_a_flip():
+    env, rig = _env_and_rig(gripper_mode="continuous")
+    _place(env, SPREAD)
+    commands = []
+    for _ in range(4000):
+        goal = rig.goals[0]
+        approach = goal is not None and goal.phase in (oracle.Phase.HOVER, oracle.Phase.DESCEND)
+        action, out = _step(rig)
+        if approach:
+            commands.append(float(action[0, 6]))
+        if rig.oracles[0].phase in (oracle.Phase.CLOSE, oracle.Phase.LIFT) or bool(out["dones"][0]):
+            break
+    assert commands, "no HOVER or DESCEND frame was seen"
+    width = rig.oracles[0].grasp_width
+    expected = 2.0 * (grasp.landing_half_gap(width) - grasp.JAW_HOLD_BAND)
+    # No flips: every command is the same set point, and it is a gap, not a sign.
+    assert all(c == pytest.approx(expected) for c in commands), (commands[:5], expected)
+    assert 0.02 < expected < frames.JAW_FULL_GAP
+    jaw = min(rig.robot.data.joint_pos[0, rig.finger_ids].tolist())
+    assert abs(2.0 * jaw - expected) <= 2.0 * grasp.JAW_HOLD_BAND + 0.004
+    env.close()
+
+
+def test_the_continuous_rig_stows_three_spread_parts():
+    env, rig = _env_and_rig(gripper_mode="continuous")
+    _place(env, SPREAD)
+    _run(rig)
+    stats = rig.episode_stats(0)
+    env.close()
+    assert stats["succeeded"] is True and stats["bricks_delivered"] == 3, stats
+
+
+def test_the_binary_rig_still_flips_around_the_matched_opening():
+    env, rig = _env_and_rig()
+    _place(env, SPREAD)
+    commands = set()
+    for _ in range(600):
+        action, _ = _step(rig)
+        commands.add(float(action[0, 6]))
+        if rig.oracles[0].phase is oracle.Phase.CLOSE:
+            break
+    assert commands <= {1.0, -1.0} and len(commands) == 2
     env.close()

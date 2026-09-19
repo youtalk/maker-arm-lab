@@ -98,6 +98,7 @@ from maker_arm_lab.robots.frames import (
     GRIPPER_CLOSED_POS,
     GRIPPER_JOINT_NAMES,
     JAW_AXIS_BODY,
+    JAW_FULL_GAP,
     PICK_OFFSET_MEASURED,
     TOOL_AXIS_BODY,
     TOOL_BODY,
@@ -446,6 +447,7 @@ class OracleRig:
         oracle_factory=None,
     ):
         self.env = env
+        self.gripper_mode = getattr(env, "gripper_mode", "binary")
         # Multiplier on the pace of the transport legs (TRANSPORT_PHASES); see leg_resolution.
         self.transport_speed = transport_speed
         self.bl = bl
@@ -622,13 +624,9 @@ class OracleRig:
             goal = self.goals[i]
             if goal is None:
                 # DONE/ABANDON/idle envs coast: jaws open, arm holding its last joint target.
-                action[i, 6] = GRIPPER_OPEN_ACTION
+                action[i, 6] = self._gripper_command(i, None)
             else:
-                action[i, 6] = goal.gripper
-                if goal.gripper > 0.0 and goal.phase in MATCHED_OPENING_PHASES:
-                    action[i, 6] = self._matched_opening_command(i, action[i, 6])
-                elif goal.gripper < 0.0 and goal.phase in MATCHED_CLOSE_PHASES:
-                    action[i, 6] = self._matched_close_command(i, action[i, 6])
+                action[i, 6] = self._gripper_command(i, goal)
                 self._advance_plan(i)
             target = self.q_cmd[i]
             self._planned.append(target)
@@ -709,14 +707,38 @@ class OracleRig:
         of this set point to follow the jaws rather than the command.
 
         An oracle that does not ask for it keeps the fully open descend, so the six-brick
-        task and its gated corpus are untouched (MS6 rung 1).
+        task and its gated corpus are untouched (MS6 rung 1). Under the continuous gripper the
+        set point is returned as a gap instead (``_gripper_command``).
         """
         orc = self.oracles[i]
+        binary = self.gripper_mode == "binary"
         if not getattr(orc, "matched_jaw_opening", False):
-            return fully_open
+            return fully_open if binary else JAW_FULL_GAP
         target = grasp.landing_half_gap(float(orc.grasp_width)) - grasp.JAW_HOLD_BAND
+        if not binary:
+            return 2.0 * target
         measured = min(self.robot.data.joint_pos[i, self.finger_ids].tolist())
         return fully_open if measured <= target else -fully_open
+
+    def _gripper_command(self, i: int, goal: oracle.Goal | None) -> float:
+        """The seventh action column for env ``i`` this step, in the env's gripper mode.
+
+        Binary (every corpus before MS6 phase B): the goal's own +1/-1, held around a matched
+        opening or closing set point by the two flip helpers. Continuous (phase B design
+        5.4): the set point itself as a jaw gap in meters, so the recorded label is the
+        opening the teacher wants and not a chatter around it.
+        """
+        binary = self.gripper_mode == "binary"
+        if goal is None:
+            return GRIPPER_OPEN_ACTION if binary else JAW_FULL_GAP
+        g = goal.gripper
+        if g > 0.0 and goal.phase in MATCHED_OPENING_PHASES:
+            return self._matched_opening_command(i, g)
+        if g < 0.0 and goal.phase in MATCHED_CLOSE_PHASES:
+            return self._matched_close_command(i, g)
+        if binary:
+            return g
+        return JAW_FULL_GAP if g > 0.0 else 0.0
 
     def _advance_plan(self, i: int) -> None:
         """Move the commanded joint target one control step along this phase's plan: the
@@ -1132,12 +1154,16 @@ class OracleRig:
         command the real arm accepts.
 
         An oracle that does not ask for it keeps driving the jaws shut, so the six-brick task
-        and its gated corpus are untouched (MS6 rung 3).
+        and its gated corpus are untouched (MS6 rung 3). Under the continuous gripper the set
+        point is returned as a gap instead (``_gripper_command``).
         """
         orc = self.oracles[i]
+        binary = self.gripper_mode == "binary"
         if not getattr(orc, "matched_jaw_opening", False):
-            return fully_closed
+            return fully_closed if binary else 0.0
         floor = max(0.0, 0.5 * float(orc.grasp_width) - CLOSE_SQUEEZE_M)
+        if not binary:
+            return 2.0 * floor
         measured = min(self.robot.data.joint_pos[i, self.finger_ids].tolist())
         return fully_closed if measured > floor else -fully_closed
 
