@@ -97,12 +97,15 @@ def test_cycle_end_names_the_three_ends():
 def test_only_a_resting_part_off_the_reach_band_and_off_the_bin_is_out_of_reach():
     bl = layout.DEFAULT_BIN_LAYOUT
     half = (0.05, 0.05)
-    bin_xy = layout.heap_bin_center(bl)[:2]
-    assert not layout.in_reach(*bin_xy, bl)
-    assert loop.resting_out_of_reach(torch.tensor([0.60, 0.0]), 0.0, bl, half)
-    assert not loop.resting_out_of_reach(torch.tensor([0.60, 0.0]), 0.3, bl, half)  # carried
-    assert not loop.resting_out_of_reach(torch.tensor(bin_xy), 0.0, bl, half)  # over the bin
-    assert not loop.resting_out_of_reach(torch.tensor([0.20, 0.0]), 0.0, bl, half)  # in reach
+    cx, cy, _ = layout.heap_bin_center(bl)
+    assert not layout.in_reach(cx, cy, bl)
+    gap = torch.tensor([0.60, 0.0, 0.006])
+    assert loop.resting_out_of_reach(gap, 0.0, False, bl, half)
+    assert not loop.resting_out_of_reach(gap, 0.3, False, bl, half)  # carried
+    assert not loop.resting_out_of_reach(gap, 0.0, True, bl, half)  # between the jaws
+    assert not loop.resting_out_of_reach(torch.tensor([0.60, 0.0, 0.15]), 0.0, False, bl, half)
+    assert not loop.resting_out_of_reach(torch.tensor([cx, cy, 0.006]), 0.0, False, bl, half)
+    assert not loop.resting_out_of_reach(torch.tensor([0.20, 0.0, 0.006]), 0.0, False, bl, half)
 
 
 def test_the_oracle_driver_stows_three_spread_parts_through_the_loop():
@@ -228,6 +231,39 @@ def test_a_carry_through_out_of_reach_space_ends_as_stowed(monkeypatch):
     assert any(not layout.in_reach(x, y, bl) for x, y in policy.path)
     ep = payload["episodes"][0]
     assert ep["cycle_reasons"] == ["stowed"] and ep["bricks_stowed"] == 1, ep
+
+
+def test_a_carry_paused_over_the_reach_gap_keeps_its_cycle(monkeypatch):
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 200)
+    env, rig = _env_and_rig(budget=1)
+    _place(env, SPREAD)
+    bl = env.bin_layouts[0]
+    cx, _, _ = layout.heap_bin_center(bl)
+    x = next(v / 1000 for v in range(250, 450) if not layout.in_reach(v / 1000, 0.0, bl)) + 0.02
+    assert x < cx - float(env.stow_half_extents[0]) - 0.02  # in the gap, short of the bin
+    pause = range(2, 20)  # 18 steps held still at 0.15 m over the gap, out of the jaws
+    calls = [0]
+    stepped = env.step
+
+    def env_step(action):
+        out = stepped(action)
+        calls[0] += 1
+        if calls[0] in pause:
+            m, d, h = env.models[0], env.datas[0], env.handles
+            b = int(env.target_part[0])
+            adr, dof = h.brick_qpos[b], h.brick_dof[b]
+            d.qpos[adr : adr + 3] = (x, 0.0, 0.15)
+            d.qvel[dof : dof + 6] = 0.0
+            mujoco.mj_forward(m, d)
+            env._refresh([0], images=False)
+        return out
+
+    env.step = env_step
+    payload = _rollout(env, rig, _HoldPolicy(), budget=1)
+    env.close()
+    ep = payload["episodes"][0]
+    # The pause keeps the cycle, and the part dropped on the desk in the gap then ends it.
+    assert ep["cycle_reasons"] == ["out_of_reach"] and ep["cycle_steps"][0] > pause.stop, ep
 
 
 def test_the_loop_refuses_a_six_brick_env_and_a_context_mismatch():

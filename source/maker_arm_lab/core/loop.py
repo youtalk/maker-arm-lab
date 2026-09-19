@@ -5,8 +5,8 @@ rule) names the target, the loop writes it into ``env.target_part`` so the overh
 moves, the policy drives, and the privileged grader ends the cycle. Three ends: a part that
 was not stowed when the cycle began is at rest in the bin (the target, or any part the jaws
 carried, rung b5's rule), the cycle spent ``CYCLE_STEP_BUDGET`` control steps, or the target
-came to rest outside ``layout.in_reach`` and outside the bin (knocked out of reach; a carry
-crosses out-of-reach space in flight). A failed cycle marks its cell in the selector's failure
+came to rest on the desk outside ``layout.in_reach`` and outside the bin, out of the jaws
+(knocked out of reach; a carry crosses out-of-reach space in flight and may pause there). A failed cycle marks its cell in the selector's failure
 memory.
 There is no reset between cycles. The episode ends when the selector returns None (no
 candidate, or the cycle budget is spent) or every part is stowed.
@@ -30,8 +30,10 @@ from dataclasses import dataclass, field
 import torch
 
 from maker_arm_lab.core import layout, oracle
+from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.eval_loop import EvalFailure
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
+from maker_arm_lab.core.heap_oracle import CANDIDATE_MAX_Z
 from maker_arm_lab.core.stowed import _brick_states, per_brick_stowed
 from maker_arm_lab.robots.frames import ARM_JOINT_REGEX
 
@@ -135,13 +137,16 @@ def cycle_end(
     return None
 
 
-def resting_out_of_reach(xy, speed: float, bl, stow_half_xy) -> bool:
-    """A part at rest (the grader's speed rule) outside ``layout.in_reach`` and outside the
-    destination bin's footprint: knocked out of reach, not carried or stowed."""
-    x, y = float(xy[0]), float(xy[1])
+def resting_out_of_reach(pos, speed: float, held: bool, bl, stow_half_xy) -> bool:
+    """A part knocked out of reach: at rest (the grader's speed rule), not between the jaws,
+    down on the desk or heap (the selector's ``CANDIDATE_MAX_Z``), outside ``layout.in_reach``
+    and outside the destination bin's footprint. A slow or paused carry is none of these."""
+    x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
+    if held or speed > AT_REST_SPEED or z > CANDIDATE_MAX_Z:
+        return False
     cx, cy, _ = layout.heap_bin_center(bl)
     in_bin = abs(x - cx) <= float(stow_half_xy[0]) and abs(y - cy) <= float(stow_half_xy[1])
-    return speed <= AT_REST_SPEED and not in_bin and not layout.in_reach(x, y, bl)
+    return not in_bin and not layout.in_reach(x, y, bl)
 
 
 def _close_cycle(st: EnvState, reason: str, stowed: list[int], step: int, scene) -> None:
@@ -231,6 +236,9 @@ def rollout(
         tracker.latch_pre_step(per_brick)
         pos, vel = _brick_states(env)
         pos, speed = pos.to("cpu"), vel.norm(dim=-1).to("cpu")
+        left_mag = env.scene["finger_left_brick"].data.force_matrix_w.norm(dim=-1).squeeze(1)
+        right_mag = env.scene["finger_right_brick"].data.force_matrix_w.norm(dim=-1).squeeze(1)
+        held = held_brick_from_forces(left_mag, right_mag, min_force=HELD_MIN_FORCE).to("cpu")
         # 1. Grade and select on the envs the loop holds: episode live, rig idle.
         for i in range(num_envs):
             if bool(tracker.done[i]) or not rig.idle[i]:
@@ -240,7 +248,11 @@ def rollout(
             if st.cycle is not None:
                 b = st.cycle.target
                 out = resting_out_of_reach(
-                    pos[i, b, :2], float(speed[i, b]), _layout_of(rig, i), env.stow_half_extents
+                    pos[i, b],
+                    float(speed[i, b]),
+                    int(held[i]) == b,
+                    _layout_of(rig, i),
+                    env.stow_half_extents,
                 )
                 end = cycle_end(st.cycle, stowed_now, out, step)
                 if end is not None:
