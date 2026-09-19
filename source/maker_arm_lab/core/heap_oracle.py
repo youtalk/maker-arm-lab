@@ -334,6 +334,41 @@ class HeapOracle(oracle.EnvOracle):
         if self.cycle_parts:  # a resumed takeover enters LIFT with no cycle of its own
             self.cycle_parts[-1] = part
 
+    # -- the outer loop's entry points (phase B design 5.2 and 5.5) ---------------
+
+    def select_target(self, scene: oracle.SceneSnapshot) -> int | None:
+        """The outer loop's selector: the teacher's own rule, with the teacher's bookkeeping.
+
+        A returned part starts a cycle: ``cycles`` is bumped and the part joins
+        ``cycle_parts``, so the loop and the teacher count cycles the same way. None means no
+        candidate or a spent budget, and the loop ends the episode. The machine is not
+        entered: ``target_brick`` stays None, so the same oracle can select again.
+        """
+        return self._next_brick(scene)
+
+    def aim_hover_at(self, scene: oracle.SceneSnapshot, target: int) -> bool:
+        """Point the HOVER that ``resume`` left pending at the loop's target.
+
+        ``resume`` with no held part enters HOVER with no target, and HOVER's entry would
+        select on its own. A takeover works the loop's cycle instead, so the target is set
+        here with the grasp the teacher would rank on it. Nominal plan: no hover jitter, no
+        induced style. False when no grasp ranks on the part any more (the policy moved it);
+        the caller then declines the takeover and the loop ends the cycle as a failure.
+        """
+        mask = torch.zeros(self.num_bricks, dtype=torch.bool)
+        mask[target] = True
+        ranked = self._ranked(scene, mask)
+        if not ranked:
+            return False
+        self.grasp = ranked[0]
+        self.grasp_width = ranked[0].width
+        self.grasp_min_size = min(self.parts[target].size)
+        self.target_brick = target
+        self._brick_start = scene.brick_pos[target].clone()
+        self._hover_dx = self._hover_dy = 0.0
+        self.pick_order.append(target)
+        return True
+
     def _target_yaw(self, scene: oracle.SceneSnapshot) -> float:
         # Goal.yaw is a LONG-AXIS heading; the runtime folds yaw + pi/2 as the closing axis.
         if self.grasp is None:
