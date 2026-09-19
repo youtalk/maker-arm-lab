@@ -28,6 +28,13 @@ CANON_IN_BODY = (JAW_AXIS_BODY, (1.0, 0.0, 0.0), TOOL_AXIS_BODY)
 GRIPPER_CLOSED_POS = 0.0
 GRIPPER_OPEN_POS = 0.0524125
 
+# The gap between the two jaw inner faces when both jaws sit at GRIPPER_OPEN_POS: the unit of
+# the continuous gripper action (MS6 phase B design 5.4, decision P6). Twice the per-jaw
+# prismatic coordinate the state column normalizes. The real gripper's full gap is an MS5a
+# measurement (open decision O6); the action stays in meters so that one transmission fit
+# maps it.
+JAW_FULL_GAP = 2.0 * GRIPPER_OPEN_POS
+
 # Kinematic sign relations the jaw-heading fold (core.oracle.fold_jaw_heading) depends on:
 # d(jaw_yaw)/d(wrist roll) and d(jaw_yaw)/d(base yaw), each +-1.
 # Measured by scripted_grasp_check.py --signs on 2026-09-05: d_yaw_per_roll=0.9478,
