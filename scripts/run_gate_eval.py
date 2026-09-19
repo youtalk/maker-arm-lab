@@ -598,6 +598,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def _build_cfg(args: argparse.Namespace) -> GateCfg:
+    if args.gripper != "binary" and (args.heap_k <= 0 or args.backend != "mujoco"):
+        # Only the MuJoCo heap client drives a continuous gripper (phase B design 5.4).
+        raise ValueError("--gripper continuous needs --heap_k > 0 and --backend mujoco")
     if args.heap_k > 0:
         if args.backend != "mujoco":
             raise ValueError("--heap_k needs --backend mujoco: the Isaac env has no heap")

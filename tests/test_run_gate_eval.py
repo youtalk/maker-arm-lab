@@ -658,3 +658,32 @@ def test_a_heap_gate_defaults_the_cycles_rule_and_refuses_the_isaac_backend(
     assert ge.main(base + ["--backend", "isaac"]) == 2
     out = capsys.readouterr()
     assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--backend mujoco" in out.err
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [["--backend", "mujoco"], ["--backend", "isaac"], ["--backend", "isaac", "--heap_k", "50"]],
+)
+def test_a_continuous_gate_refuses_anything_but_the_mujoco_heap(
+    monkeypatch, capsys, tmp_path, extra
+):
+    argv = [
+        "--checkpoint",
+        "ck",
+        "--out_dir",
+        str(tmp_path),
+        "--ledger",
+        "l",
+        "--threshold",
+        "0.85",
+        "--seed",
+        "1",
+        "--gripper",
+        "continuous",
+    ]
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(argv + extra) == 2
+    out = capsys.readouterr()
+    assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--gripper continuous" in out.err
+    heap = ["--backend", "mujoco", "--heap_k", "50"]
+    assert ge._build_cfg(ge._parse_args(argv + heap)).gripper == "continuous"
