@@ -98,7 +98,7 @@ def test_delta_prev_actions_anchor_on_the_previous_target(tmp_path):
     shard = _shard(tmp_path / "s.hdf5")
     c2l.convert([shard], tmp_path / "ds", "t/x", 30, action_space="delta_prev")
     marker = json.loads((tmp_path / "ds" / "meta" / "action_space.json").read_text())
-    assert marker == {"action_space": "delta_prev"}
+    assert marker == {"action_space": "delta_prev", "gripper": "binary"}
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     ds = LeRobotDataset("t/x", root=tmp_path / "ds")
@@ -148,7 +148,8 @@ def test_absolute_is_the_default_and_leaves_a_marker(tmp_path):
     shard = _shard(tmp_path / "s.hdf5")
     c2l.convert([shard], tmp_path / "ds", "t/x", 30)
     assert json.loads((tmp_path / "ds" / "meta" / "action_space.json").read_text()) == {
-        "action_space": "absolute"
+        "action_space": "absolute",
+        "gripper": "binary",
     }
 
 
@@ -265,3 +266,29 @@ def test_convert_ok_reports_what_was_read_and_skipped(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "CONVERT_OK episodes=1 total=1 read=2 skipped=1" in result.stdout
+
+
+def test_the_converter_refuses_a_shard_of_the_other_gripper_contract(tmp_path):
+    shard = _shard(tmp_path / "s.hdf5")
+    with h5py.File(shard, "a") as f:
+        f.attrs["gripper_mode"] = "continuous"
+    with pytest.raises(RuntimeError, match="gripper"):
+        c2l.convert([shard], tmp_path / "ds", "t/x", 30, gripper="binary")
+
+
+def test_the_gripper_name_and_the_marker_follow_the_flag(tmp_path):
+    shard = _shard(tmp_path / "s.hdf5")
+    with h5py.File(shard, "a") as f:
+        f.attrs["gripper_mode"] = "continuous"
+    c2l.convert([shard], tmp_path / "ds", "t/x", 30, gripper="continuous")
+    info = json.loads((tmp_path / "ds" / "meta" / "info.json").read_text())
+    assert info["features"]["action"]["names"][6] == "gripper_gap_m"
+    marker = json.loads((tmp_path / "ds" / "meta" / "action_space.json").read_text())
+    assert marker == {"action_space": "absolute", "gripper": "continuous"}
+
+
+def test_a_shard_without_the_attribute_is_binary(tmp_path):
+    shard = _shard(tmp_path / "s.hdf5")
+    c2l.convert([shard], tmp_path / "ds", "t/x", 30)
+    info = json.loads((tmp_path / "ds" / "meta" / "info.json").read_text())
+    assert info["features"]["action"]["names"][6] == "gripper"

@@ -53,6 +53,7 @@ set -euo pipefail
 # decide whether to write the action_space marker (see the ACTION_SPACE block below for why
 # that write happens here and not before the launch, and why it never overwrites one).
 TRAIN_LAUNCHED=0
+GRIPPER_MODE="${GRIPPER_MODE:-binary}"
 
 emit_train_token() {
     local status=$?
@@ -60,8 +61,8 @@ emit_train_token() {
     # already exists, and it refuses after TRAIN_LAUNCHED is set, so a relaunch with a
     # different ACTION_SPACE would otherwise relabel an earlier run's checkpoints.
     if [ "$TRAIN_LAUNCHED" -eq 1 ] && [ ! -e "$OUT/action_space.json" ]; then
-        { mkdir -p "$OUT" && printf '{"action_space": "%s"}\n' "$ACTION_SPACE" \
-            > "$OUT/action_space.json"; } \
+        { mkdir -p "$OUT" && printf '{"action_space": "%s", "gripper": "%s"}\n' \
+            "$ACTION_SPACE" "$GRIPPER_MODE" > "$OUT/action_space.json"; } \
             || echo "train_act.sh: could not write $OUT/action_space.json" >&2
     fi
     if [ "$status" -eq 0 ]; then
@@ -126,16 +127,17 @@ PY
 # marker next to whatever checkpoints it managed to save. A marker that is already there is
 # left alone: the run that wrote it is the one whose checkpoints are in $OUT.
 ACTION_SPACE="${ACTION_SPACE:-absolute}"
-python3 - "$DATASET_ROOT" "$ACTION_SPACE" <<'PY'
+python3 - "$DATASET_ROOT" "$ACTION_SPACE" "$GRIPPER_MODE" <<'PY'
 import json, pathlib, sys
-root, wanted = pathlib.Path(sys.argv[1]), sys.argv[2]
+root, wanted, gripper = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 marker = root / "meta" / "action_space.json"
-recorded = json.loads(marker.read_text())["action_space"] if marker.exists() else "absolute"
-if recorded != wanted:
-    sys.exit(
-        f"train_act.sh: action_space mismatch: {root} holds {recorded} actions, "
-        f"ACTION_SPACE={wanted}"
-    )
+recorded = json.loads(marker.read_text()) if marker.exists() else {}
+space = recorded.get("action_space", "absolute")
+mode = recorded.get("gripper", "binary")
+if space != wanted:
+    sys.exit(f"train_act.sh: action_space mismatch: {root} holds {space} actions, ACTION_SPACE={wanted}")
+if mode != gripper:
+    sys.exit(f"train_act.sh: gripper mismatch: {root} holds {mode} actions, GRIPPER_MODE={gripper}")
 PY
 
 WANDB_ENABLE="${WANDB_ENABLE:-true}"
