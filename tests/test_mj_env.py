@@ -483,3 +483,64 @@ def test_without_an_actor_tensor_every_frame_is_recorded_as_the_oracle(tmp_path)
     env.close()
     with h5py.File(tmp_path / "plain.hdf5", "r") as f:
         assert f["data/demo_0/obs/actor"][:].tolist() == [1] * 15
+
+
+def test_binary_gripper_mode_is_the_old_contract():
+    env = MjLegoSortEnv(3, _draw(), num_bricks=2, cameras=False)
+    assert env.gripper_mode == "binary"
+    per_jaw, fraction = env.jaw_targets(torch.tensor([1.0, -1.0, 0.0]))
+    assert per_jaw.tolist() == [
+        frames.GRIPPER_OPEN_POS,
+        frames.GRIPPER_CLOSED_POS,
+        frames.GRIPPER_OPEN_POS,
+    ]
+    assert fraction.tolist() == [1.0, 0.0, 1.0]
+    env.close()
+
+
+def test_continuous_gripper_mode_halves_and_clips_the_gap():
+    env = MjLegoSortEnv(4, _draw(), num_bricks=2, cameras=False, gripper_mode="continuous")
+    assert env.gripper_mode == "continuous"
+    gaps = torch.tensor([frames.JAW_FULL_GAP, 0.040, 0.0, 0.5])
+    per_jaw, fraction = env.jaw_targets(gaps)
+    assert per_jaw.tolist() == pytest.approx(
+        [frames.GRIPPER_OPEN_POS, 0.020, 0.0, frames.GRIPPER_OPEN_POS]
+    )
+    assert fraction.tolist() == pytest.approx([1.0, 0.020 / frames.GRIPPER_OPEN_POS, 0.0, 1.0])
+    env.close()
+
+
+def test_a_continuous_gap_command_ramps_the_jaws_to_the_gap_and_holds_there():
+    env = MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, gripper_mode="continuous")
+    env.reset(seed=3)
+    q = env.scene["robot"].data.joint_pos
+    action = torch.zeros(1, 7)
+    action[0, :6] = q[0, :6]
+    action[0, 6] = 0.040
+    for _ in range(60):
+        env.step(action)
+    left = float(env.scene["robot"].data.joint_pos[0, 6])
+    assert left == pytest.approx(0.020, abs=0.001)
+    env.close()
+
+
+def test_the_env_refuses_an_unknown_gripper_mode():
+    with pytest.raises(ValueError, match="gripper_mode"):
+        MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, gripper_mode="analog")
+
+
+def test_the_shard_records_the_gripper_mode(tmp_path):
+    env = MjLegoSortEnv(
+        1,
+        _draw(),
+        num_bricks=2,
+        cameras=False,
+        gripper_mode="continuous",
+        export_dir=tmp_path,
+        shard_name="g",
+        export_all=True,
+    )
+    env.reset(seed=3)
+    env.close()
+    with h5py.File(tmp_path / "g.hdf5", "r") as f:
+        assert f.attrs["gripper_mode"] == "continuous"
