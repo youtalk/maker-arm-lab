@@ -71,3 +71,9 @@ def test_dagger_ok_does_not_print_inside_the_try_clause():
     )
     assert "DAGGER_OK" not in finally_prefix
     assert "DAGGER_OK " in text  # still printed somewhere -- after the try/except/finally
+
+
+def test_the_six_brick_clients_refuse_a_continuous_checkpoint():
+    for name in ("mj_eval_policy.py", "mj_dagger_batch.py"):
+        text = (pathlib.Path(__file__).resolve().parents[1] / "scripts" / name).read_text()
+        assert 'getattr(policy, "gripper", "binary") != "binary"' in text, name

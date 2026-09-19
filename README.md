@@ -162,6 +162,8 @@ Dataset schema, both sides (spec section 4.2; `docs/ms1-maker-arm-sim.md`):
 
 Under `--action_space delta_prev` the six joint columns of `action` are this frame's post-clamp target minus the previous frame's target, and the measured joints on the first frame of a sub-episode. The converter records the choice in `meta/action_space.json`. At inference the eval client sends its previous clamped command as the `anchor` array and the policy server adds it back, so the wire and the real arm still carry absolute joint targets. The c1 definition (`delta`, target minus the measured joints of the same frame) is refused by both sides.
 
+Under `--gripper continuous` (MS6 phase B) the action's seventh column is the jaw gap in meters, `0.0` closed and `0.104825` open. The dataset names it `gripper_gap_m`. The checkpoint's `action_space.json` and the server handshake carry `gripper`. Every corpus before phase B is `binary`.
+
 To convert a shard by hand:
 
 ```bash

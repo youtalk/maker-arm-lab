@@ -85,6 +85,7 @@ class GateCfg:
     parts_split: str = "heldout"
     cycle_budget: int | None = None  # None: the client's default, ceil(1.3 * K)
     max_cycles_per_stowed: float | None = None  # the second gate rule, None: not applied
+    gripper: str = "binary"  # MuJoCo only: the checkpoint's handshake (MS6 phase B design 5.4)
 
 
 def make_eval_draws(processes: int, seed: int) -> list[EvalDraw]:
@@ -348,6 +349,7 @@ def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
             ]
             if cfg.cycle_budget is not None:
                 prefix += ["--cycle_budget", str(cfg.cycle_budget)]
+            prefix += ["--gripper", cfg.gripper]
     else:
         prefix = [
             f"{cfg.isaaclab_path}/isaaclab.sh",
@@ -423,6 +425,7 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
             payload.get("parts_split") == cfg.parts_split
             and payload.get("parts_seed") == cfg.parts_seed
             and payload.get("cycle_budget") == budget
+            and payload.get("gripper", "binary") == cfg.gripper
         )
     return payload if same_draw and same_policy and same_task else None
 
@@ -585,6 +588,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="the second gate rule of MS6 phase B: pick cycles per stowed part at most this "
         "(default 1.3 when --heap_k > 0, else not applied)",
     )
+    parser.add_argument(
+        "--gripper",
+        choices=("binary", "continuous"),
+        default="binary",
+        help="MuJoCo only: forwarded to the heap client; must match the checkpoint's handshake",
+    )
     return parser.parse_args(argv)
 
 
@@ -620,6 +629,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         parts_split=args.parts_split,
         cycle_budget=args.cycle_budget,
         max_cycles_per_stowed=args.max_cycles_per_stowed,
+        gripper=args.gripper,
     )
 
 

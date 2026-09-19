@@ -64,6 +64,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help="pick cycles per episode; the default is ceil(1.3 * K) (phase B design 5.1)",
     )
+    parser.add_argument(
+        "--gripper",
+        choices=("binary", "continuous"),
+        default="binary",
+        help="the env's gripper contract; must match the checkpoint's handshake",
+    )
     parser.add_argument("--server", type=str, default="tcp://127.0.0.1:5555")
     parser.add_argument("--out", type=str, default="", help="write the EVAL_OK payload here too")
     parser.add_argument(
@@ -112,6 +118,7 @@ def main(argv=None) -> int:
             spatial_scale=args.spatial_scale,
             context=args.context,
             episode_length_s=episode_length_s(args.cycle_budget),
+            gripper_mode=args.gripper,
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)

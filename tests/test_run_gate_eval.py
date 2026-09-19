@@ -574,7 +574,13 @@ def test_aggregate_gate_refuses_the_cycles_rule_on_an_episode_without_cycles():
 
 
 def _heap_payload(draw, **extra):
-    heap = {"heap_k": 50, "parts_split": "heldout", "parts_seed": 20260915, "cycle_budget": 65}
+    heap = {
+        "heap_k": 50,
+        "parts_split": "heldout",
+        "parts_seed": 20260915,
+        "cycle_budget": 65,
+        "gripper": "binary",
+    }
     heap.update(extra)
     ep = dict(_episode(0), num_bricks=50, bricks_stowed=45, cycles=55)
     return _payload(draw, [ep], **heap)
@@ -595,10 +601,36 @@ def test_cached_payload_matches_the_task_as_well_as_the_draw(tmp_path):
     six = _payload(draw, [_episode(6, success=True)])
     assert cached(six_cfg, six) and not cached(heap_cfg, six)
     assert cached(heap_cfg, _heap_payload(draw)) and not cached(six_cfg, _heap_payload(draw))
-    for other in ({"heap_k": 20}, {"parts_split": "train"}, {"parts_seed": 1}, {"cycle_budget": 9}):
+    for other in (
+        {"heap_k": 20},
+        {"parts_split": "train"},
+        {"parts_seed": 1},
+        {"cycle_budget": 9},
+        {"gripper": "continuous"},
+    ):
         assert not cached(heap_cfg, _heap_payload(draw, **other)), other
     heap_cfg.cycle_budget = 70
     assert cached(heap_cfg, _heap_payload(draw, cycle_budget=70))
+    heap_cfg.gripper = "continuous"
+    assert cached(heap_cfg, _heap_payload(draw, cycle_budget=70, gripper="continuous"))
+    assert not cached(heap_cfg, _heap_payload(draw, cycle_budget=70, gripper="binary"))
+
+
+def test_eval_command_forwards_the_gripper_to_the_heap_client(tmp_path):
+    cfg = ge.GateCfg(
+        checkpoint="ck",
+        out_dir=tmp_path,
+        processes=1,
+        num_envs=5,
+        seed=1,
+        threshold=0.85,
+        ledger=tmp_path / "ledger.json",
+        backend="mujoco",
+        heap_k=50,
+        gripper="continuous",
+    )
+    cmd = ge._eval_command(cfg, ge.make_eval_draws(1, 1)[0])
+    assert cmd[cmd.index("--gripper") + 1] == "continuous"
 
 
 def test_a_heap_gate_defaults_the_cycles_rule_and_refuses_the_isaac_backend(
