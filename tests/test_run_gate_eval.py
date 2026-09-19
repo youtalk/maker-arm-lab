@@ -511,3 +511,54 @@ def test_eval_command_forwards_the_context_to_the_mujoco_client(tmp_path):
     plain = ge._build_cfg(args)
     assert plain.context == "none"
     assert "--context" not in ge._eval_command(plain, ge.make_eval_draws(1, 7)[0])
+
+
+def test_eval_command_heap_spawns_the_heap_client_with_the_heap_flags(tmp_path):
+    cfg = ge.GateCfg(
+        checkpoint="ck",
+        out_dir=tmp_path,
+        processes=1,
+        num_envs=5,
+        seed=20261400,
+        threshold=0.85,
+        ledger=tmp_path / "ledger.json",
+        backend="mujoco",
+        episode_draws=True,
+        frame_jitter=True,
+        context="camera_box",
+        heap_k=50,
+        parts_split="heldout",
+        cycle_budget=65,
+    )
+    draw = ge.make_eval_draws(1, 20261400)[0]
+    cmd = ge._eval_command(cfg, draw)
+    assert cmd[:2] == [ge.MUJOCO_PYTHON, "scripts/mj_eval_heap.py"]
+    for flag, value in (
+        ("--heap_k", "50"),
+        ("--parts_seed", "20260915"),
+        ("--parts_split", "heldout"),
+        ("--cycle_budget", "65"),
+        ("--context", "camera_box"),
+    ):
+        assert cmd[cmd.index(flag) + 1] == value
+    assert "--episode_draws" in cmd and "--frame_jitter" in cmd
+
+
+def test_aggregate_gate_applies_the_cycles_rule_on_a_heap():
+    draw = ge.make_eval_draws(1, 20261400)[0]
+    eps = [dict(_episode(0), num_bricks=50, bricks_stowed=45, cycles=55, success=False)]
+    results = ge.aggregate_gate([_payload(draw, eps)], threshold=0.85, max_cycles_per_stowed=1.3)
+    gate = results["gate"]
+    assert gate["per_brick_rate"] == pytest.approx(0.9)
+    assert gate["cycles_total"] == 55 and gate["cycles_per_stowed"] == pytest.approx(55 / 45)
+    assert gate["passed"] is True
+    slow = [dict(eps[0], cycles=65)]
+    assert (
+        ge.aggregate_gate([_payload(draw, slow)], threshold=0.85, max_cycles_per_stowed=1.3)[
+            "gate"
+        ]["passed"]
+        is False
+    )
+    # No cycles rule: the six-brick gate reads as before, and cycles are reported as None.
+    six = ge.aggregate_gate([_payload(draw, [_episode(0)])], threshold=0.15)["gate"]
+    assert six["cycles_per_stowed"] is None and six["max_cycles_per_stowed"] is None

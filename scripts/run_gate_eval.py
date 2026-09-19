@@ -79,6 +79,12 @@ class GateCfg:
     frame_jitter: bool = False  # MuJoCo only
     spatial_scale: float = 1.0  # MuJoCo only: the generalization ladder of the MS4 roadmap
     context: str = "none"  # MuJoCo only: the context channel served to the policy
+    # MS6 phase B (design 5.3): a heap gate spawns scripts/mj_eval_heap.py.
+    heap_k: int = 0  # 0 is the six-brick task
+    parts_seed: int = 20260915
+    parts_split: str = "heldout"
+    cycle_budget: int | None = None  # None: the client's default, ceil(1.3 * K)
+    max_cycles_per_stowed: float | None = None  # the second gate rule, None: not applied
 
 
 def make_eval_draws(processes: int, seed: int) -> list[EvalDraw]:
@@ -143,15 +149,26 @@ def wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple[float
     return (max(0.0, center - half), min(1.0, center + half))
 
 
-def aggregate_gate(process_payloads: list[dict], threshold: float) -> dict:
+def aggregate_gate(
+    process_payloads: list[dict], threshold: float, max_cycles_per_stowed: float | None = None
+) -> dict:
     """Per-brick success rate = bricks delivered to their correct bin / (num_bricks x
     episodes), as RolloutTracker grades it, gated against `threshold`. Everything else is
     reported, not gated. The Wilson interval is over bricks and therefore optimistic (the
-    six bricks of one episode are not independent); the report reads it as such."""
+    six bricks of one episode are not independent); the report reads it as such.
+
+    `max_cycles_per_stowed` (MS6 phase B design 5.3) is the heap gate's second rule: pick
+    cycles per stowed part at most this. None (the six-brick task) reports cycles but does
+    not gate on them."""
     episodes = [ep for p in process_payloads for ep in p["episodes"]]
     bricks_total = sum(ep["num_bricks"] for ep in episodes)
     bricks_stowed = sum(ep["bricks_stowed"] for ep in episodes)
     rate = bricks_stowed / bricks_total if bricks_total else 0.0
+    cycles_total = sum(ep.get("cycles", 0) for ep in episodes)
+    cycles_per_stowed = (cycles_total / bricks_stowed) if bricks_stowed else None
+    cycles_ok = max_cycles_per_stowed is None or (
+        cycles_per_stowed is not None and cycles_per_stowed <= max_cycles_per_stowed
+    )
     steps_total = sum(ep["steps"] for ep in episodes)
     grasp_attempts = sum(ep.get("grasp_attempts", 0) for ep in episodes)
     grasp_successes = sum(ep.get("grasp_successes", 0) for ep in episodes)
@@ -182,7 +199,10 @@ def aggregate_gate(process_payloads: list[dict], threshold: float) -> dict:
             "bricks_stowed": bricks_stowed,
             "per_brick_rate": rate,
             "wilson95": [lo, hi],
-            "passed": rate >= threshold,
+            "cycles_total": cycles_total,
+            "cycles_per_stowed": cycles_per_stowed,
+            "max_cycles_per_stowed": max_cycles_per_stowed,
+            "passed": rate >= threshold and cycles_ok,
         },
         "secondary": {
             "all_six_episode_rate": (
@@ -304,7 +324,8 @@ def _isaaclab_eval_env(cfg: GateCfg) -> dict[str, str]:
 
 def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
     if cfg.backend == "mujoco":
-        prefix = [MUJOCO_PYTHON, "scripts/mj_eval_policy.py"]
+        script = "scripts/mj_eval_heap.py" if cfg.heap_k > 0 else "scripts/mj_eval_policy.py"
+        prefix = [MUJOCO_PYTHON, script]
         if cfg.episode_draws:
             prefix.append("--episode_draws")
         if cfg.frame_jitter:
@@ -313,6 +334,17 @@ def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
             prefix += ["--spatial_scale", str(cfg.spatial_scale)]
         if cfg.context != "none":
             prefix += ["--context", cfg.context]
+        if cfg.heap_k > 0:
+            prefix += [
+                "--heap_k",
+                str(cfg.heap_k),
+                "--parts_seed",
+                str(cfg.parts_seed),
+                "--parts_split",
+                cfg.parts_split,
+            ]
+            if cfg.cycle_budget is not None:
+                prefix += ["--cycle_budget", str(cfg.cycle_budget)]
     else:
         prefix = [
             f"{cfg.isaaclab_path}/isaaclab.sh",
@@ -439,7 +471,7 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
         finally:
             server.stop()
     ordered = [payloads[k] for k in sorted(payloads)]
-    results = aggregate_gate(ordered, cfg.threshold)
+    results = aggregate_gate(ordered, cfg.threshold, cfg.max_cycles_per_stowed)
     results["checkpoint"] = cfg.checkpoint
     results["seed"] = cfg.seed
     results["ledger"] = str(cfg.ledger)
@@ -523,10 +555,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--context",
-        choices=("none", "camera", "privileged"),
+        choices=("none", "camera", "privileged", "camera_box"),
         default="none",
         help="MuJoCo only: which context channel the env serves to the policy "
         "(observation.environment_state); must match the checkpoint",
+    )
+    parser.add_argument(
+        "--heap_k", type=int, default=0, help="MuJoCo only: a heap of K parts (MS6)"
+    )
+    parser.add_argument("--parts_seed", type=int, default=20260915)
+    parser.add_argument("--parts_split", choices=("train", "heldout", "all"), default="heldout")
+    parser.add_argument("--cycle_budget", type=int, default=None)
+    parser.add_argument(
+        "--max_cycles_per_stowed",
+        type=float,
+        default=None,
+        help="the second gate rule of MS6 phase B: pick cycles per stowed part at most this",
     )
     return parser.parse_args(argv)
 
@@ -553,6 +597,11 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         frame_jitter=args.frame_jitter,
         spatial_scale=args.spatial_scale,
         context=args.context,
+        heap_k=args.heap_k,
+        parts_seed=args.parts_seed,
+        parts_split=args.parts_split,
+        cycle_budget=args.cycle_budget,
+        max_cycles_per_stowed=args.max_cycles_per_stowed,
     )
 
 
