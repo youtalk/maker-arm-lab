@@ -6,8 +6,9 @@ moves, the policy drives, and the privileged grader ends the cycle. Three ends: 
 was not stowed when the cycle began is at rest in the bin (the target, or any part the jaws
 carried, rung b5's rule), the cycle spent ``CYCLE_STEP_BUDGET`` control steps, or the target
 came to rest on the desk outside ``layout.in_reach`` and outside the bin, out of the jaws
-(knocked out of reach; a carry crosses out-of-reach space in flight and may pause there). A failed cycle marks its cell in the selector's failure
-memory.
+(knocked out of reach; a carry crosses out-of-reach space in flight and may pause there). A
+failed cycle marks its cell in the selector's failure memory. A part an earlier cycle stowed
+never ends a later one, so a stowed part that settles late is not credited twice.
 There is no reset between cycles. The episode ends when the selector returns None (no
 candidate, or the cycle budget is spent) or every part is stowed.
 
@@ -117,15 +118,21 @@ def _selector(rig, i: int):
 
 
 def cycle_end(
-    cycle: Cycle, stowed_now: set[int], resting_out_of_reach: bool, step: int
+    cycle: Cycle,
+    stowed_now: set[int],
+    resting_out_of_reach: bool,
+    step: int,
+    credited: set[int] = frozenset(),
 ) -> tuple[str, list[int]] | None:
     """Why the cycle ends now and the parts it stowed, or None while it runs. Pure.
 
     ``resting_out_of_reach`` is ``resting_out_of_reach()`` on the target: a carry passes
     through out-of-reach space on its way to the bin, so only a part knocked out and at rest
-    ends the cycle.
+    ends the cycle. ``credited`` holds the parts earlier cycles of the episode stowed: a part
+    still moving in the bin when this cycle opened is missing from ``stowed_before``, and it
+    must not end this cycle when it settles.
     """
-    new = sorted(stowed_now - cycle.stowed_before)
+    new = sorted(stowed_now - cycle.stowed_before - credited)
     if new:
         return "stowed", new
     if cycle.takeover_failed:
@@ -254,7 +261,7 @@ def rollout(
                     _layout_of(rig, i),
                     env.stow_half_extents,
                 )
-                end = cycle_end(st.cycle, stowed_now, out, step)
+                end = cycle_end(st.cycle, stowed_now, out, step, set(st.stowed_parts))
                 if end is not None:
                     _close_cycle(st, end[0], end[1], step, rig.snapshot(i))
             if st.cycle is not None:
@@ -283,6 +290,11 @@ def rollout(
         # 2. The policy's action for the whole batch (its temporal ensemble stays warm).
         policy_action = None
         if policy is not None:
+            # The frame the policy reads was rendered unmarked at the end of the last step,
+            # and pass 1 may have moved the target since: stamp it now (phase B design 5.2).
+            stamp = getattr(env, "stamp_markers", None)
+            if stamp is not None:
+                stamp()
             state = policy_state(robot.data.joint_pos).to("cpu").numpy()
             wrist = env.obs_buf["images"]["wrist_rgb"].to("cpu").numpy()
             overhead = env.obs_buf["images"]["overhead_rgb"].to("cpu").numpy()
@@ -346,7 +358,9 @@ def rollout(
                     st.takeovers_failed += 1
             if st.cycle is not None:
                 if bool(success[i]):
-                    _close_cycle(st, "stowed", [st.cycle.target], step + 1, None)
+                    # Every part is in: the cycle stowed all the parts not credited before.
+                    new = set(range(k)) - st.cycle.stowed_before - set(st.stowed_parts)
+                    _close_cycle(st, "stowed", sorted(new), step + 1, None)
                 else:
                     _close_cycle_unmarked(st, step + 1)
             st.done_reason = st.done_reason or ("all_stowed" if bool(success[i]) else "time_out")
@@ -369,6 +383,7 @@ def rollout(
     episodes = []
     for i, result in enumerate(tracker.results):
         st = states[i]
+        final = tracker.stowed_mask(i)
         episodes.append(
             {
                 **result.to_json(),
@@ -378,7 +393,7 @@ def rollout(
                 "cycle_steps": list(st.steps),
                 "cycle_targets": list(st.targets),
                 "stowed_parts": list(st.stowed_parts),
-                "stowed_families": sorted(env.parts[p].family for p in st.stowed_parts),
+                "stowed_families": sorted(env.parts[p].family for p in range(k) if final[p]),
                 "done_reason": st.done_reason,
                 "takeovers": st.takeovers,
                 "takeovers_stowed": st.takeovers_stowed,

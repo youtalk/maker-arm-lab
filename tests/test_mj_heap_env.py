@@ -203,7 +203,7 @@ def test_the_marker_lands_on_the_targets_projection_and_depth_is_rendered():
     e.reset(seed=3)
     before = e.obs_buf["images"]["overhead_rgb"][0].numpy().copy()
     e.target_part[0] = 1
-    e._stamp_markers()
+    e.stamp_markers()
     d, h, c = e.datas[0], e.handles, e._cam_overhead
     u, v = overlay.project_point(
         d.cam_xpos[c],

@@ -24,7 +24,8 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
         frame as takeover k
     heap mode (MS6, ``parts`` given): env.parts, env.destination_bins (N,) long,
         env.stow_half_extents, env.target_part (N,) int16 (the overhead marker), env.context_box,
-        env.context_camera_box (N,9), env.obs_buf["images"]["overhead_depth"] (N,224,224) uint16
+        env.context_camera_box (N,9), env.obs_buf["images"]["overhead_depth"] (N,224,224) uint16,
+        env.stamp_markers() (the heap loop stamps the frame it hands the policy)
 
 Semantics carried over from ``ManagerBasedRLEnv`` because the rig depends on them: a done
 env is auto-reset INSIDE ``step`` (its state tensors already show the next episode when
@@ -393,7 +394,7 @@ class MjLegoSortEnv:
         heap = self.parts is not None
         if heap:
             self._update_target_parts(actor)
-            self._stamp_markers()
+            self.stamp_markers()
         if self.recorder is not None:
             phase = getattr(self, "oracle_cycle_phase", None)
             brick = getattr(self, "oracle_cycle_brick", None)
@@ -452,11 +453,14 @@ class MjLegoSortEnv:
             if actor is None or int(actor[i]) > 0:
                 self.target_part[i] = int(brick[i])
 
-    def _stamp_markers(self) -> None:
+    def stamp_markers(self) -> None:
         """Draw the target marker into the overhead frame about to be observed (design 9).
 
         Projected through the pose the frame was rendered with: ``cam_xpos``/``cam_xmat`` are
-        those ``_refresh`` left after the per-frame jitter, and no physics ran since.
+        those ``_refresh`` left after the per-frame jitter, and no physics ran since. ``step``
+        calls it before the recorder reads the frame, and the heap loop calls it again after
+        it moves ``target_part`` and before the policy reads the frame. A second stamp at the
+        same point writes the same pixels (``overlay.stamp_marker`` sets fixed values).
         """
         if not self.cameras:
             return

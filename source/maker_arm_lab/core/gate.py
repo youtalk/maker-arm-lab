@@ -290,6 +290,13 @@ class RolloutTracker:
             )
         self.done |= newly
 
+    def stowed_mask(self, i: int) -> list[bool]:
+        """The grader's final per-part mask of env ``i``'s finished episode: every part on
+        success, else the mask latched before its last step (what ``bricks_stowed`` counts)."""
+        if self.results[i].success:
+            return [True] * self.num_bricks
+        return [bool(v) for v in self._latched[i]]
+
     @property
     def all_done(self) -> bool:
         return bool(self.done.all())

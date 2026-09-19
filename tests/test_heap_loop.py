@@ -10,21 +10,23 @@ import torch
 from maker_arm_lab.core import layout, loop, oracle
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
+from maker_arm_lab.mj import overlay
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
+from test_mj_heap_env import _can_render
 from test_mj_heap_oracle import PARTS, _place
 
 SPREAD = [(0.195, -0.045, 0.006, 0.3), (0.195, 0.0, 0.006, -0.8), (0.195, 0.045, 0.006, 1.2)]
 
 
-def _env_and_rig(seed=11, budget=4, **env_kwargs):
+def _env_and_rig(seed=11, budget=4, cameras=False, **env_kwargs):
     draw = sample_run_draw(random.Random(5))
     draw["slot_colors"] = (0, 1, 2, 3)
     env = MjLegoSortEnv(
         1,
         draw,
         parts=PARTS,
-        cameras=False,
+        cameras=cameras,
         episode_length_s=loop.episode_length_s(budget),
         **env_kwargs,
     )
@@ -94,6 +96,14 @@ def test_cycle_end_names_the_three_ends():
     assert loop.cycle_end(cycle, {2}, True, 100) == ("out_of_reach", [])
 
 
+def test_a_part_an_earlier_cycle_stowed_never_ends_a_later_cycle():
+    # Part 1 was stowed by cycle 1 but still moving when cycle 2 opened, so it is missing from
+    # stowed_before; when it settles it must not end cycle 2 as a stow.
+    cycle = loop.Cycle(ordinal=2, target=0, start_step=100, stowed_before={2})
+    assert loop.cycle_end(cycle, {1, 2}, False, 101, credited={1}) is None
+    assert loop.cycle_end(cycle, {0, 1, 2}, False, 101, credited={1}) == ("stowed", [0])
+
+
 def test_only_a_resting_part_off_the_reach_band_and_off_the_bin_is_out_of_reach():
     bl = layout.DEFAULT_BIN_LAYOUT
     half = (0.05, 0.05)
@@ -118,6 +128,8 @@ def test_the_oracle_driver_stows_three_spread_parts_through_the_loop():
     assert ep["cycles"] == 3 and ep["cycle_outcomes"] == [True, True, True]
     assert ep["cycle_reasons"] == ["stowed"] * 3 and sorted(ep["cycle_targets"]) == [0, 1, 2]
     assert ep["takeovers"] == 3 and ep["takeovers_stowed"] == 3
+    assert sorted(ep["stowed_parts"]) == [0, 1, 2]
+    assert ep["stowed_families"] == sorted(p.family for p in env.parts)
     assert payload["policy_id"] == "oracle" and payload["cycles_per_stowed"] == pytest.approx(1.0)
     assert payload["gripper"] == "binary" and payload["cycle_budget"] == 4
 
@@ -138,6 +150,53 @@ def test_a_still_policy_spends_its_budget_and_the_failure_memory_excludes_the_ce
     assert ep["cycle_targets"] == [0, 0, 0, 2, 2, 2]
     assert ep["takeovers"] == 0 and payload["policy_id"] == "fake:hold"
     assert payload["stowed_total"] == 0 and payload["cycles_per_stowed"] is None
+
+
+def test_a_still_policy_under_a_short_budget_ends_on_the_cycle_budget(monkeypatch):
+    # The env is built long enough for every cycle to finish, then each cycle gets 40 steps.
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 60)
+    env, rig = _env_and_rig(budget=4)
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
+    _place(env, SPREAD)
+    payload = _rollout(env, rig, _HoldPolicy(), budget=4)
+    env.close()
+    ep = payload["episodes"][0]
+    # Under the selector's natural dry-out of six cycles (the test above).
+    assert ep["cycles"] == 4 and ep["done_reason"] == "cycle_budget", ep
+
+
+class _FramePolicy(_HoldPolicy):
+    """Holds still and records, per call, whether the target's pixel is the marker's white."""
+
+    def __init__(self, env):
+        super().__init__()
+        self.env = env
+        self.hits = []
+
+    def step(self, state, wrist, overhead, context=None, anchor=None):
+        env, t = self.env, int(self.env.target_part[0])
+        d, c = env.datas[0], env._cam_overhead
+        u, v = overlay.project_point(
+            d.cam_xpos[c],
+            d.cam_xmat[c],
+            float(env.models[0].cam_fovy[c]),
+            224,
+            224,
+            d.xpos[env.handles.brick_bodies[t]],
+        )
+        self.hits.append(tuple(overhead[0, round(v), round(u)]) == (255, 255, 255))
+        return super().step(state, wrist, overhead, context=context, anchor=anchor)
+
+
+@pytest.mark.skipif(not _can_render(), reason="no MuJoCo GL context on this host")
+def test_the_policy_reads_the_marker_on_the_loops_target(monkeypatch):
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 5)
+    env, rig = _env_and_rig(budget=2, cameras=True)
+    _place(env, SPREAD)
+    policy = _FramePolicy(env)
+    _rollout(env, rig, policy, budget=2)
+    env.close()
+    assert len(policy.hits) >= 5 and all(policy.hits), policy.hits
 
 
 def test_the_marker_follows_the_loops_target():

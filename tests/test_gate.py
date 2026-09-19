@@ -48,6 +48,14 @@ def test_timeout_finalizes_from_the_latch():
     assert tr.all_done
 
 
+def test_stowed_mask_is_the_latch_or_every_part_on_success():
+    tr = RolloutTracker(num_envs=2, num_bricks=3)
+    tr.latch_pre_step(_bool([[T, F, T], [F, T, F]]))
+    tr.record_step(9, terminated=_bool([T, F]), truncated=_bool([F, T]), success=_bool([T, F]))
+    tr.latch_pre_step(_bool([[F, F, F], [F, F, F]]))  # done envs no longer latch
+    assert tr.stowed_mask(0) == [T, T, T] and tr.stowed_mask(1) == [F, T, F]
+
+
 def test_done_envs_stop_latching_and_counting_clamps():
     tr = RolloutTracker(num_envs=2, num_bricks=6)
     tr.record_clamps(_over([0.2, 0.2]))
