@@ -25,18 +25,21 @@ duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
 from __future__ import annotations
 
 import math
+import random
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 
 import torch
 
 from maker_arm_lab.core import grasp, layout, oracle
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
-from maker_arm_lab.core.eval_loop import EvalFailure
+from maker_arm_lab.core.dagger_loop import DECLINE_COOLDOWN, trigger_reason
+from maker_arm_lab.core.eval_loop import EvalFailure, _nearest_brick_cm
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
 from maker_arm_lab.core.heap_oracle import CANDIDATE_MAX_Z
-from maker_arm_lab.core.stowed import _brick_states, per_brick_stowed
-from maker_arm_lab.robots.frames import ARM_JOINT_REGEX
+from maker_arm_lab.core.stowed import _brick_states, env_heap_bin_centers, per_brick_stowed
+from maker_arm_lab.robots.frames import ARM_JOINT_REGEX, TOOL_BODY
 
 CYCLE_STEP_BUDGET = 800
 """INITIAL: control steps one policy cycle may take, twice the b4 teacher's median cycle of
@@ -57,6 +60,19 @@ points, while one fixed threshold cannot: across the catalog the landings span 1
 47.8 mm and the closes 1.8 to 33.8 mm. An env with no cycle has no w. Half the full gap
 keeps a fully open coast reading open and a zero command reading closed. Triggers and
 duty-cycle stats read the threshold; the metric never does."""
+HALF_BUDGET_NO_HOLD = "half_budget_no_hold"
+"""The heap trigger of phase B design 5.5: the cycle is at half its step budget and the jaws
+hold nothing."""
+
+
+@dataclass(frozen=True)
+class TakeoverConfig:
+    """The DAgger mode (phase B design 5.5). ``random_interval`` is the mean control steps
+    between random takeovers, None for trouble triggers only. ``max_per_cycle`` caps the
+    takeovers one loop cycle may spend."""
+
+    random_interval: float | None
+    max_per_cycle: int = 2
 
 
 def cycle_budget(k: int) -> int:
@@ -120,6 +136,7 @@ class Cycle:
     close_below: float = IDLE_CLOSE_GAP  # m, the continuous close threshold (cycle_close_below)
     takeover: int = 0  # the rig's takeover ordinal while the rig holds this cycle, else 0
     takeover_failed: bool = False
+    takeovers: int = 0  # takeovers this cycle spent, against TakeoverConfig.max_per_cycle
 
 
 @dataclass
@@ -252,6 +269,9 @@ def rollout(
     rig.rearm(list(range(num_envs)), idle=True)
     env.oracle_actor = torch.zeros(num_envs, dtype=torch.int16)
     env.target_part[:] = -1
+    # A policy reads the marker on the loop's target, so a takeover's frames must show that
+    # marker too, not the rig's cycle part (they differ when the rig adopts a held part).
+    env.marker_from_rig = policy is None
     states = [EnvState(selector=_selector(rig, i)) for i in range(num_envs)]
     for st in states:
         if st.selector.cycle_budget != cycle_budget:
@@ -318,6 +338,9 @@ def rollout(
             env.target_part[i] = target
             if policy is None:
                 _take_over(rig, env, st, i, ordinal, reason="driver")
+        close_below = torch.tensor(
+            [IDLE_CLOSE_GAP if st.cycle is None else st.cycle.close_below for st in states]
+        )
         # 2. The policy's action for the whole batch (its temporal ensemble stays warm).
         policy_action = None
         if policy is not None:
@@ -332,18 +355,14 @@ def rollout(
             context = env.obs_buf["context"].to("cpu").numpy() if served_width else None
             policy_action = torch.from_numpy(policy.step(state, wrist, overhead, context=context))
             if triggers is not None:
-                triggers.offer(
-                    env, rig, states, tracker, policy_action, pos, ordinal, step, gripper_mode
-                )
+                grip_open = grip_open_flags(policy_action[:, 6], gripper_mode, close_below)
+                triggers.offer(env, rig, states, tracker, grip_open, held, pos, ordinal, step)
         # 3. Compose: the rig's row where it drives, the policy's where the rig is idle.
         rig_action = rig.actions().to("cpu")
         action_cpu = rig_action.clone()
         if policy_action is not None:
             idle = torch.tensor(rig.idle)
             action_cpu[idle] = policy_action[idle]
-        close_below = torch.tensor(
-            [IDLE_CLOSE_GAP if st.cycle is None else st.cycle.close_below for st in states]
-        )
         tracker.record_gripper(open_signal(action_cpu[:, 6], gripper_mode, close_below))
         arm_clamped, overshoot = clamp_arm_actions(action_cpu[:, :6], limits)
         tracker.record_clamps(overshoot)
@@ -492,12 +511,82 @@ def _take_over(rig, env, st: EnvState, i: int, ordinal: list[int], *, reason: st
         st.cycle.takeover = ordinal[i]
         env.oracle_actor[i] = ordinal[i]
         return True
-    st.cycle.takeover_failed = True
+    if reason == "driver":
+        # The driver has no one to hand the cycle back to; a declined trigger leaves the
+        # policy on the cycle.
+        st.cycle.takeover_failed = True
     return False
 
 
 class _TriggerState:
-    """Placeholder until plan Task 16 adds the takeover triggers of phase B design 5.5."""
+    """Per-env trigger counters and the offer of a takeover: the six-brick DAgger loop's logic
+    on the loop's cycles (the MS4 four triggers, the random draw, the decline cooldown) plus
+    the half-budget trigger (phase B design 5.5). ``offer`` runs once per step before the
+    actions are composed, on the envs the policy holds."""
 
-    def __init__(self, num_envs: int, config, run_seed: int):
-        raise EvalFailure("takeover", "takeover triggers arrive with the DAgger branch")
+    def __init__(self, num_envs: int, config: TakeoverConfig, run_seed: int):
+        self.config = config
+        self.rng = random.Random(run_seed)
+        self.random_p = 0.0 if config.random_interval is None else 1.0 / config.random_interval
+        self.since_open = [0] * num_envs
+        self.closed_no_pinch = [0] * num_envs
+        self.cooldown = [0] * num_envs
+        self.grip_open_prev: torch.Tensor | None = None
+        self.counts: Counter = Counter()
+        self.declined = 0
+
+    def offer(self, env, rig, states, tracker, grip_open, held, pos, ordinal, step) -> None:
+        """``grip_open`` is the policy's (N,) open read on the loop's per-env close threshold
+        and ``held`` the loop's per-step held read, so the triggers and the grader agree."""
+        robot = env.scene["robot"]
+        tool = robot.find_bodies(TOOL_BODY)[0][0]
+        nearest_cm = _nearest_brick_cm(
+            pos,
+            robot.data.body_pos_w[:, tool, :2].to("cpu"),
+            held,
+            env_heap_bin_centers(env, "cpu").to("cpu"),
+            torch.as_tensor(env.stow_half_extents).to("cpu"),
+        )
+        for i in range(env.num_envs):
+            st = states[i]
+            if bool(tracker.done[i]) or not rig.idle[i] or st.cycle is None:
+                continue
+            open_i = bool(grip_open[i])
+            closed_now = (
+                self.grip_open_prev is not None and bool(self.grip_open_prev[i]) and not open_i
+            )
+            self.since_open[i] = self.since_open[i] + 1 if open_i else 0
+            no_pinch = not open_i and int(held[i]) < 0
+            self.closed_no_pinch[i] = self.closed_no_pinch[i] + 1 if no_pinch else 0
+            if self.cooldown[i] > 0:
+                self.cooldown[i] -= 1
+                continue
+            reason = trigger_reason(
+                grip_open=open_i,
+                closed_now=closed_now,
+                held=int(held[i]),
+                nearest_cm=nearest_cm[i],
+                pick_point=rig.pick_point(i).tolist(),
+                since_open=self.since_open[i],
+                closed_no_pinch=self.closed_no_pinch[i],
+                random_draw=self.rng.random(),
+                random_p=self.random_p,
+            )
+            if (
+                reason is None
+                and int(held[i]) < 0
+                and step - st.cycle.start_step >= CYCLE_STEP_BUDGET // 2
+            ):
+                reason = HALF_BUDGET_NO_HOLD
+            if reason is None or st.cycle.takeovers >= self.config.max_per_cycle:
+                continue
+            # Reset on both branches: an answered trigger must not fire again off the same count.
+            self.since_open[i] = 0
+            self.closed_no_pinch[i] = 0
+            if _take_over(rig, env, st, i, ordinal, reason=reason):
+                st.cycle.takeovers += 1
+                self.counts[reason] += 1
+            else:
+                self.declined += 1
+                self.cooldown[i] = DECLINE_COOLDOWN
+        self.grip_open_prev = grip_open

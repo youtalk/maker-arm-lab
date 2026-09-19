@@ -2,12 +2,13 @@
 
 import random
 
+import h5py
 import mujoco
 import numpy as np
 import pytest
 import torch
 
-from maker_arm_lab.core import layout, loop, oracle
+from maker_arm_lab.core import dagger_loop, layout, loop, oracle
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj import overlay
@@ -390,3 +391,154 @@ def test_the_loop_refuses_a_selector_with_another_cycle_budget():
         _rollout(env, rig, None, budget=5)
     env.close()
     assert err.value.reason == "cycle_budget"
+
+
+def test_a_still_policy_is_taken_over_on_no_close_and_only_takeovers_are_recorded(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(dagger_loop, "NO_CLOSE_STEPS", 60)
+    env, rig = _env_and_rig(budget=4, export_dir=tmp_path, shard_name="d", export_all=True)
+    _place(env, SPREAD)
+    payload = _rollout(env, rig, _HoldPolicy(), takeover=loop.TakeoverConfig(random_interval=None))
+    env.close()
+    ep = payload["episodes"][0]
+    assert ep["takeovers"] >= 1 and payload["triggers"].get("no_close", 0) >= 1, payload["triggers"]
+    assert ep["bricks_stowed"] >= 1
+    with h5py.File(tmp_path / "d.hdf5", "r") as f:
+        actor = f["data/demo_0"]["obs/actor"][:]
+        marked = f["data/demo_0"]["obs/target_part"][:]
+    assert (actor != 0).all(), "a policy frame was recorded"
+    assert set(abs(actor).tolist()) <= set(range(1, ep["takeovers"] + 1))
+    # One marker, on the loop's target: every recorded frame marks a part a cycle targeted.
+    assert set(marked.tolist()) <= set(ep["cycle_targets"]), (marked, ep["cycle_targets"])
+
+
+def test_a_takeover_keeps_the_marker_on_the_loops_target(monkeypatch):
+    # The rig's cycle part differs from the loop's target when it adopts a held part; force
+    # that on every takeover step and check the env still marks the loop's target, which is
+    # also the part the loop stamped into the frame before the step.
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 200)
+    monkeypatch.setattr(dagger_loop, "NO_CLOSE_STEPS", 30)
+    env, rig = _env_and_rig(budget=1)
+    _place(env, SPREAD)
+    real_actions = rig.actions
+
+    def actions():
+        out = real_actions()
+        if not rig.idle[0]:
+            env.oracle_cycle_brick[0] = (int(env.target_part[0]) + 1) % 3
+        return out
+
+    monkeypatch.setattr(rig, "actions", actions)
+    pairs = []
+    stepped = env.step
+
+    def env_step(action):
+        before = int(env.target_part[0])
+        out = stepped(action)
+        if int(env.oracle_actor[0]) != 0:
+            pairs.append((before, int(env.target_part[0])))
+        return out
+
+    env.step = env_step
+    _rollout(env, rig, _HoldPolicy(), budget=1, takeover=loop.TakeoverConfig(random_interval=None))
+    env.close()
+    assert pairs and all(a == b for a, b in pairs), pairs
+
+
+def _resume_then_fail(rig, monkeypatch):
+    real_resume = rig.resume
+
+    def resume_then_fail(i, target=None):
+        ok = real_resume(i, target=target)
+        if ok:
+            rig._go_idle(i, False)  # hand back at once as a failed takeover
+        return ok
+
+    monkeypatch.setattr(rig, "resume", resume_then_fail)
+
+
+def test_a_takeover_that_fails_is_negated(tmp_path, monkeypatch):
+    env, rig = _env_and_rig(budget=3, export_dir=tmp_path, shard_name="n", export_all=True)
+    _place(env, SPREAD)
+    _resume_then_fail(rig, monkeypatch)
+    payload = _rollout(
+        env, rig, _HoldPolicy(), budget=3, takeover=loop.TakeoverConfig(random_interval=None)
+    )
+    env.close()
+    assert payload["takeovers_failed"] == payload["takeovers"] >= 1
+    with h5py.File(tmp_path / "n.hdf5", "r") as f:
+        actor = f["data/demo_0"]["obs/actor"][:]
+    assert (actor < 0).all(), "a failed takeover left a positive-actor frame"
+
+
+def test_a_takeover_the_time_out_cuts_short_is_failed_and_negated(tmp_path, monkeypatch):
+    # 90 steps of episode: the takeover the no-close trigger starts at step 10 is still
+    # running when the env times out.
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 30)
+    monkeypatch.setattr(dagger_loop, "NO_CLOSE_STEPS", 10)
+    env, rig = _env_and_rig(budget=3, export_dir=tmp_path, shard_name="t", export_all=True)
+    _place(env, SPREAD)
+    payload = _rollout(
+        env,
+        rig,
+        _HoldPolicy(),
+        budget=3,
+        takeover=loop.TakeoverConfig(random_interval=None, max_per_cycle=1),
+    )
+    env.close()
+    ep = payload["episodes"][0]
+    assert ep["done_reason"] == "time_out" and ep["takeovers"] == 1, ep
+    assert ep["takeovers_failed"] == 1 and ep["takeovers_stowed"] == 0, ep
+    with h5py.File(tmp_path / "t.hdf5", "r") as f:
+        actor = f["data/demo_0"]["obs/actor"][:]
+    assert len(actor) > 10 and (actor == -1).all(), actor
+
+
+def test_the_half_budget_trigger_fires_without_a_hold(monkeypatch):
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 60)
+    monkeypatch.setattr(dagger_loop, "NO_CLOSE_STEPS", 10_000)
+    env, rig = _env_and_rig(budget=3)
+    _place(env, SPREAD)
+    payload = _rollout(
+        env, rig, _HoldPolicy(), budget=3, takeover=loop.TakeoverConfig(random_interval=None)
+    )
+    env.close()
+    assert payload["triggers"].get("half_budget_no_hold", 0) >= 1, payload["triggers"]
+
+
+def test_the_per_cycle_takeover_cap_holds(monkeypatch):
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 600)
+    monkeypatch.setattr(dagger_loop, "NO_CLOSE_STEPS", 50)
+    env, rig = _env_and_rig(budget=3)
+    _place(env, SPREAD)
+    _resume_then_fail(rig, monkeypatch)
+    payload = _rollout(
+        env,
+        rig,
+        _HoldPolicy(),
+        budget=3,
+        takeover=loop.TakeoverConfig(random_interval=None, max_per_cycle=2),
+    )
+    env.close()
+    ep = payload["episodes"][0]
+    # Every 50 open steps trigger, every takeover fails at once: the cap of two per cycle holds.
+    assert ep["takeovers"] == 2 * ep["cycles"], ep
+
+
+def test_a_takeover_on_a_target_out_of_reach_is_declined_not_raised():
+    env, rig = _env_and_rig(budget=3)
+    _place(env, [(0.60, 0.0, 0.006, 0.0)] + SPREAD[1:])
+    assert not layout.in_reach(0.60, 0.0, env.bin_layouts[0])
+    rig.rearm([0], idle=True)
+    ok = rig.resume(0, target=0)
+    env.close()
+    assert ok is False and rig.idle[0] and rig.takeover_result[0] is None
+
+
+def test_the_random_trigger_needs_a_policy():
+    env, rig = _env_and_rig(budget=3)
+    with pytest.raises(loop.EvalFailure) as err:
+        _rollout(env, rig, None, budget=3, takeover=loop.TakeoverConfig(random_interval=300))
+    env.close()
+    assert err.value.reason == "takeover"

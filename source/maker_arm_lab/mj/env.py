@@ -26,7 +26,9 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
     heap mode (MS6, ``parts`` given): env.parts, env.destination_bins (N,) long,
         env.stow_half_extents, env.target_part (N,) int16 (the overhead marker), env.context_box,
         env.context_camera_box (N,9), env.obs_buf["images"]["overhead_depth"] (N,224,224) uint16,
-        env.stamp_markers() (the heap loop stamps the frame it hands the policy)
+        env.stamp_markers() (the heap loop stamps the frame it hands the policy),
+        env.marker_from_rig (default True; the heap loop's policy mode sets False so a
+        takeover keeps the marker on the loop's target)
 
 Semantics carried over from ``ManagerBasedRLEnv`` because the rig depends on them: a done
 env is auto-reset INSIDE ``step`` (its state tensors already show the next episode when
@@ -400,7 +402,8 @@ class MjLegoSortEnv:
         recorded = [False] * self.num_envs
         heap = self.parts is not None
         if heap:
-            self._update_target_parts(actor)
+            if getattr(self, "marker_from_rig", True):
+                self._update_target_parts(actor)
             self.stamp_markers()
         if self.recorder is not None:
             phase = getattr(self, "oracle_cycle_phase", None)
