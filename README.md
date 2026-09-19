@@ -184,6 +184,15 @@ python3 scripts/run_gate_eval.py --backend mujoco --checkpoint <pretrained_model
     --episode_draws --frame_jitter --context camera_box --out_dir ~/data/maker-arm-ms6/l/gate
 ```
 
+Round k rolls out the previous round's policy on train-split heaps and records takeover frames only. The conversion flags are `--dagger --split_cycles --context camera_box --gripper <mode>`.
+
+```bash
+uv run python scripts/mj_dagger_heap.py --num_envs 5 --heap_k 50 --parts_split train \
+    --run_seed 20261510 --layout_seed 20261610 --episode_draws --frame_jitter \
+    --context camera_box --gripper continuous --server tcp://127.0.0.1:5700 --round 1 \
+    --out_dir ~/data/maker-arm-ms6/l/dagger/r1 --shard_name proc_0
+```
+
 ## Training smoke
 
 ```bash
