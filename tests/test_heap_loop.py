@@ -14,7 +14,7 @@ from maker_arm_lab.mj import overlay
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 from test_mj_heap_env import _can_render
-from test_mj_heap_oracle import PARTS, _place
+from test_mj_heap_oracle import PARTS, _place, _step
 
 SPREAD = [(0.195, -0.045, 0.006, 0.3), (0.195, 0.0, 0.006, -0.8), (0.195, 0.045, 0.006, 1.2)]
 
@@ -81,10 +81,46 @@ def test_cycle_budget_and_episode_length_follow_the_gate_rule():
 def test_grip_open_flags_read_both_gripper_contracts():
     binary = torch.tensor([1.0, -1.0, 0.0])
     assert loop.grip_open_flags(binary, "binary").tolist() == [True, False, True]
-    gaps = torch.tensor([0.1048, 0.0398, 0.0138, 0.0])
-    assert loop.grip_open_flags(gaps, "continuous").tolist() == [True, True, False, False]
-    assert (loop.open_signal(gaps, "continuous") >= 0.0).tolist() == [True, True, False, False]
+    assert loop.grip_open_flags(binary, "binary", torch.full((3,), 0.5)).tolist() == [
+        True,
+        False,
+        True,
+    ]
     assert torch.equal(loop.open_signal(binary, "binary"), binary)
+    # A 7.8 mm and a 39.8 mm grasp: each one's landing (w + 8 mm) reads open and its close
+    # (w - 6 mm) reads closed, which no single fixed threshold does for both.
+    w = torch.tensor([0.0078, 0.0078, 0.0398, 0.0398])
+    gaps = torch.tensor([0.0158, 0.0018, 0.0478, 0.0338])
+    assert loop.grip_open_flags(gaps, "continuous", w).tolist() == [True, False, True, False]
+    assert (loop.open_signal(gaps, "continuous", w) >= 0.0).tolist() == [True, False, True, False]
+    # No cycle: a fully open coast reads open, a zero command reads closed.
+    idle = torch.tensor([0.1048, 0.0])
+    assert loop.grip_open_flags(idle, "continuous").tolist() == [True, False]
+
+
+def test_the_continuous_rigs_commands_read_open_and_closed_on_the_per_target_threshold():
+    env, rig = _env_and_rig(gripper_mode="continuous")
+    _place(env, SPREAD)
+    opening = (oracle.Phase.HOVER, oracle.Phase.DESCEND, oracle.Phase.RELEASE)
+    closing = (oracle.Phase.CLOSE, oracle.Phase.LIFT)
+    seen, target, close_below = set(), None, None
+    for _ in range(9000):
+        orc = rig.oracles[0]
+        if orc is not None and orc.target_brick is not None and orc.target_brick != target:
+            # A new cycle: the loop reads its threshold once, on the scene it opens on.
+            target = orc.target_brick
+            close_below = loop.cycle_close_below(orc, rig.snapshot(0), target)
+            assert close_below == pytest.approx(orc.grasp_width)
+        goal = rig.goals[0]
+        action, out = _step(rig)
+        if goal is not None and goal.phase in opening + closing:
+            is_open = loop.grip_open_flags(action[:, 6], "continuous", torch.tensor([close_below]))
+            assert bool(is_open[0]) == (goal.phase in opening), (goal.phase, float(action[0, 6]))
+            seen.add(goal.phase)
+        if bool(out["dones"][0]) or bool(out["abandoned"][0]):
+            break
+    env.close()
+    assert set(opening + closing) <= seen, seen
 
 
 def test_cycle_end_names_the_three_ends():

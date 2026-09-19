@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-from maker_arm_lab.core import layout, oracle
+from maker_arm_lab.core import grasp, layout, oracle
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.eval_loop import EvalFailure
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
@@ -46,11 +46,17 @@ CYCLE_BUDGET_FACTOR = 1.3
 """Pick cycles per part an episode may spend: the gate's own cycles-per-stowed rule."""
 AT_REST_SPEED = 0.02
 """m/s: the grader's at-rest speed, ``checker.bricks_at_rest_in_bins``'s ``max_speed``."""
-CONTINUOUS_CLOSE_GAP = 0.030
-"""m: under the continuous gripper a commanded jaw gap below this reads as a close. The
-smallest matched landing gap in the catalog is 31.8 mm (a 7.8 mm slope) and the widest close
-command, on a 31.8 mm brick, about 30 mm. Triggers and duty-cycle stats read it; the metric
-never does."""
+IDLE_CLOSE_GAP = grasp.OPEN_HALF_GAP
+"""m: the continuous close threshold of an env with no open cycle, half the full jaw gap.
+
+Under the continuous gripper a commanded gap below the grasp width of the cycle's target
+reads as a close (``cycle_close_below``). The teacher lands at the matched gap
+``2 * (landing_half_gap(w) - JAW_HOLD_BAND)`` = w + 8 mm and closes to
+``2 * max(0, w / 2 - CLOSE_SQUEEZE_M)`` = w - 6 mm, so w splits every grasp's two set
+points, while one fixed threshold cannot: across the catalog the landings span 15.8 to
+47.8 mm and the closes 1.8 to 33.8 mm. An env with no cycle has no w. Half the full gap
+keeps a fully open coast reading open and a zero command reading closed. Triggers and
+duty-cycle stats read the threshold; the metric never does."""
 
 
 def cycle_budget(k: int) -> int:
@@ -63,23 +69,46 @@ def episode_length_s(budget: int, control_hz: float = 30.0) -> float:
     return budget * CYCLE_STEP_BUDGET / control_hz
 
 
-def grip_open_flags(gripper: torch.Tensor, gripper_mode: str) -> torch.Tensor:
+def grip_open_flags(
+    gripper: torch.Tensor, gripper_mode: str, close_below: torch.Tensor | None = None
+) -> torch.Tensor:
     """(N,) bool: which raw gripper commands read as an open jaw.
 
-    Binary: at or above zero, the env's contract. Continuous: a commanded gap at or above
-    ``CONTINUOUS_CLOSE_GAP``; under it the jaws are closing onto something.
+    Binary: at or above zero, the env's contract; ``close_below`` is ignored. Continuous: a
+    commanded gap at or above ``close_below``, the (N,) per-env threshold in meters
+    (``IDLE_CLOSE_GAP`` for every env when None); under it the jaws are closing onto the part.
     """
-    g = gripper.detach().to(device="cpu", dtype=torch.float32)
-    if gripper_mode == "continuous":
-        return g >= CONTINUOUS_CLOSE_GAP
-    return g >= 0.0
+    return open_signal(gripper, gripper_mode, close_below) >= 0.0
 
 
-def open_signal(gripper: torch.Tensor, gripper_mode: str) -> torch.Tensor:
+def open_signal(
+    gripper: torch.Tensor, gripper_mode: str, close_below: torch.Tensor | None = None
+) -> torch.Tensor:
     """The gripper column shifted so that ``>= 0`` means open in either mode, which is the
-    sign convention ``RolloutTracker.record_gripper`` counts duty cycles and flips by."""
+    sign convention ``RolloutTracker.record_gripper`` counts duty cycles and flips by.
+    ``close_below`` as in ``grip_open_flags``."""
     g = gripper.detach().to(device="cpu", dtype=torch.float32)
-    return g - CONTINUOUS_CLOSE_GAP if gripper_mode == "continuous" else g
+    if gripper_mode != "continuous":
+        return g
+    if close_below is None:
+        return g - IDLE_CLOSE_GAP
+    return g - close_below.to(device="cpu", dtype=torch.float32)
+
+
+def cycle_close_below(selector, scene, target: int) -> float:
+    """m: the continuous close threshold of a cycle on ``target``, read once when it opens.
+
+    The grasp width the teacher would rank first on the target, the way
+    ``HeapOracle.aim_hover_at`` ranks it for a takeover. When no grasp ranks (no closing
+    axis near the jaw plane), the part's smallest footprint side: the width any grasp on a
+    part lying flat would close across.
+    """
+    mask = torch.zeros(selector.num_bricks, dtype=torch.bool)
+    mask[target] = True
+    ranked = selector._ranked(scene, mask)
+    if ranked:
+        return float(ranked[0].width)
+    return float(min(selector.parts[target].size[:2]))
 
 
 @dataclass
@@ -88,6 +117,7 @@ class Cycle:
     target: int
     start_step: int
     stowed_before: set[int]
+    close_below: float = IDLE_CLOSE_GAP  # m, the continuous close threshold (cycle_close_below)
     takeover: int = 0  # the rig's takeover ordinal while the rig holds this cycle, else 0
     takeover_failed: bool = False
 
@@ -283,6 +313,7 @@ def rollout(
                 target=target,
                 start_step=step,
                 stowed_before=stowed_now,
+                close_below=cycle_close_below(st.selector, scene, target),
             )
             env.target_part[i] = target
             if policy is None:
@@ -310,7 +341,10 @@ def rollout(
         if policy_action is not None:
             idle = torch.tensor(rig.idle)
             action_cpu[idle] = policy_action[idle]
-        tracker.record_gripper(open_signal(action_cpu[:, 6], gripper_mode))
+        close_below = torch.tensor(
+            [IDLE_CLOSE_GAP if st.cycle is None else st.cycle.close_below for st in states]
+        )
+        tracker.record_gripper(open_signal(action_cpu[:, 6], gripper_mode, close_below))
         arm_clamped, overshoot = clamp_arm_actions(action_cpu[:, :6], limits)
         tracker.record_clamps(overshoot)
         clamped = torch.cat([arm_clamped, action_cpu[:, 6:7]], dim=-1)
