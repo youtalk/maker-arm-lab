@@ -42,9 +42,10 @@ from maker_arm_lab.core.stowed import _brick_states, env_heap_bin_centers, per_b
 from maker_arm_lab.robots.frames import ARM_JOINT_REGEX, TOOL_BODY
 
 CYCLE_STEP_BUDGET = 800
-"""INITIAL: control steps one policy cycle may take, twice the b4 teacher's median cycle of
-about 400 steps (17094 to 20677 steps over about 50 cycles, docs/ms6-bare-desk-heap.md
-section 3). The phase B preflight (plan Task 15) fixes it from the corpus shards."""
+"""Control steps one policy cycle may take. The phase B preflight (plan Task 15) reads the k
+corpus's 1974 teacher cycles (obs/actor over ~/data/maker-arm-ms6/k/corpus): a median of
+378.5 steps, p90 572, p95 732, max 1407. 800 is kept because the median is within 10% of 400
+and 800 is above the p95."""
 CYCLE_BUDGET_FACTOR = 1.3
 """Pick cycles per part an episode may spend: the gate's own cycles-per-stowed rule."""
 AT_REST_SPEED = 0.02
