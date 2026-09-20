@@ -42,8 +42,11 @@ OBS_SCHEMA = {
     "wrist": ((224, 224, 3), "uint8"),
     "overhead": ((224, 224, 3), "uint8"),
 }
-# Also 7, but a different 7: 6 joint TARGETS + the raw binary gripper command. The two
-# widths coincide on this arm and must still be validated against their own constants.
+# Also 7, but a different 7: 6 joint TARGETS + the gripper command. The gripper column is
+# the raw command in the checkpoint's contract: a binary sign (raw >= 0 opens) or, under
+# `gripper = continuous` in the handshake, the jaw gap in meters. The state column stays an
+# opening fraction in both. The two widths coincide on this arm and must still be validated
+# against their own constants.
 #
 # Because they coincide, a shape check can no longer catch an action array handed in where
 # an observation belongs -- openyam-lab's 8-vs-7 made that swap self-revealing and this

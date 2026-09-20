@@ -162,11 +162,35 @@ Dataset schema, both sides (spec section 4.2; `docs/ms1-maker-arm-sim.md`):
 
 Under `--action_space delta_prev` the six joint columns of `action` are this frame's post-clamp target minus the previous frame's target, and the measured joints on the first frame of a sub-episode. The converter records the choice in `meta/action_space.json`. At inference the eval client sends its previous clamped command as the `anchor` array and the policy server adds it back, so the wire and the real arm still carry absolute joint targets. The c1 definition (`delta`, target minus the measured joints of the same frame) is refused by both sides.
 
+Under `--gripper continuous` (MS6 phase B) the action's seventh column is the jaw gap in meters, `0.0` closed and `0.104825` open. The dataset names it `gripper_gap_m`. The checkpoint's `action_space.json` and the server handshake carry `gripper`. Every corpus before phase B is `binary`.
+
 To convert a shard by hand:
 
 ```bash
 lerobot_stack/.venv/bin/python lerobot_stack/convert_to_lerobot.py \
     --shards /tmp/batch0/shard.hdf5 --root ~/data/maker-arm-ms1/dataset   # CONVERT_OK episodes=<n> total=<n> read=<n> skipped=<n>
+```
+
+## Evaluation and gating
+
+The heap gate (MS6 phase B) drives `scripts/mj_eval_heap.py` through `core/loop.py`. A `HeapOracle` selects each target. The policy drives. The privileged grader ends the cycle. With `--oracle_driver`, the rig drives every cycle instead of the policy.
+
+```bash
+uv run python scripts/mj_eval_heap.py --num_envs 1 --heap_k 50 --parts_split heldout \
+    --run_seed 20261300 --layout_seed 20261310 --oracle_driver --out /tmp/preflight.json
+python3 scripts/run_gate_eval.py --backend mujoco --checkpoint <pretrained_model> \
+    --ledger ~/data/maker-arm-ms6/l/ledger.json --threshold 0.85 --max_cycles_per_stowed 1.3 \
+    --seed 20261400 --processes 8 --num_envs 5 --heap_k 50 --parts_split heldout \
+    --episode_draws --frame_jitter --context camera_box --out_dir ~/data/maker-arm-ms6/l/gate
+```
+
+Round k rolls out the previous round's policy on train-split heaps and records takeover frames only. The conversion flags are `--dagger --split_cycles --context camera_box --gripper <mode>`.
+
+```bash
+uv run python scripts/mj_dagger_heap.py --num_envs 5 --heap_k 50 --parts_split train \
+    --run_seed 20261510 --layout_seed 20261610 --episode_draws --frame_jitter \
+    --context camera_box --gripper continuous --server tcp://127.0.0.1:5700 --round 1 \
+    --out_dir ~/data/maker-arm-ms6/l/dagger/r1 --shard_name proc_0
 ```
 
 ## Training smoke

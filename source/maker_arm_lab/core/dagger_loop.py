@@ -94,6 +94,10 @@ def rollout(
     log=print,
 ) -> dict:
     """One lockstep DAgger rollout of ``env.num_envs`` episodes; returns the DAGGER payload."""
+    # The six-brick task reads the gripper column as a sign (phase B design 5.4): refuse a
+    # continuous checkpoint before touching the env, whichever backend drives it.
+    if getattr(policy, "gripper", "binary") != "binary":
+        raise EvalFailure("gripper", "the six-brick rollout drives the binary gripper only")
     num_envs = env.num_envs
     num_bricks = env.cfg.num_bricks
     robot = env.scene["robot"]

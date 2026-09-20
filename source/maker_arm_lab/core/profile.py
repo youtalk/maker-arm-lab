@@ -76,15 +76,20 @@ def gripper_angle(profile: dict, open_fraction: float) -> float:
 
 
 def clamp_joint_targets(
-    arm_targets: Sequence[Sequence[float]], gripper_open: Sequence[bool], profile: dict
+    arm_targets: Sequence[Sequence[float]], gripper_fraction: Sequence[float], profile: dict
 ) -> tuple[list[list[float]], list[bool]]:
-    """Run every env's 6 arm targets through the Rust clamp; return positions and flags."""
-    if len(arm_targets) != len(gripper_open):
-        raise ValueError("arm_targets and gripper_open must have one entry per env")
+    """Run every env's 6 arm targets through the Rust clamp; return positions and flags.
+
+    ``gripper_fraction`` is the per-env jaw opening as a fraction of the profile's travel.
+    The binary path passes bools (True is open, 1.0); the continuous gripper (MS6 phase B
+    design 5.4) passes the fraction its gap command maps to.
+    """
+    if len(arm_targets) != len(gripper_fraction):
+        raise ValueError("arm_targets and gripper_fraction must have one entry per env")
     joints = profile["joints"]
     out_pos: list[list[float]] = []
     flags: list[bool] = []
-    for targets, is_open in zip(arm_targets, gripper_open):
+    for targets, fraction in zip(arm_targets, gripper_fraction):
         if len(targets) != ARM_JOINT_COUNT:
             raise ValueError(f"expected {ARM_JOINT_COUNT} arm targets, got {len(targets)}")
         cmds = [
@@ -92,7 +97,7 @@ def clamp_joint_targets(
             for q, j in zip(targets, joints[:ARM_JOINT_COUNT])
         ]
         g = joints[GRIPPER_INDEX]
-        cmds.append((gripper_angle(profile, 1.0 if is_open else 0.0), 0.0, g["kp"], g["kd"], 0.0))
+        cmds.append((gripper_angle(profile, float(fraction)), 0.0, g["kp"], g["kd"], 0.0))
         clamped_cmds, changed = maker_arm_rs.clamp_command(cmds, profile)
         out_pos.append([c[0] for c in clamped_cmds[:ARM_JOINT_COUNT]])
         flags.append(bool(changed))
@@ -101,20 +106,21 @@ def clamp_joint_targets(
 
 def clamp_targets_tensor(
     targets: torch.Tensor,
-    gripper_open: torch.Tensor,
+    gripper_fraction: torch.Tensor,
     profile: dict,
     out_flags: torch.Tensor,
     accumulate: bool = False,
 ) -> torch.Tensor:
     """Batched (N, 6) targets through the Rust clamp; one host sync per call.
 
+    ``gripper_fraction`` is a bool or float tensor, one entry per env.
     By default ``out_flags`` is overwritten with this call's flags. With ``accumulate=True``,
     this call's flags are OR-ed into whatever ``out_flags`` already holds, for callers that
     invoke this once per physics substep but want the flag to record "clamped on any substep
     this control step" rather than just the last one -- see
     ``mdp.actions.ClampedDifferentialIKAction``.
     """
-    pos, flags = clamp_joint_targets(targets.tolist(), gripper_open.tolist(), profile)
+    pos, flags = clamp_joint_targets(targets.tolist(), gripper_fraction.tolist(), profile)
     new_flags = torch.tensor(flags, dtype=torch.bool, device=out_flags.device)
     if accumulate:
         out_flags |= new_flags

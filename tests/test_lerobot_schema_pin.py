@@ -24,6 +24,11 @@ def test_arm_joint_names_pin_matches_urdf():
         assert f'"{name}"' in text
 
 
+def test_the_converter_names_both_gripper_contracts():
+    text = CONVERT.read_text()
+    assert '"gripper_gap_m"' in text and 'GRIPPER_MODES = ("binary", "continuous")' in text
+
+
 def test_protocol_state_is_seven_wide():
     if not PROTOCOL.exists():
         pytest.skip("lerobot_stack/policy_protocol.py is ported by Task E2")

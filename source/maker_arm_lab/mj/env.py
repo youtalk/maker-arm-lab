@@ -22,9 +22,13 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
     env.context_mode, env.obs_buf["context"], env.context_camera, env.context_privileged
     env.oracle_actor (N,) int16, set by the DAgger loop: 0 records nothing, k records the
         frame as takeover k
+    env.gripper_mode ("binary" | "continuous") and env.jaw_targets(raw)
     heap mode (MS6, ``parts`` given): env.parts, env.destination_bins (N,) long,
         env.stow_half_extents, env.target_part (N,) int16 (the overhead marker), env.context_box,
-        env.context_camera_box (N,9), env.obs_buf["images"]["overhead_depth"] (N,224,224) uint16
+        env.context_camera_box (N,9), env.obs_buf["images"]["overhead_depth"] (N,224,224) uint16,
+        env.stamp_markers() (the heap loop stamps the frame it hands the policy),
+        env.marker_from_rig (default True; the heap loop's policy mode sets False so a
+        takeover keeps the marker on the loop's target)
 
 Semantics carried over from ``ManagerBasedRLEnv`` because the rig depends on them: a done
 env is auto-reset INSIDE ``step`` (its state tensors already show the next episode when
@@ -242,7 +246,13 @@ class MjLegoSortEnv:
         export_dir: Path | str | None = None,
         shard_name: str = "shard",
         export_all: bool = False,
+        gripper_mode: str = "binary",
     ):
+        # MS6 phase B design 5.4: "binary" is the raw >= 0 opens contract every corpus before
+        # phase B was recorded with; "continuous" reads action[:, 6] as the jaw gap in meters.
+        if gripper_mode not in ("binary", "continuous"):
+            raise ValueError(f"gripper_mode must be 'binary' or 'continuous', got {gripper_mode!r}")
+        self.gripper_mode = gripper_mode
         self.device = "cpu"
         self.num_envs = num_envs
         self.cameras = cameras
@@ -344,6 +354,7 @@ class MjLegoSortEnv:
                 export_all=export_all,
                 cameras=cameras,
                 depth=self.parts is not None,
+                gripper_mode=gripper_mode,
             )
             if export_dir is not None
             else None
@@ -378,11 +389,10 @@ class MjLegoSortEnv:
             raise ValueError(
                 f"expected an action of shape ({self.num_envs}, 7), got {tuple(raw.shape)}"
             )
-        grip_open = raw[:, 6] >= 0.0
+        grip_target, grip_fraction = self.jaw_targets(raw[:, 6])
         arm = _profile.clamp_targets_tensor(
-            raw[:, :6].double(), grip_open, self.profile, self._arm_term.clamped
+            raw[:, :6].double(), grip_fraction, self.profile, self._arm_term.clamped
         )
-        grip_target = np.where(grip_open.numpy(), GRIPPER_OPEN_POS, GRIPPER_CLOSED_POS)
         targets = np.concatenate(
             [arm.numpy(), np.stack([grip_target, grip_target], axis=1)], axis=1
         )
@@ -392,8 +402,9 @@ class MjLegoSortEnv:
         recorded = [False] * self.num_envs
         heap = self.parts is not None
         if heap:
-            self._update_target_parts(actor)
-            self._stamp_markers()
+            if getattr(self, "marker_from_rig", True):
+                self._update_target_parts(actor)
+            self.stamp_markers()
         if self.recorder is not None:
             phase = getattr(self, "oracle_cycle_phase", None)
             brick = getattr(self, "oracle_cycle_brick", None)
@@ -443,6 +454,22 @@ class MjLegoSortEnv:
         self._refresh(range(self.num_envs), images=True)
         return None, None, terminated, truncated, {}
 
+    def jaw_targets(self, raw_gripper: torch.Tensor) -> tuple[np.ndarray, torch.Tensor]:
+        """The per-jaw prismatic target (N,) and the clamp's opening fraction (N,) for the
+        raw gripper column, in this env's gripper mode."""
+        g = raw_gripper.detach().to("cpu", torch.float64)
+        if self.gripper_mode == "continuous":
+            per_jaw = (0.5 * g).clamp(GRIPPER_CLOSED_POS, GRIPPER_OPEN_POS)
+        else:
+            # torch.where promotes bare Python floats to float32 before any later .to() call
+            # runs, which rounds GRIPPER_OPEN_POS; keep both branches float64 from the start.
+            per_jaw = torch.where(
+                g >= 0.0,
+                torch.full_like(g, GRIPPER_OPEN_POS),
+                torch.full_like(g, GRIPPER_CLOSED_POS),
+            )
+        return per_jaw.numpy(), per_jaw / GRIPPER_OPEN_POS
+
     def _update_target_parts(self, actor) -> None:
         """Heap mode: the rig's cycle stash names the marker's part on the envs it drives."""
         brick = getattr(self, "oracle_cycle_brick", None)
@@ -452,11 +479,14 @@ class MjLegoSortEnv:
             if actor is None or int(actor[i]) > 0:
                 self.target_part[i] = int(brick[i])
 
-    def _stamp_markers(self) -> None:
+    def stamp_markers(self) -> None:
         """Draw the target marker into the overhead frame about to be observed (design 9).
 
         Projected through the pose the frame was rendered with: ``cam_xpos``/``cam_xmat`` are
-        those ``_refresh`` left after the per-frame jitter, and no physics ran since.
+        those ``_refresh`` left after the per-frame jitter, and no physics ran since. ``step``
+        calls it before the recorder reads the frame, and the heap loop calls it again after
+        it moves ``target_part`` and before the policy reads the frame. A second stamp at the
+        same point writes the same pixels (``overlay.stamp_marker`` sets fixed values).
         """
         if not self.cameras:
             return

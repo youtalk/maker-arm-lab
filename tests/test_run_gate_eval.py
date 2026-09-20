@@ -511,3 +511,179 @@ def test_eval_command_forwards_the_context_to_the_mujoco_client(tmp_path):
     plain = ge._build_cfg(args)
     assert plain.context == "none"
     assert "--context" not in ge._eval_command(plain, ge.make_eval_draws(1, 7)[0])
+
+
+def test_eval_command_heap_spawns_the_heap_client_with_the_heap_flags(tmp_path):
+    cfg = ge.GateCfg(
+        checkpoint="ck",
+        out_dir=tmp_path,
+        processes=1,
+        num_envs=5,
+        seed=20261400,
+        threshold=0.85,
+        ledger=tmp_path / "ledger.json",
+        backend="mujoco",
+        episode_draws=True,
+        frame_jitter=True,
+        context="camera_box",
+        heap_k=50,
+        parts_split="heldout",
+        cycle_budget=65,
+    )
+    draw = ge.make_eval_draws(1, 20261400)[0]
+    cmd = ge._eval_command(cfg, draw)
+    assert cmd[:2] == [ge.MUJOCO_PYTHON, "scripts/mj_eval_heap.py"]
+    for flag, value in (
+        ("--heap_k", "50"),
+        ("--parts_seed", "20260915"),
+        ("--parts_split", "heldout"),
+        ("--cycle_budget", "65"),
+        ("--context", "camera_box"),
+    ):
+        assert cmd[cmd.index(flag) + 1] == value
+    assert "--episode_draws" in cmd and "--frame_jitter" in cmd
+
+
+def test_aggregate_gate_applies_the_cycles_rule_on_a_heap():
+    draw = ge.make_eval_draws(1, 20261400)[0]
+    eps = [dict(_episode(0), num_bricks=50, bricks_stowed=45, cycles=55, success=False)]
+    results = ge.aggregate_gate([_payload(draw, eps)], threshold=0.85, max_cycles_per_stowed=1.3)
+    gate = results["gate"]
+    assert gate["per_brick_rate"] == pytest.approx(0.9)
+    assert gate["cycles_total"] == 55 and gate["cycles_per_stowed"] == pytest.approx(55 / 45)
+    assert gate["passed"] is True
+    slow = [dict(eps[0], cycles=65)]
+    assert (
+        ge.aggregate_gate([_payload(draw, slow)], threshold=0.85, max_cycles_per_stowed=1.3)[
+            "gate"
+        ]["passed"]
+        is False
+    )
+    # No cycles rule: the six-brick gate reads as before, and cycles are reported as None.
+    six = ge.aggregate_gate([_payload(draw, [_episode(0)])], threshold=0.15)["gate"]
+    assert six["cycles_per_stowed"] is None and six["max_cycles_per_stowed"] is None
+
+
+def test_aggregate_gate_refuses_the_cycles_rule_on_an_episode_without_cycles():
+    draw = ge.make_eval_draws(1, 20261400)[0]
+    heap = dict(_episode(0), num_bricks=50, bricks_stowed=45, cycles=55)
+    with pytest.raises(ValueError, match="cycles"):
+        ge.aggregate_gate(
+            [_payload(draw, [heap, _episode(6)])], threshold=0.85, max_cycles_per_stowed=1.3
+        )
+
+
+def _heap_payload(draw, **extra):
+    heap = {
+        "heap_k": 50,
+        "parts_split": "heldout",
+        "parts_seed": 20260915,
+        "cycle_budget": 65,
+        "gripper": "binary",
+    }
+    heap.update(extra)
+    ep = dict(_episode(0), num_bricks=50, bricks_stowed=45, cycles=55)
+    return _payload(draw, [ep], **heap)
+
+
+def test_cached_payload_matches_the_task_as_well_as_the_draw(tmp_path):
+    ledger = _fake_ledger(tmp_path)
+    heap_cfg = _cfg(tmp_path, ledger, processes=1, backend="mujoco", heap_k=50)
+    six_cfg = _cfg(tmp_path, ledger, processes=1)
+    heap_cfg.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    path = heap_cfg.out_dir / "eval_000.json"
+
+    def cached(cfg, payload):
+        path.write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    six = _payload(draw, [_episode(6, success=True)])
+    assert cached(six_cfg, six) and not cached(heap_cfg, six)
+    assert cached(heap_cfg, _heap_payload(draw)) and not cached(six_cfg, _heap_payload(draw))
+    for other in (
+        {"heap_k": 20},
+        {"parts_split": "train"},
+        {"parts_seed": 1},
+        {"cycle_budget": 9},
+        {"gripper": "continuous"},
+    ):
+        assert not cached(heap_cfg, _heap_payload(draw, **other)), other
+    heap_cfg.cycle_budget = 70
+    assert cached(heap_cfg, _heap_payload(draw, cycle_budget=70))
+    heap_cfg.gripper = "continuous"
+    assert cached(heap_cfg, _heap_payload(draw, cycle_budget=70, gripper="continuous"))
+    assert not cached(heap_cfg, _heap_payload(draw, cycle_budget=70, gripper="binary"))
+
+
+def test_eval_command_forwards_the_gripper_to_the_heap_client(tmp_path):
+    cfg = ge.GateCfg(
+        checkpoint="ck",
+        out_dir=tmp_path,
+        processes=1,
+        num_envs=5,
+        seed=1,
+        threshold=0.85,
+        ledger=tmp_path / "ledger.json",
+        backend="mujoco",
+        heap_k=50,
+        gripper="continuous",
+    )
+    cmd = ge._eval_command(cfg, ge.make_eval_draws(1, 1)[0])
+    assert cmd[cmd.index("--gripper") + 1] == "continuous"
+
+
+def test_a_heap_gate_defaults_the_cycles_rule_and_refuses_the_isaac_backend(
+    monkeypatch, capsys, tmp_path
+):
+    base = [
+        "--checkpoint",
+        "ck",
+        "--out_dir",
+        str(tmp_path),
+        "--ledger",
+        "l",
+        "--threshold",
+        "0.85",
+        "--seed",
+        "1",
+        "--heap_k",
+        "50",
+    ]
+    cfg = ge._build_cfg(ge._parse_args(base + ["--backend", "mujoco"]))
+    assert cfg.max_cycles_per_stowed == 1.3
+    explicit = ge._parse_args(base + ["--backend", "mujoco", "--max_cycles_per_stowed", "2"])
+    assert ge._build_cfg(explicit).max_cycles_per_stowed == 2.0
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(base + ["--backend", "isaac"]) == 2
+    out = capsys.readouterr()
+    assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--backend mujoco" in out.err
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [["--backend", "mujoco"], ["--backend", "isaac"], ["--backend", "isaac", "--heap_k", "50"]],
+)
+def test_a_continuous_gate_refuses_anything_but_the_mujoco_heap(
+    monkeypatch, capsys, tmp_path, extra
+):
+    argv = [
+        "--checkpoint",
+        "ck",
+        "--out_dir",
+        str(tmp_path),
+        "--ledger",
+        "l",
+        "--threshold",
+        "0.85",
+        "--seed",
+        "1",
+        "--gripper",
+        "continuous",
+    ]
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(argv + extra) == 2
+    out = capsys.readouterr()
+    assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--gripper continuous" in out.err
+    heap = ["--backend", "mujoco", "--heap_k", "50"]
+    assert ge._build_cfg(ge._parse_args(argv + heap)).gripper == "continuous"

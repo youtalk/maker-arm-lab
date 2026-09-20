@@ -298,3 +298,16 @@ def test_a_trailing_push_leg_with_no_following_pick_is_negated_at_timeout():
     assert env.recorder.actors[0] == [-1, -1, -1]
     assert counters["attempts"] == 1
     assert counters["episodes"][0]["outcome"] == "time_out"
+
+
+def test_run_meta_records_the_gripper_mode():
+    parser = argparse.ArgumentParser()
+    batch_loop.add_batch_arguments(parser)
+    args = parser.parse_args(["--out_dir", "/tmp/x", "--heap_k", "3", "--gripper", "continuous"])
+    draw, _bl, noise = batch_loop.build_run(args)
+    meta = batch_loop.run_meta(
+        args, draw, noise, None, num_bricks=3, export_mode="all", backend="mujoco", task="heap"
+    )
+    assert meta["gripper"] == "continuous"
+    default = parser.parse_args(["--out_dir", "/tmp/x"])
+    assert default.gripper == "binary"

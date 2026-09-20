@@ -111,6 +111,7 @@ CLOSE_STEPS = 45
 DEFAULT_MAX_STEPS = 300
 DESCEND_STALL_STEPS = 12
 LIFT_HEIGHT = 0.10
+LIFT_MIN_RISE = 0.05  # m: the rise LIFT must see to call a part lifted (oracle_runtime)
 
 # RAISE's own target height and budget -- OpenYAM MEASURED this (Task 8), not
 # the RELEASE_Z a first reading of "raise" suggests.

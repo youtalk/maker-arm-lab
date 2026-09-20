@@ -6,14 +6,16 @@ Observation state: the 6 URDF arm joint angles plus the gripper OPENING FRACTION
 ``<mimic>`` is not honoured by the importer, Task D3), so the left jaw specifically is
 the reference and the right jaw column is dropped.
 
-Action stream: 6 post-IK arm joint targets + the raw binary gripper command (spec
-section 4.2 -- the same table as the state above; section 5 is an unsubdivided list,
-so the "5.4 item 4" this line carried over from openyam-lab pointed nowhere) -- what
-the ACT head outputs and the real robot's joint-position interface consumes. The
-seventh action column is a COMMAND (>= 0 opens, < 0 closes), not a position: it is
-deliberately left in its own units rather than normalised into the state's, which is
-why the two features name it differently (``gripper`` vs ``gripper_open``). fps
-follows the 30 Hz control rate.
+Action stream: 6 post-IK arm joint targets + the raw gripper command (spec section 4.2 --
+the same table as the state above; section 5 is an unsubdivided list, so the "5.4 item 4"
+this line carried over from openyam-lab pointed nowhere) -- what the ACT head outputs and
+the real robot's joint-position interface consumes. The seventh action column follows the
+shard's gripper contract (``--gripper``, phase B design 5.4). Under ``binary`` (every corpus
+before phase B) it is a COMMAND (>= 0 opens, < 0 closes), feature name ``gripper``. Under
+``continuous`` it is the target jaw gap in meters, 0.0 shut to twice ``GRIPPER_TRAVEL``
+open, feature name ``gripper_gap_m``. Either way it is left in its own units rather than
+normalised into the state's opening fraction, which is why the state names its column
+``gripper_open``. fps follows the 30 Hz control rate.
 
 Every exit path prints CONVERT_OK or CONVERT_FAIL on stdout. scripts/generate_dataset.py
 parses that line, and a run that terminates without either reads to it as a HANG rather
@@ -67,6 +69,13 @@ ARM_JOINTS = [
 # because this venv has no maker_arm_lab; tests/test_lerobot_schema_pin.py keeps it honest.
 GRIPPER_TRAVEL = 0.0524125
 
+# The gripper contract of a shard's action column (MS6 phase B design 5.4). "binary" is the
+# raw >= 0 opens command every corpus before phase B was recorded with; "continuous" is the
+# jaw gap in meters. The recorder writes it as the HDF5 file attribute `gripper_mode`, a
+# dataset never mixes the two, and the name of the action's seventh feature says which.
+GRIPPER_MODES = ("binary", "continuous")
+GRIPPER_NAMES = {"binary": "gripper", "continuous": "gripper_gap_m"}
+
 BASE_FEATURES = {
     "action": {"dtype": "float32", "shape": (7,), "names": ARM_JOINTS + ["gripper"]},
     "observation.state": {
@@ -114,25 +123,42 @@ class Counts(NamedTuple):
     skipped: int
 
 
-def write_action_space_marker(root: Path, action_space: str) -> None:
+def write_action_space_marker(root: Path, action_space: str, gripper: str = "binary") -> None:
     (root / "meta").mkdir(parents=True, exist_ok=True)
-    (root / "meta" / ACTION_SPACE_MARKER).write_text(json.dumps({"action_space": action_space}))
+    (root / "meta" / ACTION_SPACE_MARKER).write_text(
+        json.dumps({"action_space": action_space, "gripper": gripper})
+    )
 
 
-def check_action_space_marker(root: Path, action_space: str) -> None:
-    """Refuse to append actions of one space to a dataset converted in the other."""
+def read_action_space_marker(root: Path) -> dict:
+    """The marker as written, with the pre-phase-B defaults for a marker that lacks a key."""
     marker = root / "meta" / ACTION_SPACE_MARKER
-    recorded = json.loads(marker.read_text())["action_space"] if marker.exists() else "absolute"
-    if recorded != action_space:
+    recorded = json.loads(marker.read_text()) if marker.exists() else {}
+    return {
+        "action_space": recorded.get("action_space", "absolute"),
+        "gripper": recorded.get("gripper", "binary"),
+    }
+
+
+def check_action_space_marker(root: Path, action_space: str, gripper: str = "binary") -> None:
+    """Refuse to append actions of one space or gripper contract to a dataset of the other."""
+    recorded = read_action_space_marker(root)
+    if recorded["action_space"] != action_space:
         raise RuntimeError(
-            f"{root} was converted with action_space={recorded}, refusing to append {action_space}"
+            f"{root} was converted with action_space={recorded['action_space']}, "
+            f"refusing to append {action_space}"
+        )
+    if recorded["gripper"] != gripper:
+        raise RuntimeError(
+            f"{root} was converted with gripper={recorded['gripper']}, refusing to append {gripper}"
         )
 
 
-def build_features(context_names: list[str] | None, images: bool) -> dict:
+def build_features(context_names: list[str] | None, images: bool, gripper: str = "binary") -> dict:
     """The dataset features for one conversion: state and action always, images unless
     dropped, and ``observation.environment_state`` when a context channel is selected."""
     features = dict(BASE_FEATURES)
+    features["action"] = {**BASE_FEATURES["action"], "names": ARM_JOINTS + [GRIPPER_NAMES[gripper]]}
     if images:
         features.update(IMAGE_FEATURES)
     if context_names is not None:
@@ -233,6 +259,7 @@ def convert(
     images: bool = True,
     action_space: str = "absolute",
     dagger: bool = False,
+    gripper: str = "binary",
 ) -> Counts:
     """Convert `shards` into (or append them onto) the LeRobot dataset at `root`.
 
@@ -269,7 +296,7 @@ def convert(
     # local metadata at all -- LeRobotDataset.resume then falls back to querying the HuggingFace
     # Hub for repo_id, which 404s (RepositoryNotFoundError) for a repo that was never pushed.
     if (root / "meta" / "info.json").exists():
-        check_action_space_marker(root, action_space)
+        check_action_space_marker(root, action_space, gripper)
         dataset = LeRobotDataset.resume(repo_id, root=root)
     else:
         if root.exists():
@@ -301,15 +328,21 @@ def convert(
         dataset = LeRobotDataset.create(
             repo_id,
             fps=fps,
-            features=build_features(context_names, images),
+            features=build_features(context_names, images, gripper),
             root=root,
             robot_type="maker_arm",
             use_videos=True,
         )
-        write_action_space_marker(root, action_space)
+        write_action_space_marker(root, action_space, gripper)
     converted = read = skipped = 0
     for shard in shards:
         with h5py.File(shard, "r") as f:
+            recorded_gripper = str(f.attrs.get("gripper_mode", "binary"))
+            if recorded_gripper != gripper:
+                raise RuntimeError(
+                    f"{shard} was recorded with gripper_mode={recorded_gripper}, "
+                    f"--gripper is {gripper}"
+                )
             data = f["data"]
             for demo in sorted(data.keys(), key=lambda k: int(k.split("_")[1])):
                 grp = data[demo]
@@ -471,6 +504,12 @@ def build_parser() -> argparse.ArgumentParser:
         "cut on actor change; also drops the success-attribute filter, since a heap run "
         "records every episode",
     )
+    parser.add_argument(
+        "--gripper",
+        choices=GRIPPER_MODES,
+        default="binary",
+        help="the shards' gripper contract; must match the recorder's gripper_mode attribute",
+    )
     return parser
 
 
@@ -495,6 +534,7 @@ def main() -> int:
             images=not args.no_images,
             action_space=args.action_space,
             dagger=args.dagger,
+            gripper=args.gripper,
         )
     except Exception as exc:  # noqa: BLE001 -- any failure must become CONVERT_FAIL, not a crash.
         print(f"CONVERT_FAIL {type(exc).__name__}: {exc}", flush=True)

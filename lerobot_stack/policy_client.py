@@ -40,6 +40,7 @@ class ServerPolicy:
         self.inference: dict = dict(header.get("inference", {}))
         self.context_dim: int = int(header.get("context_dim", 0))
         self.action_space: str = str(header.get("action_space", "absolute"))
+        self.gripper: str = str(header.get("gripper", "binary"))
         self.reset()
 
     def reset(self) -> None:

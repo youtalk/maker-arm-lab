@@ -120,14 +120,18 @@ def test_the_action_space_marker_is_written_next_to_the_checkpoints(rig):
     (rig["dataset"] / "meta" / "action_space.json").write_text('{"action_space": "delta"}')
     result = _run(rig, **_full_env(rig), ACTION_SPACE="delta")
     assert result.returncode == 0, result.stderr
-    assert json.loads((rig["out"] / "action_space.json").read_text()) == {"action_space": "delta"}
+    assert json.loads((rig["out"] / "action_space.json").read_text()) == {
+        "action_space": "delta",
+        "gripper": "binary",
+    }
 
 
 def test_absolute_is_the_default_action_space(rig):
     result = _run(rig, **_full_env(rig))
     assert result.returncode == 0, result.stderr
     assert json.loads((rig["out"] / "action_space.json").read_text()) == {
-        "action_space": "absolute"
+        "action_space": "absolute",
+        "gripper": "binary",
     }
 
 

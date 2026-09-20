@@ -541,3 +541,44 @@ def test_a_forced_pick_that_gets_tipped_does_not_inflate_forced_picks(monkeypatc
     assert hover is not None and hover.phase is oracle.Phase.TIP_HOVER
     assert orc.tip is not None and orc.tip.part == 0
     assert orc.forced_picks == 0
+
+
+def test_select_target_is_the_teachers_rule_with_its_bookkeeping():
+    orc = _oracle([BRICK, BRICK, BRICK])
+    scene = _snapshot([[0.20, -0.05, 0.005], [0.20, 0.0, 0.005], [0.20, 0.05, 0.005]])
+    target = orc.select_target(scene)
+    assert target in (0, 1, 2)
+    assert orc.cycles == 1 and orc.cycle_parts == [target]
+    # The loop re-selects after a failed cycle: the same scene selects again and counts again.
+    assert orc.select_target(scene) == target and orc.cycles == 2
+    assert orc.target_brick is None  # selection does not enter the machine
+
+
+def test_select_target_returns_none_at_the_cycle_budget():
+    orc = _oracle([BRICK, BRICK], budget=1)
+    scene = _snapshot([[0.20, -0.05, 0.005], [0.20, 0.05, 0.005]])
+    assert orc.select_target(scene) is not None
+    assert orc.select_target(scene) is None
+
+
+def test_aim_hover_at_points_the_pending_hover_at_the_loops_target():
+    orc = _oracle([BRICK, BRICK, BRICK])
+    scene = _snapshot([[0.20, -0.05, 0.005], [0.20, 0.0, 0.005], [0.20, 0.05, 0.005]])
+    orc.resume(scene, -1)
+    assert orc.aim_hover_at(scene, 2) is True
+    assert orc.phase is oracle.Phase.HOVER and orc.target_brick == 2
+    assert orc.grasp is not None and orc.grasp.part == 2 and orc.pick_order == [2]
+    assert orc.cycles == 0  # the loop counted the cycle at selection, not here
+    goal = orc.next_goal(scene)
+    assert goal.phase is oracle.Phase.HOVER
+    assert goal.target_pos[:2].tolist() == pytest.approx(scene.brick_pos[2, :2].tolist(), abs=1e-6)
+
+
+def test_aim_hover_at_declines_a_part_with_no_grasp():
+    orc = _oracle([BRICK, BRICK])
+    scene = _snapshot([[0.20, -0.05, 0.005], [0.20, 0.05, 0.005]])
+    # Corner up: every body axis is more than 15 degrees off the jaw plane, so no axis closes.
+    scene.brick_quat[1] = torch.tensor(quat_from_rpy_deg((45.0, 45.0, 0.0)))
+    orc.resume(scene, -1)
+    assert orc.aim_hover_at(scene, 1) is False
+    assert orc.target_brick is None

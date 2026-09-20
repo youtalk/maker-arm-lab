@@ -85,3 +85,26 @@ def test_clamp_targets_tensor_accumulate_keeps_an_earlier_clamp_flag():
 
     prof.clamp_targets_tensor(inside, torch.tensor([True]), p, flags, accumulate=True)
     assert flags.tolist() == [True]  # must not be overwritten back to False
+
+
+def test_clamp_joint_targets_takes_a_gripper_fraction_and_still_takes_bools():
+    p = prof.sim_profile()
+    limits = urdf_prep.arm_joint_limits()
+    inside = [(lo + hi) / 2 for lo, hi in limits]
+    out, flags = prof.clamp_joint_targets([inside, inside, inside], [True, 0.37, 0.0], p)
+    assert flags == [False, False, False] and len(out) == 3
+    # The seventh clamp slot is in range by construction, so a fraction never sets the flag.
+    tensor_out = prof.clamp_targets_tensor(
+        torch.tensor([inside, inside]),
+        torch.tensor([1.0, 0.37]),
+        p,
+        torch.zeros(2, dtype=torch.bool),
+    )
+    assert tensor_out.shape == (2, 6)
+
+
+def test_jaw_full_gap_is_twice_the_per_jaw_travel():
+    from maker_arm_lab.robots import frames
+
+    assert frames.JAW_FULL_GAP == pytest.approx(2 * frames.GRIPPER_OPEN_POS)
+    assert frames.JAW_FULL_GAP == pytest.approx(0.104825)

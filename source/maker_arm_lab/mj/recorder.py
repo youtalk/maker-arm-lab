@@ -25,6 +25,7 @@ consumers and are unchanged):
         layout
     initial_state/destination_bin (1,) i64      MS6 heap shards only
     attrs: parts (JSON list of part names, MS6 heap shards only)
+    attrs (file level): gripper_mode ("binary" | "continuous", MS6 phase B design 5.4)
 
 Frames are appended per control step. Images go to resizable datasets under ``inflight/``
 in chunks of ``flush_every`` frames, so RAM stays flat whatever the episode length; at the
@@ -61,12 +62,14 @@ class ShardRecorder:
         cameras: bool = True,
         flush_every: int = 256,
         depth: bool = False,
+        gripper_mode: str = "binary",
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._file = h5py.File(self.path, "w")
         self._data = self._file.create_group("data")
         self._inflight = self._file.create_group("inflight")
+        self._file.attrs["gripper_mode"] = gripper_mode
         self.num_envs = num_envs
         self.export_all = export_all
         self.cameras = cameras

@@ -50,6 +50,7 @@ class PolicyServer:
         inference: dict | None = None,
         context_dim: int = 0,
         action_space: str = "absolute",
+        gripper: str = "binary",
     ):
         self._policy_fn = policy_fn
         self._reset_fn = reset_fn
@@ -57,6 +58,10 @@ class PolicyServer:
         self._port = port
         self._n_action_steps = n_action_steps
         self._action_space = action_space
+        # The checkpoint's gripper contract (Task 12's action_space.json "gripper" key):
+        # "binary" is a raw sign (>= 0 opens), "continuous" is a jaw gap in meters. Echoed in
+        # SERVER_READY and hello_ack so a client (and core.loop's mismatch check) knows which.
+        self._gripper = gripper
         # The inference config the loaded policy actually runs with (n_action_steps,
         # temporal_ensemble_coeff, chunk_size), read off the policy after the overrides were
         # applied and echoed in SERVER_READY and hello_ack so an eval payload records what
@@ -84,6 +89,7 @@ class PolicyServer:
             "inference": self._inference,
             "context_dim": self._context_dim,
             "action_space": self._action_space,
+            "gripper": self._gripper,
         }
         print("SERVER_READY " + json.dumps(ready), flush=True)
         return self._port
@@ -97,6 +103,7 @@ class PolicyServer:
             "inference": self._inference,
             "context_dim": self._context_dim,
             "action_space": self._action_space,
+            "gripper": self._gripper,
             "obs_schema": {k: [list(shape), dtype] for k, (shape, dtype) in OBS_SCHEMA.items()},
             "action": [list(ACTION_SHAPE), ACTION_DTYPE],
         }
@@ -264,10 +271,11 @@ def find_gripper_bce_marker(checkpoint_dir: str) -> dict | None:
 ACTION_SPACE_MARKER = "action_space.json"
 
 
-def find_action_space_marker(checkpoint_dir: str) -> str:
-    """The action space train_act.sh recorded next to the checkpoints, "absolute" if none.
+def _read_action_space_marker(checkpoint_dir: str) -> dict | None:
+    """The parsed action_space.json nearest checkpoint_dir, walking up to output_dir.
 
     Same walk as find_gripper_bce_marker: the checkpoint dir, then up to output_dir.
+    Shared by find_action_space_marker and find_gripper_marker so both keys read one file.
     """
     from pathlib import Path
 
@@ -275,8 +283,21 @@ def find_action_space_marker(checkpoint_dir: str) -> str:
     for candidate in [directory, *directory.parents[:3]]:
         marker = candidate / ACTION_SPACE_MARKER
         if marker.is_file():
-            return json.loads(marker.read_text())["action_space"]
-    return "absolute"
+            return json.loads(marker.read_text())
+    return None
+
+
+def find_action_space_marker(checkpoint_dir: str) -> str:
+    """The action space train_act.sh recorded next to the checkpoints, "absolute" if none."""
+    marker = _read_action_space_marker(checkpoint_dir)
+    return "absolute" if marker is None else marker["action_space"]
+
+
+def find_gripper_marker(checkpoint_dir: str) -> str:
+    """The gripper contract train_act.sh recorded next to the checkpoints, "binary" if none
+    (MS6 phase B design 5.4). Same walk as find_action_space_marker."""
+    marker = _read_action_space_marker(checkpoint_dir)
+    return "binary" if marker is None else marker.get("gripper", "binary")
 
 
 def integrate_delta(action: np.ndarray, state: np.ndarray) -> np.ndarray:
@@ -346,6 +367,7 @@ def inference_policy_id(
     gripper_squash: bool = False,
     context_dim: int = 0,
     action_space: str = "absolute",
+    gripper: str = "binary",
 ) -> str:
     """Suffix the policy id with the active overrides so eval payloads are self-describing."""
     policy_id = f"act:{checkpoint_dir}"
@@ -361,6 +383,8 @@ def inference_policy_id(
         policy_id += f"+ctx{context_dim}"
     if action_space == "delta_prev":
         policy_id += "+dprev"
+    if gripper == "continuous":
+        policy_id += "+gap"
     return policy_id
 
 
@@ -371,7 +395,8 @@ def load_act(
     temporal_ensemble_coeff: float | None = None,
     blank_camera: str | None = None,
 ):
-    """Build (policy_fn, reset_fn, policy_id, n_action_steps, inference, context_dim, action_space).
+    """Build (policy_fn, reset_fn, policy_id, n_action_steps, inference, context_dim, action_space,
+    gripper).
 
     checkpoint_dir is a `pretrained_model` directory (e.g.
     <output_dir>/checkpoints/last/pretrained_model). The checkpoint's own
@@ -414,6 +439,7 @@ def load_act(
     )
     marker = find_gripper_bce_marker(checkpoint_dir)
     action_space = find_action_space_marker(checkpoint_dir)
+    gripper = find_gripper_marker(checkpoint_dir)
     if action_space == "delta":
         raise ValueError(
             "this checkpoint was trained on the c1 delta definition (target minus the measured "
@@ -460,11 +486,13 @@ def load_act(
             gripper_squash=marker is not None,
             context_dim=context_dim,
             action_space=action_space,
+            gripper=gripper,
         ),
         policy.config.n_action_steps,
         served_inference(policy.config),
         context_dim,
         action_space,
+        gripper,
     )
 
 
@@ -527,14 +555,21 @@ def main() -> int:
     parser = build_parser()
     try:
         args = parser.parse_args()
-        policy_fn, reset_fn, policy_id, n_action_steps, inference, context_dim, action_space = (
-            load_act(
-                args.checkpoint,
-                args.device,
-                n_action_steps=args.n_action_steps,
-                temporal_ensemble_coeff=args.temporal_ensemble_coeff,
-                blank_camera=args.blank_camera,
-            )
+        (
+            policy_fn,
+            reset_fn,
+            policy_id,
+            n_action_steps,
+            inference,
+            context_dim,
+            action_space,
+            gripper,
+        ) = load_act(
+            args.checkpoint,
+            args.device,
+            n_action_steps=args.n_action_steps,
+            temporal_ensemble_coeff=args.temporal_ensemble_coeff,
+            blank_camera=args.blank_camera,
         )
         server = PolicyServer(
             policy_fn,
@@ -545,6 +580,7 @@ def main() -> int:
             inference=inference,
             context_dim=context_dim,
             action_space=action_space,
+            gripper=gripper,
         )
         server.bind()
         server.serve_forever()

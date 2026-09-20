@@ -83,6 +83,24 @@ def test_the_viewer_flag_exists_and_is_off_by_default():
     assert args.viewer is False
 
 
+def test_inspect_heap_parses_the_continuous_gripper_flag(tmp_path):
+    module = _load(SCRIPT)
+    args = module.parse_args(
+        [
+            "--out_dir",
+            str(tmp_path),
+            "--num_envs",
+            "1",
+            "--heap_k",
+            "3",
+            "--gripper",
+            "continuous",
+            "--no_video",
+        ]
+    )
+    assert args.gripper == "continuous"
+
+
 def test_the_logging_oracle_writes_a_scan_per_selection_and_a_phase_per_report(tmp_path):
     module = _load(SCRIPT)
     draw = layout.sample_run_draw(random.Random(5))

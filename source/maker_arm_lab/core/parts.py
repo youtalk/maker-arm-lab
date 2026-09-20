@@ -37,7 +37,8 @@ STUD_HEIGHT = 0.0017
 ABS_DENSITY_KG_M3 = 1040.0
 HOLLOW_FRACTION = 0.6  # 2x4 brick -> 3.0 g = layout.BRICK_MASS
 MASS_FLOOR_KG = 0.0005  # solver health on 1x1 plates (0.12 g solid)
-MAX_GRASP_WIDTH = 0.045  # 7 mm under the 52.4 mm jaw opening (design section 5)
+# 7 mm under the 52.4 mm per-jaw travel; the full gap is 104.8 mm (robots.frames.JAW_FULL_GAP)
+MAX_GRASP_WIDTH = 0.045
 HELDOUT_FRACTION = 0.2
 FAMILIES = ("brick", "slope")
 FLAT_FAMILIES = ("plate", "tile")  # constructible for replays, not in the catalog

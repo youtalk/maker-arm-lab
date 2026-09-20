@@ -87,7 +87,7 @@ from maker_arm_lab.core.global_ik import (
     steepest_jaw_roll,
     tool_axis_world,
 )
-from maker_arm_lab.core.oracle import PHASE_TO_INT
+from maker_arm_lab.core.oracle import LIFT_MIN_RISE, PHASE_TO_INT
 from maker_arm_lab.core.quat import quat_apply
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.robots.frames import (
@@ -98,6 +98,7 @@ from maker_arm_lab.robots.frames import (
     GRIPPER_CLOSED_POS,
     GRIPPER_JOINT_NAMES,
     JAW_AXIS_BODY,
+    JAW_FULL_GAP,
     PICK_OFFSET_MEASURED,
     TOOL_AXIS_BODY,
     TOOL_BODY,
@@ -236,7 +237,8 @@ ROT_CONVERGED = 0.02
 # as min(BRICK_SIZE)/2 = 0.0048 m, and core.checker carries the derivation. PINCH_MIN_FORCE
 # was validated against Task D3's 10/10 gate on this arm and closed; PINCH_MAX_ASYMMETRY
 # remains inherited from OpenYAM. Read core.checker for which is which.
-LIFT_MIN_RISE = 0.05  # m
+# LIFT_MIN_RISE (0.05 m) lives in core.oracle, next to LIFT_HEIGHT, so the torch-only heap
+# loop reads the same rise gate (phase B design 5.5).
 LIFT_MAX_XY_ERROR = 0.03  # m
 
 # `resume` calls a brick pinched at core.checker.HELD_MIN_FORCE (imported above), the
@@ -272,6 +274,17 @@ MATCHED_OPENING_PHASES = (oracle.Phase.HOVER, oracle.Phase.DESCEND, oracle.Phase
 # walked rather than stepped.
 ROLL_DEADBAND_RAD = math.radians(5.0)
 ROLL_MAX_STEP_RAD = math.radians(6.0)
+# The continuous gripper releases with the jaw plane LEVEL instead (phase B release rung): a
+# position-held jaw opens smoothly, and a part resting on the lower jaw of a stood-up plane
+# stays there -- the jaw face slopes about 10 degrees against a sliding friction of 1.0.
+# Traced on the corpus heaps, 20 to 26 of about 49 releases per heap still held their part.
+# A level plane has no jaw under the part. On the corpus seeds p0..p3 (K=50) it stows 180 of
+# 200 against 158 on the stood-up plane; p4..p7 read 188 of 200, binary 190. A first probe
+# that rolled level without the unroll lost RETREATs: planned from the rolled wrist, 3 to 13
+# per heap came back unplanned, and two episodes were abandoned. RETREAT now turns the wrist
+# back along the same waypoints before it plans. The margin keeps the level roll off the wrist
+# stop; 10 degrees is chosen, not swept.
+LEVEL_ROLL_MARGIN_RAD = math.radians(10.0)
 
 # MS6 rung 3. The legs that CARRY hold the jaws at the part's own width instead of driving
 # them to `GRIPPER_CLOSED_POS`, for an oracle that asks for it.
@@ -446,6 +459,7 @@ class OracleRig:
         oracle_factory=None,
     ):
         self.env = env
+        self.gripper_mode = getattr(env, "gripper_mode", "binary")
         # Multiplier on the pace of the transport legs (TRANSPORT_PHASES); see leg_resolution.
         self.transport_speed = transport_speed
         self.bl = bl
@@ -490,6 +504,7 @@ class OracleRig:
         self.plans: list[list[torch.Tensor]] = [[] for _ in range(self.num_envs)]
         self.walk_steps = [1] * self.num_envs
         self.walk_step = [0] * self.num_envs
+        self.unroll: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * self.num_envs
         # Where a desk-resting brick sits in `grasp_center` coordinates. Per env because the
         # descend ladder picks its own offset per rung (the offset balancing desk clearance
         # against tip margin moves with tilt), and that choice then has to survive into the
@@ -622,13 +637,9 @@ class OracleRig:
             goal = self.goals[i]
             if goal is None:
                 # DONE/ABANDON/idle envs coast: jaws open, arm holding its last joint target.
-                action[i, 6] = GRIPPER_OPEN_ACTION
+                action[i, 6] = self._gripper_command(i, None)
             else:
-                action[i, 6] = goal.gripper
-                if goal.gripper > 0.0 and goal.phase in MATCHED_OPENING_PHASES:
-                    action[i, 6] = self._matched_opening_command(i, action[i, 6])
-                elif goal.gripper < 0.0 and goal.phase in MATCHED_CLOSE_PHASES:
-                    action[i, 6] = self._matched_close_command(i, action[i, 6])
+                action[i, 6] = self._gripper_command(i, goal)
                 self._advance_plan(i)
             target = self.q_cmd[i]
             self._planned.append(target)
@@ -709,14 +720,38 @@ class OracleRig:
         of this set point to follow the jaws rather than the command.
 
         An oracle that does not ask for it keeps the fully open descend, so the six-brick
-        task and its gated corpus are untouched (MS6 rung 1).
+        task and its gated corpus are untouched (MS6 rung 1). Under the continuous gripper the
+        set point is returned as a gap instead (``_gripper_command``).
         """
         orc = self.oracles[i]
+        binary = self.gripper_mode == "binary"
         if not getattr(orc, "matched_jaw_opening", False):
-            return fully_open
+            return fully_open if binary else JAW_FULL_GAP
         target = grasp.landing_half_gap(float(orc.grasp_width)) - grasp.JAW_HOLD_BAND
+        if not binary:
+            return 2.0 * target
         measured = min(self.robot.data.joint_pos[i, self.finger_ids].tolist())
         return fully_open if measured <= target else -fully_open
+
+    def _gripper_command(self, i: int, goal: oracle.Goal | None) -> float:
+        """The seventh action column for env ``i`` this step, in the env's gripper mode.
+
+        Binary (every corpus before MS6 phase B): the goal's own +1/-1, held around a matched
+        opening or closing set point by the two flip helpers. Continuous (phase B design
+        5.4): the set point itself as a jaw gap in meters, so the recorded label is the
+        opening the teacher wants and not a chatter around it.
+        """
+        binary = self.gripper_mode == "binary"
+        if goal is None:
+            return GRIPPER_OPEN_ACTION if binary else JAW_FULL_GAP
+        g = goal.gripper
+        if g > 0.0 and goal.phase in MATCHED_OPENING_PHASES:
+            return self._matched_opening_command(i, g)
+        if g < 0.0 and goal.phase in MATCHED_CLOSE_PHASES:
+            return self._matched_close_command(i, g)
+        if binary:
+            return g
+        return JAW_FULL_GAP if g > 0.0 else 0.0
 
     def _advance_plan(self, i: int) -> None:
         """Move the commanded joint target one control step along this phase's plan: the
@@ -1039,6 +1074,10 @@ class OracleRig:
         if goal.target_pos is None:
             return  # hold phase: keep commanding the joint target the last leg left
         start = self.q_cmd[i]
+        if goal.phase is not oracle.Phase.RETREAT:
+            self.unroll[i] = None
+        elif self.unroll[i] is not None:
+            start = self.unroll[i][1]
         pick_from, tilt_from = self._commanded_pick_pose(i, start)
         pick_to = goal.target_pos.double().cpu()
         heading = self.commanded_yaw[i]
@@ -1120,8 +1159,35 @@ class OracleRig:
         if goal.phase == oracle.Phase.EXTEND and getattr(
             self.oracles[i], "matched_jaw_opening", False
         ):
-            plan = plan + self._roll_waypoints(plan[-1])
+            roll = self._roll_waypoints(plan[-1])
+            if roll and self.gripper_mode != "binary":
+                roll = self._paced_roll(i, plan, plan[-1], roll[-1])
+                # RETREAT turns the wrist back from where RELEASE holds to the carry's end.
+                self.unroll[i] = (roll[-1], plan[-1])
+            plan = plan + roll
+        elif goal.phase == oracle.Phase.RETREAT and self.unroll[i] is not None:
+            (rolled, arrival), self.unroll[i] = self.unroll[i], None
+            # The carry plan starts at `arrival`; the walk starts where RELEASE holds.
+            plan = [rolled] + self._paced_roll(i, plan, rolled, arrival) + plan[1:]
         self.plans[i] = plan
+
+    def _paced_roll(
+        self, i: int, plan: list[torch.Tensor], start: torch.Tensor, end: torch.Tensor
+    ) -> list[torch.Tensor]:
+        """Wrist-only waypoints after ``start`` up to ``end``, walked with ``plan``.
+
+        The walk gives every segment the same share of its steps (``polyline_point``), and the
+        carry's steps come from its Cartesian length, which a wrist roll does not add to. So
+        the roll is cut into as many segments as keep the wrist under ``ROLL_MAX_STEP_RAD``
+        per control step at the minimum-jerk peak, and the walk grows by the carry's own
+        steps per segment for each one: the carry keeps its pace.
+        """
+        per_segment = self.walk_steps[i] / len(plan)
+        turn = abs(float(end[WRIST_ROLL_INDEX] - start[WRIST_ROLL_INDEX]))
+        peak = trajectory.MIN_JERK_PEAK_VELOCITY * turn / (ROLL_MAX_STEP_RAD * per_segment)
+        n = max(1, math.ceil(peak))
+        self.walk_steps[i] = math.ceil(self.walk_steps[i] * (len(plan) + n) / len(plan))
+        return [start + (end - start) * k / n for k in range(1, n + 1)]
 
     def _matched_close_command(self, i: int, fully_closed: float) -> float:
         """Hold the jaws at the part's own width instead of driving them shut.
@@ -1132,12 +1198,16 @@ class OracleRig:
         command the real arm accepts.
 
         An oracle that does not ask for it keeps driving the jaws shut, so the six-brick task
-        and its gated corpus are untouched (MS6 rung 3).
+        and its gated corpus are untouched (MS6 rung 3). Under the continuous gripper the set
+        point is returned as a gap instead (``_gripper_command``).
         """
         orc = self.oracles[i]
+        binary = self.gripper_mode == "binary"
         if not getattr(orc, "matched_jaw_opening", False):
-            return fully_closed
+            return fully_closed if binary else 0.0
         floor = max(0.0, 0.5 * float(orc.grasp_width) - CLOSE_SQUEEZE_M)
+        if not binary:
+            return 2.0 * floor
         measured = min(self.robot.data.joint_pos[i, self.finger_ids].tolist())
         return fully_closed if measured > floor else -fully_closed
 
@@ -1158,6 +1228,10 @@ class OracleRig:
 
         The wrist's travel is finite, so a roll that would leave the joint's range is dropped
         rather than clamped: half a stood-up plane is not worth a servo against its stop.
+
+        Under the continuous gripper the roll levels the plane instead: of the two level rolls,
+        a quarter turn either way off the steepest one, the shorter that keeps
+        ``LEVEL_ROLL_MARGIN_RAD`` off both wrist stops, and none if neither does.
         """
         _, rotation = self.ik.fk(arrival)
         rotation = torch.as_tensor(rotation, dtype=torch.float64)
@@ -1166,8 +1240,20 @@ class OracleRig:
         # `link_007_joint` turns the jaw axis by MINUS its own angle about the tool axis
         # (measured 2026-09-17, ratio -1.000), so the joint moves against the roll.
         delta = -steepest_jaw_roll(jaw, tool)
-        target = float(arrival[WRIST_ROLL_INDEX]) + delta
         lo, hi = self.wrist_roll_limits
+        if self.gripper_mode != "binary":
+            # Level: a quarter turn off the steepest roll, either way. Take the shorter one
+            # that keeps LEVEL_ROLL_MARGIN_RAD off both wrist stops.
+            here = float(arrival[WRIST_ROLL_INDEX])
+            options = [
+                d
+                for d in (delta + math.pi / 2, delta - math.pi / 2)
+                if lo + LEVEL_ROLL_MARGIN_RAD <= here + d <= hi - LEVEL_ROLL_MARGIN_RAD
+            ]
+            if not options:
+                return []
+            delta = min(options, key=abs)
+        target = float(arrival[WRIST_ROLL_INDEX]) + delta
         if not lo <= target <= hi or abs(delta) < ROLL_DEADBAND_RAD:
             return []
         steps = max(1, math.ceil(abs(delta) / ROLL_MAX_STEP_RAD))
@@ -1496,11 +1582,13 @@ class OracleRig:
             if not idle:
                 self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE
 
-    def resume(self, i: int) -> bool:
+    def resume(self, i: int, target: int | None = None) -> bool:
         """Take idle env ``i`` over from the policy for one brick cycle (MS4 c2 design 6.2).
 
         Returns False, and leaves the env idle, when the oracle answers DONE or ABANDON at
-        entry or the first leg cannot be planned.
+        entry or the first leg cannot be planned. With ``target`` (the heap outer loop, phase
+        B design 5.5) a takeover that holds nothing works that part instead of letting HOVER
+        select; it is declined when no grasp ranks on the part any more.
         """
         if not self.idle[i]:
             raise RuntimeError(f"env {i} is not idle")
@@ -1548,6 +1636,9 @@ class OracleRig:
             self._go_idle(i, None)
             return False
         orc.resume(scene, held)
+        if target is not None and held < 0 and not orc.aim_hover_at(scene, target):
+            self._go_idle(i, None)
+            return False
         self.brick_start[i] = self._brick_pos(i, held) if held >= 0 else None
         self.idle[i] = False
         self.single_cycle[i] = True

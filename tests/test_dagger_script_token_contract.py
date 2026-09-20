@@ -6,6 +6,11 @@ Isaac grasp script."""
 
 import ast
 import pathlib
+import types
+
+import pytest
+
+from maker_arm_lab.core import dagger_loop, eval_loop
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "mj_dagger_batch.py"
 
@@ -71,3 +76,16 @@ def test_dagger_ok_does_not_print_inside_the_try_clause():
     )
     assert "DAGGER_OK" not in finally_prefix
     assert "DAGGER_OK " in text  # still printed somewhere -- after the try/except/finally
+
+
+def test_the_six_brick_rollouts_refuse_a_continuous_checkpoint():
+    """Both core rollouts refuse before they touch the env, so every client (the Isaac
+    eval script too) gets the refusal without its own check."""
+    policy = types.SimpleNamespace(gripper="continuous")
+    draw = {"run_seed": 1, "layout_seed": 2, "permutation": (0, 1, 2, 3), "max_wall_minutes": 1.0}
+    with pytest.raises(eval_loop.EvalFailure) as err:
+        eval_loop.rollout(None, policy, **draw)
+    assert err.value.reason == "gripper"
+    with pytest.raises(eval_loop.EvalFailure) as err:
+        dagger_loop.rollout(None, None, policy, random_interval=None, **draw)
+    assert err.value.reason == "gripper"

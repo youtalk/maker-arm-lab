@@ -83,6 +83,31 @@ def delta_prev_server():
     shutdown()
 
 
+@pytest.fixture()
+def continuous_server():
+    def fake_policy(state, wrist, overhead, context=None):
+        return np.zeros((state.shape[0], *ACTION_SHAPE), dtype="float32")
+
+    endpoint, shutdown = _serve(
+        policy_fn=fake_policy,
+        reset_fn=lambda: None,
+        policy_id="fake:gap",
+        gripper="continuous",
+    )
+    yield endpoint
+    shutdown()
+
+
+def test_client_reads_the_gripper_contract(continuous_server, running_server):
+    client = ServerPolicy(continuous_server)
+    assert client.gripper == "continuous"
+    client.close()
+    endpoint, _ = running_server
+    legacy = ServerPolicy(endpoint)
+    assert legacy.gripper == "binary"
+    legacy.close()
+
+
 def test_client_handshakes_resets_and_records_the_served_inference(running_server):
     endpoint, calls = running_server
     client = ServerPolicy(endpoint)
