@@ -427,7 +427,13 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
             and payload.get("cycle_budget") == budget
             and payload.get("gripper", "binary") == cfg.gripper
         )
-    return payload if same_draw and same_policy and same_task else None
+    # The served inference configuration is part of what a draw measured. An open-loop read
+    # (the checkpoint's own n_action_steps) must never stand in for a temporal-ensemble read.
+    served = payload.get("inference") or {}
+    same_inference = served.get("temporal_ensemble_coeff") == cfg.temporal_ensemble_coeff and (
+        cfg.n_action_steps is None or served.get("n_action_steps") == cfg.n_action_steps
+    )
+    return payload if same_draw and same_policy and same_task and same_inference else None
 
 
 def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:

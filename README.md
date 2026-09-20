@@ -181,8 +181,11 @@ uv run python scripts/mj_eval_heap.py --num_envs 1 --heap_k 50 --parts_split hel
 python3 scripts/run_gate_eval.py --backend mujoco --checkpoint <pretrained_model> \
     --ledger ~/data/maker-arm-ms6/l/ledger.json --threshold 0.85 --max_cycles_per_stowed 1.3 \
     --seed 20261400 --processes 8 --num_envs 5 --heap_k 50 --parts_split heldout \
-    --episode_draws --frame_jitter --context camera_box --out_dir ~/data/maker-arm-ms6/l/gate
+    --episode_draws --frame_jitter --context camera_box --gripper continuous \
+    --n_action_steps 1 --temporal_ensemble_coeff 0.01 --out_dir ~/data/maker-arm-ms6/l/gate
 ```
+
+Every gate read and every DAgger rollout serves the policy under the MS3 inference protocol, `--n_action_steps 1 --temporal_ensemble_coeff 0.01`. The supervisor passes the two flags to the policy server. A reused draw must report the same inference configuration in its payload. Because the temporal ensemble state lives in the server, a DAgger round starts one policy server per client.
 
 Round k rolls out the previous round's policy on train-split heaps and records takeover frames only. The conversion flags are `--dagger --split_cycles --context camera_box --gripper <mode>`.
 
