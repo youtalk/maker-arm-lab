@@ -654,3 +654,58 @@ def test_the_random_trigger_needs_a_policy():
         _rollout(env, rig, None, budget=3, takeover=loop.TakeoverConfig(random_interval=300))
     env.close()
     assert err.value.reason == "takeover"
+
+
+def test_census_step_counts_the_duty_the_hold_and_the_first_close():
+    cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
+    loop.census_step(cycle, grip_open=True, held=-1, rise=0.0, close_cm=9.0)
+    loop.census_step(cycle, grip_open=False, held=-1, rise=0.0, close_cm=1.25)
+    loop.census_step(cycle, grip_open=False, held=2, rise=0.03, close_cm=0.5)
+    loop.census_step(cycle, grip_open=False, held=2, rise=0.07, close_cm=0.5)
+    loop.census_step(cycle, grip_open=True, held=-1, rise=0.0, close_cm=30.0)
+    assert (cycle.open_steps, cycle.closed_steps, cycle.held_steps) == (2, 3, 2)
+    assert cycle.first_close_cm == 1.25 and cycle.max_rise == pytest.approx(0.07)
+    assert cycle.holding is False
+
+
+def _census(**fields):
+    cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
+    for name, value in fields.items():
+        setattr(cycle, name, value)
+    return cycle
+
+
+def test_cycle_class_names_the_last_stage_a_failed_cycle_reached():
+    held = loop.CENSUS_MIN_HELD_STEPS
+    lifted = oracle.LIFT_MIN_RISE
+    assert loop.cycle_class(_census(closed_steps=9), "stowed") == "stowed"
+    assert loop.cycle_class(_census(open_steps=800), "budget") == "no_close"
+    assert loop.cycle_class(_census(closed_steps=800), "budget") == "no_open"
+    assert loop.cycle_class(_census(open_steps=500, closed_steps=300), "budget") == "close_miss"
+    # A pinch shorter than the hold window's start is a brush, not a hold.
+    brush = _census(open_steps=500, closed_steps=300, held_steps=held - 1, max_rise=lifted)
+    assert loop.cycle_class(brush, "budget") == "close_miss"
+    low = _census(open_steps=1, closed_steps=1, held_steps=held, max_rise=lifted - 0.001)
+    assert loop.cycle_class(low, "budget") == "held_no_lift"
+    up = _census(open_steps=1, closed_steps=1, held_steps=held, max_rise=lifted)
+    assert loop.cycle_class(up, "budget") == "lifted_lost"
+    up.holding = True
+    assert loop.cycle_class(up, "budget") == "carrying"
+
+
+def test_a_still_policy_is_classed_no_close_and_the_teacher_closes_on_its_target(monkeypatch):
+    env, rig = _env_and_rig(gripper_mode="continuous")
+    _place(env, SPREAD)
+    ep = _rollout(env, rig, None)["episodes"][0]
+    env.close()
+    assert ep["cycle_classes"] == ["stowed"] * 3, ep
+    # The teacher's first close lands on the target: well inside the 2 cm close-far rule.
+    closes = ep["cycle_first_close_cm"]
+    assert all(cm is not None and cm < dagger_loop.CLOSE_FAR_CM for cm in closes), closes
+
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
+    env, rig = _env_and_rig(budget=9)
+    _place(env, SPREAD)
+    ep = _rollout(env, rig, _HoldPolicy(), budget=9)["episodes"][0]
+    env.close()
+    assert ep["cycle_classes"] == ["no_close"] * 6 and ep["cycle_first_close_cm"] == [None] * 6
