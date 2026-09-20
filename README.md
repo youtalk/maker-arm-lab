@@ -183,9 +183,11 @@ python3 scripts/run_gate_eval.py --backend mujoco --checkpoint <pretrained_model
     --seed 20261400 --processes 8 --num_envs 5 --heap_k 50 --parts_split heldout \
     --episode_draws --frame_jitter --context camera_box --gripper continuous \
     --n_action_steps 1 --temporal_ensemble_coeff 0.01 --out_dir ~/data/maker-arm-ms6/l/gate
+python3 scripts/heap_cycle_census.py \
+    --evals "$HOME/data/maker-arm-ms6/l/gate/eval_[0-9][0-9][0-9].json"   # CENSUS_OK {...}
 ```
 
-Every gate read and every DAgger rollout serves the policy under the MS3 inference protocol, `--n_action_steps 1 --temporal_ensemble_coeff 0.01`. The supervisor passes the two flags to the policy server. A reused draw must report the same inference configuration in its payload. Because the temporal ensemble state lives in the server, a DAgger round starts one policy server per client.
+Every gate read and every DAgger rollout serves the policy under the MS3 inference protocol, `--n_action_steps 1 --temporal_ensemble_coeff 0.01`. The supervisor passes the two flags to the policy server. A reused draw must report the same inference configuration in its payload. Because the temporal ensemble state lives in the server, a DAgger round starts one policy server per client. `heap_cycle_census.py` sums the cycle census of a read: how far each failed cycle got, the stows of a part other than the target, the first close distance and the step count per end reason.
 
 Round k rolls out the previous round's policy on train-split heaps and records takeover frames only. The conversion flags are `--dagger --split_cycles --context camera_box --gripper <mode>`.
 
