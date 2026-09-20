@@ -432,13 +432,16 @@ def rollout(
             if st.cycle is None or bool(tracker.done[i]):
                 continue
             c, h = st.cycle, int(held[i])
-            to_target = rig.pick_point(i)[:2].to("cpu") - pos[i, c.target, :2]
+            close_cm = 0.0
+            if c.first_close_cm is None:
+                to_target = rig.pick_point(i)[:2].to(pos.device) - pos[i, c.target, :2]
+                close_cm = 100.0 * float(to_target.norm())
             census_step(
                 c,
                 grip_open=bool(signal[i] >= 0.0),
                 held=h,
                 rise=float(pos[i, h, 2] - c.start_z[h]) if h >= 0 else 0.0,
-                close_cm=100.0 * float(to_target.norm()),
+                close_cm=close_cm,
             )
         arm_clamped, overshoot = clamp_arm_actions(action_cpu[:, :6], limits)
         tracker.record_clamps(overshoot)
