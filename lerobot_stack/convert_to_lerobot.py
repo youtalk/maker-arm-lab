@@ -278,6 +278,8 @@ def convert(
     """
     if action_space not in ACTION_SPACES:
         raise ValueError(f"action_space must be one of {ACTION_SPACES}, got {action_space!r}")
+    if gripper not in GRIPPER_MODES:
+        raise ValueError(f"gripper must be one of {GRIPPER_MODES}, got {gripper!r}")
     if sidecar_dir is not None and not split_cycles:
         raise ValueError("sidecar_dir requires split_cycles")
     if lead_keep and not split_cycles:
