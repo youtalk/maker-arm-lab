@@ -129,6 +129,12 @@ def test_the_c1_delta_definition_is_refused():
         c2l.convert([], None, "t/x", 30, action_space="delta")
 
 
+def test_an_unknown_gripper_contract_is_refused():
+    # argparse's choices only guard the command line; convert() is also called directly.
+    with pytest.raises(ValueError, match="gripper"):
+        c2l.convert([], None, "t/x", 30, gripper="analog")
+
+
 def test_delta_prev_resets_anchor_on_segment_boundary(tmp_path):
     # Regression test: each segment's first frame must anchor on measured joints,
     # not on the previous segment's last target. Create a 2-segment shard by
