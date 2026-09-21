@@ -90,8 +90,8 @@ The ladder on the four corpus heaps p0 to p3, K of 50, stowed of 200:
 A debounced version of the finger-contact wait read 172, and a vertical lift bought nothing. A
 flat jaw plane at release was tried inside the same trace and read 136 of 148 cycles, but it
 raised EXTEND overruns, which the pre-registered bar forbids, so it was reversed. The adopted
-fix is a level jaw plane too. The paced wrist roll is what made a level plane reach the release
-without the overruns.
+fix is a level jaw plane too. The wrist roll that keeps 10 degrees off the wrist stops is what
+made a level plane reach the release without the overruns.
 
 The pre-registered bar was 0.90 with no rise in EXTEND overruns or abandons. No variant of the
 steep jaw plane reached it, and the campaign stopped for an owner decision on 2026-09-19. The
@@ -338,9 +338,9 @@ Both were fixed and both cost machine time only.
 - The gate. The best read of the campaign is run g at 400k, 0.4198 on 6000 parts. Round 1's
   checked read is 0.3463 on 3000 parts. Both sit against a gate of 0.85, and nothing has
   cleared the 0.50 R-GATE floor.
-- The official read on seed 20261400. The MS3 selection rule L3, which the ledger keeps in its
-  gate protocol section, still owes the selected checkpoint one read. The owner held it back
-  because the selection numbers already answer the R-GATE question.
+- The official read on seed 20261400. The MS3 selection rule L3 still owes the selected
+  checkpoint one read. The owner held it back because the selection numbers already answer the
+  R-GATE question.
 - The binary control. `base_b` is not gated, so the continuous gripper has no A/B partner. A
   relabelled binary run would restore it at the cost of one conversion and four hours.
 - Why the cycles fail. The measurement lives in the campaign ledger under "The failed-cycle
