@@ -10,7 +10,8 @@ into that ledger before its number arrived.
 
 ## 0. Read this first
 
-The gate did not pass. The best read of the campaign is 0.4498 short of it.
+The gate did not pass. The best read of the campaign is 0.4198 against a gate of 0.85, which is
+0.4302 short of it.
 
 Three results stand. The binary gripper label is unlearnable, and the continuous contract
 that replaces it needed a new teacher release before the corpus reached the recording bar.
@@ -86,6 +87,12 @@ The ladder on the four corpus heaps p0 to p3, K of 50, stowed of 200:
 | level jaw plane at release, first cut | 180 | 0.900 |
 | level jaw plane with the paced wrist roll, adopted | 183 | 0.915 |
 
+A debounced version of the finger-contact wait read 172, and a vertical lift bought nothing. A
+flat jaw plane at release was tried inside the same trace and read 136 of 148 cycles, but it
+raised EXTEND overruns, which the pre-registered bar forbids, so it was reversed. The adopted
+fix is a level jaw plane too. The paced wrist roll is what made a level plane reach the release
+without the overruns.
+
 The pre-registered bar was 0.90 with no rise in EXTEND overruns or abandons. No variant of the
 steep jaw plane reached it, and the campaign stopped for an owner decision on 2026-09-19. The
 owner ruled a redesign of the release. EXTEND now rolls the jaw plane level with a wrist roll
@@ -111,8 +118,7 @@ commits.
   named `gripper_gap_m`. The video decode check reads `CHECK_OK`.
 - `train_g`: `TRAIN_OK` at 600k steps, checkpoints every 50k.
 
-The level release costs two points of corpus yield against the binary teacher. That is the
-price of a label a student can imitate.
+The level release costs two points of corpus yield against the binary teacher.
 
 ## 5. The selection ladder of run g
 
@@ -135,12 +141,10 @@ the highest stowed fraction, ties to the later checkpoint. The winner is 400k. T
 600k intervals lie under the 400k interval with no overlap, so the run peaks near 400k and
 then falls.
 
-0.4198 against a gate of 0.85 leaves the policy 0.43 short. It also sits under the 0.50 R-GATE
+0.4198 against a gate of 0.85 leaves the policy 0.4302 short. It also sits under the 0.50 R-GATE
 floor.
 
 ## 6. The inference protocol defect and the re-read
-
-This is the finding of the campaign.
 
 `gate.sh` and `round.sh` pass no inference flag. Every run g read therefore served the
 checkpoint's own configuration: `n_action_steps` 100 and no temporal ensembling. Design 5.1
@@ -229,7 +233,7 @@ open loop, one policy server per client slot, seeds `20261500 + 100 + p` and
 processes overlap otherwise.
 
 Over 120 episodes the mixed run stowed 5587 of 6000 parts, 0.931. There were 5515 takeovers.
-The rig stowed 5248 of them, handed 267 back failed and declined 347.
+The rig stowed 5248 and handed 267 back failed. It declined 347 more triggers.
 
 | trigger | takeovers |
 | --- | --- |
@@ -282,11 +286,26 @@ run as undertrained rather than as a failed round, and resumed it to 1000k steps
 `resume_train.sh`, which is new because `train_act.sh` never resumes. The resume printed
 `TRAIN_OK` at 1000k steps on 2026-09-21.
 
-The adoption bar stays the run g selection read of 0.4198 plus 0.03, which is 0.4498.
+The resume ran 400k steps in 3 hours 9 minutes at 42.9 steps per second. The resumed
+checkpoints carry seven-digit names, from `0650000` to `1000000`, because LeRobot pads to the
+width of the new total.
 
-The ladder protocol: open loop, no ensembling and no `--n_action_steps` flag, selection seed
-20261300, draws 0 to 3, 1000 parts per cell, four lanes per rung, all four rungs at once. The
-rung that reads at or above 0.4498 is adopted, and the check step on draws 0 to 11 follows.
+The rules below went into the ledger before any number of this ladder arrived.
+
+The selection protocol: open loop, the checkpoint's own `n_action_steps` of 100, no temporal
+ensembling and no `+te` suffix in any payload's `policy_id`, on draws 0 to 3 of seed 20261300,
+20 episodes and 1000 parts per cell. These are the same draws as the round 1 ladder and the run
+g re-read. The launcher `ladder_r1_resume.sh` is new and runs all four rungs at once, four lanes
+each, with port bases 100 apart because `gate_te.sh` puts its aggregating call on `PORT_BASE`
+plus 90. Sixteen lanes put the load average at 33 and the GPU at 47 to 61 percent, above the
+twelve-lane ceiling this host measured, so every lane runs slower and the whole ladder still
+finishes in one wave. The heap read is bound by the MuJoCo step and not by inference, so a lane
+count above the core count buys nothing but context switches.
+
+The check and the adoption: the top rung of the whole round 1 ladder, the four new rungs against
+the old 600k, then runs on draws 0 to 11, 3000 parts. The bar is the run g selection read of
+0.4198 plus 0.03, which is 0.4498. Round 1 is adopted only if that checked read reaches 0.4498.
+A miss ends the rounds at one. 600k already has its checked read at 0.3463.
 
 The ladder is running. Its numbers do not exist yet.
 
@@ -312,14 +331,21 @@ Both were fixed and both cost machine time only.
 
 ## 10. What is still open
 
-- The resumed round 1 ladder of section 8, and the adoption call at 0.4498.
-- The gate. The best read of the campaign is 0.3463 on 3000 parts, against 0.85. Nothing has
-  cleared the 0.50 R-GATE floor either.
-- The official read on seed 20261400. Rule L3 still owes the selected checkpoint one read. The
-  owner held it back because the selection numbers already answer the R-GATE question.
+- The resumed round 1 ladder of section 8, and the adoption call at 0.4498 on its checked read.
+  Round 1 has already missed that bar at 600k with 0.3463. Design 5.5 and the ledger stop the
+  rounds at the first miss and at three, so the resumed ladder is the only thing keeping the
+  rounds open. A miss there ends them at one.
+- The gate. The best read of the campaign is run g at 400k, 0.4198 on 6000 parts. Round 1's
+  checked read is 0.3463 on 3000 parts. Both sit against a gate of 0.85, and nothing has
+  cleared the 0.50 R-GATE floor.
+- The official read on seed 20261400. The MS3 selection rule L3, which the ledger keeps in its
+  gate protocol section, still owes the selected checkpoint one read. The owner held it back
+  because the selection numbers already answer the R-GATE question.
 - The binary control. `base_b` is not gated, so the continuous gripper has no A/B partner. A
   relabelled binary run would restore it at the cost of one conversion and four hours.
-- Why the cycles fail. The commanded gap per cycle has a median of 10 to 32 mm, and the
+- Why the cycles fail. The measurement lives in the campaign ledger under "The failed-cycle
+  measurement of run g at 400k (2026-09-20)", which records its provenance. The commanded gap
+  per cycle has a median of 10 to 32 mm, and the
   teacher's matched landing gap for a 7.8 mm part is 15.8 mm, so the opening scale is right.
   Failed cycles close the jaws to 1 to 5 mm, which is the teacher's own close command, at a
   place where the part is not. The stowed fraction is flat across part widths: 7.8 mm parts
