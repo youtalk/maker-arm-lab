@@ -1,5 +1,6 @@
 """The heap outer loop on a three-part MuJoCo heap, cameras off (phase B design 5.2)."""
 
+import itertools
 import math
 import random
 
@@ -543,6 +544,73 @@ def test_the_half_budget_trigger_fires_on_a_held_part_with_no_lift(monkeypatch):
 def test_the_half_budget_trigger_spares_a_held_part_lifted_past_the_rise(monkeypatch):
     triggers = _half_budget_triggers(monkeypatch, rise=oracle.LIFT_MIN_RISE + 0.01)
     assert "half_budget_no_lift" not in triggers, triggers
+
+
+class _CloseEveryNStepsPolicy:
+    """Holds the arm still with the jaws open, and closes them for the single step whose index
+    is a multiple of ``period``. No takeover runs and the arm never stows, so every cycle ends
+    on its step budget: a period equal to that budget puts each close edge on a boundary."""
+
+    def __init__(self, period):
+        self.period = period
+        self.steps = 0
+        self.context_dim = 0
+        self.policy_id = "fake:close_every_n"
+        self.n_action_steps = 1
+        self.inference = {}
+        self.action_space = "absolute"
+
+    def step(self, state, wrist, overhead, context=None, anchor=None):
+        action = np.zeros((state.shape[0], 7), dtype=np.float32)
+        action[:, :6] = state[:, :6]
+        action[:, 6] = -1.0 if self.steps % self.period == 0 else 1.0
+        self.steps += 1
+        return action
+
+
+def test_no_close_edge_is_read_across_a_cycle_boundary(monkeypatch):
+    # The two sides of a close edge must come from one threshold. A cycle's first step reads
+    # the new cycle's threshold while the step before it read the old one, so that step carries
+    # no edge whatever the policy commands.
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
+    monkeypatch.setattr(dagger_loop, "NO_CLOSE_STEPS", 10_000)
+    env, rig = _env_and_rig(budget=3)
+    _place(env, SPREAD)
+    calls = []
+    seen = {"step": -1, "start": -1}
+    real_reason = loop.trigger_reason
+    real_offer = loop._TriggerState.offer
+
+    def offer(self, env, rig, states, tracker, grip_open, held, pos, ordinal, step):
+        seen["step"] = step
+        seen["start"] = -1 if states[0].cycle is None else states[0].cycle.start_step
+        return real_offer(self, env, rig, states, tracker, grip_open, held, pos, ordinal, step)
+
+    def spy(**kw):
+        calls.append((seen["step"], seen["start"], kw["grip_open"], kw["closed_now"]))
+        return real_reason(**kw)
+
+    monkeypatch.setattr(loop._TriggerState, "offer", offer)
+    monkeypatch.setattr(loop, "trigger_reason", spy)
+    _rollout(
+        env,
+        rig,
+        _CloseEveryNStepsPolicy(40),
+        budget=3,
+        # No takeover ever runs: the policy must keep driving every cycle to its step budget.
+        takeover=loop.TakeoverConfig(random_interval=None, max_per_episode_factor=0.0),
+    )
+    env.close()
+    boundary = [(step, closed) for step, start, _, closed in calls if step == start]
+    assert boundary and not any(closed for _, closed in boundary), calls
+    # The guard really bit: on at least one boundary the jaws read open the step before and
+    # closed on the boundary step itself, which is the edge the old code would have reported.
+    edges = [
+        cur[0]
+        for prev, cur in itertools.pairwise(calls)
+        if cur[0] == cur[1] and prev[2] and not cur[2] and prev[0] == cur[0] - 1
+    ]
+    assert edges, calls
 
 
 def test_a_failed_takeover_ends_its_cycle_and_the_episode_cap_holds(monkeypatch):
