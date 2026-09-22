@@ -824,12 +824,21 @@ class OracleRig:
 
         Those recorders fire inside env.step(), so the stash is refreshed in place before it.
         NOT ``target_brick or -1`` -- brick 0 is falsy and must survive.
+
+        ``oracle_cycle_brick`` is the ACCOUNTING id: the batch loop counts cycles by it and
+        the converter's ``--split_cycles`` cuts on it, so it names the retreating cycle's part
+        until RETREAT ends. ``oracle_marker_part`` and ``oracle_cycle_target`` are what the
+        policy sees, and under the 2026-09-22 protocol they switch to the pre-selected next
+        part the moment RELEASE ends (``EnvOracle.preselects_next_target``).
         """
         if not hasattr(self.env, "oracle_cycle_phase"):
             self.env.oracle_cycle_phase = torch.full(
                 (self.num_envs,), -1, dtype=torch.int8, device=self.device
             )
             self.env.oracle_cycle_brick = torch.full(
+                (self.num_envs,), -1, dtype=torch.int8, device=self.device
+            )
+            self.env.oracle_marker_part = torch.full(
                 (self.num_envs,), -1, dtype=torch.int8, device=self.device
             )
             self.env.oracle_cycle_target = torch.zeros(
@@ -848,8 +857,13 @@ class OracleRig:
             self.env.oracle_cycle_brick[i] = brick_i if brick_i is not None else -1
             # The target channel (MS6 heap lever): the heap teacher's grasp on its target,
             # zeros on the six-brick oracle, between cycles and on an idle env.
+            marker_i = brick_i
             start = getattr(orc_i, "_brick_start", None) if brick_i is not None else None
             chosen = getattr(orc_i, "grasp", None) if start is not None else None
+            preselected = brick_i is not None and orc_i.preselects_next_target
+            if preselected and orc_i.next_brick is not None:
+                marker_i, start, chosen = orc_i.next_brick, orc_i.next_brick_start, orc_i.next_grasp
+            self.env.oracle_marker_part[i] = marker_i if marker_i is not None else -1
             self.env.oracle_cycle_target[i] = torch.tensor(target_context(start, chosen))
 
     def _advance_phases(self, dones: torch.Tensor) -> None:
