@@ -552,3 +552,103 @@ def test_the_handshake_carries_the_gripper_contract(tmp_path):
         gripper="continuous",
     )
     assert srv._hello_ack()["gripper"] == "continuous"
+
+
+def _chunk_of(state, n):
+    """A per-sample chunk: row b, step t is state[b] + t in every column."""
+    return np.stack([state + t for t in range(n)], axis=1).astype(np.float32)
+
+
+def test_action_queues_drain_in_lockstep_without_flags_and_replan_per_env():
+    from policy_server import ActionQueues
+
+    n = 3
+    seen = []
+
+    def predict(obs):
+        seen.append(obs["state"][:, 0].tolist())
+        return _chunk_of(obs["state"], n)
+
+    def obs(step):
+        state = np.zeros((2, 7), np.float32)
+        state[:, 0] = [10 * step, 100 + 10 * step]  # the two envs differ and drift
+        return {"state": state}
+
+    queues = ActionQueues(predict, n)
+    # Steps 0 to 2: one forward over both envs at step 0, then the queue heads, which is what
+    # ACTPolicy.select_action's single queue gives.
+    got = [queues.step(obs(s)) for s in range(3)]
+    assert seen == [[0.0, 100.0]]
+    for t in range(3):
+        np.testing.assert_array_equal(got[t], _chunk_of(obs(0)["state"], n)[:, t])
+    # Step 3: both queues are empty, one refill from step 3's observation.
+    queues.step(obs(3))
+    assert seen[-1] == [30.0, 130.0]
+    # Step 4: env 1 replans from its own row alone; env 0 keeps draining its queue.
+    out = queues.step(obs(4), np.array([False, True]))
+    assert seen[-1] == [140.0]
+    np.testing.assert_array_equal(out[0], _chunk_of(obs(3)["state"], n)[0, 1])
+    np.testing.assert_array_equal(out[1], _chunk_of(obs(4)["state"], n)[1, 0])
+    out = queues.step(obs(5))
+    assert seen[-1] == [140.0]
+    np.testing.assert_array_equal(out[0], _chunk_of(obs(3)["state"], n)[0, 2])
+    np.testing.assert_array_equal(out[1], _chunk_of(obs(4)["state"], n)[1, 1])
+    queues.reset()
+    queues.step(obs(6))
+    assert seen[-1] == [60.0, 160.0]
+
+
+def test_the_step_hands_the_replan_flag_to_the_policy_only_when_sent():
+    calls = {"reset": 0, "replan": []}
+
+    def fake_policy(state, wrist, overhead, context=None, replan=None):
+        calls["replan"].append(None if replan is None else replan.tolist())
+        return np.zeros((state.shape[0], 7), dtype=np.float32)
+
+    req, thread = _start_server(fake_policy, calls)
+    send_message(req, {"type": "step", "batch": 2}, _obs())
+    assert recv_message(req)[0]["type"] == "action"
+    send_message(req, {"type": "step", "batch": 2}, {**_obs(), "replan": np.array([True, False])})
+    assert recv_message(req)[0]["type"] == "action"
+    send_message(req, {"type": "step", "batch": 2}, {**_obs(), "replan": np.zeros(3, dtype=bool)})
+    header, _ = recv_message(req)
+    assert header["type"] == "error" and header["error"] == "bad_obs"
+    assert "replan" in header["message"]
+    _stop_server(req, thread)
+    assert calls["replan"] == [None, [True, False]]
+
+
+CHECKPOINT = Path.home() / "data/maker-arm-ms6/m/train/checkpoints/400000/pretrained_model"
+
+
+@pytest.mark.skipif(not CHECKPOINT.is_dir(), reason="the m 400k checkpoint is not on this host")
+def test_the_per_env_queue_equals_the_batched_forward_on_the_checkpoint():
+    """ACT in eval mode is per-sample: an env replanned alone must get what it gets inside
+    the batch, step for step, through the real checkpoint's chunk path."""
+    from policy_server import load_act
+
+    n = 3
+    policy_fn, reset_fn, _id, _n, _inf, context_dim, _space, _grip = load_act(
+        str(CHECKPOINT), "cpu", n_action_steps=n
+    )
+    rng = np.random.default_rng(0)
+    state = rng.uniform(-1.0, 1.0, (2, 7)).astype(np.float32)
+    state[:, 6] = 0.5
+    wrist = rng.integers(0, 256, (2, 224, 224, 3), dtype=np.uint8)
+    overhead = rng.integers(0, 256, (2, 224, 224, 3), dtype=np.uint8)
+    context = rng.uniform(-0.2, 0.2, (2, context_dim)).astype(np.float32)
+    reset_fn()
+    batched = [policy_fn(state, wrist, overhead, context) for _ in range(n)]
+    assert batched[0].shape == (2, 7) and not np.array_equal(batched[0], batched[1])
+    for b in range(2):
+        reset_fn()
+        rows = (state[b : b + 1], wrist[b : b + 1], overhead[b : b + 1], context[b : b + 1])
+        alone = [policy_fn(*rows) for _ in range(n)]
+        for t in range(n):
+            np.testing.assert_allclose(alone[t][0], batched[t][b], atol=1e-5)
+    # A replan mid-chunk cuts env 1's queue and leaves env 0's alone.
+    reset_fn()
+    first = policy_fn(state, wrist, overhead, context)
+    cut = policy_fn(state, wrist, overhead, context, replan=np.array([False, True]))
+    np.testing.assert_array_equal(cut[0], batched[1][0])
+    np.testing.assert_allclose(cut[1], first[1], atol=1e-5)

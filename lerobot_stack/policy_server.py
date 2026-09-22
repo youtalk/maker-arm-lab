@@ -21,6 +21,7 @@ rather than a failure, which is the worse of the two outcomes.
 import argparse
 import json
 import traceback
+from collections import deque
 
 import numpy as np
 import zmq
@@ -32,6 +33,7 @@ from policy_protocol import (
     CONTEXT_KEY,
     OBS_SCHEMA,
     PROTOCOL_VERSION,
+    REPLAN_KEY,
     recv_message,
     send_message,
     validate_action,
@@ -160,8 +162,14 @@ class PolicyServer:
                         },
                     )
                     return True
+                # The replan flag is passed only when the client sent one, so a policy_fn
+                # that predates it (every test fake) keeps its four-argument signature.
+                replan = arrays.get(REPLAN_KEY)
+                extra = {} if replan is None else {"replan": replan}
                 action = np.asarray(
-                    self._policy_fn(arrays["state"], arrays["wrist"], arrays["overhead"], context),
+                    self._policy_fn(
+                        arrays["state"], arrays["wrist"], arrays["overhead"], context, **extra
+                    ),
                     dtype=np.float32,
                 )
                 validate_action(action, batch)
@@ -200,6 +208,46 @@ class PolicyServer:
     def serve_forever(self) -> None:
         while self.handle_one():
             pass
+
+
+class ActionQueues:
+    """One action queue per env, the per-env twin of ``ACTPolicy.select_action``'s queue.
+
+    LeRobot keeps ONE queue for the whole batch, refilled every ``n_action_steps`` from one
+    forward, so every env replans in lockstep and a target row written mid-chunk reaches the
+    policy 0 to n_action_steps - 1 steps late. Here ``step`` refills the queues of the envs
+    whose queue is empty or whose ``replan`` flag is set, from one forward over that sub-batch
+    only, and every env pops the head of its own queue. ACT in eval mode is per-sample, so the
+    sub-batch forward is the batched forward restricted to those rows. With no flags every
+    queue empties on the same step and the refill is the lockstep one.
+
+    ``predict_chunk(obs) -> (b, n_action_steps, action_dim)`` takes the observation arrays of
+    the sub-batch, keyed like the wire (state, wrist, overhead, optional context).
+    """
+
+    def __init__(self, predict_chunk, n_action_steps: int):
+        self._predict = predict_chunk
+        self._n = n_action_steps
+        self._queues: list[deque] = []
+
+    def reset(self) -> None:
+        self._queues = []
+
+    def step(self, obs: dict[str, np.ndarray], replan: np.ndarray | None = None) -> np.ndarray:
+        batch = int(obs["state"].shape[0])
+        if len(self._queues) != batch:
+            self._queues = [deque() for _ in range(batch)]
+        flags = np.zeros(batch, dtype=bool) if replan is None else np.asarray(replan, dtype=bool)
+        need = [i for i in range(batch) if flags[i] or not self._queues[i]]
+        if need:
+            chunk = np.asarray(self._predict({k: v[need] for k, v in obs.items()}))
+            if chunk.shape[:2] != (len(need), self._n):
+                raise ValueError(
+                    f"predict_chunk returned {chunk.shape}, want ({len(need)}, {self._n}, ...)"
+                )
+            for row, i in enumerate(need):
+                self._queues[i] = deque(chunk[row])
+        return np.stack([q.popleft() for q in self._queues])
 
 
 def resolve_inference_overrides(
@@ -455,9 +503,7 @@ def load_act(
     def _images(array: np.ndarray) -> torch.Tensor:
         return torch.from_numpy(array).permute(0, 3, 1, 2).to(torch.float32) / 255.0
 
-    def policy_fn(
-        state: np.ndarray, wrist: np.ndarray, overhead: np.ndarray, context: np.ndarray | None
-    ) -> np.ndarray:
+    def _batch(state, wrist, overhead, context) -> dict:
         batch = {"observation.state": torch.from_numpy(state)}
         if uses_images:
             wrist, overhead = blank_streams(wrist, overhead, blank_camera)
@@ -465,20 +511,50 @@ def load_act(
             batch["observation.images.overhead"] = _images(overhead)
         if context_dim:
             batch["observation.environment_state"] = torch.from_numpy(context)
-        batch = pre(batch)
-        with torch.inference_mode():
-            action = policy.select_action(batch)
-        action = post(action)
-        action = np.asarray(action.detach().to("cpu"), dtype=np.float32)
+        return pre(batch)
+
+    def _finish(action) -> np.ndarray:
+        action = np.asarray(post(action).detach().to("cpu"), dtype=np.float32)
         if marker is not None:
             action = squash_gripper_logit(
                 action, marker["gripper_raw_mean"], marker["gripper_raw_std"]
             )
         return action
 
+    def predict_chunk(obs: dict) -> np.ndarray:
+        """(b, n_action_steps, 7): the chunk head ``select_action`` would queue, unnormalized
+        in one call (the unnormalizer is elementwise, so this equals per-step ``post``)."""
+        batch = _batch(obs["state"], obs["wrist"], obs["overhead"], obs.get("context"))
+        with torch.inference_mode():
+            chunk = policy.predict_action_chunk(batch)[:, : policy.config.n_action_steps]
+        return _finish(chunk)
+
+    queues = ActionQueues(predict_chunk, int(policy.config.n_action_steps))
+
+    def policy_fn(
+        state: np.ndarray,
+        wrist: np.ndarray,
+        overhead: np.ndarray,
+        context: np.ndarray | None,
+        replan: np.ndarray | None = None,
+    ) -> np.ndarray:
+        if policy.config.temporal_ensemble_coeff is not None:
+            # The ensembler runs the model every step, so there is no queue to cut short.
+            with torch.inference_mode():
+                action = policy.select_action(_batch(state, wrist, overhead, context))
+            return _finish(action)
+        obs = {"state": state, "wrist": wrist, "overhead": overhead}
+        if context_dim:
+            obs["context"] = context
+        return queues.step(obs, replan)
+
+    def reset_fn() -> None:
+        policy.reset()
+        queues.reset()
+
     return (
         policy_fn,
-        policy.reset,
+        reset_fn,
         inference_policy_id(
             checkpoint_dir,
             overrides,
