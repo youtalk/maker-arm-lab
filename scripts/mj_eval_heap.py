@@ -87,6 +87,24 @@ def parse_args(argv=None) -> argparse.Namespace:
         "(every cycle of the budget at its full step budget)",
     )
     parser.add_argument(
+        "--select_at_release",
+        action="store_true",
+        help="select the next target when the release opens the jaws after a stow "
+        "(loop.release_ready), not at the retreat point",
+    )
+    parser.add_argument(
+        "--replan_on_switch",
+        action="store_true",
+        help="send the per-env replan flag: the server refills that env's action queue on "
+        "the step a target row is written",
+    )
+    parser.add_argument(
+        "--row_refresh",
+        action="store_true",
+        help="rewrite the target row from the live scene at a re-open that lifted nothing "
+        "(the teacher's REOPEN refresh)",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -172,6 +190,9 @@ def main(argv=None) -> int:
             cycle_budget=args.cycle_budget,
             max_wall_minutes=args.max_wall_minutes,
             on_frame=frame_writer(args.frames_dir) if args.frames_dir else None,
+            select_at_release=args.select_at_release,
+            replan_on_switch=args.replan_on_switch,
+            row_refresh=args.row_refresh,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

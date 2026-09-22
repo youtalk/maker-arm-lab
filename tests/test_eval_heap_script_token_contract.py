@@ -40,3 +40,9 @@ def test_usage_errors_print_the_fail_token():
 def test_the_heap_client_takes_the_gripper_flag():
     text = SCRIPT.read_text()
     assert '"--gripper"' in text and "gripper_mode=args.gripper" in text
+
+
+def test_the_heap_client_takes_the_protocol_switches():
+    text = SCRIPT.read_text()
+    for name in ("select_at_release", "replan_on_switch", "row_refresh"):
+        assert f'"--{name}"' in text and f"{name}=args.{name}" in text

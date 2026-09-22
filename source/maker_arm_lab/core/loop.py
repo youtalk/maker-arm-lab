@@ -16,6 +16,14 @@ own. The metric never reads the cycle end: it is the at-rest grader at the episo
 There is no reset between cycles. The episode ends when the selector returns None (no
 candidate, or the cycle budget is spent) or every part is stowed.
 
+Three protocol switches, all off by default so the old protocol stays reproducible
+(2026-09-22): ``select_at_release`` selects the next target when the release opens the jaws
+(``release_ready``) instead of at the retreat (``select_ready``); ``replan_on_switch`` sends
+the server a per-env replan flag on the step a target row is written, so the policy's chunk
+is cut at the switch (``policy_server.ActionQueues``); ``row_refresh`` rewrites the row from
+the live scene at a re-open that lifted nothing (``reopen_edge``, ``refreshed_row``), the
+teacher's REOPEN refresh. The payload's ``inference`` block records all three.
+
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
 loop's own end-to-end check. A takeover holds the env until the rig hands it back at
@@ -107,6 +115,21 @@ def select_ready(pick_point, open_fraction: float, waited: int) -> bool:
     return near <= SELECT_RETREAT_RADIUS and open_fraction >= SELECT_OPEN_FRACTION
 
 
+def release_ready(open_fraction: float, waited: int, after_stow: bool) -> bool:
+    """``select_at_release``: may the loop hand the policy its next target now? Pure.
+
+    After a stow (``after_stow``) the release is done when the measured jaw opening reads
+    ``SELECT_OPEN_FRACTION``, with no retreat radius. The corpus teacher switches the row at
+    the end of its RETREAT, but the policy retreats to about x 0.31 and, with the stale row
+    and marker on the part now in the bin, never settles inside ``SELECT_RETREAT_RADIUS``:
+    on run m's 400k read two thirds of ``select_ready``'s waits ran to the cap, 26 % of all
+    steps. The same cap still bounds this wait. After any other end the loop selects at once.
+    """
+    if not after_stow or waited >= int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET):
+        return True
+    return open_fraction >= SELECT_OPEN_FRACTION
+
+
 """Control steps a part must stay between the jaws to count as held in the cycle census: the
 start of the six-brick hold window. A shorter pinch is a brush."""
 
@@ -164,6 +187,15 @@ def open_signal(
     return g - close_below.to(device="cpu", dtype=torch.float32)
 
 
+def _best_grasp(selector, scene, target: int):
+    """The grasp the teacher ranks first on ``target`` alone, the way ``HeapOracle._regrasp``
+    and ``aim_hover_at`` rank it, or None when no closing axis lies near the jaw plane."""
+    mask = torch.zeros(selector.num_bricks, dtype=torch.bool)
+    mask[target] = True
+    ranked = selector._ranked(scene, mask)
+    return ranked[0] if ranked else None
+
+
 def cycle_close_below(selector, scene, target: int) -> float:
     """m: the continuous close threshold of a cycle on ``target``, read once when it opens.
 
@@ -172,12 +204,20 @@ def cycle_close_below(selector, scene, target: int) -> float:
     axis near the jaw plane), the part's smallest footprint side: the width any grasp on a
     part lying flat would close across.
     """
-    mask = torch.zeros(selector.num_bricks, dtype=torch.bool)
-    mask[target] = True
-    ranked = selector._ranked(scene, mask)
-    if ranked:
-        return float(ranked[0].width)
+    chosen = _best_grasp(selector, scene, target)
+    if chosen is not None:
+        return float(chosen.width)
     return float(min(selector.parts[target].size[:2]))
+
+
+def refreshed_row(row, selector, scene, target: int) -> list[float]:
+    """``row_refresh``: the target row after the teacher's REOPEN refresh. The part's live
+    centre and the grasp re-ranked on it (``target_context``); when nothing ranks any more the
+    served grasp columns of ``row`` stay, as ``HeapOracle._regrasp`` keeps its old grasp. Pure."""
+    chosen = _best_grasp(selector, scene, target)
+    if chosen is not None:
+        return target_context(scene.brick_pos[target], chosen)
+    return [float(v) for v in scene.brick_pos[target][:3]] + [float(v) for v in row[3:7]]
 
 
 @dataclass
@@ -224,6 +264,7 @@ class Cycle:
     last_held: int = -1  # and at the last one
     wait_steps: int = 0  # the retreat wait this selection spent (``select_ready``)
     wait_capped: bool = False  # the wait ended on its cap, not on the retreat
+    refreshes: int = 0  # target rows ``row_refresh`` rewrote within the cycle
 
 
 @dataclass
@@ -321,6 +362,12 @@ def census_step(
         cycle.max_rise = max(cycle.max_rise, rise)
 
 
+def reopen_edge(cycle: Cycle, grip_open: bool) -> bool:
+    """``row_refresh``: is this step the open edge after a close that lifted nothing, the
+    policy's REOPEN? Read before ``census_step`` moves ``open_prev``. Pure."""
+    return grip_open and cycle.open_prev is False and cycle.max_rise < oracle.LIFT_MIN_RISE
+
+
 def first_close_geometry(
     cycle: Cycle, *, gap: float, pick, target_pos, target_quat, ctx_pos=None
 ) -> None:
@@ -371,6 +418,7 @@ CENSUS_EXPORT = (
     "close_edges",
     "wait_steps",
     "wait_capped",
+    "refreshes",
 )
 """The ``Cycle`` fields each episode's ``cycle_census`` row exports, plus the two is_target
 flags of ``first_held`` and ``last_held``. Observation only, never the metric."""
@@ -435,11 +483,16 @@ def rollout(
     takeover=None,
     log=print,
     on_frame=None,
+    select_at_release: bool = False,
+    replan_on_switch: bool = False,
+    row_refresh: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
     ``policy`` is a ``policy_client.ServerPolicy`` or None for the oracle driver.
     ``takeover`` is a ``TakeoverConfig`` (the DAgger mode, phase B design 5.5) or None.
+    The three switches are the module docstring's; ``replan_on_switch`` needs a policy whose
+    ``step`` takes ``replan``, and the flag is left off the wire when the switch is off.
     ``on_frame(ordinal, step_in_cycle, wrist, overhead)`` is called with env 0's two policy
     frames every ``FRAME_EVERY`` steps of each of its cycles, for a forensics dump.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
@@ -494,6 +547,12 @@ def rollout(
     triggers = (
         _TriggerState(num_envs, takeover, run_seed, cycle_budget) if takeover is not None else None
     )
+    switches = {
+        "select_at_release": bool(select_at_release),
+        "replan_on_switch": bool(replan_on_switch),
+        "row_refresh": bool(row_refresh),
+    }
+    replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
 
     started = time.monotonic()
     max_steps = int(env.max_episode_length)
@@ -534,13 +593,15 @@ def rollout(
                 loop_done[i] = True
                 st.done_reason = "all_stowed"
                 continue
-            if st.idle_since is not None and not select_ready(
-                rig.pick_point(i).to("cpu"),
-                float(policy_state(robot.data.joint_pos)[i, 6]),
-                step - st.idle_since,
-            ):
-                st.select_wait_steps += 1
-                continue
+            if st.idle_since is not None:
+                opening = float(policy_state(robot.data.joint_pos)[i, 6])
+                if select_at_release:
+                    ready = release_ready(opening, step - st.idle_since, st.reasons[-1] == "stowed")
+                else:
+                    ready = select_ready(rig.pick_point(i).to("cpu"), opening, step - st.idle_since)
+                if not ready:
+                    st.select_wait_steps += 1
+                    continue
             scene = rig.snapshot(i)
             target = st.selector.select_target(scene)
             if target is None:
@@ -565,6 +626,7 @@ def rollout(
             env.target_part[i] = target
             if ctx_target is not None:
                 ctx_target[i] = target_context(scene.brick_pos[target], st.selector.grasp)
+            replan[i] = True
             if policy is None:
                 _take_over(rig, env, st, i, ordinal, reason="driver")
         close_below = torch.tensor(
@@ -589,7 +651,11 @@ def rollout(
                 and (step - c0.start_step) % FRAME_EVERY == 0
             ):
                 on_frame(c0.ordinal, step - c0.start_step, wrist[0], overhead[0])
-            policy_action = torch.from_numpy(policy.step(state, wrist, overhead, context=context))
+            extra = {"replan": replan.numpy().copy()} if replan_on_switch else {}
+            policy_action = torch.from_numpy(
+                policy.step(state, wrist, overhead, context=context, **extra)
+            )
+            replan.zero_()
             if triggers is not None:
                 grip_open = grip_open_flags(policy_action[:, 6], gripper_mode, close_below)
                 triggers.offer(env, rig, states, tracker, grip_open, held, pos, ordinal, step)
@@ -607,6 +673,13 @@ def rollout(
             c, h = st.cycle, int(held[i])
             pick = rig.pick_point(i).to(pos.device)
             grip_open = bool(signal[i] >= 0.0)
+            if row_refresh and rig.idle[i] and reopen_edge(c, grip_open):
+                c.refreshes += 1
+                if ctx_target is not None:
+                    ctx_target[i] = refreshed_row(
+                        ctx_target[i], st.selector, rig.snapshot(i), c.target
+                    )
+                replan[i] = True
             close_cm = 0.0
             if c.first_close_at is None:
                 close_cm = 100.0 * float((pick[:2] - pos[i, c.target, :2]).norm())
@@ -743,7 +816,7 @@ def rollout(
         "cycle_step_budget": CYCLE_STEP_BUDGET,
         "policy_id": "oracle" if policy is None else policy.policy_id,
         "n_action_steps": None if policy is None else policy.n_action_steps,
-        "inference": {} if policy is None else policy.inference,
+        "inference": {} if policy is None else {**policy.inference, "loop": switches},
         "context": context_mode,
         "gripper": gripper_mode,
         "episode_draws": bool(getattr(env.cfg, "episode_draws", False)),

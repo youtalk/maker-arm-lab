@@ -865,3 +865,113 @@ def test_a_part_inside_the_bin_but_still_moving_ends_the_cycle_and_not_the_metri
     assert not bool(per_brick_stowed(env)[0, 0])
     assert bool(per_brick_stowed(env, max_speed=math.inf)[0, 0])
     env.close()
+
+
+def test_release_ready_selects_at_the_release_after_a_stow_and_at_once_otherwise():
+    cap = int(loop.SELECT_WAIT_FRACTION * loop.CYCLE_STEP_BUDGET)
+    assert loop.release_ready(1.0, 0, after_stow=True)
+    assert loop.release_ready(loop.SELECT_OPEN_FRACTION, 5, after_stow=True)
+    assert not loop.release_ready(0.3, cap - 1, after_stow=True)  # the jaws are still closing
+    assert loop.release_ready(0.3, cap, after_stow=True)  # the cap
+    assert loop.release_ready(0.0, 0, after_stow=False)  # a budget end selects at once
+
+
+def test_reopen_edge_is_the_open_after_a_close_that_lifted_nothing():
+    cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
+    assert not loop.reopen_edge(cycle, True)  # a cycle's first step has no edge
+    loop.census_step(cycle, grip_open=True, held=-1, rise=0.0, close_cm=5.0)
+    assert not loop.reopen_edge(cycle, True)  # open after open
+    loop.census_step(cycle, grip_open=False, held=0, rise=0.0, close_cm=1.0)
+    assert not loop.reopen_edge(cycle, False)  # still closed
+    assert loop.reopen_edge(cycle, True)  # the re-open, and nothing rose
+    loop.census_step(cycle, grip_open=False, held=0, rise=oracle.LIFT_MIN_RISE, close_cm=1.0)
+    assert not loop.reopen_edge(cycle, True)  # the part rose: a lift, not a REOPEN
+
+
+def test_refreshed_row_follows_the_live_centre_and_keeps_the_grasp_when_nothing_ranks(
+    monkeypatch,
+):
+    env, rig = _env_and_rig()
+    _place(env, SPREAD)
+    scene = rig.snapshot(0)
+    env.close()
+    selector = loop._selector(rig, 0)
+    target = selector.select_target(scene)
+    row = np.array(loop.target_context(scene.brick_pos[target], selector.grasp), dtype=np.float32)
+    scene.brick_pos[target, :2] += 0.02
+    fresh = loop.refreshed_row(row, selector, scene, target)
+    assert fresh[:3] == pytest.approx(scene.brick_pos[target].tolist())
+    assert fresh[3] ** 2 + fresh[4] ** 2 == pytest.approx(1.0) and fresh[5] > 0.0
+    monkeypatch.setattr(selector, "_ranked", lambda scene, mask: [])
+    kept = loop.refreshed_row(row, selector, scene, target)
+    assert kept[:3] == pytest.approx(scene.brick_pos[target].tolist())
+    assert kept[3:] == pytest.approx(row[3:].tolist())
+
+
+class _ReplanSpyPolicy(_HoldPolicy):
+    """Holds still with the jaws open, closes them on the steps in ``closes``, and records the
+    replan flags the loop sends (None when the switch is off)."""
+
+    def __init__(self, closes=()):
+        super().__init__()
+        self.flags = []
+        self.closes = set(closes)
+        self.steps = 0
+
+    def step(self, state, wrist, overhead, context=None, anchor=None, replan=None):
+        self.flags.append(None if replan is None else replan.tolist())
+        action = super().step(state, wrist, overhead, context, anchor)
+        if self.steps in self.closes:
+            action[:, 6] = -1.0
+        self.steps += 1
+        return action
+
+
+def test_the_switches_select_at_once_after_a_budget_end_refresh_at_a_reopen_and_flag_it(
+    monkeypatch,
+):
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
+    env, rig = _env_and_rig(budget=3)
+    _place(env, SPREAD)
+    policy = _ReplanSpyPolicy(closes={5})  # closed at step 5, open again at 6: a REOPEN
+    payload = _rollout(
+        env,
+        rig,
+        policy,
+        budget=3,
+        select_at_release=True,
+        replan_on_switch=True,
+        row_refresh=True,
+    )
+    env.close()
+    ep = payload["episodes"][0]
+    assert payload["inference"]["loop"] == {
+        "select_at_release": True,
+        "replan_on_switch": True,
+        "row_refresh": True,
+    }
+    # Every cycle ended on its budget, so no selection waited for a retreat.
+    assert ep["cycle_reasons"] == ["budget"] * 3 and ep["select_wait_steps"] == 0
+    assert [r["wait_steps"] for r in ep["cycle_census"]] == [0, 0, 0]
+    assert [r["refreshes"] for r in ep["cycle_census"]] == [1, 0, 0]
+    # The flag rides on the request after a row is written: the selections at steps 0, 40 and
+    # 80, and the refresh read at step 6 reaches the policy on step 7.
+    assert [i for i, f in enumerate(policy.flags) if f == [True]] == [0, 7, 40, 80]
+    # Off, the flag stays off the wire (an older server would reject it).
+    env, rig = _env_and_rig(budget=1)
+    _place(env, SPREAD)
+    policy = _ReplanSpyPolicy()
+    _rollout(env, rig, policy, budget=1)
+    env.close()
+    assert set(policy.flags) == {None}
+
+
+def test_the_release_selection_waits_for_nothing_after_the_teachers_stow():
+    env, rig = _env_and_rig()
+    _place(env, SPREAD)
+    ep = _rollout(env, rig, None, select_at_release=True)["episodes"][0]
+    env.close()
+    # The rig hands back at RETREAT with the jaws at the full gap, so the release read holds
+    # on the step the cycle closes.
+    assert ep["cycle_reasons"] == ["stowed"] * 3
+    assert [r["wait_steps"] for r in ep["cycle_census"]] == [0, 0, 0]
