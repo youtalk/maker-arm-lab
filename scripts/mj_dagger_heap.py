@@ -33,6 +33,7 @@ from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.core.loop import (
     CYCLE_STEP_BUDGET,
+    HELD_NO_RISE_STEPS,
     TakeoverConfig,
     cycle_budget,
     episode_length_s,
@@ -86,6 +87,31 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--server", type=str, default="tcp://127.0.0.1:5555")
     parser.add_argument(
         "--round", type=int, default=1, help="DAgger round: the random interval doubles per round"
+    )
+    parser.add_argument(
+        "--trigger",
+        choices=("random", "failure"),
+        default="random",
+        help="random: the round's mean interval plus the trouble triggers (campaign l and m); "
+        "failure: no random draw, and a takeover when a held part has not risen for "
+        "loop.HELD_NO_RISE_STEPS steps (loop.HELD_NO_RISE) or at half the budget with no lift",
+    )
+    parser.add_argument(
+        "--select_at_release",
+        action="store_true",
+        help="select the next target when the release opens the jaws (loop.release_ready)",
+    )
+    parser.add_argument(
+        "--replan_on_switch",
+        action="store_true",
+        help="send the server a per-env replan flag on the step a target row is written",
+    )
+    parser.add_argument(
+        "--squeeze_floor",
+        action="store_true",
+        help="cap the policy's closing gap command at the teacher's close set point "
+        "(loop.floored_gap); the policy's frames are not recorded, so this only changes what "
+        "the policy executes",
     )
     parser.add_argument("--out_dir", type=str, required=True, help="where the shard is written")
     parser.add_argument("--shard_name", type=str, default="shard")
@@ -156,6 +182,12 @@ def main(argv=None) -> int:
             env, env.cfg.bin_layout, oracle.OracleNoise(), rig_rng, oracle_factory=factory
         )
         policy = policy_client.ServerPolicy(args.server)
+        if args.trigger == "random":
+            takeover = TakeoverConfig(
+                random_interval=TAKEOVER_MEAN_INTERVAL * 2 ** (args.round - 1)
+            )
+        else:
+            takeover = TakeoverConfig(random_interval=None, held_no_rise_steps=HELD_NO_RISE_STEPS)
         payload = rollout(
             env,
             rig,
@@ -165,9 +197,13 @@ def main(argv=None) -> int:
             permutation=perm,
             cycle_budget=args.cycle_budget,
             max_wall_minutes=args.max_wall_minutes,
-            takeover=TakeoverConfig(random_interval=TAKEOVER_MEAN_INTERVAL * 2 ** (args.round - 1)),
+            takeover=takeover,
+            select_at_release=args.select_at_release,
+            replan_on_switch=args.replan_on_switch,
+            squeeze_floor=args.squeeze_floor,
         )
         payload["round"] = args.round
+        payload["trigger"] = args.trigger
         payload["parts_split"] = args.parts_split
         payload["shard"] = str(Path(args.out_dir) / f"{args.shard_name}.hdf5")
     except EvalFailure as err:
