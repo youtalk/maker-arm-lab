@@ -77,7 +77,7 @@ def _rollout(env, rig, policy, budget=4, **kwargs):
 
 def test_cycle_budget_and_episode_length_follow_the_gate_rule():
     assert loop.cycle_budget(50) == 65 and loop.cycle_budget(3) == 4
-    assert loop.episode_length_s(65) == pytest.approx(65 * loop.CYCLE_STEP_BUDGET / 30.0)
+    assert loop.episode_length_s(65) == pytest.approx(65 * (loop.CYCLE_STEP_BUDGET + 300) / 30.0)
 
 
 def test_grip_open_flags_read_both_gripper_contracts():

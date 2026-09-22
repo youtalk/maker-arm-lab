@@ -128,8 +128,12 @@ def cycle_budget(k: int) -> int:
 
 
 def episode_length_s(budget: int, control_hz: float = 30.0) -> float:
-    """The env's episode length: every cycle of the budget at its full step budget."""
-    return budget * CYCLE_STEP_BUDGET / control_hz
+    """The env's episode length: every cycle of the budget at its full step budget, plus the
+    retreat wait at its cap before each. The wait lies outside the cycles, so without its
+    allowance the episode's step cap binds before the cycle budget does: on the 400k check of
+    run m (2026-09-22), 41 of 60 episodes ended on the step cap at a median of 60 of 65 cycles,
+    with a quarter of their steps spent in the wait."""
+    return budget * (CYCLE_STEP_BUDGET + int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET)) / control_hz
 
 
 def grip_open_flags(
