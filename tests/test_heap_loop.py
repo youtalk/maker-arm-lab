@@ -743,6 +743,53 @@ def test_census_step_counts_the_duty_the_hold_and_the_first_close():
     assert cycle.holding is False
 
 
+def test_the_census_reads_the_first_close_geometry_and_the_hold_ids():
+    # The served closing axis points along +y; the part has yawed 90 degrees since, so its
+    # body x axis now lies along +y and is the live closing axis.
+    cycle = loop.Cycle(
+        ordinal=1,
+        target=2,
+        start_step=0,
+        stowed_before=set(),
+        close_below=0.016,
+        heading=math.pi / 2,
+    )
+    yaw90 = torch.tensor([math.cos(math.pi / 4), 0.0, 0.0, math.sin(math.pi / 4)])
+    loop.first_close_geometry(
+        cycle,
+        gap=0.020,
+        pick=torch.tensor([0.01, 0.02, 0.05]),
+        target_pos=torch.tensor([0.0, 0.0, 0.04]),
+        target_quat=yaw90,
+        ctx_pos=np.array([0.03, 0.0, 0.04, 0.0, 1.0, 0.016, 0.005], dtype=np.float32),
+    )
+    assert cycle.squeeze_margin == pytest.approx(0.004) and cycle.gap_close == 0.020
+    assert (cycle.off_x, cycle.off_y, cycle.off_z) == pytest.approx((0.01, 0.02, 0.01))
+    assert cycle.off_along == pytest.approx(0.02) and cycle.off_across == pytest.approx(-0.01)
+    assert cycle.ctx_stale == pytest.approx(0.03)
+    steps = [  # (grip_open, held, rise, pick_z)
+        (True, -1, 0.0, 0.10),
+        (False, -1, 0.0, 0.05),
+        (False, 2, 0.01, 0.06),
+        (False, 3, 0.02, 0.09),
+        (True, -1, 0.0, 0.12),
+        (False, -1, 0.0, 0.07),
+    ]
+    for grip_open, held, rise, pick_z in steps:
+        loop.census_step(
+            cycle, grip_open=grip_open, held=held, rise=rise, close_cm=1.0, pick_z=pick_z
+        )
+    assert (cycle.first_close_at, cycle.reopen_steps, cycle.close_edges) == (1, 3, 2)
+    assert (cycle.pick_z_close, cycle.pick_z_max) == (0.05, 0.12)
+    assert (cycle.first_held, cycle.last_held) == (2, 3)
+    st = loop.EnvState(selector=None)
+    loop._book_census(st, cycle, "budget")
+    row = st.census[0]
+    assert st.classes == ["close_miss"] and set(loop.CENSUS_EXPORT) < set(row)
+    assert row["first_held_is_target"] and not row["last_held_is_target"]
+    assert row["squeeze_margin"] == 0.004 and row["wait_steps"] == 0 and not row["wait_capped"]
+
+
 def _census(**fields):
     cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
     for name, value in fields.items():
@@ -777,6 +824,12 @@ def test_a_still_policy_is_classed_no_close_and_the_teacher_closes_on_its_target
     # The teacher's first close lands on the target: well inside the 2 cm close-far rule.
     closes = ep["cycle_first_close_cm"]
     assert all(cm is not None and cm < dagger_loop.CLOSE_FAR_CM for cm in closes), closes
+    # The teacher's first close commands a gap under the grasp width, pinches its own target
+    # and lifts the pick point past the rise; the first selection waits for no retreat.
+    for row in ep["cycle_census"]:
+        assert -0.02 < row["squeeze_margin"] < 0.0 and row["first_held_is_target"], row
+        assert row["pick_z_max"] - row["pick_z_close"] >= oracle.LIFT_MIN_RISE, row
+    assert ep["cycle_census"][0]["wait_steps"] == 0
 
     monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
     env, rig = _env_and_rig(budget=9)

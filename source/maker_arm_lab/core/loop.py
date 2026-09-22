@@ -89,6 +89,8 @@ held_no_lift cycles followed a stow and their first close was a median 13 cm fro
 at the bin."""
 SELECT_OPEN_FRACTION = 0.8
 """The measured jaw opening fraction that reads as the retreat's full gap."""
+FRAME_EVERY = 10
+"""Steps between two frames ``rollout``'s ``on_frame`` dump receives."""
 SELECT_WAIT_FRACTION = 0.375
 """The share of ``CYCLE_STEP_BUDGET`` the loop waits for the retreat at most before it selects
 anyway: 300 steps at the 800-step budget, and the teacher's RETREAT converges in 91 to 147 of
@@ -201,6 +203,27 @@ class Cycle:
     # cm, the xy distance from the pick point to the target at the first closed step. The
     # binary teacher flips its command on the approach, so read it on continuous runs only.
     first_close_cm: float | None = None
+    # The forensics of the first close (2026-09-22), continuous runs only like first_close_cm.
+    # ``first_close_geometry`` fills the geometry once, ``census_step`` the rest every step.
+    heading: float | None = None  # rad, the served grasp's closing axis when the cycle opened
+    first_close_at: int | None = None  # steps into the cycle at the first closed command
+    gap_close: float | None = None  # m, the commanded gap at the first close
+    squeeze_margin: float | None = None  # m, ``gap_close`` minus ``close_below``
+    off_x: float | None = None  # m, pick point minus target centre at the first close (world)
+    off_y: float | None = None
+    off_z: float | None = None
+    off_along: float | None = None  # m, the same xy offset along the live closing axis
+    off_across: float | None = None  # m, and across it (the part's other in-plane axis)
+    ctx_stale: float | None = None  # m, the served row's centre to the target's live centre
+    pick_z_close: float | None = None  # m, the pick point's z at the first close
+    pick_z_max: float | None = None  # m, its highest z from the first close on
+    reopen_steps: int | None = None  # steps from the first close to the first re-open
+    close_edges: int = 0  # open-to-closed edges of the command within the cycle
+    open_prev: bool | None = None
+    first_held: int = -1  # the part between the jaws at the first held step
+    last_held: int = -1  # and at the last one
+    wait_steps: int = 0  # the retreat wait this selection spent (``select_ready``)
+    wait_capped: bool = False  # the wait ended on its cap, not on the retreat
 
 
 @dataclass
@@ -214,6 +237,7 @@ class EnvState:
     stowed_parts: list[int] = field(default_factory=list)
     classes: list[str] = field(default_factory=list)
     first_close_cm: list[float | None] = field(default_factory=list)
+    census: list[dict] = field(default_factory=list)  # one ``CENSUS_EXPORT`` row per cycle
     takeovers: int = 0
     takeovers_stowed: int = 0
     takeovers_failed: int = 0
@@ -259,20 +283,97 @@ def cycle_end(
     return None
 
 
-def census_step(cycle: Cycle, *, grip_open: bool, held: int, rise: float, close_cm: float) -> None:
+def census_step(
+    cycle: Cycle,
+    *,
+    grip_open: bool,
+    held: int,
+    rise: float,
+    close_cm: float,
+    pick_z: float = 0.0,
+) -> None:
     """One control step of the cycle census. ``held`` is the loop's held read (-1 for none),
-    ``rise`` the held part's height above where it lay when the cycle opened, and ``close_cm``
-    the xy distance from the rig's pick point to the target, kept at the first closed step."""
+    ``rise`` the held part's height above where it lay when the cycle opened, ``close_cm``
+    the xy distance from the rig's pick point to the target, kept at the first closed step,
+    and ``pick_z`` the pick point's height, tracked from the first close on."""
+    t = cycle.open_steps + cycle.closed_steps  # this step's index within the cycle
+    if not grip_open and cycle.open_prev:
+        cycle.close_edges += 1
+    cycle.open_prev = grip_open
     if grip_open:
         cycle.open_steps += 1
+        if cycle.first_close_at is not None and cycle.reopen_steps is None:
+            cycle.reopen_steps = t - cycle.first_close_at
     else:
         cycle.closed_steps += 1
-        if cycle.first_close_cm is None:
+        if cycle.first_close_at is None:
             cycle.first_close_cm = close_cm
+            cycle.first_close_at = t
+            cycle.pick_z_close = pick_z
+    if cycle.first_close_at is not None:
+        cycle.pick_z_max = pick_z if cycle.pick_z_max is None else max(cycle.pick_z_max, pick_z)
     cycle.holding = held >= 0
     if cycle.holding:
+        if cycle.first_held < 0:
+            cycle.first_held = held
+        cycle.last_held = held
         cycle.held_steps += 1
         cycle.max_rise = max(cycle.max_rise, rise)
+
+
+def first_close_geometry(
+    cycle: Cycle, *, gap: float, pick, target_pos, target_quat, ctx_pos=None
+) -> None:
+    """The cycle's first closed command, read once: the commanded ``gap`` (m) against the
+    target's grasp width, the pick point's offset from the target's centre in the world and
+    along and across the live closing axis (the body axis nearest ``cycle.heading``, signed
+    with it), and the served context row's centre ``ctx_pos`` against the live centre."""
+    target_pos = torch.as_tensor(target_pos, dtype=torch.float32)
+    off = torch.as_tensor(pick, dtype=torch.float32) - target_pos
+    cycle.gap_close = gap
+    cycle.squeeze_margin = gap - cycle.close_below
+    cycle.off_x, cycle.off_y, cycle.off_z = (float(v) for v in off)
+    if cycle.heading is not None:
+        served = torch.tensor([math.cos(cycle.heading), math.sin(cycle.heading)])
+        axes = grasp.body_axes_world(torch.as_tensor(target_quat, dtype=torch.float32))[:, :2]
+        axis = axes[int((axes @ served).abs().argmax())]
+        axis = axis / axis.norm()
+        if float(axis @ served) < 0.0:
+            axis = -axis
+        cycle.off_along = float(off[:2] @ axis)
+        cycle.off_across = float(off[1] * axis[0] - off[0] * axis[1])
+    if ctx_pos is not None:
+        cycle.ctx_stale = float(
+            (torch.as_tensor(ctx_pos[:3], dtype=torch.float32) - target_pos).norm()
+        )
+
+
+CENSUS_EXPORT = (
+    "max_rise",
+    "held_steps",
+    "closed_steps",
+    "open_steps",
+    "close_below",
+    "first_held",
+    "last_held",
+    "first_close_at",
+    "gap_close",
+    "squeeze_margin",
+    "off_x",
+    "off_y",
+    "off_z",
+    "off_along",
+    "off_across",
+    "ctx_stale",
+    "pick_z_close",
+    "pick_z_max",
+    "reopen_steps",
+    "close_edges",
+    "wait_steps",
+    "wait_capped",
+)
+"""The ``Cycle`` fields each episode's ``cycle_census`` row exports, plus the two is_target
+flags of ``first_held`` and ``last_held``. Observation only, never the metric."""
 
 
 def cycle_class(cycle: Cycle, reason: str) -> str:
@@ -333,11 +434,14 @@ def rollout(
     max_wall_minutes: float,
     takeover=None,
     log=print,
+    on_frame=None,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
     ``policy`` is a ``policy_client.ServerPolicy`` or None for the oracle driver.
     ``takeover`` is a ``TakeoverConfig`` (the DAgger mode, phase B design 5.5) or None.
+    ``on_frame(ordinal, step_in_cycle, wrist, overhead)`` is called with env 0's two policy
+    frames every ``FRAME_EVERY`` steps of each of its cycles, for a forensics dump.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -385,6 +489,7 @@ def rollout(
                 f"the selector spends {st.selector.cycle_budget} cycles, the loop {cycle_budget}",
             )
     ordinal = [0] * num_envs  # the recorder's takeover ordinal per env
+    ctx_target = getattr(env, "context_target", None)
     loop_done = torch.zeros(num_envs, dtype=torch.bool)
     triggers = (
         _TriggerState(num_envs, takeover, run_seed, cycle_budget) if takeover is not None else None
@@ -444,6 +549,8 @@ def rollout(
                     "cycle_budget" if st.selector.cycles >= cycle_budget else "no_candidate"
                 )
                 continue
+            waited = 0 if st.idle_since is None else step - st.idle_since
+            chosen = getattr(st.selector, "grasp", None)
             st.cycle = Cycle(
                 ordinal=len(st.outcomes) + 1,
                 target=target,
@@ -451,9 +558,11 @@ def rollout(
                 stowed_before=stowed_now,
                 close_below=cycle_close_below(st.selector, scene, target),
                 start_z=pos[i, :, 2].clone(),
+                heading=None if chosen is None else float(chosen.heading),
+                wait_steps=waited,
+                wait_capped=waited >= int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET),
             )
             env.target_part[i] = target
-            ctx_target = getattr(env, "context_target", None)
             if ctx_target is not None:
                 ctx_target[i] = target_context(scene.brick_pos[target], st.selector.grasp)
             if policy is None:
@@ -473,6 +582,13 @@ def rollout(
             wrist = env.obs_buf["images"]["wrist_rgb"].to("cpu").numpy()
             overhead = env.obs_buf["images"]["overhead_rgb"].to("cpu").numpy()
             context = env.obs_buf["context"].to("cpu").numpy() if served_width else None
+            c0 = states[0].cycle
+            if (
+                on_frame is not None
+                and c0 is not None
+                and (step - c0.start_step) % FRAME_EVERY == 0
+            ):
+                on_frame(c0.ordinal, step - c0.start_step, wrist[0], overhead[0])
             policy_action = torch.from_numpy(policy.step(state, wrist, overhead, context=context))
             if triggers is not None:
                 grip_open = grip_open_flags(policy_action[:, 6], gripper_mode, close_below)
@@ -489,16 +605,27 @@ def rollout(
             if st.cycle is None or bool(tracker.done[i]):
                 continue
             c, h = st.cycle, int(held[i])
+            pick = rig.pick_point(i).to(pos.device)
+            grip_open = bool(signal[i] >= 0.0)
             close_cm = 0.0
-            if c.first_close_cm is None:
-                to_target = rig.pick_point(i)[:2].to(pos.device) - pos[i, c.target, :2]
-                close_cm = 100.0 * float(to_target.norm())
+            if c.first_close_at is None:
+                close_cm = 100.0 * float((pick[:2] - pos[i, c.target, :2]).norm())
+                if not grip_open:
+                    first_close_geometry(
+                        c,
+                        gap=float(action_cpu[i, 6]),
+                        pick=pick,
+                        target_pos=pos[i, c.target],
+                        target_quat=env.scene[f"brick_{c.target}"].data.root_quat_w[i].to("cpu"),
+                        ctx_pos=None if ctx_target is None else ctx_target[i],
+                    )
             census_step(
                 c,
-                grip_open=bool(signal[i] >= 0.0),
+                grip_open=grip_open,
                 held=h,
                 rise=float(pos[i, h, 2] - c.start_z[h]) if h >= 0 else 0.0,
                 close_cm=close_cm,
+                pick_z=float(pick[2]),
             )
         arm_clamped, overshoot = clamp_arm_actions(action_cpu[:, :6], limits)
         tracker.record_clamps(overshoot)
@@ -592,6 +719,7 @@ def rollout(
                 "stowed_parts": list(st.stowed_parts),
                 "cycle_classes": list(st.classes),
                 "cycle_first_close_cm": list(st.first_close_cm),
+                "cycle_census": list(st.census),
                 "stowed_families": sorted(env.parts[p].family for p in range(k) if final[p]),
                 "done_reason": st.done_reason,
                 "takeovers": st.takeovers,
@@ -644,6 +772,10 @@ def _book_census(st: EnvState, cycle: Cycle, reason: str) -> None:
     st.classes.append(cycle_class(cycle, reason))
     close_cm = cycle.first_close_cm
     st.first_close_cm.append(None if close_cm is None else round(close_cm, 2))
+    row = {name: getattr(cycle, name) for name in CENSUS_EXPORT}
+    row["first_held_is_target"] = cycle.first_held == cycle.target
+    row["last_held_is_target"] = cycle.last_held == cycle.target
+    st.census.append({k: round(v, 4) if isinstance(v, float) else v for k, v in row.items()})
 
 
 def _close_cycle_unmarked(st: EnvState, step: int) -> None:

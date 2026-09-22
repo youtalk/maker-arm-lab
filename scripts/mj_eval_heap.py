@@ -86,6 +86,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="the wall-clock cap; the default allows a generous 0.15 s per step of the episode "
         "(every cycle of the budget at its full step budget)",
     )
+    parser.add_argument(
+        "--frames_dir",
+        type=str,
+        default="",
+        help="dump env 0's wrist and overhead policy frames as PNGs here, every "
+        "loop.FRAME_EVERY steps of each cycle (forensics; needs the policy server)",
+    )
     args = parser.parse_args(argv)
     for name in ("run_seed", "layout_seed"):
         if not (0 <= getattr(args, name) < 2**32):
@@ -97,6 +104,20 @@ def parse_args(argv=None) -> argparse.Namespace:
     if args.max_wall_minutes is None:
         args.max_wall_minutes = args.cycle_budget * CYCLE_STEP_BUDGET * 0.15 / 60.0
     return args
+
+
+def frame_writer(frames_dir: str):
+    """``loop.rollout``'s ``on_frame``: ``c<ordinal>_s<step>_<camera>.png`` under ``frames_dir``."""
+    from PIL import Image
+
+    root = Path(frames_dir)
+    root.mkdir(parents=True, exist_ok=True)
+
+    def write(ordinal: int, step: int, wrist, overhead) -> None:
+        for name, frame in (("wrist", wrist), ("overhead", overhead)):
+            Image.fromarray(frame).save(root / f"c{ordinal:03d}_s{step:04d}_{name}.png")
+
+    return write
 
 
 def main(argv=None) -> int:
@@ -150,6 +171,7 @@ def main(argv=None) -> int:
             permutation=perm,
             cycle_budget=args.cycle_budget,
             max_wall_minutes=args.max_wall_minutes,
+            on_frame=frame_writer(args.frames_dir) if args.frames_dir else None,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
