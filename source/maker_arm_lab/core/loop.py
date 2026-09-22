@@ -70,8 +70,12 @@ HALF_BUDGET_NO_LIFT = "half_budget_no_lift"
 No lift means the jaws hold nothing, or hold a part that has not risen ``oracle.LIFT_MIN_RISE``
 above where it was when the cycle opened (``Cycle.start_z``)."""
 CENSUS_MIN_HELD_STEPS = GRASP_HOLD_WINDOW[0]
-SELECT_RETREAT_RADIUS = 0.06
+SELECT_RETREAT_RADIUS = 0.10
 """m: the next target is selected once the pick point is this close to ``oracle.RETREAT_POINT``.
+
+0.10 and not 0.06 (2026-09-22): the 50k policy of run m retreats to about x 0.31, 5 to 6 cm
+from the point, so a 6 cm radius caught the retreat on its edge or not at all; the release pose
+over the bin sits 16 cm away, so 10 cm still tells the two apart.
 
 The teacher's corpus switches the target row and the marker when RETREAT ends: the arm at
 RETREAT_POINT (plus the episode's via jitter) with the jaws at the full gap, and only then does
@@ -80,12 +84,15 @@ until 2026-09-21, hands the policy a new target while it is still at the release
 no demonstration pairs with a fresh target. On round 1's 700k read, 646 of the 1324
 held_no_lift cycles followed a stow and their first close was a median 13 cm from the target,
 at the bin."""
-SELECT_OPEN_FRACTION = 0.8
+SELECT_OPEN_FRACTION = 0.7
 """The measured jaw opening fraction that reads as the retreat's full gap."""
-SELECT_WAIT_FRACTION = 0.375
+SELECT_WAIT_FRACTION = 0.1875
 """The share of ``CYCLE_STEP_BUDGET`` the loop waits for the retreat at most before it selects
-anyway: 300 steps at the 800-step budget, and the teacher's RETREAT converges in 91 to 147 of
-its 300 steps. A fraction, so a test that shrinks the budget shrinks the wait with it."""
+anyway: 150 steps at the 800-step budget. The teacher's RETREAT converges in 91 to 147 of its
+300 steps and the 50k policy's in 55 to 91. A wait that runs past that is a policy that did not
+retreat, and every step of it shows the policy a stale target row: on the diagnostic of
+2026-09-22 the policy then went back into the bin after the part it had just released. A
+fraction, so a test that shrinks the budget shrinks the wait with it."""
 
 
 def select_ready(pick_point, open_fraction: float, waited: int) -> bool:
