@@ -135,7 +135,10 @@ recorded = json.loads(marker.read_text()) if marker.exists() else {}
 space = recorded.get("action_space", "absolute")
 mode = recorded.get("gripper", "binary")
 if space != wanted:
-    sys.exit(f"train_act.sh: action_space mismatch: {root} holds {space} actions, ACTION_SPACE={wanted}")
+    sys.exit(
+        f"train_act.sh: action_space mismatch: {root} holds {space} actions, "
+        f"ACTION_SPACE={wanted}"
+    )
 if mode != gripper:
     sys.exit(f"train_act.sh: gripper mismatch: {root} holds {mode} actions, GRIPPER_MODE={gripper}")
 PY

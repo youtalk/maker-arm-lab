@@ -4,15 +4,13 @@ import ast
 import importlib.util
 import json
 import pathlib
-import sys
 
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BATCH = ROOT / "scripts" / "mj_generate_batch.py"
 READ = ROOT / "scripts" / "heap_yield_read.py"
-
-sys.path.insert(0, str(ROOT / "scripts"))
+EVAL_HEAP = ROOT / "scripts" / "mj_eval_heap.py"
 
 
 def _load(path):
@@ -130,9 +128,7 @@ def test_main_prints_a_token_on_every_path(tmp_path, capsys):
 
 
 def test_mj_eval_heap_oracle_driver_prints_eval_ok_on_a_tiny_heap(tmp_path, capsys):
-    import importlib
-
-    script = importlib.import_module("mj_eval_heap")
+    script = _load(EVAL_HEAP)
     code = script.main(
         [
             "--num_envs",
@@ -161,27 +157,21 @@ def test_mj_eval_heap_oracle_driver_prints_eval_ok_on_a_tiny_heap(tmp_path, caps
 
 
 def test_mj_eval_heap_defaults_the_wall_cap_from_the_episode_length():
-    import importlib
-
-    script = importlib.import_module("mj_eval_heap")
+    script = _load(EVAL_HEAP)
     args = script.parse_args(["--heap_k", "50"])
     assert args.max_wall_minutes == pytest.approx(65 * script.CYCLE_STEP_BUDGET * 0.15 / 60)
     assert script.parse_args(["--heap_k", "50", "--max_wall_minutes", "7"]).max_wall_minutes == 7
 
 
 def test_mj_eval_heap_refuses_a_zero_heap_with_the_fail_token(capsys):
-    import importlib
-
-    script = importlib.import_module("mj_eval_heap")
+    script = _load(EVAL_HEAP)
     with pytest.raises(SystemExit):
         script.main(["--heap_k", "0", "--oracle_driver"])
     assert "EVAL_FAIL " in capsys.readouterr().out
 
 
 def test_mj_eval_heap_reports_a_bad_out_path_with_exactly_one_fail_token(tmp_path, capsys):
-    import importlib
-
-    script = importlib.import_module("mj_eval_heap")
+    script = _load(EVAL_HEAP)
     code = script.main(
         [
             "--num_envs",

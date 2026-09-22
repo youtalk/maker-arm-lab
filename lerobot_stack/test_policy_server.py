@@ -525,6 +525,16 @@ def test_policy_id_marks_delta_prev_checkpoints():
     assert "+d" not in inference_policy_id("ck", {})
 
 
+def test_policy_id_marks_a_continuous_gripper_checkpoint():
+    assert inference_policy_id("ck", {}, gripper="continuous") == "act:ck+gap"
+    assert inference_policy_id("ck", {}) == "act:ck"
+    # The suffix comes last, after every other override.
+    assert (
+        inference_policy_id("ck", {"n_action_steps": 25}, context_dim=9, gripper="continuous")
+        == "act:ck+nas25+ctx9+gap"
+    )
+
+
 def test_the_handshake_carries_the_gripper_contract(tmp_path):
     marker = tmp_path / "action_space.json"
     marker.write_text(json.dumps({"action_space": "absolute", "gripper": "continuous"}))

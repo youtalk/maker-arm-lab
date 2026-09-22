@@ -723,3 +723,39 @@ def test_cached_payload_matches_the_inference_configuration(tmp_path):
     legacy = {k: v for k, v in served_open_loop.items() if k != "inference"}
     open_loop.n_action_steps = None
     assert cached(open_loop, legacy) and not cached(ensemble, legacy)
+
+
+def _argv(tmp_path: Path) -> list[str]:
+    return [
+        "--checkpoint",
+        "ck",
+        "--out_dir",
+        str(tmp_path),
+        "--ledger",
+        "l",
+        "--threshold",
+        "0.85",
+        "--seed",
+        "1",
+    ]
+
+
+def test_a_heap_gate_refuses_the_privileged_context(monkeypatch, capsys, tmp_path):
+    # The heap client has no privileged channel; the supervisor must say so before it
+    # starts a server and spends every draw on the client's own usage error.
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    heap = ["--backend", "mujoco", "--heap_k", "50"]
+    assert ge.main(_argv(tmp_path) + heap + ["--context", "privileged"]) == 2
+    out = capsys.readouterr()
+    assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "privileged" in out.err
+    assert ge._build_cfg(ge._parse_args(_argv(tmp_path) + heap)).context == "none"
+
+
+def test_an_argparse_usage_error_still_prints_one_token(capsys, tmp_path):
+    # The token contract covers every exit path: argparse's own error() prints none.
+    with pytest.raises(SystemExit) as exc:
+        ge._parse_args(_argv(tmp_path) + ["--processes", "not_a_number"])
+    assert exc.value.code == 2
+    out = capsys.readouterr()
+    assert out.out.strip().splitlines() == ["GATE_ERROR"]
+    assert "not_a_number" in out.err

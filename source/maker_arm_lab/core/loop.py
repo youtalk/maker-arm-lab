@@ -697,6 +697,7 @@ class _TriggerState:
         self.since_open = [0] * num_envs
         self.closed_no_pinch = [0] * num_envs
         self.cooldown = [0] * num_envs
+        self.cycle_start = [-1] * num_envs  # the open step of the cycle the last offer saw
         self.grip_open_prev: torch.Tensor | None = None
         self.counts: Counter = Counter()
         self.declined = 0
@@ -718,8 +719,21 @@ class _TriggerState:
             if bool(tracker.done[i]) or not rig.idle[i] or st.cycle is None:
                 continue
             open_i = bool(grip_open[i])
+            # A new cycle brings a new close threshold (``cycle_close_below``), so the previous
+            # step's open read was taken against another threshold: a close edge across the
+            # boundary would compare two different rules. The first step of a cycle has no edge.
+            # The reset is unconditional on purpose. Under the binary gripper the rule is the
+            # command's sign, which no boundary changes, so there the guard drops one real close
+            # edge and with it one close_far opportunity per cycle. That is the cheaper side:
+            # closed_no_pinch reads the same stall a few steps later, and threading the gripper
+            # mode in here to make the guard exact costs more than the trigger it saves.
+            new_cycle = self.cycle_start[i] != st.cycle.start_step
+            self.cycle_start[i] = st.cycle.start_step
             closed_now = (
-                self.grip_open_prev is not None and bool(self.grip_open_prev[i]) and not open_i
+                not new_cycle
+                and self.grip_open_prev is not None
+                and bool(self.grip_open_prev[i])
+                and not open_i
             )
             self.since_open[i] = self.since_open[i] + 1 if open_i else 0
             no_pinch = not open_i and int(held[i]) < 0

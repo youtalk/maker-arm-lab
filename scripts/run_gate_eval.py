@@ -538,8 +538,21 @@ def _process_list(raw: str) -> tuple:
     return values
 
 
+class _TokenEmittingParser(argparse.ArgumentParser):
+    """A parser whose usage errors still honour the token contract.
+
+    argparse's own ``error()`` exits 2 with a usage message on stderr and no token, which a
+    supervisor grepping the log cannot tell from a hang."""
+
+    def error(self, message: str):
+        self.print_usage(sys.stderr)
+        print(f"{self.prog}: error: {message}", file=sys.stderr, flush=True)
+        print("GATE_ERROR", flush=True)
+        raise SystemExit(2)
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _TokenEmittingParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True, help="a pretrained_model directory")
     parser.add_argument("--out_dir", type=Path, required=True)
     parser.add_argument("--ledger", type=Path, required=True, help="the campaign ledger.json")
@@ -610,6 +623,10 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
     if args.heap_k > 0:
         if args.backend != "mujoco":
             raise ValueError("--heap_k needs --backend mujoco: the Isaac env has no heap")
+        if args.context == "privileged":
+            # The heap client serves none, camera and camera_box only. Without this guard the
+            # gate starts a server and then loses every draw to the client's own usage error.
+            raise ValueError("--context privileged has no heap channel: use camera_box")
         if args.max_cycles_per_stowed is None:
             args.max_cycles_per_stowed = 1.3  # the heap gate's rule (phase B design 5.3)
     return GateCfg(
