@@ -354,6 +354,7 @@ class EnvState:
     done_reason: str | None = None
     idle_since: int | None = None  # the step the last cycle closed at, None before the first
     select_wait_steps: int = 0  # steps spent waiting for the retreat before a selection
+    preselected: tuple | None = None  # the rig's RELEASE pre-selection a takeover handed back
 
 
 def _layout_of(rig, i: int):
@@ -364,6 +365,18 @@ def _layout_of(rig, i: int):
 def _selector(rig, i: int):
     """A fresh HeapOracle for env ``i``, built the way ``OracleRig.resume`` builds its own."""
     return rig.oracle_factory(i, _layout_of(rig, i), oracle.nominal_draw())
+
+
+def _select(st: EnvState, scene) -> int | None:
+    """The next target: the pre-selection the last takeover's RELEASE left (``preselected``)
+    when it still holds (``HeapOracle._revalidated_preselection``), else the selector's own
+    ranking of the live scene. Either way the selector books the cycle."""
+    sel = st.selector
+    if st.preselected is None:
+        return sel.select_target(scene)
+    sel.next_brick, sel.next_brick_start, sel.next_grasp, sel._next_forced = st.preselected
+    st.preselected = None
+    return sel._next_brick(scene)
 
 
 def cycle_end(
@@ -606,9 +619,11 @@ def rollout(
     rig.rearm(list(range(num_envs)), idle=True)
     env.oracle_actor = torch.zeros(num_envs, dtype=torch.int16)
     env.target_part[:] = -1
-    # A policy reads the marker on the loop's target, so a takeover's frames must show that
-    # marker too, not the rig's cycle part (they differ when the rig adopts a held part).
-    env.marker_from_rig = policy is None
+    # A takeover's frames follow the rig's marker and row (``env.marker_from_rig``, the env's
+    # default): the v2 corpora switch both when RELEASE ends (``HeapOracle._preselect``), so
+    # the recorded RETREAT frames carry the pre-selected part, and the loop adopts that
+    # pre-selection at hand-back (``_select``). Phase B design 5.2 pinned the loop's target on
+    # those frames; campaign n (2026-09-22) reverses it.
     states = [EnvState(selector=_selector(rig, i)) for i in range(num_envs)]
     for st in states:
         if st.selector.cycle_budget != cycle_budget:
@@ -687,7 +702,7 @@ def rollout(
                     st.select_wait_steps += 1
                     continue
             scene = rig.snapshot(i)
-            target = st.selector.select_target(scene)
+            target = _select(st, scene)
             if target is None:
                 loop_done[i] = True
                 st.done_reason = (
@@ -813,6 +828,14 @@ def rollout(
             if result is None:
                 continue
             st = states[i]
+            orc = rig.oracles[i]
+            if getattr(orc, "next_brick", None) is not None:
+                st.preselected = (
+                    orc.next_brick,
+                    orc.next_brick_start,
+                    orc.next_grasp,
+                    orc._next_forced,
+                )
             if result:
                 st.takeovers_stowed += 1
             else:

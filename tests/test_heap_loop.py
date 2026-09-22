@@ -415,37 +415,37 @@ def test_a_still_policy_is_taken_over_on_no_close_and_only_takeovers_are_recorde
     assert set(marked.tolist()) <= set(ep["cycle_targets"]), (marked, ep["cycle_targets"])
 
 
-def test_a_takeover_keeps_the_marker_on_the_loops_target(monkeypatch):
-    # The rig's cycle part differs from the loop's target when it adopts a held part; force
-    # that on every takeover step and check the env still marks the loop's target, which is
-    # also the part the loop stamped into the frame before the step.
+def test_a_takeovers_retreat_frames_carry_the_rigs_preselected_part(monkeypatch):
+    """Phase B design 5.2 pinned the opposite (a takeover keeps the marker on the loop's
+    target); campaign n (2026-09-22) reverses it because the v2 corpora switch the row and the
+    marker when RELEASE ends (``HeapOracle._preselect``). So a takeover's RETREAT frames carry
+    the rig's pre-selected part, and at hand-back the loop adopts that pre-selection when it
+    still holds, else re-ranks (``loop._select``)."""
     monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 200)
     monkeypatch.setattr(dagger_loop, "NO_CLOSE_STEPS", 30)
-    env, rig = _env_and_rig(budget=1)
+    env, rig = _env_and_rig(budget=3)
     _place(env, SPREAD)
-    real_actions = rig.actions
-
-    def actions():
-        out = real_actions()
-        if not rig.idle[0]:
-            env.oracle_cycle_brick[0] = (int(env.target_part[0]) + 1) % 3
-        return out
-
-    monkeypatch.setattr(rig, "actions", actions)
-    pairs = []
+    retreats = []  # (the marker the frame recorded, the retreating cycle's part)
     stepped = env.step
 
     def env_step(action):
-        before = int(env.target_part[0])
         out = stepped(action)
-        if int(env.oracle_actor[0]) != 0:
-            pairs.append((before, int(env.target_part[0])))
+        retreating = int(env.oracle_cycle_phase[0]) == oracle.PHASE_TO_INT["RETREAT"]
+        if int(env.oracle_actor[0]) != 0 and retreating:
+            retreats.append((int(env.target_part[0]), int(env.oracle_cycle_brick[0])))
         return out
 
     env.step = env_step
-    _rollout(env, rig, _HoldPolicy(), budget=1, takeover=loop.TakeoverConfig(random_interval=None))
+    payload = _rollout(
+        env, rig, _HoldPolicy(), budget=3, takeover=loop.TakeoverConfig(random_interval=None)
+    )
     env.close()
-    assert pairs and all(a == b for a, b in pairs), pairs
+    ep = payload["episodes"][0]
+    switched = {(marker, brick) for marker, brick in retreats if marker != brick}
+    assert ep["takeovers"] >= 2 and switched, (payload["triggers"], retreats)
+    targets = ep["cycle_targets"]
+    for marker, brick in switched:  # the pre-selected part is the next cycle's target
+        assert targets[targets.index(brick) + 1] == marker, (targets, retreats)
 
 
 def _resume_then_fail(rig, monkeypatch):
