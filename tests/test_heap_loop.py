@@ -876,6 +876,16 @@ def test_release_ready_selects_at_the_release_after_a_stow_and_at_once_otherwise
     assert loop.release_ready(0.0, 0, after_stow=False)  # a budget end selects at once
 
 
+def test_released_after_lift_is_the_open_jaw_after_a_lift_with_nothing_held():
+    cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
+    loop.census_step(cycle, grip_open=False, held=0, rise=0.0, close_cm=1.0)
+    assert not loop.released_after_lift(cycle, 1.0, -1)  # a re-open with no lift: chatter
+    loop.census_step(cycle, grip_open=False, held=0, rise=oracle.LIFT_MIN_RISE, close_cm=1.0)
+    assert not loop.released_after_lift(cycle, 0.3, -1)  # the jaws are still opening
+    assert not loop.released_after_lift(cycle, 1.0, 0)  # open, but the part is still held
+    assert loop.released_after_lift(cycle, loop.SELECT_OPEN_FRACTION, -1)  # the release
+
+
 def test_reopen_edge_is_the_open_after_a_close_that_lifted_nothing():
     cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
     assert not loop.reopen_edge(cycle, True)  # a cycle's first step has no edge

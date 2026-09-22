@@ -18,10 +18,11 @@ candidate, or the cycle budget is spent) or every part is stowed.
 
 Three protocol switches, all off by default so the old protocol stays reproducible
 (2026-09-22): ``select_at_release`` selects the next target when the release opens the jaws
-(``release_ready``) instead of at the retreat (``select_ready``); ``replan_on_switch`` sends
-the server a per-env replan flag on the step a target row is written, so the policy's chunk
-is cut at the switch (``policy_server.ActionQueues``); ``row_refresh`` rewrites the row from
-the live scene at a re-open that lifted nothing (``reopen_edge``, ``refreshed_row``), the
+(``release_ready``) instead of at the retreat (``select_ready``), and ends a cycle at the
+release of a lifted part wherever it landed (``released_after_lift``); ``replan_on_switch``
+sends the server a per-env replan flag on the step a target row is written, so the policy's
+chunk is cut at the switch (``policy_server.ActionQueues``); ``row_refresh`` rewrites the row
+from the live scene at a re-open that lifted nothing (``reopen_edge``, ``refreshed_row``), the
 teacher's REOPEN refresh. The payload's ``inference`` block records all three.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
@@ -118,7 +119,8 @@ def select_ready(pick_point, open_fraction: float, waited: int) -> bool:
 def release_ready(open_fraction: float, waited: int, after_stow: bool) -> bool:
     """``select_at_release``: may the loop hand the policy its next target now? Pure.
 
-    After a stow (``after_stow``) the release is done when the measured jaw opening reads
+    After a stow or the release of a lifted part (``after_stow``: the last end is one of
+    ``RELEASE_ENDS``) the release is done when the measured jaw opening reads
     ``SELECT_OPEN_FRACTION``, with no retreat radius. The corpus teacher switches the row at
     the end of its RETREAT, but the policy retreats to about x 0.31 and, with the stale row
     and marker on the part now in the bin, never settles inside ``SELECT_RETREAT_RADIUS``:
@@ -128,6 +130,26 @@ def release_ready(open_fraction: float, waited: int, after_stow: bool) -> bool:
     if not after_stow or waited >= int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET):
         return True
     return open_fraction >= SELECT_OPEN_FRACTION
+
+
+RELEASE_ENDS = ("stowed", "released")
+"""The cycle ends a release makes; ``release_ready`` waits for the jaws' full gap after them."""
+
+
+def released_after_lift(cycle: Cycle, open_fraction: float, held: int) -> bool:
+    """``select_at_release``: did the jaws just release a lifted part? The part rose
+    ``oracle.LIFT_MIN_RISE`` between the jaws (``cycle.max_rise``), nothing is held now
+    (``held`` < 0, the loop's held read) and the measured opening reads
+    ``SELECT_OPEN_FRACTION``. The stowed rule (``cycle_end``) ends the cycle only when the
+    part entered the bin; this ends it at the same moment when the part landed anywhere
+    else, as the teacher pre-selects when RELEASE ends wherever its part went
+    (``HeapOracle._preselect``). A re-open without a lift is jaw chatter or the policy's
+    REOPEN, not a release, and keeps the cycle. Pure."""
+    return (
+        cycle.max_rise >= oracle.LIFT_MIN_RISE
+        and held < 0
+        and open_fraction >= SELECT_OPEN_FRACTION
+    )
 
 
 """Control steps a part must stay between the jaws to count as held in the cycle census: the
@@ -568,6 +590,7 @@ def rollout(
         left_mag = env.scene["finger_left_brick"].data.force_matrix_w.norm(dim=-1).squeeze(1)
         right_mag = env.scene["finger_right_brick"].data.force_matrix_w.norm(dim=-1).squeeze(1)
         held = held_brick_from_forces(left_mag, right_mag, min_force=HELD_MIN_FORCE).to("cpu")
+        openings = policy_state(robot.data.joint_pos)[:, 6].to("cpu")
         # 1. Grade and select on the envs the loop holds: episode live, rig idle.
         for i in range(num_envs):
             if bool(tracker.done[i]) or not rig.idle[i]:
@@ -584,6 +607,12 @@ def rollout(
                     env.stow_half_extents,
                 )
                 end = cycle_end(st.cycle, stowed_now, out, step, set(st.stowed_parts))
+                if (
+                    end is None
+                    and select_at_release
+                    and released_after_lift(st.cycle, float(openings[i]), int(held[i]))
+                ):
+                    end = ("released", [])
                 if end is not None:
                     _close_cycle(st, end[0], end[1], step, rig.snapshot(i))
                     st.idle_since = step
@@ -594,9 +623,11 @@ def rollout(
                 st.done_reason = "all_stowed"
                 continue
             if st.idle_since is not None:
-                opening = float(policy_state(robot.data.joint_pos)[i, 6])
+                opening = float(openings[i])
                 if select_at_release:
-                    ready = release_ready(opening, step - st.idle_since, st.reasons[-1] == "stowed")
+                    ready = release_ready(
+                        opening, step - st.idle_since, st.reasons[-1] in RELEASE_ENDS
+                    )
                 else:
                     ready = select_ready(rig.pick_point(i).to("cpu"), opening, step - st.idle_since)
                 if not ready:
