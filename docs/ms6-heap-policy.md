@@ -10,8 +10,8 @@ into that ledger before its number arrived.
 
 ## 0. Read this first
 
-The gate did not pass. The best read of the campaign is 0.4198 against a gate of 0.85, which is
-0.4302 short of it.
+The gate did not pass. The best read of the campaign is 0.4297 against a gate of 0.85, which is
+0.4203 short of it. The DAgger rounds ended at one.
 
 Three results stand. The binary gripper label is unlearnable, and the continuous contract
 that replaces it needed a new teacher release before the corpus reached the recording bar.
@@ -19,8 +19,11 @@ The heap policy serves open loop: the MS3 inference protocol, which every earlie
 used, reads 0.1868 against the open loop's 0.3230 on the same checkpoints. Design 5.1 carries
 that addendum. Run g peaks at 400k steps and reads 0.4198 on the selection seed. DAgger round
 1 reads 0.3463 at 600k on 3000 parts, below run g, and rises with the step count where run g
-fell. The owner read that as an undertrained run and resumed it to 1000k steps. That ladder is
-running and section 8 holds its empty table.
+fell. The owner read that as an undertrained run and resumed it to 1000k steps. The resumed
+ladder peaks at 700k, whose checked read is 0.4297 on 3000 parts. That misses the adoption bar
+of 0.4498, and the bar sits above the read's Wilson interval, so the rounds stop at one. The
+census of that read names the failure the next lever has to move: the jaws now reach the part
+and close on it, and the part does not rise.
 
 The official seed 20261400 is unburned. The selection numbers sit far under the 0.50 R-GATE
 floor, so the official read would record a number and buy no direction.
@@ -278,10 +281,10 @@ The check step ran the top two rungs on draws 0 to 11, 3000 parts per cell. 600k
 0.3463 is below the run g selection read of 0.4198, so round 1 misses its adoption rule of the
 previous read plus 0.03.
 
-## 8. The resume to 1000k steps
+## 8. The resume to 1000k steps and the end of the rounds
 
-Round 1 rises with the step count over the whole ladder, where run g peaked at 400k and fell.
-Its corpus is 3.3 times larger than run g's: 2942311 frames against 883621. The owner read the
+Round 1 rose with the step count over the whole 600k ladder, where run g peaked at 400k and
+fell. Its corpus is 3.3 times larger than run g's: 2942311 frames against 883621. The owner read the
 run as undertrained rather than as a failed round, and resumed it to 1000k steps with
 `resume_train.sh`, which is new because `train_act.sh` never resumes. The resume printed
 `TRAIN_OK` at 1000k steps on 2026-09-21.
@@ -295,26 +298,74 @@ The rules below went into the ledger before any number of this ladder arrived.
 The selection protocol: open loop, the checkpoint's own `n_action_steps` of 100, no temporal
 ensembling and no `+te` suffix in any payload's `policy_id`, on draws 0 to 3 of seed 20261300,
 20 episodes and 1000 parts per cell. These are the same draws as the round 1 ladder and the run
-g re-read. The launcher `ladder_r1_resume.sh` is new and runs all four rungs at once, four lanes
+g re-read. The launcher `ladder_r1_resume.sh` is new and ran all four rungs at once, four lanes
 each, with port bases 100 apart because `gate_te.sh` puts its aggregating call on `PORT_BASE`
 plus 90. Sixteen lanes put the load average at 33 and the GPU at 47 to 61 percent, above the
 twelve-lane ceiling this host measured, so every lane runs slower and the whole ladder still
 finishes in one wave. The heap read is bound by the MuJoCo step and not by inference, so a lane
 count above the core count buys nothing but context switches.
 
-The check and the adoption: the top rung of the whole round 1 ladder, the four new rungs against
-the old 600k, then runs on draws 0 to 11, 3000 parts. The bar is the run g selection read of
-0.4198 plus 0.03, which is 0.4498. Round 1 is adopted only if that checked read reaches 0.4498.
-A miss ends the rounds at one. 600k already has its checked read at 0.3463.
+The check and the adoption: rule L3 runs the top two rungs of the whole round 1 ladder on draws
+0 to 11, 3000 parts each, and the higher checked read wins. The bar is the run g selection read
+of 0.4198 plus 0.03, which is 0.4498. Round 1 is adopted only if that checked read reaches the
+bar. A miss ends the rounds at one.
 
-The ladder is running. Its numbers do not exist yet.
+The ladder:
 
-| rung | stowed of 1000 | fraction | cycles per stowed |
-| --- | --- | --- | --- |
-| 700k | pending | pending | pending |
-| 800k | pending | pending | pending |
-| 900k | pending | pending | pending |
-| 1000k | pending | pending | pending |
+| rung | stowed of 1000 | fraction | Wilson 95 % | cycles per stowed |
+| --- | --- | --- | --- | --- |
+| 700k | 431 | 0.4310 | 0.4006-0.4619 | 2.979 |
+| 800k | 397 | 0.3970 | 0.3671-0.4277 | 3.224 |
+| 900k | 346 | 0.3460 | 0.3172-0.3760 | 3.679 |
+| 1000k | 425 | 0.4250 | 0.3947-0.4559 | 3.024 |
+
+The resume was worth taking. Every rung above 600k except 900k beats run g's best open-loop read
+of 0.3960 at 400k on the same draws, and 700k gives the campaign's best cycles per stowed part at
+2.979. The run does not keep climbing the way the undertrained reading predicted. It rises from
+0.3480 at 600k to 0.4310 at 700k and then sits flat near 0.42 out to 1000k. The 900k dip has an
+interval that does not overlap 700k's, so the variance between neighbouring checkpoints at this
+sample size is larger than any trend a reader could take from the curve. No rung reaches the bar.
+
+The top two rungs are 700k and 1000k, 0.006 apart inside intervals that overlap almost
+completely, so the ladder alone cannot separate them. Both went to the check step: draws 0 to 11,
+60 episodes, 3000 parts per rung, open loop, seed 20261300, with draws 0 to 3 reused from the
+ladder. The launcher `check_r1_resume.sh` is new and ran both rungs at once, eight lanes each.
+
+| rung | stowed of 3000 | fraction | Wilson 95 % | cycles per stowed |
+| --- | --- | --- | --- | --- |
+| 700k | 1289 | 0.4297 | 0.4121-0.4475 | 3.002 |
+| 1000k | 1271 | 0.4237 | 0.4061-0.4414 | 3.055 |
+
+Round 1 misses its adoption bar. The bar is 0.4498 and the higher checked read is 0.4297. The bar
+sits above both Wilson intervals, so the miss is not a marginal call another draw could overturn.
+By the pre-registered rule the rounds stop at the first miss, so the DAgger rounds end at one.
+
+What the round bought: run g's selection read is 0.4198 and round 1's best checked read is
+0.4297, a gain of 0.0099 that sits well inside both intervals. It cost a round of rollouts, a
+parallel conversion, a 600k training run and a 400k resume. The cycles per stowed part went from
+3.066 to 3.002, against a rule of 1.3.
+
+### 8.1 The cycle census
+
+The census is what the round leaves behind for the next lever, because it names which failure
+class moved and which one did not. Share of all cycles over the 12 draws of the checked reads:
+
+| rung | held_no_lift | stowed | close_miss | no_close | carrying | lifted_lost | no_open |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 700k | 0.3421 | 0.3354 | 0.1992 | 0.0481 | 0.0408 | 0.0297 | 0.0047 |
+| 1000k | 0.3636 | 0.3304 | 0.1952 | 0.0319 | 0.0417 | 0.0337 | 0.0033 |
+
+`close_miss` fell from run g's 0.2712 at 400k to about 0.199, so DAgger fixed closing the jaws
+where the part is not, which is what the takeover triggers targeted. `held_no_lift` rose to the
+largest class at about 0.35 and did not fall between 700k and 1000k. The policy reaches the part
+and closes on it, and then the part does not rise. That is a different failure from the one the
+campaign was chasing. The ladder census on draws 0 to 3 reads the same way at 800k (held_no_lift
+0.3148, stowed 0.3125, close_miss 0.2039, no_close 0.0797) and at 900k (0.2985, 0.2702, 0.2349,
+0.1343).
+
+Cycles that stowed a part other than the target: 286 of 1219 at 700k and 290 of 1223 at 1000k,
+both 23 percent, against 82 of 264 on run g at 400k. A quarter of the successes still credit a
+part the loop did not aim at. The census never gates and it picks no lever by itself.
 
 ## 9. Two launcher defects of the 2026-09-20 session
 
@@ -331,13 +382,16 @@ Both were fixed and both cost machine time only.
 
 ## 10. What is still open
 
-- The resumed round 1 ladder of section 8, and the adoption call at 0.4498 on its checked read.
-  Round 1 has already missed that bar at 600k with 0.3463. Design 5.5 and the ledger stop the
-  rounds at the first miss and at three, so the resumed ladder is the only thing keeping the
-  rounds open. A miss there ends them at one.
-- The gate. The best read of the campaign is run g at 400k, 0.4198 on 6000 parts. Round 1's
-  checked read is 0.3463 on 3000 parts. Both sit against a gate of 0.85, and nothing has
-  cleared the 0.50 R-GATE floor.
+- The next lever, which is an owner decision. Round 1 missed its bar and design 5.5 stops the
+  rounds at the first miss, so DAgger is closed at one round and the campaign has no scheduled
+  next step. The alternative the handoff frames is a teacher variant that widens the landing
+  opening for narrow parts, plus about six hours of re-recording. It partly reverses the matched
+  opening of the MS6 phase A rework. The new census points the other way: `close_miss` is the
+  class DAgger already largely fixed, and `held_no_lift` at about 0.35 is now the largest one.
+  The report does not choose between them.
+- The gate. The best read of the campaign is round 1 at 700k, 0.4297 on 3000 parts. Run g at
+  400k reads 0.4198 on 6000 parts. Both sit against a gate of 0.85, and nothing has cleared the
+  0.50 R-GATE floor.
 - The official read on seed 20261400. The MS3 selection rule L3 still owes the selected
   checkpoint one read. The owner held it back because the selection numbers already answer the
   R-GATE question.
@@ -345,15 +399,13 @@ Both were fixed and both cost machine time only.
   relabelled binary run would restore it at the cost of one conversion and four hours.
 - Why the cycles fail. The measurement lives in the campaign ledger under "The failed-cycle
   measurement of run g at 400k (2026-09-20)", which records its provenance. The commanded gap
-  per cycle has a median of 10 to 32 mm, and the
-  teacher's matched landing gap for a 7.8 mm part is 15.8 mm, so the opening scale is right.
-  Failed cycles close the jaws to 1 to 5 mm, which is the teacher's own close command, at a
-  place where the part is not. The stowed fraction is flat across part widths: 7.8 mm parts
-  read 0.19 to 0.28 and 15.8 mm parts read 0.255 to 0.258. The open question is whether a
-  15.8 mm landing gap leaves any room for a student's approach error. A teacher variant that
-  widens the landing opening for narrow parts is the framed alternative to a further round. It
-  partly reverses the matched opening of the MS6 phase A rework and costs about six hours of
-  re-recording.
+  per cycle has a median of 10 to 32 mm, and the teacher's matched landing gap for a 7.8 mm
+  part is 15.8 mm, so the opening scale is right. Failed cycles close the jaws to 1 to 5 mm,
+  which is the teacher's own close command, at a place where the part is not. The stowed
+  fraction is flat across part widths: 7.8 mm parts read 0.19 to 0.28 and 15.8 mm parts read
+  0.255 to 0.258. The open question is whether a 15.8 mm landing gap leaves any room for a
+  student's approach error. That measurement is run g's. Round 1's census moved the failure
+  from closing to lifting, so it needs taking again before it drives a lever.
 - The open-loop ruling is a serving decision and not an explanation. A policy that must execute
   whole 100-step chunks cannot correct inside a chunk, and the real arm will need a protocol
   that can. Design 5.1 records the measurement, and MS5b needs the reason.
