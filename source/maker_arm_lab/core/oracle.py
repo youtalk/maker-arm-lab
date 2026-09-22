@@ -723,6 +723,14 @@ class EnvOracle:
         another bin, and the gated corpus was recorded with this LIFT. ``HeapOracle`` turns it
         on, where one bin takes every part. The runtime's LIFT gate reads it
         (``oracle_runtime.OracleRig._lift_result``)."""
+        self.preselects_next_target = False
+        """Is the next target chosen when RELEASE ends, before RETREAT, so its row and marker
+        show through the whole retreat?
+
+        Off here: the six-brick oracle selects at HOVER entry and serves no target row.
+        ``HeapOracle`` turns it on and holds the choice in ``next_brick``, ``next_brick_start``
+        and ``next_grasp`` until HOVER adopts it. The runtime's cycle stash reads it
+        (``oracle_runtime.OracleRig._stash_cycle_state``)."""
         # One entry per completed pick cycle: did the brick reach its bin (RETREAT's read).
         # The heap batch loop negates the recorded frames of a False cycle (MS6 design H7).
         self.cycle_outcomes: list[bool] = []

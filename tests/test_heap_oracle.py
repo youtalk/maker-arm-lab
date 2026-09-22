@@ -591,3 +591,94 @@ def test_target_context_is_the_part_centre_and_the_grasp_or_zeros():
     assert row[:3] == pytest.approx([0.2, -0.1, 0.0048])
     assert row[3:5] == pytest.approx([0.0, 1.0])
     assert row[5:] == pytest.approx([0.0158, 0.0048])
+
+
+def _to_release_end(orc, scene):
+    """From a selected HOVER, one clean pick through RELEASE's report: the oracle stands at
+    RETREAT."""
+    for outcome in ("converged", "stalled", "converged"):  # HOVER, DESCEND, CLOSE
+        orc.report(oracle.PhaseResult(outcome=outcome), scene)
+        orc.next_goal(scene)
+    orc.report(oracle.PhaseResult(outcome="converged", lifted=True), scene)  # LIFT
+    for _ in range(3):  # RAISE, EXTEND, RELEASE
+        orc.next_goal(scene)
+        orc.report(oracle.PhaseResult(outcome="converged"), scene)
+    assert orc.phase is oracle.Phase.RETREAT
+
+
+THREE_SPREAD = [[0.185, -0.045, 0.0048], [0.205, 0.045, 0.0048], [0.24, 0.0, 0.0048]]
+
+
+def test_the_next_target_is_chosen_when_release_ends_and_hover_adopts_it():
+    """The 2026-09-22 protocol lever, teacher side: the choice is made the moment RELEASE
+    ends, the retreating cycle keeps its own part, grasp and log, and HOVER adopts the
+    choice with the bookkeeping a fresh selection gets."""
+    orc = _oracle([BRICK, BRICK, BRICK])
+    scene = _snapshot(THREE_SPREAD)
+    _to_hover(orc, scene)
+    first = orc.target_brick
+    assert orc.next_brick is None
+    _to_release_end(orc, scene)
+    chosen = orc.next_brick
+    assert chosen is not None and chosen != first and orc.next_grasp.part == chosen
+    assert torch.equal(orc.next_brick_start, scene.brick_pos[chosen])
+    # The retreating cycle is untouched: RETREAT grades it and the log names it.
+    assert orc.target_brick == first and orc.grasp.part == first
+    assert orc.cycles == 1 and orc.cycle_parts == [first] and orc.pick_order == [first]
+    # The same rule HOVER applies, on the scene minus the part in flight.
+    fresh = _oracle([BRICK, BRICK, BRICK])
+    fresh._sorted.add(first)
+    assert fresh._next_brick(scene) == chosen
+    orc.next_goal(scene)  # RETREAT
+    stowed = _snapshot(THREE_SPREAD, stowed=(first,))
+    orc.report(oracle.PhaseResult(outcome="converged"), stowed)
+    assert orc.cycle_outcomes == [True] and orc.target_brick is None
+    hover = orc.next_goal(stowed)
+    assert hover.phase is oracle.Phase.HOVER and orc.target_brick == chosen
+    assert orc.grasp == fresh.grasp and orc.next_brick is None and orc.next_grasp is None
+    assert orc.cycles == 2 and orc.cycle_parts == [first, chosen]
+    assert orc.pick_order == [first, chosen] and orc.retries_used == 0
+
+
+def test_a_preselection_that_no_longer_holds_is_re_ranked_or_dropped():
+    orc = _oracle([BRICK, BRICK, BRICK])
+    scene = _snapshot(THREE_SPREAD)
+    _to_hover(orc, scene)
+    first = orc.target_brick
+    _to_release_end(orc, scene)
+    chosen, stale = orc.next_brick, orc.next_grasp
+    # Moved past PRESELECT_MOVE_M: the same part, re-ranked on its live pose.
+    moved = _snapshot(THREE_SPREAD, stowed=(first,))
+    moved.brick_pos[chosen, 1] += 0.02
+    orc.next_goal(scene)  # RETREAT
+    orc.report(oracle.PhaseResult(outcome="converged"), moved)
+    orc.next_goal(moved)
+    mask = torch.zeros(3, dtype=torch.bool)
+    mask[chosen] = True
+    assert orc.target_brick == chosen
+    assert orc.grasp == grasp.select_grasp(orc._ranked(moved, mask)) and orc.grasp != stale
+    # Stowed meanwhile: HOVER falls back to a fresh selection.
+    orc2 = _oracle([BRICK, BRICK, BRICK])
+    _to_hover(orc2, scene)
+    first2 = orc2.target_brick
+    _to_release_end(orc2, scene)
+    gone = orc2.next_brick
+    orc2.next_goal(scene)
+    orc2.report(
+        oracle.PhaseResult(outcome="converged"), _snapshot(THREE_SPREAD, stowed=(first2, gone))
+    )
+    orc2.next_goal(_snapshot(THREE_SPREAD, stowed=(first2, gone)))
+    assert orc2.target_brick == 3 - first2 - gone and orc2.next_brick is None
+    # The loop's selector never inherits a pre-selection.
+    orc3 = _oracle([BRICK, BRICK, BRICK])
+    _to_hover(orc3, scene)
+    _to_release_end(orc3, scene)
+    orc3.target_brick = None
+    orc3.select_target(scene)
+    assert orc3.next_brick is None
+
+
+def test_the_six_brick_oracle_selects_at_hover_only():
+    assert oracle.EnvOracle(BL, 6, oracle.nominal_draw()).preselects_next_target is False
+    assert not hasattr(oracle.EnvOracle(BL, 6, oracle.nominal_draw()), "next_brick")
+    assert _oracle([BRICK]).preselects_next_target is True
