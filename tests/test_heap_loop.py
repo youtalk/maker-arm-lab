@@ -633,10 +633,13 @@ def test_a_decline_on_a_held_part_keeps_its_cycle_with_a_cooldown(monkeypatch):
     )
     env.close()
     ep = payload["episodes"][0]
-    assert ep["cycle_reasons"] == ["episode_end"] and ep["takeovers"] == 0, ep
+    # The episode now outlives its one cycle by the wait allowance, so the cycle ends on its
+    # own budget and the loop ends the episode on the spent cycle budget.
+    assert ep["cycle_reasons"] == ["budget"] and ep["takeovers"] == 0, ep
     # Declines at steps 0, 61 and 122 of 150: one per cooldown of 60 steps.
     assert payload["takeovers_declined"] == 3, payload
-    assert marks == [], marks
+    # The declines mark nothing; the one mark is the cycle's own budget end.
+    assert marks == [0], marks
 
 
 def test_a_takeover_on_a_target_out_of_reach_is_declined_not_raised():
