@@ -499,8 +499,18 @@ class MjLegoSortEnv:
         for i in range(self.num_envs):
             if actor is None or int(actor[i]) > 0:
                 self.target_part[i] = int(marker[i])
-                if target is not None:
-                    self.context_target[i] = target[i].numpy()
+                if target is None:
+                    continue
+                row = target[i].numpy()
+                # A takeover that resumed at LIFT on a held part names the part but ranks no
+                # grasp until REOPEN's regrasp, so the rig's row is zeros; the corpus never
+                # shows a zero row on a marked part. Keep the loop's row, the one the policy
+                # pinched under (campaign n round 2, 2026-09-22). The teacher's own batches
+                # (actor None) and an unmarked stash (-1) copy the rig's row as before.
+                marked_no_grasp = int(marker[i]) >= 0 and not row.any()
+                if actor is not None and marked_no_grasp and self.context_target[i].any():
+                    continue
+                self.context_target[i] = row
 
     def stamp_markers(self) -> None:
         """Draw the target marker into the overhead frame about to be observed (design 9).
