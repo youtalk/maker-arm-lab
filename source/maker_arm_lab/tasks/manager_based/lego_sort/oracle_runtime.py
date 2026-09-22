@@ -303,22 +303,6 @@ MATCHED_CLOSE_PHASES = (
     oracle.Phase.RAISE,
     oracle.Phase.EXTEND,
 )
-CLOSE_SQUEEZE_M = 0.003
-"""How far past the part's half width the jaws may still close (m).
-
-The contact model penetrates, and by a varying amount: a held grip settles 2.0 to 4.25 mm
-inside the part's half width across the catalog, so this is a floor on the RUNAWAY, not a
-model of the grip. Swept on the lone-part wall table, counting the rows whose grip survived
-the lift: 2.0 mm holds 10 of 12 and cuts off plate_1x4, whose grip needs 2.6 mm; 3.0 mm
-holds 11 of 12; 4.0 mm holds 10 of 12 and 5.0 mm only 8, both starving the wider grasps.
-Read the FORCE in that table and not its `pick` column, which also counts the parts that
-were gripped and then lost on the way to the bin.
-
-For a narrow grasp the floor falls near zero and the jaws behave as they always did, which
-is what the 7.8 mm rows want; it binds on the wide thin parts, which is where the extrusion
-was.
-"""
-
 # Per-step joint jitter (rad) that one raw unit of `EpisodeDraw.action_noise_std` buys.
 # core.oracle calibrates its noise in the raw units of the action space this module used to
 # drive, where a raw unit was IK_SCALE metres of tool motion in one control step; the joint
@@ -1215,7 +1199,7 @@ class OracleRig:
     def _matched_close_command(self, i: int, fully_closed: float) -> float:
         """Hold the jaws at the part's own width instead of driving them shut.
 
-        The floor is the grasp's half width less ``CLOSE_SQUEEZE_M``, which is where a brick
+        The floor is the grasp's half width less ``grasp.CLOSE_SQUEEZE_M``, which is where a brick
         of the same grasp width settles on its own. Bang-bang around it, the same way
         ``_matched_opening_command`` holds an opening: what this emits stays a binary gripper
         command the real arm accepts.
@@ -1228,7 +1212,7 @@ class OracleRig:
         binary = self.gripper_mode == "binary"
         if not getattr(orc, "matched_jaw_opening", False):
             return fully_closed if binary else 0.0
-        floor = max(0.0, 0.5 * float(orc.grasp_width) - CLOSE_SQUEEZE_M)
+        floor = 0.5 * grasp.close_gap(float(orc.grasp_width))
         if not binary:
             return 2.0 * floor
         measured = min(self.robot.data.joint_pos[i, self.finger_ids].tolist())

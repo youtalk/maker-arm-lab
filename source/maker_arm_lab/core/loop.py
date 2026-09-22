@@ -16,14 +16,16 @@ own. The metric never reads the cycle end: it is the at-rest grader at the episo
 There is no reset between cycles. The episode ends when the selector returns None (no
 candidate, or the cycle budget is spent) or every part is stowed.
 
-Three protocol switches, all off by default so the old protocol stays reproducible
+Four protocol switches, all off by default so the old protocol stays reproducible
 (2026-09-22): ``select_at_release`` selects the next target when the release opens the jaws
 (``release_ready``) instead of at the retreat (``select_ready``), and ends a cycle at the
 release of a lifted part wherever it landed (``released_after_lift``); ``replan_on_switch``
 sends the server a per-env replan flag on the step a target row is written, so the policy's
 chunk is cut at the switch (``policy_server.ActionQueues``); ``row_refresh`` rewrites the row
 from the live scene at a re-open that lifted nothing (``reopen_edge``, ``refreshed_row``), the
-teacher's REOPEN refresh. The payload's ``inference`` block records all three.
+teacher's REOPEN refresh; ``squeeze_floor`` caps a closing gap command at the teacher's close
+set point (``floored_gap``), a serving-side gripper lever. The payload's ``inference`` block
+records all four.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
@@ -209,6 +211,24 @@ def open_signal(
     return g - close_below.to(device="cpu", dtype=torch.float32)
 
 
+def floored_gap(gap: float, width: float) -> float:
+    """``squeeze_floor``: the continuous gap command after the teacher's close floor. Pure.
+
+    ``width`` is the served target row's grasp width (``target_context``'s sixth column, 0
+    with no live row). A command under it means the policy is closing on the part, and it
+    is capped at ``grasp.close_gap(width)``, w - 6 mm, the gap the teacher commands at every
+    CLOSE. The jaw drive's force is its stall distance times its stiffness: on run m's 400k
+    read (305 held_no_lift cycles, 2026-09-22) the first close sat a median 1.3 mm under w,
+    about a fifth of the teacher's squeeze, the arm rose 10.8 cm and the part rose 0 mm.
+    A command at or above w (a landing, a release, a coast) and any command with no row are
+    left alone. The corpus recorder needs no floor: the teacher already commands this exact
+    set point (``OracleRig._matched_close_command``), so the floor is a no-op on every
+    recorded frame and the served and recorded closes agree by construction."""
+    if width <= 0.0 or gap >= width:
+        return gap
+    return min(gap, grasp.close_gap(width))
+
+
 def _best_grasp(selector, scene, target: int):
     """The grasp the teacher ranks first on ``target`` alone, the way ``HeapOracle._regrasp``
     and ``aim_hover_at`` rank it, or None when no closing axis lies near the jaw plane."""
@@ -287,6 +307,7 @@ class Cycle:
     wait_steps: int = 0  # the retreat wait this selection spent (``select_ready``)
     wait_capped: bool = False  # the wait ended on its cap, not on the retreat
     refreshes: int = 0  # target rows ``row_refresh`` rewrote within the cycle
+    floored_steps: int = 0  # steps ``squeeze_floor`` changed the gap command
 
 
 @dataclass
@@ -441,6 +462,7 @@ CENSUS_EXPORT = (
     "wait_steps",
     "wait_capped",
     "refreshes",
+    "floored_steps",
 )
 """The ``Cycle`` fields each episode's ``cycle_census`` row exports, plus the two is_target
 flags of ``first_held`` and ``last_held``. Observation only, never the metric."""
@@ -508,13 +530,15 @@ def rollout(
     select_at_release: bool = False,
     replan_on_switch: bool = False,
     row_refresh: bool = False,
+    squeeze_floor: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
     ``policy`` is a ``policy_client.ServerPolicy`` or None for the oracle driver.
     ``takeover`` is a ``TakeoverConfig`` (the DAgger mode, phase B design 5.5) or None.
-    The three switches are the module docstring's; ``replan_on_switch`` needs a policy whose
-    ``step`` takes ``replan``, and the flag is left off the wire when the switch is off.
+    The four switches are the module docstring's; ``replan_on_switch`` needs a policy whose
+    ``step`` takes ``replan``, and the flag is left off the wire when the switch is off;
+    ``squeeze_floor`` needs the continuous gripper and a served target row.
     ``on_frame(ordinal, step_in_cycle, wrist, overhead)`` is called with env 0's two policy
     frames every ``FRAME_EVERY`` steps of each of its cycles, for a forensics dump.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
@@ -547,6 +571,9 @@ def rollout(
             )
     if takeover is not None and policy is None:
         raise EvalFailure("takeover", "the takeover triggers need a policy to take over from")
+    ctx_target = getattr(env, "context_target", None)
+    if squeeze_floor and (gripper_mode != "continuous" or ctx_target is None):
+        raise EvalFailure("squeeze_floor", "needs the continuous gripper and a served target row")
     limits = robot.data.joint_pos_limits[:, arm_ids, :].to("cpu")
     tracker = RolloutTracker(num_envs, k)
     recorder = getattr(env, "recorder", None)
@@ -564,7 +591,6 @@ def rollout(
                 f"the selector spends {st.selector.cycle_budget} cycles, the loop {cycle_budget}",
             )
     ordinal = [0] * num_envs  # the recorder's takeover ordinal per env
-    ctx_target = getattr(env, "context_target", None)
     loop_done = torch.zeros(num_envs, dtype=torch.bool)
     triggers = (
         _TriggerState(num_envs, takeover, run_seed, cycle_budget) if takeover is not None else None
@@ -573,6 +599,7 @@ def rollout(
         "select_at_release": bool(select_at_release),
         "replan_on_switch": bool(replan_on_switch),
         "row_refresh": bool(row_refresh),
+        "squeeze_floor": bool(squeeze_floor),
     }
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
 
@@ -696,6 +723,15 @@ def rollout(
         if policy_action is not None:
             idle = torch.tensor(rig.idle)
             action_cpu[idle] = policy_action[idle]
+            if squeeze_floor:
+                for i, st in enumerate(states):
+                    if st.cycle is None or not rig.idle[i] or bool(tracker.done[i]):
+                        continue
+                    gap = float(action_cpu[i, 6])
+                    floored = floored_gap(gap, float(ctx_target[i][5]))  # target_width
+                    if floored != gap:
+                        action_cpu[i, 6] = floored
+                        st.cycle.floored_steps += 1
         signal = open_signal(action_cpu[:, 6], gripper_mode, close_below)
         tracker.record_gripper(signal)
         for i, st in enumerate(states):

@@ -44,5 +44,5 @@ def test_the_heap_client_takes_the_gripper_flag():
 
 def test_the_heap_client_takes_the_protocol_switches():
     text = SCRIPT.read_text()
-    for name in ("select_at_release", "replan_on_switch", "row_refresh"):
+    for name in ("select_at_release", "replan_on_switch", "row_refresh", "squeeze_floor"):
         assert f'"--{name}"' in text and f"{name}=args.{name}" in text

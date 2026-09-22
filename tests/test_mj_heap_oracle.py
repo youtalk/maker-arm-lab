@@ -227,7 +227,6 @@ def test_a_lone_flat_part_survives_the_lift_instead_of_being_squeezed_out():
     section 5), which is why the flat families left the catalog on 2026-09-18.
     """
     from maker_arm_lab.core import grasp
-    from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import CLOSE_SQUEEZE_M
 
     plate = parts.make_part("plate", 2, 4)
     draw = sample_run_draw(random.Random(5))
@@ -257,7 +256,7 @@ def test_a_lone_flat_part_survives_the_lift_instead_of_being_squeezed_out():
         if bool(out["dones"][0]) or bool(out["abandoned"][0]):
             break
     env.close()
-    floor = 0.5 * min(plate.size[0], plate.size[1]) - CLOSE_SQUEEZE_M
+    floor = 0.5 * min(plate.size[0], plate.size[1]) - grasp.CLOSE_SQUEEZE_M
     assert tightest > floor - 0.002, (tightest, floor)
     assert any(lifts), lifts
 
@@ -323,8 +322,6 @@ def test_the_continuous_rig_commands_the_matched_gap_without_a_flip():
 def test_the_continuous_rig_closes_holds_and_releases_at_its_set_points():
     """Phase B design 5.8: the close and release gaps value by value, and a matched-gap hold
     that stays within JAW_HOLD_BAND of its set point for 100 steps with no command flip."""
-    from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import CLOSE_SQUEEZE_M
-
     env, rig = _env_and_rig(gripper_mode="continuous")
     _place(env, SPREAD)
     held_phases = (oracle.Phase.LIFT, oracle.Phase.RAISE, oracle.Phase.EXTEND)
@@ -351,7 +348,7 @@ def test_the_continuous_rig_closes_holds_and_releases_at_its_set_points():
     env.close()
     assert closes and releases and len(held) >= 100, (len(closes), len(releases), len(held))
     for command, w in closes:
-        assert command == pytest.approx(2.0 * max(0.0, 0.5 * w - CLOSE_SQUEEZE_M))
+        assert command == pytest.approx(2.0 * max(0.0, 0.5 * w - grasp.CLOSE_SQUEEZE_M))
     for command, w in releases:
         assert command == pytest.approx(2.0 * (grasp.landing_half_gap(w) - grasp.JAW_HOLD_BAND))
     hold = held[:100]

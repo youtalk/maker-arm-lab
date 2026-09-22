@@ -85,6 +85,23 @@ class Grasp:
     swept: int = 0  # standing neighbors the closing stroke pushes toward the part
 
 
+CLOSE_SQUEEZE_M = 0.003
+"""How far past the part's half width the jaws may still close (m).
+
+The contact model penetrates, and by a varying amount: a held grip settles 2.0 to 4.25 mm
+inside the part's half width across the catalog, so this is a floor on the RUNAWAY, not a
+model of the grip. Swept on the lone-part wall table, counting the rows whose grip survived
+the lift: 2.0 mm holds 10 of 12 and cuts off plate_1x4, whose grip needs 2.6 mm; 3.0 mm
+holds 11 of 12; 4.0 mm holds 10 of 12 and 5.0 mm only 8, both starving the wider grasps.
+Read the FORCE in that table and not its `pick` column, which also counts the parts that
+were gripped and then lost on the way to the bin.
+
+For a narrow grasp the floor falls near zero and the jaws behave as they always did, which
+is what the 7.8 mm rows want; it binds on the wide thin parts, which is where the extrusion
+was.
+"""
+
+
 def landing_half_gap(width: float) -> float:
     """The jaw inner face's distance (m) from the tool axis while the tips come down.
 
@@ -92,6 +109,14 @@ def landing_half_gap(width: float) -> float:
     full opening, which is all the jaws have.
     """
     return min(OPEN_HALF_GAP, 0.5 * width + JAW_APPROACH_CLEARANCE + JAW_HOLD_BAND)
+
+
+def close_gap(width: float) -> float:
+    """The teacher's close set point (m): the jaw gap the carrying legs hold on a grasp of
+    ``width``, its half width less ``CLOSE_SQUEEZE_M`` on each side and never below zero
+    (``OracleRig._matched_close_command``). The continuous corpus records exactly this gap
+    at every CLOSE, so a policy-side floor at the same value leaves recorded frames alone."""
+    return 2.0 * max(0.0, 0.5 * width - CLOSE_SQUEEZE_M)
 
 
 def body_axes_world(quat: torch.Tensor) -> torch.Tensor:

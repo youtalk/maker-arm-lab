@@ -105,6 +105,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         "(the teacher's REOPEN refresh)",
     )
     parser.add_argument(
+        "--squeeze_floor",
+        action="store_true",
+        help="cap a closing gap command at the teacher's close set point, w - 6 mm on the "
+        "served target row's width (loop.floored_gap)",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -193,6 +199,7 @@ def main(argv=None) -> int:
             select_at_release=args.select_at_release,
             replan_on_switch=args.replan_on_switch,
             row_refresh=args.row_refresh,
+            squeeze_floor=args.squeeze_floor,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

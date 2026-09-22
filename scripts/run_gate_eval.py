@@ -92,7 +92,7 @@ class GateCfg:
     client_flags: tuple = ()
 
 
-LOOP_SWITCHES = ("select_at_release", "replan_on_switch", "row_refresh")
+LOOP_SWITCHES = ("select_at_release", "replan_on_switch", "row_refresh", "squeeze_floor")
 """The heap loop's protocol switches (core.loop.rollout); the client records them in the
 payload's inference block under "loop", and the cache matches on them."""
 

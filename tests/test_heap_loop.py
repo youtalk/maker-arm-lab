@@ -898,6 +898,22 @@ def test_reopen_edge_is_the_open_after_a_close_that_lifted_nothing():
     assert not loop.reopen_edge(cycle, True)  # the part rose: a lift, not a REOPEN
 
 
+def test_floored_gap_caps_a_closing_command_at_the_teachers_close_set_point():
+    import inspect
+
+    from maker_arm_lab.core import eval_loop, grasp
+
+    w = 0.0398  # the 2x4's grasp width: the teacher closes to w - 6 mm
+    assert loop.floored_gap(w - 0.0013, w) == pytest.approx(w - 0.006)
+    assert loop.floored_gap(w - 0.0013, w) == pytest.approx(grasp.close_gap(w))
+    assert loop.floored_gap(w - 0.010, w) == pytest.approx(w - 0.010)  # already under: kept
+    assert loop.floored_gap(w + 0.008, w) == w + 0.008  # the landing gap, untouched
+    assert loop.floored_gap(w, w) == w
+    assert loop.floored_gap(0.0018, 0.0) == 0.0018  # no live row: untouched
+    # The six-brick gate rollout has no target row and never floors anything.
+    assert "floored_gap" not in inspect.getsource(eval_loop)
+
+
 def test_refreshed_row_follows_the_live_centre_and_keeps_the_grasp_when_nothing_ranks(
     monkeypatch,
 ):
@@ -959,6 +975,7 @@ def test_the_switches_select_at_once_after_a_budget_end_refresh_at_a_reopen_and_
         "select_at_release": True,
         "replan_on_switch": True,
         "row_refresh": True,
+        "squeeze_floor": False,
     }
     # Every cycle ended on its budget, so no selection waited for a retreat.
     assert ep["cycle_reasons"] == ["budget"] * 3 and ep["select_wait_steps"] == 0
