@@ -8,11 +8,13 @@ K of 50, a cycle budget of 65, the continuous gripper, open loop. The campaign l
 
 ## 0. Read this first
 
-The goal was not met. The best checked read of this campaign is 0.6250, 1875 of 3000 parts
-stowed, at 1.93 cycles per stowed part, against a goal of 0.80. That read is the 400k
-checkpoint of run m, served at 50 actions per forward under the loop of commit f719716. The
-previous campaign's checked best was 0.4297 on the same 3000 parts, so the gain is 0.195 with
-the two intervals disjoint. This is the first heap read above the 0.50 floor of R-GATE.
+The goal was not met. The best checked read of this campaign is 0.6320, 1896 of 3000 parts
+stowed, at 2.00 cycles per stowed part, against a goal of 0.80. That read is the 400k
+checkpoint of run m, served at 50 actions per forward under the loop of commit adedbfc. The
+same checkpoint read 0.6250 before the episode allowance of that commit, inside the same
+interval. The previous campaign's checked best was 0.4297 on the same 3000 parts, so the
+gain is 0.20 with the two intervals disjoint. This is the first heap read above the 0.50
+floor of R-GATE.
 
 Three levers moved the number, and two protocol defects were found and fixed on the way.
 
@@ -30,7 +32,7 @@ to hundreds of steps later. The policy meanwhile picked on a stale target. The l
 ends the cycle on bin entry and waits for the retreat. The wait still caps after most cycles,
 and that stale-row time is the largest known cost left.
 
-Section 5.2 holds both checked reads, 200k at 0.5197 and 400k at 0.6250. Section 6 lists
+Section 5.2 holds the checked reads, 200k at 0.5197 and 400k at 0.6250 and 0.6320. Section 6 lists
 what is open, and the next lever it names is the row switch that mirrors the teacher exactly.
 
 ## 1. Where the previous campaign stopped
@@ -101,6 +103,13 @@ pick point is within 6 cm of `RETREAT_POINT` with the jaws at least 0.8 open. A 
 steps, at the 800-step cycle budget, ends the wait on a policy that never retreats. That is the state the corpus pairs with a new target. The wait lies between
 cycles, so the cycle budget and the cycles-per-stowed rule count as before. Each episode
 reports its wait as `select_wait_steps`.
+
+The episode length follows the wait since commit adedbfc. It used to hold every cycle at its
+full budget and nothing more. A wait that hit its cap therefore ate the cycles at the end
+of the episode. On the 400k check, 41 of 60 episodes ended on the 52000-step cap at a median of 60
+of 65 cycles. A quarter of their steps went to the wait. The episode now holds every cycle
+at its full budget plus the wait at its cap before each, 65 x 1100 steps. The
+pre-registered cycle budget is then what binds. Section 5.3 holds the read under it.
 
 ## 3. The code
 
@@ -200,6 +209,7 @@ f719716 at 50 actions per forward. Draws 0 to 3 are the ladder's cached payloads
 | --- | --- | --- | --- | --- |
 | 200k | 1559 | 0.5197 | 0.5018-0.5375 | 2.271 |
 | 400k | 1875 | 0.6250 | 0.6075-0.6422 | 1.927 |
+| 400k, episode allowance (adedbfc) | 1896 | 0.6320 | 0.6146-0.6491 | 1.997 |
 
 Draws 4 to 11 of the 200k read 0.46 where draws 0 to 3 read 0.60. The four selection draws
 chose both the checkpoint and the horizon, so they carried selection luck. The checked read
@@ -225,7 +235,18 @@ are 178 of 891, 20 percent, against 23 percent in round 1. Stowed cycles take a 
 the teacher's pace. The failed cycles still run to the 800-step budget, 1955 of them at
 400k.
 
-### 5.3 What the two checks say together
+### 5.3 The read under the episode allowance
+
+The 400k checkpoint read draws 0 to 11 again under adedbfc, at 50 actions per forward, with
+the episode at 65 x 1100 steps. No episode ended on the step cap. Every one ended on the
+cycle budget or with no candidate left, where 41 of 60 ended on the cap before. The read
+is 1896 of 3000, 0.6320, at 2.00 cycles per stowed part. That is 0.007 above the read
+without the allowance, inside both intervals. The extra cycles at the end of an episode
+went to the parts the policy already failed on. The allowance made the cycle budget bind
+as designed and moved the number very little. By the ledger's rule it is the
+campaign's number.
+
+### 5.4 What the checks say together
 
 `held_no_lift` at 0.26 to 0.27 is the class no lever of this campaign moved, and it is the
 class the stale target row feeds. The wait after a stow hits its cap after most cycles. In
@@ -236,7 +257,7 @@ commits to a grasp where the earlier one hovered.
 
 ## 6. What is still open
 
-- The goal. 0.6250 against 0.80, a gap of 0.175. At 65 cycles for 50 parts the read needs a
+- The goal. 0.6320 against 0.80, a gap of 0.168. At 65 cycles for 50 parts the read needs a
   per-cycle stow rate of about 0.62, and the 400k policy stows 0.42 of its cycles.
 - The remaining failure classes. At 200k and 50 actions per forward, `held_no_lift` is still
   about 0.28 of all cycles and `close_miss` about 0.20. The wait still hits its 300-step cap
