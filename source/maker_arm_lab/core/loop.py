@@ -66,6 +66,34 @@ HALF_BUDGET_NO_LIFT = "half_budget_no_lift"
 No lift means the jaws hold nothing, or hold a part that has not risen ``oracle.LIFT_MIN_RISE``
 above where it was when the cycle opened (``Cycle.start_z``)."""
 CENSUS_MIN_HELD_STEPS = GRASP_HOLD_WINDOW[0]
+SELECT_RETREAT_RADIUS = 0.06
+"""m: the next target is selected once the pick point is this close to ``oracle.RETREAT_POINT``.
+
+The teacher's corpus switches the target row and the marker when RETREAT ends: the arm at
+RETREAT_POINT (plus the episode's via jitter) with the jaws at the full gap, and only then does
+the next HOVER start. Selecting the instant the stowed part rests in the bin, as the loop did
+until 2026-09-21, hands the policy a new target while it is still at the release pose, a state
+no demonstration pairs with a fresh target. On round 1's 700k read, 646 of the 1324
+held_no_lift cycles followed a stow and their first close was a median 13 cm from the target,
+at the bin."""
+SELECT_OPEN_FRACTION = 0.8
+"""The measured jaw opening fraction that reads as the retreat's full gap."""
+SELECT_WAIT_FRACTION = 0.375
+"""The share of ``CYCLE_STEP_BUDGET`` the loop waits for the retreat at most before it selects
+anyway: 300 steps at the 800-step budget, and the teacher's RETREAT converges in 91 to 147 of
+its 300 steps. A fraction, so a test that shrinks the budget shrinks the wait with it."""
+
+
+def select_ready(pick_point, open_fraction: float, waited: int) -> bool:
+    """May the loop hand the policy its next target now? Pure. ``pick_point`` is the rig's
+    (3,) pick point, ``open_fraction`` the measured jaw opening in [0, 1], ``waited`` the steps
+    since the last cycle closed."""
+    if waited >= int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET):
+        return True
+    near = float((torch.as_tensor(pick_point) - torch.tensor(oracle.RETREAT_POINT)).norm())
+    return near <= SELECT_RETREAT_RADIUS and open_fraction >= SELECT_OPEN_FRACTION
+
+
 """Control steps a part must stay between the jaws to count as held in the cycle census: the
 start of the six-brick hold window. A shorter pinch is a brush."""
 
@@ -175,6 +203,8 @@ class EnvState:
     takeovers_stowed: int = 0
     takeovers_failed: int = 0
     done_reason: str | None = None
+    idle_since: int | None = None  # the step the last cycle closed at, None before the first
+    select_wait_steps: int = 0  # steps spent waiting for the retreat before a selection
 
 
 def _layout_of(rig, i: int):
@@ -376,11 +406,19 @@ def rollout(
                 end = cycle_end(st.cycle, stowed_now, out, step, set(st.stowed_parts))
                 if end is not None:
                     _close_cycle(st, end[0], end[1], step, rig.snapshot(i))
+                    st.idle_since = step
             if st.cycle is not None:
                 continue
             if len(stowed_now) == k:
                 loop_done[i] = True
                 st.done_reason = "all_stowed"
+                continue
+            if st.idle_since is not None and not select_ready(
+                rig.pick_point(i).to("cpu"),
+                float(policy_state(robot.data.joint_pos)[i, 6]),
+                step - st.idle_since,
+            ):
+                st.select_wait_steps += 1
                 continue
             scene = rig.snapshot(i)
             target = st.selector.select_target(scene)
@@ -543,6 +581,7 @@ def rollout(
                 "takeovers": st.takeovers,
                 "takeovers_stowed": st.takeovers_stowed,
                 "takeovers_failed": st.takeovers_failed,
+                "select_wait_steps": st.select_wait_steps,
             }
         )
     steps_total = sum(e["steps"] for e in episodes)
