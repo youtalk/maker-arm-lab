@@ -715,11 +715,11 @@ def test_a_still_policy_is_classed_no_close_and_the_teacher_closes_on_its_target
 def test_the_next_target_waits_for_the_retreat_or_the_cap():
     at_retreat = torch.tensor(oracle.RETREAT_POINT)
     assert loop.select_ready(at_retreat, 1.0, 0)
-    assert loop.select_ready(at_retreat + torch.tensor([0.09, 0.0, 0.0]), 0.75, 10)
+    assert loop.select_ready(at_retreat + torch.tensor([0.05, 0.0, 0.0]), 0.9, 10)
     assert not loop.select_ready(at_retreat, 0.3, 10)  # jaws still closed
     assert not loop.select_ready(torch.tensor([0.44, 0.0, 0.30]), 1.0, 10)  # at the bin
     cap = int(loop.SELECT_WAIT_FRACTION * loop.CYCLE_STEP_BUDGET)
-    assert cap == 150 and not loop.select_ready(torch.tensor([0.44, 0.0, 0.30]), 0.0, cap - 1)
+    assert cap == 300 and not loop.select_ready(torch.tensor([0.44, 0.0, 0.30]), 0.0, cap - 1)
     assert loop.select_ready(torch.tensor([0.44, 0.0, 0.30]), 0.0, cap)
 
 
