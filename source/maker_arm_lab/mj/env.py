@@ -25,7 +25,8 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
     env.gripper_mode ("binary" | "continuous") and env.jaw_targets(raw)
     heap mode (MS6, ``parts`` given): env.parts, env.destination_bins (N,) long,
         env.stow_half_extents, env.target_part (N,) int16 (the overhead marker), env.context_box,
-        env.context_camera_box (N,9), env.obs_buf["images"]["overhead_depth"] (N,224,224) uint16,
+        env.context_camera_box (N,9), env.context_target (N,7), env.context_camera_box_target
+        (N,16), env.obs_buf["images"]["overhead_depth"] (N,224,224) uint16,
         env.stamp_markers() (the heap loop stamps the frame it hands the policy),
         env.marker_from_rig (default True; the heap loop's policy mode sets False so a
         takeover keeps the marker on the loop's target)
@@ -286,8 +287,11 @@ class MjLegoSortEnv:
             self.cfg.num_bricks = num_bricks
             if context == "privileged":
                 raise ValueError(
-                    "the privileged channel holds six bricks; a heap serves camera or camera_box"
+                    "the privileged channel holds six bricks; a heap serves camera, camera_box "
+                    "or camera_box_target"
                 )
+        elif context == "camera_box_target":
+            raise ValueError("the target channel is a heap channel; six bricks serve camera")
         elif num_bricks > CONTEXT_MAX_BRICKS:
             raise ValueError(f"context channels hold {CONTEXT_MAX_BRICKS} bricks, got {num_bricks}")
         self.context_mode = context
@@ -295,11 +299,18 @@ class MjLegoSortEnv:
         self.context_privileged = np.zeros((num_envs, CONTEXT_DIMS["privileged"]), dtype=np.float32)
         self.context_box = np.zeros((num_envs, 3), dtype=np.float32)
         self.context_camera_box = np.zeros((num_envs, CONTEXT_DIMS["camera_box"]), dtype=np.float32)
+        # One buffer: the 9-wide camera+box row, then the target row as a view into it, so a
+        # write to context_target lands in the served vector.
+        self.context_camera_box_target = np.zeros(
+            (num_envs, CONTEXT_DIMS["camera_box_target"]), dtype=np.float32
+        )
+        self.context_target = self.context_camera_box_target[:, CONTEXT_DIMS["camera_box"] :]
         served = {
             "none": np.zeros((num_envs, 0), dtype=np.float32),
             "camera": self.context_camera,
             "privileged": self.context_privileged,
             "camera_box": self.context_camera_box,
+            "camera_box_target": self.context_camera_box_target,
         }[context]
         self.max_episode_length = round(episode_length_s * CONTROL_HZ)
         # The run-level draw, and the draw in force per env: equal to run_draw for every env
@@ -427,6 +438,7 @@ class MjLegoSortEnv:
                     depth=self._depth[i] if heap and self.cameras else None,
                     target_part=int(self.target_part[i]) if heap else -1,
                     context_box=self.context_box[i] if heap else None,
+                    context_target=self.context_target[i] if heap else None,
                 )
         step_limit = GRIPPER_RATE_M_PER_S / CONTROL_HZ
         self._grip_ctrl += np.clip(targets[:, 6:] - self._grip_ctrl, -step_limit, step_limit)
@@ -475,9 +487,12 @@ class MjLegoSortEnv:
         brick = getattr(self, "oracle_cycle_brick", None)
         if brick is None:
             return
+        target = getattr(self, "oracle_cycle_target", None)
         for i in range(self.num_envs):
             if actor is None or int(actor[i]) > 0:
                 self.target_part[i] = int(brick[i])
+                if target is not None:
+                    self.context_target[i] = target[i].numpy()
 
     def stamp_markers(self) -> None:
         """Draw the target marker into the overhead frame about to be observed (design 9).
@@ -591,6 +606,8 @@ class MjLegoSortEnv:
             self.context_box[i] = np.array([bl.bin_x, bl.bin_ys[dest], 0.0], dtype=np.float32)
             self.context_camera_box[i, :6] = self.context_camera[i]
             self.context_camera_box[i, 6:] = self.context_box[i]
+            self.context_camera_box_target[i, :9] = self.context_camera_box[i]
+            self.context_target[i] = 0.0
         mujoco.mj_forward(m, d)
         self.episode_length_buf[i] = 0
         if self.recorder is not None:

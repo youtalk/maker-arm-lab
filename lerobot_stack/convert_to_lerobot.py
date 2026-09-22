@@ -24,7 +24,8 @@ than a failure -- a far worse outcome than a reported failure.
 ``--context`` additionally reads a shard's ``obs/context_<name>`` dataset(s) and writes
 them as the single feature ``observation.environment_state``. ``camera`` and ``privileged``
 read one channel each; ``camera_box`` (MS6 heap shards) concatenates the camera pose and the
-destination box pose into one 9-wide row, camera first. The context choices never mix in one
+destination box pose into one 9-wide row, camera first, and ``camera_box_target`` adds the
+7-wide target row (``obs/context_target``) after the box. The context choices never mix in one
 dataset: one ``--context`` per conversion. ``--no_images`` drops both image features (the
 privileged-state ceiling) and requires ``--context`` -- a dataset with neither images nor a
 context channel has nothing to condition the policy on.
@@ -103,6 +104,7 @@ CONTEXT_SOURCES = {
     "camera": ("camera",),
     "privileged": ("privileged",),
     "camera_box": ("camera", "box"),
+    "camera_box_target": ("camera", "box", "target"),
 }
 CONTEXT_CHANNELS = tuple(CONTEXT_SOURCES)
 ACTION_SPACES = ("absolute", "delta_prev")

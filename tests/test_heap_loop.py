@@ -1,5 +1,6 @@
 """The heap outer loop on a three-part MuJoCo heap, cameras off (phase B design 5.2)."""
 
+import math
 import random
 
 import h5py
@@ -76,7 +77,7 @@ def _rollout(env, rig, policy, budget=4, **kwargs):
 
 def test_cycle_budget_and_episode_length_follow_the_gate_rule():
     assert loop.cycle_budget(50) == 65 and loop.cycle_budget(3) == 4
-    assert loop.episode_length_s(65) == pytest.approx(65 * loop.CYCLE_STEP_BUDGET / 30.0)
+    assert loop.episode_length_s(65) == pytest.approx(65 * (loop.CYCLE_STEP_BUDGET + 300) / 30.0)
 
 
 def test_grip_open_flags_read_both_gripper_contracts():
@@ -632,10 +633,13 @@ def test_a_decline_on_a_held_part_keeps_its_cycle_with_a_cooldown(monkeypatch):
     )
     env.close()
     ep = payload["episodes"][0]
-    assert ep["cycle_reasons"] == ["episode_end"] and ep["takeovers"] == 0, ep
+    # The episode now outlives its one cycle by the wait allowance, so the cycle ends on its
+    # own budget and the loop ends the episode on the spent cycle budget.
+    assert ep["cycle_reasons"] == ["budget"] and ep["takeovers"] == 0, ep
     # Declines at steps 0, 61 and 122 of 150: one per cooldown of 60 steps.
     assert payload["takeovers_declined"] == 3, payload
-    assert marks == [], marks
+    # The declines mark nothing; the one mark is the cycle's own budget end.
+    assert marks == [0], marks
 
 
 def test_a_takeover_on_a_target_out_of_reach_is_declined_not_raised():
@@ -709,3 +713,31 @@ def test_a_still_policy_is_classed_no_close_and_the_teacher_closes_on_its_target
     ep = _rollout(env, rig, _HoldPolicy(), budget=9)["episodes"][0]
     env.close()
     assert ep["cycle_classes"] == ["no_close"] * 6 and ep["cycle_first_close_cm"] == [None] * 6
+
+
+def test_the_next_target_waits_for_the_retreat_or_the_cap():
+    at_retreat = torch.tensor(oracle.RETREAT_POINT)
+    assert loop.select_ready(at_retreat, 1.0, 0)
+    assert loop.select_ready(at_retreat + torch.tensor([0.05, 0.0, 0.0]), 0.9, 10)
+    assert not loop.select_ready(at_retreat, 0.3, 10)  # jaws still closed
+    assert not loop.select_ready(torch.tensor([0.44, 0.0, 0.30]), 1.0, 10)  # at the bin
+    cap = int(loop.SELECT_WAIT_FRACTION * loop.CYCLE_STEP_BUDGET)
+    assert cap == 300 and not loop.select_ready(torch.tensor([0.44, 0.0, 0.30]), 0.0, cap - 1)
+    assert loop.select_ready(torch.tensor([0.44, 0.0, 0.30]), 0.0, cap)
+
+
+def test_a_part_inside_the_bin_but_still_moving_ends_the_cycle_and_not_the_metric():
+    from maker_arm_lab.core.stowed import per_brick_stowed
+
+    env, _rig = _env_and_rig()
+    _place(env, SPREAD)
+    cx, cy, cz = layout.heap_bin_center(env.bin_layouts[0])
+    m, d, h = env.models[0], env.datas[0], env.handles
+    adr = h.brick_qpos[0]
+    d.qpos[adr : adr + 3] = (cx, cy, cz)
+    d.qvel[h.brick_dof[0] : h.brick_dof[0] + 3] = (0.3, 0.0, 0.0)
+    mujoco.mj_forward(m, d)
+    env._refresh([0], images=False)
+    assert not bool(per_brick_stowed(env)[0, 0])
+    assert bool(per_brick_stowed(env, max_speed=math.inf)[0, 0])
+    env.close()

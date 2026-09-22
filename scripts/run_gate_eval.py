@@ -576,7 +576,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--context",
-        choices=("none", "camera", "privileged", "camera_box"),
+        choices=("none", "camera", "privileged", "camera_box", "camera_box_target"),
         default="none",
         help="MuJoCo only: which context channel the env serves to the policy "
         "(observation.environment_state); must match the checkpoint",

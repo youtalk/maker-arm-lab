@@ -3,12 +3,16 @@
 Phase B design 5.2. One cycle: the selector (a ``HeapOracle`` per env, the teacher's own
 rule) names the target, the loop writes it into ``env.target_part`` so the overhead marker
 moves, the policy drives, and the privileged grader ends the cycle. Three ends: a part that
-was not stowed when the cycle began is at rest in the bin (the target, or any part the jaws
-carried, rung b5's rule), the cycle spent ``CYCLE_STEP_BUDGET`` control steps, or the target
+was not in the bin when the cycle began is inside the bin, moving or not (the target, or any
+part the jaws carried, rung b5's rule), the cycle spent ``CYCLE_STEP_BUDGET`` control steps, or the target
 came to rest on the desk outside ``layout.in_reach`` and outside the bin, out of the jaws
 (knocked out of reach; a carry crosses out-of-reach space in flight and may pause there). A
 failed cycle marks its cell in the selector's failure memory. A part an earlier cycle stowed
 never ends a later one, so a stowed part that settles late is not credited twice.
+The cycle ends on entry into the bin and not at rest (2026-09-22), because the teacher's
+corpus switches targets when RETREAT ends, and a part settling in a pile can take hundreds
+of steps longer than that; the policy meanwhile saw a stale target and started a pick of its
+own. The metric never reads the cycle end: it is the at-rest grader at the episode's end.
 There is no reset between cycles. The episode ends when the selector returns None (no
 candidate, or the cycle budget is spent) or every part is stowed.
 
@@ -37,7 +41,7 @@ from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.dagger_loop import DECLINE_COOLDOWN, trigger_reason
 from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _nearest_brick_cm
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
-from maker_arm_lab.core.heap_oracle import CANDIDATE_MAX_Z
+from maker_arm_lab.core.heap_oracle import CANDIDATE_MAX_Z, target_context
 from maker_arm_lab.core.stowed import _brick_states, env_heap_bin_centers, per_brick_stowed
 from maker_arm_lab.robots.frames import ARM_JOINT_REGEX, TOOL_BODY
 
@@ -66,6 +70,41 @@ HALF_BUDGET_NO_LIFT = "half_budget_no_lift"
 No lift means the jaws hold nothing, or hold a part that has not risen ``oracle.LIFT_MIN_RISE``
 above where it was when the cycle opened (``Cycle.start_z``)."""
 CENSUS_MIN_HELD_STEPS = GRASP_HOLD_WINDOW[0]
+SELECT_RETREAT_RADIUS = 0.06
+"""m: the next target is selected once the pick point is this close to ``oracle.RETREAT_POINT``.
+
+0.06 was widened to 0.10 for a few hours on 2026-09-22 (the 50k policy retreats to about
+x 0.31, 5 to 6 cm from the point, so 6 cm catches the retreat on its edge) together with a
+0.7 opening and a 150-step cap. Measured on the 200k checkpoint at 50 actions per forward,
+draws 0 to 3 of seed 20261300, the wider wait read lower on every finished draw (draw 3: 112
+against 151 of 250), so the switch fired mid-retreat, before the state the corpus pairs with a
+new target. The constants went back to what the 0.597 read used.
+
+The teacher's corpus switches the target row and the marker when RETREAT ends: the arm at
+RETREAT_POINT (plus the episode's via jitter) with the jaws at the full gap, and only then does
+the next HOVER start. Selecting the instant the stowed part rests in the bin, as the loop did
+until 2026-09-21, hands the policy a new target while it is still at the release pose, a state
+no demonstration pairs with a fresh target. On round 1's 700k read, 646 of the 1324
+held_no_lift cycles followed a stow and their first close was a median 13 cm from the target,
+at the bin."""
+SELECT_OPEN_FRACTION = 0.8
+"""The measured jaw opening fraction that reads as the retreat's full gap."""
+SELECT_WAIT_FRACTION = 0.375
+"""The share of ``CYCLE_STEP_BUDGET`` the loop waits for the retreat at most before it selects
+anyway: 300 steps at the 800-step budget, and the teacher's RETREAT converges in 91 to 147 of
+its 300 steps. A fraction, so a test that shrinks the budget shrinks the wait with it."""
+
+
+def select_ready(pick_point, open_fraction: float, waited: int) -> bool:
+    """May the loop hand the policy its next target now? Pure. ``pick_point`` is the rig's
+    (3,) pick point, ``open_fraction`` the measured jaw opening in [0, 1], ``waited`` the steps
+    since the last cycle closed."""
+    if waited >= int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET):
+        return True
+    near = float((torch.as_tensor(pick_point) - torch.tensor(oracle.RETREAT_POINT)).norm())
+    return near <= SELECT_RETREAT_RADIUS and open_fraction >= SELECT_OPEN_FRACTION
+
+
 """Control steps a part must stay between the jaws to count as held in the cycle census: the
 start of the six-brick hold window. A shorter pinch is a brush."""
 
@@ -89,8 +128,12 @@ def cycle_budget(k: int) -> int:
 
 
 def episode_length_s(budget: int, control_hz: float = 30.0) -> float:
-    """The env's episode length: every cycle of the budget at its full step budget."""
-    return budget * CYCLE_STEP_BUDGET / control_hz
+    """The env's episode length: every cycle of the budget at its full step budget, plus the
+    retreat wait at its cap before each. The wait lies outside the cycles, so without its
+    allowance the episode's step cap binds before the cycle budget does: on the 400k check of
+    run m (2026-09-22), 41 of 60 episodes ended on the step cap at a median of 60 of 65 cycles,
+    with a quarter of their steps spent in the wait."""
+    return budget * (CYCLE_STEP_BUDGET + int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET)) / control_hz
 
 
 def grip_open_flags(
@@ -175,6 +218,8 @@ class EnvState:
     takeovers_stowed: int = 0
     takeovers_failed: int = 0
     done_reason: str | None = None
+    idle_since: int | None = None  # the step the last cycle closed at, None before the first
+    select_wait_steps: int = 0  # steps spent waiting for the retreat before a selection
 
 
 def _layout_of(rig, i: int):
@@ -353,6 +398,7 @@ def rollout(
             raise EvalFailure("wall_clock", f"exceeded {max_wall_minutes} min at step {step}")
         per_brick = per_brick_stowed(env).to("cpu")
         tracker.latch_pre_step(per_brick)
+        in_bin = per_brick_stowed(env, max_speed=math.inf).to("cpu")
         pos, vel = _brick_states(env)
         pos, speed = pos.to("cpu"), vel.norm(dim=-1).to("cpu")
         left_mag = env.scene["finger_left_brick"].data.force_matrix_w.norm(dim=-1).squeeze(1)
@@ -363,7 +409,7 @@ def rollout(
             if bool(tracker.done[i]) or not rig.idle[i]:
                 continue
             st = states[i]
-            stowed_now = {b for b in range(k) if bool(per_brick[i, b])}
+            stowed_now = {b for b in range(k) if bool(in_bin[i, b])}
             if st.cycle is not None:
                 b = st.cycle.target
                 out = resting_out_of_reach(
@@ -376,11 +422,19 @@ def rollout(
                 end = cycle_end(st.cycle, stowed_now, out, step, set(st.stowed_parts))
                 if end is not None:
                     _close_cycle(st, end[0], end[1], step, rig.snapshot(i))
+                    st.idle_since = step
             if st.cycle is not None:
                 continue
-            if len(stowed_now) == k:
+            if bool(per_brick[i].all()):
                 loop_done[i] = True
                 st.done_reason = "all_stowed"
+                continue
+            if st.idle_since is not None and not select_ready(
+                rig.pick_point(i).to("cpu"),
+                float(policy_state(robot.data.joint_pos)[i, 6]),
+                step - st.idle_since,
+            ):
+                st.select_wait_steps += 1
                 continue
             scene = rig.snapshot(i)
             target = st.selector.select_target(scene)
@@ -399,6 +453,9 @@ def rollout(
                 start_z=pos[i, :, 2].clone(),
             )
             env.target_part[i] = target
+            ctx_target = getattr(env, "context_target", None)
+            if ctx_target is not None:
+                ctx_target[i] = target_context(scene.brick_pos[target], st.selector.grasp)
             if policy is None:
                 _take_over(rig, env, st, i, ordinal, reason="driver")
         close_below = torch.tensor(
@@ -540,6 +597,7 @@ def rollout(
                 "takeovers": st.takeovers,
                 "takeovers_stowed": st.takeovers_stowed,
                 "takeovers_failed": st.takeovers_failed,
+                "select_wait_steps": st.select_wait_steps,
             }
         )
     steps_total = sum(e["steps"] for e in episodes)

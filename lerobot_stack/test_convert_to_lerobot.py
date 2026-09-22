@@ -14,7 +14,17 @@ import convert_to_lerobot as c2l
 SCRIPT = Path(__file__).resolve().parent / "convert_to_lerobot.py"
 
 
-def _shard(path, frames=8, context=True, bricks=None, actor=None, success=True, demo=0, box=False):
+def _shard(
+    path,
+    frames=8,
+    context=True,
+    bricks=None,
+    actor=None,
+    success=True,
+    demo=0,
+    box=False,
+    target=False,
+):
     if bricks is None:
         bricks = np.zeros(frames, np.int8)
     mode = "a" if Path(path).exists() else "w"
@@ -49,6 +59,9 @@ def _shard(path, frames=8, context=True, bricks=None, actor=None, success=True, 
         if box:
             bx = g.create_dataset("obs/context_box", data=np.full((frames, 3), 0.75, np.float32))
             bx.attrs["names"] = json.dumps(["box_x", "box_y", "box_yaw"])
+        if target:
+            tg = g.create_dataset("obs/context_target", data=np.full((frames, 7), 0.5, np.float32))
+            tg.attrs["names"] = json.dumps([f"target_{k}" for k in range(7)])
         init = g.create_group("initial_state")
         robot = init.create_group("articulation/robot")
         for key, width in (
@@ -236,6 +249,28 @@ def test_camera_box_context_is_the_camera_pose_then_the_box_pose(tmp_path):
     row = LeRobotDataset("t/x", root=tmp_path / "ds")[0]["observation.environment_state"]
     # Camera first (0.25 from _shard), then the box (0.75) -- not the other way round.
     assert row.tolist() == pytest.approx([0.25] * 6 + [0.75] * 3)
+
+
+def test_camera_box_target_appends_the_target_row_after_the_box(tmp_path):
+    shard = _shard(tmp_path / "s.hdf5", box=True, target=True)
+    c2l.convert([shard], tmp_path / "ds", "t/x", 30, context="camera_box_target", images=False)
+    info = json.loads((tmp_path / "ds" / "meta" / "info.json").read_text())
+    feat = info["features"]["observation.environment_state"]
+    assert feat["shape"] == [16]
+    assert feat["names"][6] == "box_x" and feat["names"][9] == "target_0"
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    row = LeRobotDataset("t/x", root=tmp_path / "ds")[0]["observation.environment_state"]
+    assert row.tolist() == pytest.approx([0.25] * 6 + [0.75] * 3 + [0.5] * 7)
+    with pytest.raises(RuntimeError, match="context_target"):
+        c2l.convert(
+            [_shard(tmp_path / "t.hdf5", box=True)],
+            tmp_path / "ds2",
+            "t/y",
+            30,
+            context="camera_box_target",
+            images=False,
+        )
 
 
 def test_camera_box_needs_the_box_channel(tmp_path):

@@ -63,7 +63,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--episode_draws", action="store_true", help="per-episode scene draws")
     parser.add_argument("--frame_jitter", action="store_true", help="per-frame camera jitter")
     parser.add_argument("--spatial_scale", type=float, default=1.0)
-    parser.add_argument("--context", choices=("none", "camera", "camera_box"), default="camera_box")
+    parser.add_argument(
+        "--context",
+        choices=("none", "camera", "camera_box", "camera_box_target"),
+        default="camera_box",
+    )
     parser.add_argument(
         "--gripper",
         choices=("binary", "continuous"),

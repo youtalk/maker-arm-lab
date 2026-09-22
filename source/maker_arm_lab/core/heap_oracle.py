@@ -88,6 +88,24 @@ STOW_HALF_EXTENTS = (
 )
 
 
+def target_context(pos, chosen: grasp.Grasp | None) -> list[float]:
+    """The target channel row (``mj.context_names.CONTEXT_TARGET_NAMES``): the part centre
+    ``pos`` and the grasp the teacher ranks on it, zeros when there is none. The rig and the
+    heap loop both build the row here, so a recorded frame and a served one agree."""
+    if chosen is None:
+        return [0.0] * 7
+    x, y, z = (float(v) for v in pos[:3])
+    return [
+        x,
+        y,
+        z,
+        math.cos(chosen.heading),
+        math.sin(chosen.heading),
+        float(chosen.width),
+        float(chosen.half_height),
+    ]
+
+
 @dataclass(frozen=True)
 class Push:
     start: tuple[float, float]

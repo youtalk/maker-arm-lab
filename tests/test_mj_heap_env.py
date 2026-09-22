@@ -13,7 +13,7 @@ from maker_arm_lab.core import layout, parts
 from maker_arm_lab.core.heap_oracle import STOW_HALF_EXTENTS
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj import overlay
-from maker_arm_lab.mj.context_names import CONTEXT_BOX_NAMES, CONTEXT_DIMS
+from maker_arm_lab.mj.context_names import CONTEXT_BOX_NAMES, CONTEXT_DIMS, CONTEXT_TARGET_NAMES
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.mj.recorder import ShardRecorder
 
@@ -76,6 +76,7 @@ def test_the_recorder_writes_the_heap_datasets(tmp_path):
             depth=np.full((224, 224), 900, np.uint16),
             target_part=0,
             context_box=np.array([0.44, -0.07, 0.0], np.float32),
+            context_target=np.arange(7, dtype=np.float32),
         )
         rec.post_step(0, np.zeros(8), False)
     assert rec.end(0, False)
@@ -89,9 +90,13 @@ def test_the_recorder_writes_the_heap_datasets(tmp_path):
         assert g["obs/target_part"].dtype == np.int16
         assert g["obs/context_box"].shape == (3, 3)
         assert json.loads(g["obs/context_box"].attrs["names"]) == list(CONTEXT_BOX_NAMES)
+        assert g["obs/context_target"].shape == (3, 7)
+        assert g["obs/context_target"][1].tolist() == list(range(7))
+        assert json.loads(g["obs/context_target"].attrs["names"]) == list(CONTEXT_TARGET_NAMES)
         assert json.loads(g.attrs["parts"]) == ["brick_2x4", "tile_1x1"]
         assert g["initial_state/destination_bin"][:].tolist() == [2]
     assert CONTEXT_DIMS["camera_box"] == 9
+    assert CONTEXT_DIMS["camera_box_target"] == 16
 
 
 @pytest.fixture
@@ -166,6 +171,28 @@ def test_the_box_context_names_the_destination_bin(heap):
         ctx[0, 6:], e.context_box[0]
     )
     e.close()
+
+
+def test_the_target_channel_is_served_after_the_box_and_zeroed_by_a_reset():
+    e = MjLegoSortEnv(2, _draw(), parts=PARTS[:2], cameras=False, context="camera_box_target")
+    e.reset(seed=1)
+    ctx = e.obs_buf["context"].numpy()
+    assert ctx.shape == (2, 16)
+    assert np.allclose(ctx[0, :9], e.context_camera_box[0]) and not ctx[:, 9:].any()
+    # The heap loop writes the row at selection; the rig's stash is copied on the envs it
+    # drives (actor None or positive), and never onto a policy-driven env.
+    e.context_target[1] = np.arange(7, dtype=np.float32)
+    assert e.obs_buf["context"].numpy()[1, 9:].tolist() == list(range(7))
+    e.oracle_cycle_brick = torch.tensor([1, 0], dtype=torch.int8)
+    e.oracle_cycle_target = torch.full((2, 7), 0.5)
+    e._update_target_parts(torch.tensor([1, 0], dtype=torch.int16))
+    assert e.context_target[0].tolist() == [0.5] * 7 and int(e.target_part[0]) == 1
+    assert e.context_target[1].tolist() == list(range(7))
+    e.reset(seed=2, env_ids=torch.tensor([0]))
+    assert not e.obs_buf["context"].numpy()[0, 9:].any()
+    e.close()
+    with pytest.raises(ValueError, match="target"):
+        MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, context="camera_box_target")
 
 
 def test_the_privileged_channel_is_refused_on_a_heap():

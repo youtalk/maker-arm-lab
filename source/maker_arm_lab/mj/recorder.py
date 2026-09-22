@@ -46,6 +46,7 @@ from maker_arm_lab.mj.context_names import (
     CONTEXT_BOX_NAMES,
     CONTEXT_CAMERA_NAMES,
     CONTEXT_PRIVILEGED_NAMES,
+    CONTEXT_TARGET_NAMES,
 )
 
 IMAGE_KEYS = ("wrist_rgb", "overhead_rgb")
@@ -102,6 +103,7 @@ class ShardRecorder:
             "actor": [],
             "target_part": [],
             "context_box": [],
+            "context_target": [],
         }
 
     # -- episode lifecycle --------------------------------------------------
@@ -149,6 +151,7 @@ class ShardRecorder:
         depth: np.ndarray | None = None,
         target_part: int = -1,
         context_box: np.ndarray | None = None,
+        context_target: np.ndarray | None = None,
     ) -> None:
         s = self._scalars[env_index]
         s["joint_pos_abs"].append(np.asarray(joint_pos, dtype=np.float32).copy())
@@ -163,6 +166,8 @@ class ShardRecorder:
         s["target_part"].append(np.int16(target_part))
         if context_box is not None:
             s["context_box"].append(np.asarray(context_box, dtype=np.float32).copy())
+        if context_target is not None:
+            s["context_target"].append(np.asarray(context_target, dtype=np.float32).copy())
         if self.cameras:
             imgs = self._images[env_index]
             imgs["wrist_rgb"].append(np.asarray(wrist, dtype=np.uint8).copy())
@@ -210,6 +215,7 @@ class ShardRecorder:
             ("context_camera", CONTEXT_CAMERA_NAMES),
             ("context_privileged", CONTEXT_PRIVILEGED_NAMES),
             ("context_box", CONTEXT_BOX_NAMES),
+            ("context_target", CONTEXT_TARGET_NAMES),
         ):
             if s[key]:
                 ds = obs.create_dataset(key, data=np.stack(s[key][:steps]))
