@@ -546,6 +546,18 @@ def test_the_half_budget_trigger_spares_a_held_part_lifted_past_the_rise(monkeyp
     assert "half_budget_no_lift" not in triggers, triggers
 
 
+def test_failure_reason_fires_on_a_held_part_that_does_not_rise():
+    n = loop.HELD_NO_RISE_STEPS
+    half = loop.CYCLE_STEP_BUDGET // 2
+    assert loop.failure_reason(n, n, False, 10) == loop.HELD_NO_RISE
+    assert loop.failure_reason(n - 1, n, False, 10) is None
+    assert loop.failure_reason(n, None, False, 10) is None  # off: the random round
+    assert loop.failure_reason(n, None, False, half) == loop.HALF_BUDGET_NO_LIFT
+    assert loop.failure_reason(0, n, False, half) == loop.HALF_BUDGET_NO_LIFT
+    assert loop.failure_reason(0, n, True, half) is None  # a lifted part is never trouble
+    assert loop.TakeoverConfig(random_interval=None).held_no_rise_steps is None
+
+
 class _CloseEveryNStepsPolicy:
     """Holds the arm still with the jaws open, and closes them for the single step whose index
     is a multiple of ``period``. No takeover runs and the arm never stows, so every cycle ends

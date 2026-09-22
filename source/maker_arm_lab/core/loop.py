@@ -80,6 +80,14 @@ HALF_BUDGET_NO_LIFT = "half_budget_no_lift"
 """The heap trigger of phase B design 5.5: the cycle is at half its step budget with no lift.
 No lift means the jaws hold nothing, or hold a part that has not risen ``oracle.LIFT_MIN_RISE``
 above where it was when the cycle opened (``Cycle.start_z``)."""
+HELD_NO_RISE = "held_no_rise"
+"""The failure trigger of ``--trigger failure`` (campaign n, 2026-09-22): the jaws have held
+a part for ``TakeoverConfig.held_no_rise_steps`` steps and it has not risen
+``oracle.LIFT_MIN_RISE`` above its height at the cycle's open. Run m's held_no_lift class
+(0.278 of its cycles) closes near the desk and lifts the pick point without the part; the
+half-budget trigger reaches it 400 steps in, this one at ``HELD_NO_RISE_STEPS``."""
+HELD_NO_RISE_STEPS = 60
+"""Held steps without a rise before ``HELD_NO_RISE`` fires: ``CLOSED_NO_PINCH_STEPS``'s span."""
 CENSUS_MIN_HELD_STEPS = GRASP_HOLD_WINDOW[0]
 SELECT_RETREAT_RADIUS = 0.06
 """m: the next target is selected once the pick point is this close to ``oracle.RETREAT_POINT``.
@@ -166,6 +174,8 @@ class TakeoverConfig:
     of the budget"); a loop cycle holds at most one takeover, since a takeover's end ends it."""
 
     random_interval: float | None
+    # ``HELD_NO_RISE`` fires after this many held steps without a rise; None leaves it off.
+    held_no_rise_steps: int | None = None
     # At the default 2.0 this cap cannot bind: a loop cycle holds at most one takeover and an
     # episode runs at most cycle_budget cycles. It exists to cap rounds that lower it.
     max_per_episode_factor: float = 2.0
@@ -227,6 +237,22 @@ def floored_gap(gap: float, width: float) -> float:
     if width <= 0.0 or gap >= width:
         return gap
     return min(gap, grasp.close_gap(width))
+
+
+def failure_reason(
+    held_no_rise: int, min_no_rise: int | None, lifted: bool, steps_in_cycle: int
+) -> str | None:
+    """The cycle-state triggers, read after ``trigger_reason`` finds nothing. Pure.
+
+    ``held_no_rise`` is the count of consecutive steps a part sat between the jaws without
+    rising ``oracle.LIFT_MIN_RISE`` (``_TriggerState``); at ``min_no_rise`` (None: off) the
+    answer is ``HELD_NO_RISE``. Otherwise a cycle at half ``CYCLE_STEP_BUDGET`` with no lifted
+    part answers ``HALF_BUDGET_NO_LIFT``."""
+    if min_no_rise is not None and held_no_rise >= min_no_rise:
+        return HELD_NO_RISE
+    if not lifted and steps_in_cycle >= CYCLE_STEP_BUDGET // 2:
+        return HALF_BUDGET_NO_LIFT
+    return None
 
 
 def _best_grasp(selector, scene, target: int):
@@ -968,6 +994,7 @@ class _TriggerState:
         self.random_p = 0.0 if config.random_interval is None else 1.0 / config.random_interval
         self.since_open = [0] * num_envs
         self.closed_no_pinch = [0] * num_envs
+        self.held_no_rise = [0] * num_envs  # steps a part sat held without the rise
         self.cooldown = [0] * num_envs
         self.cycle_start = [-1] * num_envs  # the open step of the cycle the last offer saw
         self.grip_open_prev: torch.Tensor | None = None
@@ -1001,6 +1028,8 @@ class _TriggerState:
             # mode in here to make the guard exact costs more than the trigger it saves.
             new_cycle = self.cycle_start[i] != st.cycle.start_step
             self.cycle_start[i] = st.cycle.start_step
+            if new_cycle:
+                self.held_no_rise[i] = 0  # the rise is read against the new cycle's start_z
             closed_now = (
                 not new_cycle
                 and self.grip_open_prev is not None
@@ -1026,17 +1055,20 @@ class _TriggerState:
             )
             h = int(held[i])
             lifted = h >= 0 and float(pos[i, h, 2] - st.cycle.start_z[h]) >= oracle.LIFT_MIN_RISE
-            if (
-                reason is None
-                and not lifted
-                and step - st.cycle.start_step >= CYCLE_STEP_BUDGET // 2
-            ):
-                reason = HALF_BUDGET_NO_LIFT
+            self.held_no_rise[i] = self.held_no_rise[i] + 1 if h >= 0 and not lifted else 0
+            if reason is None:
+                reason = failure_reason(
+                    self.held_no_rise[i],
+                    self.config.held_no_rise_steps,
+                    lifted,
+                    step - st.cycle.start_step,
+                )
             if reason is None or st.cycle.taken_over or st.takeovers >= self.max_per_episode:
                 continue
             # Reset on both branches: an answered trigger must not fire again off the same count.
             self.since_open[i] = 0
             self.closed_no_pinch[i] = 0
+            self.held_no_rise[i] = 0
             if _take_over(rig, env, st, i, ordinal, reason=reason, holding=int(held[i]) >= 0):
                 self.counts[reason] += 1
             else:
