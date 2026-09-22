@@ -111,6 +111,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         "served target row's width (loop.floored_gap)",
     )
     parser.add_argument(
+        "--close_gate",
+        action="store_true",
+        help="hold the jaws at the teacher's landing gap while the pick point is still "
+        "descending onto the served target (loop.gated_gap); applied before --squeeze_floor",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -200,6 +206,7 @@ def main(argv=None) -> int:
             replan_on_switch=args.replan_on_switch,
             row_refresh=args.row_refresh,
             squeeze_floor=args.squeeze_floor,
+            close_gate=args.close_gate,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

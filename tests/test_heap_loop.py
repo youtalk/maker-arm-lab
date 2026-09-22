@@ -926,6 +926,30 @@ def test_floored_gap_caps_a_closing_command_at_the_teachers_close_set_point():
     assert "floored_gap" not in inspect.getsource(eval_loop)
 
 
+def test_gated_gap_holds_the_landing_gap_only_while_descending_above_the_top():
+    import inspect
+
+    from maker_arm_lab.core import eval_loop, grasp
+
+    w, h = 0.0398, 0.0057  # the 2x4's grasp width and half height
+    z_top = 0.010 + h
+    landing = 2.0 * (grasp.landing_half_gap(w) - grasp.JAW_HOLD_BAND)
+    closing = w - 0.0013  # the 400k policy's median first close, 1.3 mm under w
+    # Closing while still coming down 10 mm above the top: the landing gap instead.
+    assert loop.gated_gap(closing, w, z_top + 0.010, z_top, True) == pytest.approx(landing)
+    assert loop.gated_gap(closing, w, z_top + 0.010, z_top, True) == pytest.approx(w + 0.008)
+    # At the top, or below it: untouched, the endpoint is the policy's.
+    assert loop.gated_gap(closing, w, z_top, z_top, True) == closing
+    assert loop.gated_gap(closing, w, z_top - 0.004, z_top, True) == closing
+    assert loop.gated_gap(closing, w, z_top + loop.GATE_MARGIN, z_top, True) == closing
+    # Above the top but no longer descending: untouched.
+    assert loop.gated_gap(closing, w, z_top + 0.010, z_top, False) == closing
+    # A landing or a coast (at or above w) and a command with no row: untouched.
+    assert loop.gated_gap(w + 0.008, w, z_top + 0.010, z_top, True) == w + 0.008
+    assert loop.gated_gap(closing, 0.0, z_top + 0.010, z_top, True) == closing
+    assert "gated_gap" not in inspect.getsource(eval_loop)
+
+
 def test_refreshed_row_follows_the_live_centre_and_keeps_the_grasp_when_nothing_ranks(
     monkeypatch,
 ):
@@ -988,6 +1012,7 @@ def test_the_switches_select_at_once_after_a_budget_end_refresh_at_a_reopen_and_
         "replan_on_switch": True,
         "row_refresh": True,
         "squeeze_floor": False,
+        "close_gate": False,
     }
     # Every cycle ended on its budget, so no selection waited for a retreat.
     assert ep["cycle_reasons"] == ["budget"] * 3 and ep["select_wait_steps"] == 0

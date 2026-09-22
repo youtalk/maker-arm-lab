@@ -37,6 +37,6 @@ def test_the_round_sets_the_random_interval_and_the_env_records_everything():
 
 def test_the_heap_client_takes_the_loop_switches_and_the_failure_trigger():
     text = SCRIPT.read_text()
-    for name in ("select_at_release", "replan_on_switch", "squeeze_floor"):
+    for name in ("select_at_release", "replan_on_switch", "squeeze_floor", "close_gate"):
         assert f'"--{name}"' in text and f"{name}=args.{name}" in text
     assert '"--trigger"' in text and "held_no_rise_steps=HELD_NO_RISE_STEPS" in text

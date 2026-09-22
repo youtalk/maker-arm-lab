@@ -16,7 +16,7 @@ own. The metric never reads the cycle end: it is the at-rest grader at the episo
 There is no reset between cycles. The episode ends when the selector returns None (no
 candidate, or the cycle budget is spent) or every part is stowed.
 
-Four protocol switches, all off by default so the old protocol stays reproducible
+Five protocol switches, all off by default so the old protocol stays reproducible
 (2026-09-22): ``select_at_release`` selects the next target when the release opens the jaws
 (``release_ready``) instead of at the retreat (``select_ready``), and ends a cycle at the
 release of a lifted part wherever it landed (``released_after_lift``); ``replan_on_switch``
@@ -24,8 +24,9 @@ sends the server a per-env replan flag on the step a target row is written, so t
 chunk is cut at the switch (``policy_server.ActionQueues``); ``row_refresh`` rewrites the row
 from the live scene at a re-open that lifted nothing (``reopen_edge``, ``refreshed_row``), the
 teacher's REOPEN refresh; ``squeeze_floor`` caps a closing gap command at the teacher's close
-set point (``floored_gap``), a serving-side gripper lever. The payload's ``inference`` block
-records all four.
+set point (``floored_gap``) and ``close_gate`` holds the jaws at the landing gap while the
+pick point is still descending onto the target (``gated_gap``), two serving-side gripper
+levers applied in that order, gate first. The payload's ``inference`` block records all five.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
@@ -42,7 +43,7 @@ from __future__ import annotations
 import math
 import random
 import time
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field
 
 import torch
@@ -239,6 +240,43 @@ def floored_gap(gap: float, width: float) -> float:
     return min(gap, grasp.close_gap(width))
 
 
+GATE_MARGIN = 0.003
+"""m: ``close_gate`` holds the jaws open while the pick point is this far above the target's
+top (its row centre plus half height). The stows of run m's 400k read land the pick point at
+about the centre (off_z quartiles -0.8, +0.6, +3.6 mm), well inside the margin."""
+GATE_WINDOW = 5
+"""Control steps over which ``close_gate`` reads the pick point's descent."""
+GATE_DESCENT = 0.0005
+"""m: the pick point must have come down this much over ``GATE_WINDOW`` steps for the gate to
+hold. A policy that has stopped descending closes wherever it stopped."""
+
+
+def gated_gap(gap: float, width: float, z_pick: float, z_top: float, descending: bool) -> float:
+    """``close_gate``: the continuous gap command while the policy is still descending. Pure.
+
+    ``width`` is the served target row's grasp width (0 with no live row), ``z_top`` the row's
+    centre plus half height, ``z_pick`` the rig's pick point height and ``descending`` whether
+    it came down ``GATE_DESCENT`` over the last ``GATE_WINDOW`` steps. A command under
+    ``width`` while the pick point is still ``GATE_MARGIN`` above the top and still coming
+    down is replaced by the teacher's landing gap, ``2 * (landing_half_gap(w) - JAW_HOLD_BAND)``
+    = w + 8 mm (``OracleRig.actions``). Every other command is left alone: a close at or
+    below the top, a close after the descent stopped (a policy that stops 4 mm high still
+    closes there), a landing, a release, and any command with no row.
+
+    Run m's 400k read (2026-09-22): the held_no_lift cycles (27% of all cycles) are shallow
+    pinches, their pick point 3 to 6 mm above the part centre at the first close (off_z
+    quartiles +2.8, +4.4, +5.8 mm against -0.8, +0.6, +3.6 mm for the stows), so on a flat
+    brick the pads grip the top edge and the studs and the part slides out under the lift.
+    A quarter of them close first in mid-air, more than 3 cm above the part, then re-open and
+    close again; the squeeze floor moved the read (704 against 642 of 1000 on the 400k
+    checkpoint) and left held_no_lift where it was (331 against 321 of about 1236 cycles).
+    The corpus recorder needs no gate: the teacher never closes while descending, DESCEND
+    ends on a stall and CLOSE begins after it, so the gate is a no-op on recorded frames."""
+    if width <= 0.0 or gap >= width or not descending or z_pick <= z_top + GATE_MARGIN:
+        return gap
+    return 2.0 * (grasp.landing_half_gap(width) - grasp.JAW_HOLD_BAND)
+
+
 def failure_reason(
     held_no_rise: int, min_no_rise: int | None, lifted: bool, steps_in_cycle: int
 ) -> str | None:
@@ -334,6 +372,7 @@ class Cycle:
     wait_capped: bool = False  # the wait ended on its cap, not on the retreat
     refreshes: int = 0  # target rows ``row_refresh`` rewrote within the cycle
     floored_steps: int = 0  # steps ``squeeze_floor`` changed the gap command
+    gated_steps: int = 0  # steps ``close_gate`` changed the gap command
 
 
 @dataclass
@@ -502,6 +541,7 @@ CENSUS_EXPORT = (
     "wait_capped",
     "refreshes",
     "floored_steps",
+    "gated_steps",
 )
 """The ``Cycle`` fields each episode's ``cycle_census`` row exports, plus the two is_target
 flags of ``first_held`` and ``last_held``. Observation only, never the metric."""
@@ -570,14 +610,15 @@ def rollout(
     replan_on_switch: bool = False,
     row_refresh: bool = False,
     squeeze_floor: bool = False,
+    close_gate: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
     ``policy`` is a ``policy_client.ServerPolicy`` or None for the oracle driver.
     ``takeover`` is a ``TakeoverConfig`` (the DAgger mode, phase B design 5.5) or None.
-    The four switches are the module docstring's; ``replan_on_switch`` needs a policy whose
+    The five switches are the module docstring's; ``replan_on_switch`` needs a policy whose
     ``step`` takes ``replan``, and the flag is left off the wire when the switch is off;
-    ``squeeze_floor`` needs the continuous gripper and a served target row.
+    ``squeeze_floor`` and ``close_gate`` need the continuous gripper and a served target row.
     ``on_frame(ordinal, step_in_cycle, wrist, overhead)`` is called with env 0's two policy
     frames every ``FRAME_EVERY`` steps of each of its cycles, for a forensics dump.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
@@ -611,8 +652,9 @@ def rollout(
     if takeover is not None and policy is None:
         raise EvalFailure("takeover", "the takeover triggers need a policy to take over from")
     ctx_target = getattr(env, "context_target", None)
-    if squeeze_floor and (gripper_mode != "continuous" or ctx_target is None):
-        raise EvalFailure("squeeze_floor", "needs the continuous gripper and a served target row")
+    for name, on in (("squeeze_floor", squeeze_floor), ("close_gate", close_gate)):
+        if on and (gripper_mode != "continuous" or ctx_target is None):
+            raise EvalFailure(name, "needs the continuous gripper and a served target row")
     limits = robot.data.joint_pos_limits[:, arm_ids, :].to("cpu")
     tracker = RolloutTracker(num_envs, k)
     recorder = getattr(env, "recorder", None)
@@ -641,8 +683,11 @@ def rollout(
         "replan_on_switch": bool(replan_on_switch),
         "row_refresh": bool(row_refresh),
         "squeeze_floor": bool(squeeze_floor),
+        "close_gate": bool(close_gate),
     }
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
+    # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
+    pick_z_hist = [deque(maxlen=GATE_WINDOW + 1) for _ in range(num_envs)]
 
     started = time.monotonic()
     max_steps = int(env.max_episode_length)
@@ -761,25 +806,41 @@ def rollout(
         # 3. Compose: the rig's row where it drives, the policy's where the rig is idle.
         rig_action = rig.actions().to("cpu")
         action_cpu = rig_action.clone()
+        picks = [rig.pick_point(i).to(pos.device) for i in range(num_envs)]
+        for i in range(num_envs):
+            pick_z_hist[i].append(float(picks[i][2]))
         if policy_action is not None:
             idle = torch.tensor(rig.idle)
             action_cpu[idle] = policy_action[idle]
-            if squeeze_floor:
+            if close_gate or squeeze_floor:
                 for i, st in enumerate(states):
                     if st.cycle is None or not rig.idle[i] or bool(tracker.done[i]):
                         continue
+                    row = ctx_target[i]  # CONTEXT_TARGET_NAMES: z at 2, width at 5, half height 6
+                    width = float(row[5])
                     gap = float(action_cpu[i, 6])
-                    floored = floored_gap(gap, float(ctx_target[i][5]))  # target_width
-                    if floored != gap:
-                        action_cpu[i, 6] = floored
-                        st.cycle.floored_steps += 1
+                    if close_gate:
+                        hist = pick_z_hist[i]
+                        descending = len(hist) > GATE_WINDOW and hist[0] - hist[-1] > GATE_DESCENT
+                        gated = gated_gap(
+                            gap, width, hist[-1], float(row[2]) + float(row[6]), descending
+                        )
+                        if gated != gap:
+                            gap = gated
+                            st.cycle.gated_steps += 1
+                    if squeeze_floor:
+                        floored = floored_gap(gap, width)
+                        if floored != gap:
+                            gap = floored
+                            st.cycle.floored_steps += 1
+                    action_cpu[i, 6] = gap
         signal = open_signal(action_cpu[:, 6], gripper_mode, close_below)
         tracker.record_gripper(signal)
         for i, st in enumerate(states):
             if st.cycle is None or bool(tracker.done[i]):
                 continue
             c, h = st.cycle, int(held[i])
-            pick = rig.pick_point(i).to(pos.device)
+            pick = picks[i]
             grip_open = bool(signal[i] >= 0.0)
             if row_refresh and rig.idle[i] and reopen_edge(c, grip_open):
                 c.refreshes += 1

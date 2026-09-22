@@ -113,6 +113,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         "(loop.floored_gap); the policy's frames are not recorded, so this only changes what "
         "the policy executes",
     )
+    parser.add_argument(
+        "--close_gate",
+        action="store_true",
+        help="hold the jaws at the teacher's landing gap while the pick point is still "
+        "descending onto the served target (loop.gated_gap); applied before --squeeze_floor",
+    )
     parser.add_argument("--out_dir", type=str, required=True, help="where the shard is written")
     parser.add_argument("--shard_name", type=str, default="shard")
     parser.add_argument("--out", type=str, default="", help="write the DAGGER_OK payload here too")
@@ -201,6 +207,7 @@ def main(argv=None) -> int:
             select_at_release=args.select_at_release,
             replan_on_switch=args.replan_on_switch,
             squeeze_floor=args.squeeze_floor,
+            close_gate=args.close_gate,
         )
         payload["round"] = args.round
         payload["trigger"] = args.trigger
