@@ -37,7 +37,7 @@ from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.dagger_loop import DECLINE_COOLDOWN, trigger_reason
 from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _nearest_brick_cm
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
-from maker_arm_lab.core.heap_oracle import CANDIDATE_MAX_Z
+from maker_arm_lab.core.heap_oracle import CANDIDATE_MAX_Z, target_context
 from maker_arm_lab.core.stowed import _brick_states, env_heap_bin_centers, per_brick_stowed
 from maker_arm_lab.robots.frames import ARM_JOINT_REGEX, TOOL_BODY
 
@@ -399,6 +399,9 @@ def rollout(
                 start_z=pos[i, :, 2].clone(),
             )
             env.target_part[i] = target
+            ctx_target = getattr(env, "context_target", None)
+            if ctx_target is not None:
+                ctx_target[i] = target_context(scene.brick_pos[target], st.selector.grasp)
             if policy is None:
                 _take_over(rig, env, st, i, ordinal, reason="driver")
         close_below = torch.tensor(

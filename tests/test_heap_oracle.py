@@ -582,3 +582,12 @@ def test_aim_hover_at_declines_a_part_with_no_grasp():
     orc.resume(scene, -1)
     assert orc.aim_hover_at(scene, 1) is False
     assert orc.target_brick is None
+
+
+def test_target_context_is_the_part_centre_and_the_grasp_or_zeros():
+    assert heap_oracle.target_context(torch.zeros(3), None) == [0.0] * 7
+    chosen = grasp.Grasp(3, math.pi / 2, 0.0158, 0.0048, 0.01, 0.02)
+    row = heap_oracle.target_context(torch.tensor([0.2, -0.1, 0.0048]), chosen)
+    assert row[:3] == pytest.approx([0.2, -0.1, 0.0048])
+    assert row[3:5] == pytest.approx([0.0, 1.0])
+    assert row[5:] == pytest.approx([0.0158, 0.0048])

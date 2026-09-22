@@ -87,6 +87,7 @@ from maker_arm_lab.core.global_ik import (
     steepest_jaw_roll,
     tool_axis_world,
 )
+from maker_arm_lab.core.heap_oracle import target_context
 from maker_arm_lab.core.oracle import LIFT_MIN_RISE, PHASE_TO_INT
 from maker_arm_lab.core.quat import quat_apply
 from maker_arm_lab.core.stowed import per_brick_stowed
@@ -831,6 +832,9 @@ class OracleRig:
             self.env.oracle_cycle_brick = torch.full(
                 (self.num_envs,), -1, dtype=torch.int8, device=self.device
             )
+            self.env.oracle_cycle_target = torch.zeros(
+                (self.num_envs, 7), dtype=torch.float32, device=self.device
+            )
         for i in range(self.num_envs):
             goal_i, orc_i = self.goals[i], self.oracles[i]
             if self.idle[i] or orc_i is None:
@@ -842,6 +846,11 @@ class OracleRig:
             self.env.oracle_cycle_phase[i] = phase_int
             brick_i = orc_i.target_brick if orc_i is not None and not self.idle[i] else None
             self.env.oracle_cycle_brick[i] = brick_i if brick_i is not None else -1
+            # The target channel (MS6 heap lever): the heap teacher's grasp on its target,
+            # zeros on the six-brick oracle, between cycles and on an idle env.
+            start = getattr(orc_i, "_brick_start", None) if brick_i is not None else None
+            chosen = getattr(orc_i, "grasp", None) if start is not None else None
+            self.env.oracle_cycle_target[i] = torch.tensor(target_context(start, chosen))
 
     def _advance_phases(self, dones: torch.Tensor) -> None:
         """Per env: check the current goal's end condition and transition on end."""
