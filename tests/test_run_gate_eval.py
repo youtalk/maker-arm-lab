@@ -759,3 +759,59 @@ def test_an_argparse_usage_error_still_prints_one_token(capsys, tmp_path):
     out = capsys.readouterr()
     assert out.out.strip().splitlines() == ["GATE_ERROR"]
     assert "not_a_number" in out.err
+
+
+def test_client_flags_reach_the_mujoco_client_and_the_cache_matches_on_the_switches(tmp_path):
+    args = ge._parse_args(
+        [
+            "--checkpoint",
+            "ck",
+            "--out_dir",
+            str(tmp_path / "gate"),
+            "--ledger",
+            "l",
+            "--threshold",
+            "0.7",
+            "--seed",
+            "1",
+            "--backend",
+            "mujoco",
+            "--heap_k",
+            "50",
+            "--gripper",
+            "continuous",
+            "--client_flags",
+            "--select_at_release --replan_on_switch",
+        ]
+    )
+    cfg = ge._build_cfg(args)
+    assert cfg.client_flags == ("--select_at_release", "--replan_on_switch")
+    draw = ge.make_eval_draws(1, 1)[0]
+    cmd = ge._eval_command(cfg, draw)
+    at = cmd.index("--select_at_release")
+    assert cmd[at : at + 2] == ["--select_at_release", "--replan_on_switch"]
+    cfg.out_dir.mkdir()
+    on = {"select_at_release": True, "replan_on_switch": True, "row_refresh": False}
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None, "chunk_size": 100}
+
+    def write(loop):
+        payload = _payload(
+            draw,
+            [_episode(0)],
+            inference=served if loop is None else {**served, "loop": loop},
+            heap_k=50,
+            parts_split="heldout",
+            parts_seed=20260915,
+            cycle_budget=65,
+            gripper="continuous",
+        )
+        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
+
+    write(on)
+    assert ge._cached_payload(cfg, draw) is not None
+    write({**on, "row_refresh": True})
+    assert ge._cached_payload(cfg, draw) is None
+    write(None)  # a payload from before the switches ran with every switch off
+    assert ge._cached_payload(cfg, draw) is None
+    cfg.client_flags = ()
+    assert ge._cached_payload(cfg, draw) is not None
