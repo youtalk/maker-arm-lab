@@ -35,7 +35,7 @@ import torch
 from maker_arm_lab.core import grasp, layout, oracle
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.dagger_loop import DECLINE_COOLDOWN, trigger_reason
-from maker_arm_lab.core.eval_loop import EvalFailure, _nearest_brick_cm
+from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _nearest_brick_cm
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
 from maker_arm_lab.core.heap_oracle import CANDIDATE_MAX_Z
 from maker_arm_lab.core.stowed import _brick_states, env_heap_bin_centers, per_brick_stowed
@@ -65,6 +65,9 @@ HALF_BUDGET_NO_LIFT = "half_budget_no_lift"
 """The heap trigger of phase B design 5.5: the cycle is at half its step budget with no lift.
 No lift means the jaws hold nothing, or hold a part that has not risen ``oracle.LIFT_MIN_RISE``
 above where it was when the cycle opened (``Cycle.start_z``)."""
+CENSUS_MIN_HELD_STEPS = GRASP_HOLD_WINDOW[0]
+"""Control steps a part must stay between the jaws to count as held in the cycle census: the
+start of the six-brick hold window. A shorter pinch is a brush."""
 
 
 @dataclass(frozen=True)
@@ -146,6 +149,15 @@ class Cycle:
     takeover_end: str | None = None
     taken_over: bool = False  # one takeover per loop cycle (phase B design 5.5)
     start_z: torch.Tensor | None = None  # (k,) part heights when the cycle opened, for the lift
+    # The census: what the driver did in this cycle. Observation only, never the metric.
+    open_steps: int = 0  # steps the gripper command read open
+    closed_steps: int = 0  # steps it read closed
+    held_steps: int = 0  # steps a part sat between the jaws
+    holding: bool = False  # a part sat between the jaws on the last step
+    max_rise: float = 0.0  # m, the most a held part rose above its ``start_z``
+    # cm, the xy distance from the pick point to the target at the first closed step. The
+    # binary teacher flips its command on the approach, so read it on continuous runs only.
+    first_close_cm: float | None = None
 
 
 @dataclass
@@ -157,6 +169,8 @@ class EnvState:
     steps: list[int] = field(default_factory=list)
     targets: list[int] = field(default_factory=list)
     stowed_parts: list[int] = field(default_factory=list)
+    classes: list[str] = field(default_factory=list)
+    first_close_cm: list[float | None] = field(default_factory=list)
     takeovers: int = 0
     takeovers_stowed: int = 0
     takeovers_failed: int = 0
@@ -200,6 +214,42 @@ def cycle_end(
     return None
 
 
+def census_step(cycle: Cycle, *, grip_open: bool, held: int, rise: float, close_cm: float) -> None:
+    """One control step of the cycle census. ``held`` is the loop's held read (-1 for none),
+    ``rise`` the held part's height above where it lay when the cycle opened, and ``close_cm``
+    the xy distance from the rig's pick point to the target, kept at the first closed step."""
+    if grip_open:
+        cycle.open_steps += 1
+    else:
+        cycle.closed_steps += 1
+        if cycle.first_close_cm is None:
+            cycle.first_close_cm = close_cm
+    cycle.holding = held >= 0
+    if cycle.holding:
+        cycle.held_steps += 1
+        cycle.max_rise = max(cycle.max_rise, rise)
+
+
+def cycle_class(cycle: Cycle, reason: str) -> str:
+    """The census class of a closed cycle: ``stowed``, or the last stage a failed one reached.
+
+    ``no_close``: the command never read closed. ``no_open``: it never read open.
+    ``close_miss``: the jaws closed and held nothing for ``CENSUS_MIN_HELD_STEPS``.
+    ``held_no_lift``: a part was held and never rose ``oracle.LIFT_MIN_RISE``. ``carrying``: a
+    lifted part was still between the jaws when the cycle ended. ``lifted_lost``: a lifted part
+    left the jaws and did not come to rest in the bin. Pure. The grader's ``reason`` stays the
+    outcome, and the class only says how far the cycle got."""
+    if reason == "stowed":
+        return "stowed"
+    if cycle.held_steps < CENSUS_MIN_HELD_STEPS:
+        if cycle.closed_steps == 0:
+            return "no_close"
+        return "no_open" if cycle.open_steps == 0 else "close_miss"
+    if cycle.max_rise < oracle.LIFT_MIN_RISE:
+        return "held_no_lift"
+    return "carrying" if cycle.holding else "lifted_lost"
+
+
 def resting_out_of_reach(pos, speed: float, held: bool, bl, stow_half_xy) -> bool:
     """A part knocked out of reach: at rest (the grader's speed rule), not between the jaws,
     down on the desk or heap (the selector's ``CANDIDATE_MAX_Z``), outside ``layout.in_reach``
@@ -220,6 +270,7 @@ def _close_cycle(st: EnvState, reason: str, stowed: list[int], step: int, scene)
     st.steps.append(step - cycle.start_step)
     st.targets.append(cycle.target)
     st.stowed_parts.extend(stowed)
+    _book_census(st, cycle, reason)
     if not ok and scene is not None:
         st.selector._mark_failure(scene, cycle.target)
     st.cycle = None
@@ -375,7 +426,23 @@ def rollout(
         if policy_action is not None:
             idle = torch.tensor(rig.idle)
             action_cpu[idle] = policy_action[idle]
-        tracker.record_gripper(open_signal(action_cpu[:, 6], gripper_mode, close_below))
+        signal = open_signal(action_cpu[:, 6], gripper_mode, close_below)
+        tracker.record_gripper(signal)
+        for i, st in enumerate(states):
+            if st.cycle is None or bool(tracker.done[i]):
+                continue
+            c, h = st.cycle, int(held[i])
+            close_cm = 0.0
+            if c.first_close_cm is None:
+                to_target = rig.pick_point(i)[:2].to(pos.device) - pos[i, c.target, :2]
+                close_cm = 100.0 * float(to_target.norm())
+            census_step(
+                c,
+                grip_open=bool(signal[i] >= 0.0),
+                held=h,
+                rise=float(pos[i, h, 2] - c.start_z[h]) if h >= 0 else 0.0,
+                close_cm=close_cm,
+            )
         arm_clamped, overshoot = clamp_arm_actions(action_cpu[:, :6], limits)
         tracker.record_clamps(overshoot)
         clamped = torch.cat([arm_clamped, action_cpu[:, 6:7]], dim=-1)
@@ -466,6 +533,8 @@ def rollout(
                 "cycle_steps": list(st.steps),
                 "cycle_targets": list(st.targets),
                 "stowed_parts": list(st.stowed_parts),
+                "cycle_classes": list(st.classes),
+                "cycle_first_close_cm": list(st.first_close_cm),
                 "stowed_families": sorted(env.parts[p].family for p in range(k) if final[p]),
                 "done_reason": st.done_reason,
                 "takeovers": st.takeovers,
@@ -513,11 +582,18 @@ def rollout(
     return payload
 
 
+def _book_census(st: EnvState, cycle: Cycle, reason: str) -> None:
+    st.classes.append(cycle_class(cycle, reason))
+    close_cm = cycle.first_close_cm
+    st.first_close_cm.append(None if close_cm is None else round(close_cm, 2))
+
+
 def _close_cycle_unmarked(st: EnvState, step: int) -> None:
     """An episode the env ended (time-out) closes its open cycle without a scene to mark."""
     cycle = st.cycle
     st.outcomes.append(False)
     st.reasons.append("episode_end")
+    _book_census(st, cycle, "episode_end")
     st.steps.append(step - cycle.start_step)
     st.targets.append(cycle.target)
     st.cycle = None

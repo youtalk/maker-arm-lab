@@ -234,6 +234,9 @@ def _cfg(tmp_path, ledger, **kw):
         "threshold": 0.15,
         "ledger": ledger,
         "retries": 1,
+        # The MS3 protocol, which is what ``_payload`` says the server served with.
+        "n_action_steps": 1,
+        "temporal_ensemble_coeff": 0.01,
     }
     base.update(kw)
     return ge.GateCfg(**base)
@@ -687,3 +690,36 @@ def test_a_continuous_gate_refuses_anything_but_the_mujoco_heap(
     assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--gripper continuous" in out.err
     heap = ["--backend", "mujoco", "--heap_k", "50"]
     assert ge._build_cfg(ge._parse_args(argv + heap)).gripper == "continuous"
+
+
+def test_cached_payload_matches_the_inference_configuration(tmp_path):
+    ledger = _fake_ledger(tmp_path)
+    ensemble = _cfg(tmp_path, ledger, processes=1)
+    open_loop = _cfg(
+        tmp_path, ledger, processes=1, n_action_steps=None, temporal_ensemble_coeff=None
+    )
+    ensemble.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    path = ensemble.out_dir / "eval_000.json"
+
+    def cached(cfg, payload):
+        path.write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    served_ensemble = _payload(draw, [_episode(6, success=True)])
+    served_open_loop = _payload(
+        draw,
+        [_episode(6, success=True)],
+        policy_id="act:ck",
+        inference={"n_action_steps": 100, "temporal_ensemble_coeff": None, "chunk_size": 100},
+    )
+    # The MS6 phase B defect: an open-loop read stood in the out_dir of an ensemble read.
+    assert cached(ensemble, served_ensemble) and not cached(ensemble, served_open_loop)
+    assert cached(open_loop, served_open_loop) and not cached(open_loop, served_ensemble)
+    open_loop.n_action_steps = 50
+    assert not cached(open_loop, served_open_loop)
+    # A payload older than the handshake echo carries no inference key: only a gate that asks
+    # for no override reuses it.
+    legacy = {k: v for k, v in served_open_loop.items() if k != "inference"}
+    open_loop.n_action_steps = None
+    assert cached(open_loop, legacy) and not cached(ensemble, legacy)
