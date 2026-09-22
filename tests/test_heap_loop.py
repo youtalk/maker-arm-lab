@@ -1,5 +1,6 @@
 """The heap outer loop on a three-part MuJoCo heap, cameras off (phase B design 5.2)."""
 
+import math
 import random
 
 import h5py
@@ -720,3 +721,20 @@ def test_the_next_target_waits_for_the_retreat_or_the_cap():
     cap = int(loop.SELECT_WAIT_FRACTION * loop.CYCLE_STEP_BUDGET)
     assert cap == 300 and not loop.select_ready(torch.tensor([0.44, 0.0, 0.30]), 0.0, cap - 1)
     assert loop.select_ready(torch.tensor([0.44, 0.0, 0.30]), 0.0, cap)
+
+
+def test_a_part_inside_the_bin_but_still_moving_ends_the_cycle_and_not_the_metric():
+    from maker_arm_lab.core.stowed import per_brick_stowed
+
+    env, _rig = _env_and_rig()
+    _place(env, SPREAD)
+    cx, cy, cz = layout.heap_bin_center(env.bin_layouts[0])
+    m, d, h = env.models[0], env.datas[0], env.handles
+    adr = h.brick_qpos[0]
+    d.qpos[adr : adr + 3] = (cx, cy, cz)
+    d.qvel[h.brick_dof[0] : h.brick_dof[0] + 3] = (0.3, 0.0, 0.0)
+    mujoco.mj_forward(m, d)
+    env._refresh([0], images=False)
+    assert not bool(per_brick_stowed(env)[0, 0])
+    assert bool(per_brick_stowed(env, max_speed=math.inf)[0, 0])
+    env.close()

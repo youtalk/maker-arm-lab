@@ -104,8 +104,11 @@ def _brick_states(env) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.stack(pos, dim=1), torch.stack(vel, dim=1)
 
 
-def per_brick_stowed(env) -> torch.Tensor:
+def per_brick_stowed(env, max_speed: float = 0.02) -> torch.Tensor:
     """(N,B) bool: which bricks are at rest inside their target bin right now.
+
+    ``max_speed`` is the grader's at-rest speed; ``math.inf`` asks only whether the brick is
+    inside the bin, moving or not (the heap loop's cycle end, MS6).
 
     The target is the brick's color bin, or, when the env carries ``destination_bins`` (N,)
     (MuJoCo heap mode, MS6), the one heap bin (``layout.heap_bin_center``, the MS6 z-centre
@@ -132,7 +135,7 @@ def per_brick_stowed(env) -> torch.Tensor:
         ids = destination.long().unsqueeze(1).expand(-1, env.cfg.num_bricks)
     half = getattr(env, "stow_half_extents", None)
     half = _bin_half_extents_cached(device) if half is None else torch.as_tensor(half).to(device)
-    return checker.bricks_at_rest_in_bins(pos, vel, centers, half, ids)
+    return checker.bricks_at_rest_in_bins(pos, vel, centers, half, ids, max_speed=max_speed)
 
 
 def all_bricks_stowed(env) -> torch.Tensor:

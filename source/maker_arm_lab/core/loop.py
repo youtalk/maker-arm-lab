@@ -3,12 +3,16 @@
 Phase B design 5.2. One cycle: the selector (a ``HeapOracle`` per env, the teacher's own
 rule) names the target, the loop writes it into ``env.target_part`` so the overhead marker
 moves, the policy drives, and the privileged grader ends the cycle. Three ends: a part that
-was not stowed when the cycle began is at rest in the bin (the target, or any part the jaws
-carried, rung b5's rule), the cycle spent ``CYCLE_STEP_BUDGET`` control steps, or the target
+was not in the bin when the cycle began is inside the bin, moving or not (the target, or any
+part the jaws carried, rung b5's rule), the cycle spent ``CYCLE_STEP_BUDGET`` control steps, or the target
 came to rest on the desk outside ``layout.in_reach`` and outside the bin, out of the jaws
 (knocked out of reach; a carry crosses out-of-reach space in flight and may pause there). A
 failed cycle marks its cell in the selector's failure memory. A part an earlier cycle stowed
 never ends a later one, so a stowed part that settles late is not credited twice.
+The cycle ends on entry into the bin and not at rest (2026-09-22), because the teacher's
+corpus switches targets when RETREAT ends, and a part settling in a pile can take hundreds
+of steps longer than that; the policy meanwhile saw a stale target and started a pick of its
+own. The metric never reads the cycle end: it is the at-rest grader at the episode's end.
 There is no reset between cycles. The episode ends when the selector returns None (no
 candidate, or the cycle budget is spent) or every part is stowed.
 
@@ -383,6 +387,7 @@ def rollout(
             raise EvalFailure("wall_clock", f"exceeded {max_wall_minutes} min at step {step}")
         per_brick = per_brick_stowed(env).to("cpu")
         tracker.latch_pre_step(per_brick)
+        in_bin = per_brick_stowed(env, max_speed=math.inf).to("cpu")
         pos, vel = _brick_states(env)
         pos, speed = pos.to("cpu"), vel.norm(dim=-1).to("cpu")
         left_mag = env.scene["finger_left_brick"].data.force_matrix_w.norm(dim=-1).squeeze(1)
@@ -393,7 +398,7 @@ def rollout(
             if bool(tracker.done[i]) or not rig.idle[i]:
                 continue
             st = states[i]
-            stowed_now = {b for b in range(k) if bool(per_brick[i, b])}
+            stowed_now = {b for b in range(k) if bool(in_bin[i, b])}
             if st.cycle is not None:
                 b = st.cycle.target
                 out = resting_out_of_reach(
@@ -409,7 +414,7 @@ def rollout(
                     st.idle_since = step
             if st.cycle is not None:
                 continue
-            if len(stowed_now) == k:
+            if bool(per_brick[i].all()):
                 loop_done[i] = True
                 st.done_reason = "all_stowed"
                 continue
