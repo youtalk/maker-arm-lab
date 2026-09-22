@@ -574,6 +574,9 @@ def test_no_close_edge_is_read_across_a_cycle_boundary(monkeypatch):
     # no edge whatever the policy commands.
     monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
     monkeypatch.setattr(dagger_loop, "NO_CLOSE_STEPS", 10_000)
+    # The policy closes on the 40-step cadence of the cycles; the retreat wait would shift
+    # every boundary off it, so this test selects the next target at once.
+    monkeypatch.setattr(loop, "SELECT_WAIT_FRACTION", 0.0)
     env, rig = _env_and_rig(budget=3)
     _place(env, SPREAD)
     calls = []
