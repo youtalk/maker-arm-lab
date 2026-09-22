@@ -162,3 +162,19 @@ def test_client_reads_the_action_space_and_sends_an_anchor(delta_prev_server):
     with pytest.raises(RuntimeError, match="server error"):
         client.step(*_obs(2))
     client.close()
+
+
+def test_client_sends_the_replan_flag_only_when_given():
+    seen = []
+
+    def fake_policy(state, wrist, overhead, context=None, replan=None):
+        seen.append(None if replan is None else replan.tolist())
+        return np.zeros((state.shape[0], *ACTION_SHAPE), dtype="float32")
+
+    endpoint, shutdown = _serve(policy_fn=fake_policy, reset_fn=lambda: None, policy_id="fake:r")
+    client = ServerPolicy(endpoint)
+    client.step(*_obs(2))
+    client.step(*_obs(2), replan=np.array([True, False]))
+    client.close()
+    shutdown()
+    assert seen == [None, [True, False]]

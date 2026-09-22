@@ -56,12 +56,17 @@ class ServerPolicy:
         overhead: np.ndarray,
         context: np.ndarray | None = None,
         anchor: np.ndarray | None = None,
+        replan: np.ndarray | None = None,
     ) -> np.ndarray:
+        """``replan`` is the (batch,) bool per-env replan flag of ``--replan_on_switch``; None
+        leaves it off the wire, which an older server needs."""
         arrays = {"state": state, "wrist": wrist, "overhead": overhead}
         if context is not None:
             arrays[policy_protocol.CONTEXT_KEY] = context
         if anchor is not None:
             arrays[policy_protocol.ANCHOR_KEY] = anchor
+        if replan is not None:
+            arrays[policy_protocol.REPLAN_KEY] = np.asarray(replan, dtype=bool)
         policy_protocol.send_message(
             self._socket, {"type": "step", "batch": int(state.shape[0])}, arrays
         )
