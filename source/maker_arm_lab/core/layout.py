@@ -176,6 +176,25 @@ SHELF_POS = (0.44, 0.0, 0.075)
 # where it is (`core.heap_oracle`).
 HEAP_CENTER = (0.21, 0.0)
 """The zone's centre: where the push heading's bias points (`HeapOracle._push_heading`)."""
+
+# MS7a design, the tray: the H1 tray returns (MS6 design H1, git c15f8f8^). The interior is
+# 0.13 x 0.20 m at x 0.13 to 0.26 and y -0.10 to 0.10, inside the measured reach, with four
+# static walls TRAY_WALL thick and TRAY_WALL_HEIGHT high. The MS7 desk boxes keep their
+# footprints outside it. The tray itself is switched on per env; without it the heap drops on
+# the bare desk as in MS6.
+TRAY_CENTER = (0.195, 0.0)
+TRAY_INTERIOR = (0.13, 0.20)
+TRAY_WALL_HEIGHT = 0.02
+TRAY_WALL = 0.005
+
+
+def tray_bounds() -> tuple[tuple[float, float], tuple[float, float]]:
+    """((x_min, x_max), (y_min, y_max)) of the tray interior."""
+    cx, cy = TRAY_CENTER
+    hx, hy = TRAY_INTERIOR[0] / 2, TRAY_INTERIOR[1] / 2
+    return ((cx - hx, cx + hx), (cy - hy, cy + hy))
+
+
 HEAP_RADIUS = 0.088
 """The radius over which that bias narrows to its floor: the old drop disc's."""
 HEAP_DROP_INSET = 0.02
