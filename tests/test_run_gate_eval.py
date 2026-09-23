@@ -869,3 +869,25 @@ def test_desk_boxes_refuse_anything_but_the_mujoco_heap(monkeypatch, capsys, tmp
     assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--desk_boxes" in out.err
     heap = ["--backend", "mujoco", "--heap_k", "50"]
     assert ge._build_cfg(ge._parse_args(argv + heap)).desk_boxes == 1
+
+
+def test_the_gate_reports_desk_box_rows_and_counts_own_box_stows_only():
+    draw = ge.make_eval_draws(1, 20261400)[0]
+    ep = dict(
+        _episode(0),
+        num_bricks=4,
+        bricks_stowed=2,
+        cycles=4,
+        cycle_classes=["stowed", "stowed", "wrong_box", "no_close"],
+        stowed_by_class={"slope": {"stowed": 2, "total": 3}, "wide": {"stowed": 0, "total": 1}},
+        stowed_by_box=[{"stowed": 2, "total": 3}, {"stowed": 0, "total": 1}],
+        wrong_box_parts=1,
+    )
+    results = ge.aggregate_gate([_payload(draw, [ep, ep])], threshold=0.5)
+    assert results["gate"]["bricks_stowed"] == 4 and results["gate"]["per_brick_rate"] == 0.5
+    rows = results["secondary"]
+    assert rows["stowed_by_class"]["slope"] == {"stowed": 4, "total": 6}
+    assert rows["stowed_by_box"][1] == {"stowed": 0, "total": 2}
+    assert rows["wrong_box_parts"] == 2 and rows["wrong_box_cycles"] == 2
+    six = ge.aggregate_gate([_payload(draw, [_episode(0)])], threshold=0.1)["secondary"]
+    assert "stowed_by_class" not in six

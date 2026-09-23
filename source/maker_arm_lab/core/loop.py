@@ -58,10 +58,12 @@ from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _neares
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
 from maker_arm_lab.core.global_ik import fold_to_half_turn
 from maker_arm_lab.core.heap_oracle import CANDIDATE_MAX_Z, target_context
+from maker_arm_lab.core.parts import PART_CLASSES, part_class
 from maker_arm_lab.core.stowed import (
     _brick_states,
     env_heap_bin_centers,
     parts_in_desk_boxes,
+    parts_resting_box,
     per_brick_stowed,
 )
 from maker_arm_lab.robots.frames import (
@@ -685,7 +687,9 @@ def cycle_class(cycle: Cycle, reason: str) -> str:
     ``held_no_lift``: a part was held and never rose ``oracle.LIFT_MIN_RISE``. ``carrying``: a
     lifted part was still between the jaws when the cycle ended. ``lifted_lost``: a lifted part
     left the jaws and did not come to rest in the bin. Pure. The grader's ``reason`` stays the
-    outcome, and the class only says how far the cycle got."""
+    outcome, and the class only says how far the cycle got. With desk boxes a ``lifted_lost``
+    cycle becomes ``wrong_box`` at the episode's end when its part rests in another class's box
+    (``box_census``): the part is still falling when a release ends the cycle."""
     if reason == "stowed":
         return "stowed"
     if cycle.held_steps < CENSUS_MIN_HELD_STEPS:
@@ -695,6 +699,43 @@ def cycle_class(cycle: Cycle, reason: str) -> str:
     if cycle.max_rise < oracle.LIFT_MIN_RISE:
         return "held_no_lift"
     return "carrying" if cycle.holding else "lifted_lost"
+
+
+def box_census(
+    parts,
+    destination,
+    stowed,
+    resting_box,
+    classes: list[str],
+    census: list[dict],
+    num_boxes: int,
+) -> dict:
+    """The desk-box rows of one episode's end (MS7a design, the census). Pure.
+
+    ``destination`` is each part's own box, ``stowed`` the grader's final mask (at rest in its
+    own box) and ``resting_box`` the box each part rests in at the end, or -1. A part at rest in
+    a box that is not its own is a wrong-box part, and the last ``lifted_lost`` cycle that held
+    it becomes ``wrong_box`` in ``classes``, in place (``census`` rows hold ``last_held``).
+    Returns the rows: parts stowed and parts in total per class and per box, and the wrong-box
+    parts.
+    """
+    wrong = [
+        b
+        for b in range(len(parts))
+        if int(resting_box[b]) >= 0 and int(resting_box[b]) != int(destination[b])
+    ]
+    for b in wrong:
+        for j in reversed(range(len(classes))):
+            if classes[j] == "lifted_lost" and census[j].get("last_held") == b:
+                classes[j] = "wrong_box"
+                break
+    by_class = {c: {"stowed": 0, "total": 0} for c in PART_CLASSES}
+    by_box = [{"stowed": 0, "total": 0} for _ in range(num_boxes)]
+    for b, part in enumerate(parts):
+        for row in (by_class[part_class(part)], by_box[int(destination[b])]):
+            row["total"] += 1
+            row["stowed"] += int(bool(stowed[b]))
+    return {"stowed_by_class": by_class, "stowed_by_box": by_box, "wrong_box_parts": len(wrong)}
 
 
 def resting_out_of_reach(pos, speed: float, held: bool, bl, stow_half_xy, in_box=None) -> bool:
@@ -795,6 +836,11 @@ def rollout(
     ctx_target = getattr(env, "context_target", None)
     # MS7a desk boxes: one destination box per part, and the served box part follows the target.
     per_part = torch.as_tensor(env.destination_bins).dim() == 2
+    if per_part:
+        # The loop runs one episode per env: its truth, before an env's own end resets it.
+        destination = torch.as_tensor(env.destination_bins).clone().to("cpu")
+        class_to_box = [dict(zip(PART_CLASSES, map(int, row))) for row in env.class_to_box]
+        final_box = torch.full((num_envs, k), -1, dtype=torch.long)
     for name, on in (
         ("squeeze_floor", squeeze_floor),
         ("close_gate", close_gate),
@@ -847,6 +893,10 @@ def rollout(
             raise EvalFailure("wall_clock", f"exceeded {max_wall_minutes} min at step {step}")
         per_brick = per_brick_stowed(env).to("cpu")
         tracker.latch_pre_step(per_brick)
+        if per_part:
+            # Latched like the tracker's mask: the step that ends an episode also resets it.
+            live = ~tracker.done
+            final_box[live] = parts_resting_box(env).to("cpu")[live]
         in_bin = per_brick_stowed(env, max_speed=math.inf).to("cpu")
         pos, vel = _brick_states(env)
         pos, speed = pos.to("cpu"), vel.norm(dim=-1).to("cpu")
@@ -1151,6 +1201,18 @@ def rollout(
     for i, result in enumerate(tracker.results):
         st = states[i]
         final = tracker.stowed_mask(i)
+        boxes = {}
+        if per_part:
+            boxes = box_census(
+                env.parts,
+                destination[i],
+                final,
+                final_box[i],
+                st.classes,
+                st.census,
+                env.desk_boxes,
+            )
+            boxes["class_to_box"] = class_to_box[i]
         episodes.append(
             {
                 **result.to_json(),
@@ -1170,6 +1232,7 @@ def rollout(
                 "takeovers_failed": st.takeovers_failed,
                 "select_wait_steps": st.select_wait_steps,
                 "rakes": st.rakes,
+                **boxes,
             }
         )
     steps_total = sum(e["steps"] for e in episodes)
@@ -1198,6 +1261,7 @@ def rollout(
         "cycles_total": cycles_total,
         "stowed_total": stowed_total,
         "cycles_per_stowed": (cycles_total / stowed_total) if stowed_total else None,
+        **(_sum_box_rows(episodes) if per_part else {}),
         "takeovers": sum(e["takeovers"] for e in episodes),
         "takeovers_stowed": sum(e["takeovers_stowed"] for e in episodes),
         "takeovers_failed": sum(e["takeovers_failed"] for e in episodes),
@@ -1211,6 +1275,27 @@ def rollout(
         "wall_sec_per_episode": round(wall / num_envs, 1),
     }
     return payload
+
+
+def _sum_box_rows(episodes: list[dict]) -> dict:
+    """The payload's desk-box rows: every episode's class and box rows and wrong-box parts."""
+    by_class = {c: {"stowed": 0, "total": 0} for c in PART_CLASSES}
+    by_box: list[dict] = []
+    for ep in episodes:
+        for c, row in ep["stowed_by_class"].items():
+            for key in ("stowed", "total"):
+                by_class[c][key] += row[key]
+        for m, row in enumerate(ep["stowed_by_box"]):
+            if m == len(by_box):
+                by_box.append({"stowed": 0, "total": 0})
+            for key in ("stowed", "total"):
+                by_box[m][key] += row[key]
+    return {
+        "stowed_by_class": by_class,
+        "stowed_by_box": by_box,
+        "wrong_box_parts": sum(ep["wrong_box_parts"] for ep in episodes),
+        "wrong_box_cycles": sum(ep["cycle_classes"].count("wrong_box") for ep in episodes),
+    }
 
 
 def _book_census(st: EnvState, cycle: Cycle, reason: str) -> None:

@@ -4,7 +4,9 @@ Stdlib only, runs under system python3 like the other supervisors. Reads the ``e
 payloads ``scripts/run_gate_eval.py --heap_k`` leaves in its out_dir and sums what
 ``core/loop.py`` books per cycle. It reports the rows MS6 phase B design 5.10 asks for: the
 census classes, the successful cycles that stowed a part other than the target, the first
-close distance against the outcome, and the step count per end reason. Prints exactly one of
+close distance against the outcome, and the step count per end reason. With desk boxes it adds
+the MS7a rows: ``wrong_box`` among the classes, parts stowed per class and per box, and the
+parts at rest in a box that is not their own. Prints exactly one of
 ``CENSUS_OK {json}`` or ``CENSUS_FAIL {json}`` on stdout.
 """
 
@@ -37,6 +39,10 @@ def read_payloads(paths: list[Path]) -> dict:
     steps: dict[str, list[int]] = defaultdict(list)  # end reason -> cycle steps
     summary = {"draws": len(paths), "episodes": 0, "parts_total": 0, "parts_stowed": 0, "cycles": 0}
     target_stows = other_stows = unaligned = 0
+    # MS7a desk boxes: parts stowed in their own box and parts in total, per class and per box.
+    by_class: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    by_box: dict[int, list[int]] = defaultdict(lambda: [0, 0])
+    wrong_box_parts = 0
     for path in paths:
         for ep in json.loads(Path(path).read_text())["episodes"]:
             if "cycle_classes" not in ep:
@@ -46,6 +52,13 @@ def read_payloads(paths: list[Path]) -> dict:
             summary["parts_stowed"] += int(ep["bricks_stowed"])
             summary["cycles"] += int(ep["cycles"])
             classes.update(ep["cycle_classes"])
+            for name, row in ep.get("stowed_by_class", {}).items():
+                by_class[name][0] += row["stowed"]
+                by_class[name][1] += row["total"]
+            for m, row in enumerate(ep.get("stowed_by_box", [])):
+                by_box[m][0] += row["stowed"]
+                by_box[m][1] += row["total"]
+            wrong_box_parts += int(ep.get("wrong_box_parts", 0))
             for ok, cm in zip(ep["cycle_outcomes"], ep["cycle_first_close_cm"]):
                 row = closes[_close_bin(cm)]
                 row[0] += bool(ok)
@@ -72,6 +85,14 @@ def read_payloads(paths: list[Path]) -> dict:
         "episodes_not_paired": unaligned,
     }
     summary["first_close_cm"] = {k: {"stowed": v[0], "cycles": v[1]} for k, v in closes.items()}
+    if by_class:
+        summary["stowed_by_class"] = {
+            k: {"stowed": v[0], "total": v[1]} for k, v in by_class.items()
+        }
+        summary["stowed_by_box"] = {
+            str(m): {"stowed": v[0], "total": v[1]} for m, v in sorted(by_box.items())
+        }
+        summary["wrong_box_parts"] = wrong_box_parts
     summary["cycle_steps"] = {
         reason: {
             "cycles": len(v),

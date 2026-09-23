@@ -218,6 +218,25 @@ def aggregate_gate(
                 key = f"{color}->{landed}"
                 confusion[key] = confusion.get(key, 0) + 1
     lo, hi = wilson_interval(bricks_stowed, bricks_total)
+    # MS7a desk boxes: bricks_stowed counts parts at rest in their own box only (the grader),
+    # and these rows say where the rest went. Absent on every payload without desk boxes.
+    boxed = [ep for ep in episodes if "stowed_by_class" in ep]
+    box_rows = {}
+    if boxed:
+        box_rows = {
+            "stowed_by_class": {
+                c: {
+                    k: sum(ep["stowed_by_class"][c][k] for ep in boxed) for k in ("stowed", "total")
+                }
+                for c in boxed[0]["stowed_by_class"]
+            },
+            "stowed_by_box": [
+                {k: sum(ep["stowed_by_box"][m][k] for ep in boxed) for k in ("stowed", "total")}
+                for m in range(len(boxed[0]["stowed_by_box"]))
+            ],
+            "wrong_box_parts": sum(ep["wrong_box_parts"] for ep in boxed),
+            "wrong_box_cycles": sum(ep["cycle_classes"].count("wrong_box") for ep in boxed),
+        }
     return {
         "gate": {
             "threshold": threshold,
@@ -269,6 +288,7 @@ def aggregate_gate(
                 for j in range(6)
             ],
             "mean_steps": (steps_total / len(episodes)) if episodes else None,
+            **box_rows,
         },
     }
 

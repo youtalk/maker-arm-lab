@@ -122,6 +122,15 @@ def parts_in_desk_boxes(env) -> torch.Tensor:
     return checker.in_boxes(pos, boxes, half).any(dim=-1)
 
 
+def parts_resting_box(env, max_speed: float = 0.02) -> torch.Tensor:
+    """(N,K) long: the desk box each part lies at rest in, its own or not, or -1."""
+    pos, vel = _brick_states(env)
+    boxes, half = env_desk_boxes(env, str(env.device))
+    inside = checker.in_boxes(pos, boxes, half) & (vel.norm(dim=-1) <= max_speed).unsqueeze(-1)
+    index = inside.long().argmax(dim=-1)
+    return torch.where(inside.any(dim=-1), index, torch.full_like(index, -1))
+
+
 def per_brick_stowed(env, max_speed: float = 0.02) -> torch.Tensor:
     """(N,B) bool: which bricks are at rest inside their target bin right now.
 

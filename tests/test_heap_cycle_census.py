@@ -67,3 +67,25 @@ def test_the_census_prints_one_token_on_every_path(tmp_path, capsys):
     )
     assert census.main(["--evals", str(old)]) == 1
     assert "predates the census" in capsys.readouterr().out
+
+
+def test_the_census_sums_the_desk_box_rows(tmp_path):
+    rows = {
+        "stowed_by_class": {"slope": {"stowed": 1, "total": 2}, "wide": {"stowed": 1, "total": 1}},
+        "stowed_by_box": [{"stowed": 1, "total": 2}, {"stowed": 1, "total": 1}],
+        "wrong_box_parts": 1,
+    }
+    boxed = _episode(cycle_classes=["stowed", "no_close", "stowed", "wrong_box"], **rows)
+    paths = [_write(tmp_path, f"eval_00{k}.json", [boxed]) for k in range(2)]
+    s = census.read_payloads(paths)
+    assert s["classes"]["wrong_box"]["cycles"] == 2
+    assert s["stowed_by_class"] == {
+        "slope": {"stowed": 2, "total": 4},
+        "wide": {"stowed": 2, "total": 2},
+    }
+    assert s["stowed_by_box"] == {"0": {"stowed": 2, "total": 4}, "1": {"stowed": 2, "total": 2}}
+    assert s["wrong_box_parts"] == 2
+    # A payload without desk boxes reports no box rows.
+    assert "stowed_by_class" not in census.read_payloads(
+        [_write(tmp_path, "six.json", [_episode()])]
+    )

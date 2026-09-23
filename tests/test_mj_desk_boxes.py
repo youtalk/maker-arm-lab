@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import torch
 
-from maker_arm_lab.core import desk_boxes, layout, loop, oracle
+from maker_arm_lab.core import desk_boxes, layout, loop, oracle, parts
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.core.parts import PART_CLASSES
@@ -282,3 +282,67 @@ def test_the_oracle_driver_stows_through_the_loop_into_one_box():
     ep = payload["episodes"][0]
     assert ep["bricks_stowed"] == 3 and ep["cycle_reasons"] == ["stowed"] * 3, ep
     assert math.isclose(payload["cycles_per_stowed"], 1.0)
+
+
+def test_box_census_names_the_wrong_box_cycle_and_counts_per_class_and_box():
+    heap = [parts.make_part("slope", 1, 2), parts.make_part("brick", 1, 6)]
+    heap += [parts.make_part("brick", 2, 3), parts.make_part("brick", 2, 7)]
+    classes = ["lifted_lost", "stowed", "lifted_lost", "close_miss", "lifted_lost"]
+    census = [{"last_held": b} for b in (1, 2, 3, 0, 3)]
+    rows = loop.box_census(
+        heap,
+        destination=[0, 1, 2, 2],
+        stowed=[False, False, True, False],
+        resting_box=[-1, 3, 2, 1],  # part 1 and part 3 rest in other boxes
+        classes=classes,
+        census=census,
+        num_boxes=4,
+    )
+    # Part 1's only lifted_lost cycle and part 3's last one become wrong_box.
+    assert classes == ["wrong_box", "stowed", "lifted_lost", "close_miss", "wrong_box"]
+    assert rows["wrong_box_parts"] == 2
+    assert rows["stowed_by_class"] == {
+        "slope": {"stowed": 0, "total": 1},
+        "tall": {"stowed": 0, "total": 0},
+        "narrow": {"stowed": 0, "total": 1},
+        "wide": {"stowed": 1, "total": 2},
+    }
+    assert rows["stowed_by_box"] == [
+        {"stowed": 0, "total": 1},
+        {"stowed": 0, "total": 1},
+        {"stowed": 1, "total": 2},
+        {"stowed": 0, "total": 0},
+    ]
+
+
+def test_a_part_carried_into_another_box_is_a_wrong_box_cycle_and_never_stowed():
+    env, rig = _teacher_env_and_rig(4, FIXED, episode_length_s=loop.episode_length_s(3))
+    _place(env, SPREAD)
+    # The grader's truth sends every part to box 1; the teacher's own map sends them to box 0.
+    env.destination_bins[0] = torch.tensor([1, 1, 1])
+    env.class_to_box[0] = (1, 1, 1, 1)
+    rng = random.Random(1)
+
+    def wrong_teacher(i, bl, episode_draw):
+        return HeapOracle(
+            bl, env.parts, 0, episode_draw, rng=rng, cycle_budget=3, boxes=env.desk_box_poses[i]
+        )
+
+    rig.oracle_factory = wrong_teacher
+    payload = loop.rollout(
+        env,
+        rig,
+        None,
+        run_seed=11,
+        layout_seed=5,
+        permutation=(0, 1, 2, 3),
+        cycle_budget=3,
+        max_wall_minutes=5.0,
+    )
+    env.close()
+    ep = payload["episodes"][0]
+    assert ep["bricks_stowed"] == 0 and payload["stowed_total"] == 0, ep["cycle_reasons"]
+    assert ep["cycle_classes"] == ["wrong_box"] * 3 and ep["wrong_box_parts"] == 3
+    assert ep["stowed_by_box"][1] == {"stowed": 0, "total": 3}
+    assert ep["stowed_by_class"]["wide"] == {"stowed": 0, "total": 2}
+    assert payload["wrong_box_parts"] == 3 and payload["wrong_box_cycles"] == 3
