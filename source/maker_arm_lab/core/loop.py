@@ -281,17 +281,28 @@ GATE_DESCENT = 0.0005
 hold. A policy that has stopped descending closes wherever it stopped."""
 
 
-def gated_gap(gap: float, width: float, z_pick: float, z_top: float, descending: bool) -> float:
+def gated_gap(
+    gap: float, width: float, z_pick: float, z_top: float, descending: bool, held: bool = False
+) -> float:
     """``close_gate``: the continuous gap command while the policy is still descending. Pure.
 
     ``width`` is the served target row's grasp width (0 with no live row), ``z_top`` the row's
-    centre plus half height, ``z_pick`` the rig's pick point height and ``descending`` whether
-    it came down ``GATE_DESCENT`` over the last ``GATE_WINDOW`` steps. A command under
-    ``width`` while the pick point is still ``GATE_MARGIN`` above the top and still coming
-    down is replaced by the teacher's landing gap, ``2 * (landing_half_gap(w) - JAW_HOLD_BAND)``
+    centre plus half height, ``z_pick`` the rig's pick point height, ``descending`` whether
+    it came down ``GATE_DESCENT`` over the last ``GATE_WINDOW`` steps and ``held`` whether the
+    cycle has already held a part or lifted one. A command under ``width`` before the first
+    hold, while the pick point is still ``GATE_MARGIN`` above the top and still coming down,
+    is replaced by the teacher's landing gap, ``2 * (landing_half_gap(w) - JAW_HOLD_BAND)``
     = w + 8 mm (``OracleRig.actions``). Every other command is left alone: a close at or
     below the top, a close after the descent stopped (a policy that stops 4 mm high still
-    closes there), a landing, a release, and any command with no row.
+    closes there), a landing, a release, any command with no row, and any command once the
+    cycle has held a part.
+
+    The hold rule comes from the 500k read of 2026-09-22 (``squeeze_floor`` + ``close_gate``
+    without it): 461 of 1000 against 671 with the floor alone, lifted_lost 27 -> 187. The
+    served row keeps the target's desk position, so during the carry the arm descends toward
+    the bin with a closed command far above the row's top, every gate condition held, and the
+    gate commanded the landing gap in flight; the part dropped. The gate now stops at the
+    cycle's first held step or first lift, whichever comes first.
 
     Run m's 400k read (2026-09-22): the held_no_lift cycles (27% of all cycles) are shallow
     pinches, their pick point 3 to 6 mm above the part centre at the first close (off_z
@@ -302,7 +313,7 @@ def gated_gap(gap: float, width: float, z_pick: float, z_top: float, descending:
     checkpoint) and left held_no_lift where it was (331 against 321 of about 1236 cycles).
     The corpus recorder needs no gate: the teacher never closes while descending, DESCEND
     ends on a stall and CLOSE begins after it, so the gate is a no-op on recorded frames."""
-    if width <= 0.0 or gap >= width or not descending or z_pick <= z_top + GATE_MARGIN:
+    if held or width <= 0.0 or gap >= width or not descending or z_pick <= z_top + GATE_MARGIN:
         return gap
     return 2.0 * (grasp.landing_half_gap(width) - grasp.JAW_HOLD_BAND)
 
@@ -856,8 +867,17 @@ def rollout(
                     if close_gate:
                         hist = pick_z_hist[i]
                         descending = len(hist) > GATE_WINDOW and hist[0] - hist[-1] > GATE_DESCENT
+                        # ``census_step`` runs after this block, so both fields read the
+                        # steps before this one: no hold and no lift so far in the cycle.
+                        c = st.cycle
+                        held_so_far = c.held_steps > 0 or c.max_rise >= oracle.LIFT_MIN_RISE
                         gated = gated_gap(
-                            gap, width, hist[-1], float(row[2]) + float(row[6]), descending
+                            gap,
+                            width,
+                            hist[-1],
+                            float(row[2]) + float(row[6]),
+                            descending,
+                            held=held_so_far,
                         )
                         if gated != gap:
                             gap = gated

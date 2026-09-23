@@ -960,6 +960,8 @@ def test_gated_gap_holds_the_landing_gap_only_while_descending_above_the_top():
     # A landing or a coast (at or above w) and a command with no row: untouched.
     assert loop.gated_gap(w + 0.008, w, z_top + 0.010, z_top, True) == w + 0.008
     assert loop.gated_gap(closing, 0.0, z_top + 0.010, z_top, True) == closing
+    # Once the cycle has held a part (the carry's descent onto the bin): untouched.
+    assert loop.gated_gap(closing, w, z_top + 0.010, z_top, True, held=True) == closing
     assert "gated_gap" not in inspect.getsource(eval_loop)
 
 
