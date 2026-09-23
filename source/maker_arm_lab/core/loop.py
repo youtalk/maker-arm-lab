@@ -19,7 +19,8 @@ candidate, or the cycle budget is spent) or every part is stowed.
 Five protocol switches, all off by default so the old protocol stays reproducible
 (2026-09-22): ``select_at_release`` selects the next target when the release opens the jaws
 (``release_ready``) instead of at the retreat (``select_ready``), and ends a cycle at the
-release of a lifted part wherever it landed (``released_after_lift``); ``replan_on_switch``
+release of a lifted part wherever it landed (``released_after_lift``), and lets a cycle that
+holds a part at its step budget run ``CARRY_GRACE_STEPS`` more (``budget_ends_cycle``); ``replan_on_switch``
 sends the server a per-env replan flag on the step a target row is written, so the policy's
 chunk is cut at the switch (``policy_server.ActionQueues``); ``row_refresh`` rewrites the row
 from the live scene at a re-open that lifted nothing (``reopen_edge``, ``refreshed_row``), the
@@ -161,6 +162,35 @@ def released_after_lift(cycle: Cycle, open_fraction: float, held: int) -> bool:
         and held < 0
         and open_fraction >= SELECT_OPEN_FRACTION
     )
+
+
+CARRY_GRACE_STEPS = 400
+"""Control steps ``budget_ends_cycle`` keeps a cycle open past ``CYCLE_STEP_BUDGET`` while
+the jaws hold a part."""
+
+
+def budget_ends_cycle(steps: int, held: bool, grace_used: int) -> bool:
+    """``select_at_release``: does the step budget end the cycle now? Pure.
+
+    ``steps`` is the cycle's age, ``held`` the census held read (both jaws press one part at
+    or above ``HELD_MIN_FORCE``) and ``grace_used`` the steps the grace has kept this cycle
+    open so far. Under the budget the answer is no. At the budget a cycle holding nothing
+    ends as before. A cycle holding a part gets ``CARRY_GRACE_STEPS`` more steps, during
+    which the normal ends apply (a bin entry, a release after a lift, or the part dropped,
+    at which point the budget ends it at once); after the grace it ends held or not.
+
+    The gap: under ``select_at_release`` a budget end selects the next target at once, so a
+    cycle that ends on the budget while the jaws still hold a part (the census class
+    ``carrying``, or ``held_no_lift`` with the part still held at desk height, mid-retry)
+    hands the policy a fresh target row while it carries a part, a state the teacher's
+    corpus never contains: every teacher cycle ends with a RELEASE and the row switches only
+    then. The T0 100k read (n/gate/sel/t0_100000_v2sq, 2026-09-22) has 40 carrying cycles of
+    1289, and the old protocol's reads credited about 16 % of their stowed parts to carries
+    that entered the bin after their cycle ended; under the release rule those carries were
+    cut short."""
+    if steps < CYCLE_STEP_BUDGET:
+        return False
+    return not held or grace_used >= CARRY_GRACE_STEPS
 
 
 """Control steps a part must stay between the jaws to count as held in the cycle census: the
@@ -373,6 +403,7 @@ class Cycle:
     refreshes: int = 0  # target rows ``row_refresh`` rewrote within the cycle
     floored_steps: int = 0  # steps ``squeeze_floor`` changed the gap command
     gated_steps: int = 0  # steps ``close_gate`` changed the gap command
+    grace_steps: int = 0  # steps ``budget_ends_cycle``'s carry grace kept the cycle open
 
 
 @dataclass
@@ -542,6 +573,7 @@ CENSUS_EXPORT = (
     "refreshes",
     "floored_steps",
     "gated_steps",
+    "grace_steps",
 )
 """The ``Cycle`` fields each episode's ``cycle_census`` row exports, plus the two is_target
 flags of ``first_held`` and ``last_held``. Observation only, never the metric."""
@@ -720,12 +752,14 @@ def rollout(
                     env.stow_half_extents,
                 )
                 end = cycle_end(st.cycle, stowed_now, out, step, set(st.stowed_parts))
-                if (
-                    end is None
-                    and select_at_release
-                    and released_after_lift(st.cycle, float(openings[i]), int(held[i]))
-                ):
-                    end = ("released", [])
+                if select_at_release and (end is None or end[0] == "budget"):
+                    if released_after_lift(st.cycle, float(openings[i]), int(held[i])):
+                        end = ("released", [])
+                    elif end is not None and not budget_ends_cycle(
+                        step - st.cycle.start_step, int(held[i]) >= 0, st.cycle.grace_steps
+                    ):
+                        st.cycle.grace_steps += 1
+                        end = None
                 if end is not None:
                     _close_cycle(st, end[0], end[1], step, rig.snapshot(i))
                     st.idle_since = step

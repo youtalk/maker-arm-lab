@@ -898,6 +898,19 @@ def test_released_after_lift_is_the_open_jaw_after_a_lift_with_nothing_held():
     assert loop.released_after_lift(cycle, loop.SELECT_OPEN_FRACTION, -1)  # the release
 
 
+def test_budget_ends_cycle_grants_a_held_part_the_carry_grace():
+    budget, grace = loop.CYCLE_STEP_BUDGET, loop.CARRY_GRACE_STEPS
+    assert not loop.budget_ends_cycle(budget - 1, True, 0)  # under the budget
+    assert loop.budget_ends_cycle(budget, False, 0)  # nothing held: the old end
+    assert not loop.budget_ends_cycle(budget, True, 0)  # held: the grace opens
+    assert not loop.budget_ends_cycle(budget + grace - 1, True, grace - 1)
+    assert loop.budget_ends_cycle(budget + grace, True, grace)  # the grace is spent
+    assert loop.budget_ends_cycle(budget + 10, False, 10)  # dropped in the grace: at once
+    cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
+    assert loop.cycle_end(cycle, set(), False, budget) == ("budget", [])  # the off-switch path
+    assert "grace_steps" in loop.CENSUS_EXPORT
+
+
 def test_reopen_edge_is_the_open_after_a_close_that_lifted_nothing():
     cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
     assert not loop.reopen_edge(cycle, True)  # a cycle's first step has no edge
