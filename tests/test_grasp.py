@@ -413,3 +413,17 @@ def test_a_corner_part_keeps_no_heading_and_ranking_honors_the_walls():
     mask = torch.ones(1, dtype=torch.bool)
     assert grasp.rank_grasps(sizes, pos, quat, mask, walls=WALLS) == []
     assert len(grasp.rank_grasps(sizes, pos, quat, mask)) == 2
+
+
+def test_along_a_wall_a_long_part_closes_end_to_end_and_nowhere_else():
+    long_brick = parts.make_part("brick", 2, 7)  # 55.8 x 15.8 mm
+    flush = torch.tensor([TRAY_MID_X, TY0 + 0.0085, 0.0048])
+    found = grasp.candidate_grasps(0, _size(long_brick), flush, IDENTITY, walls=WALLS)
+    assert [round(g.width, 4) for g in found] == [0.0558]  # along the wall, end to end
+    bare = grasp.candidate_grasps(0, _size(long_brick), flush, IDENTITY)
+    assert [round(g.width, 4) for g in bare] == [0.0158]  # the bare desk: across only
+    middle = torch.tensor([TRAY_MID_X, layout.TRAY_CENTER[1], 0.0048])
+    inside = grasp.candidate_grasps(0, _size(long_brick), middle, IDENTITY, walls=WALLS)
+    assert [round(g.width, 4) for g in inside] == [0.0158]  # away from a wall, only across
+    too_long = parts.make_part("brick", 2, 8)  # 63.8 mm, past WALL_MAX_GRASP_WIDTH
+    assert not grasp.candidate_grasps(0, _size(too_long), flush, IDENTITY, walls=WALLS)

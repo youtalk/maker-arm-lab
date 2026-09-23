@@ -87,6 +87,17 @@ design wrote ``OPEN_HALF_GAP`` for that reach, the fully open jaw of MS6 phase A
 ways, half the tray, where no heading can then survive. # INITIAL"""
 
 
+WALL_MAX_GRASP_WIDTH = 0.060
+"""Along a wall the jaws may close end to end on a part up to this long (m), past
+MAX_GRASP_WIDTH.
+
+A 1x6 (47.8 mm) or 2x7 (55.8 mm) brick flush along a wall has no grasp under
+MAX_GRASP_WIDTH, because its short axis points a finger into the wall, and no room behind it
+for the rake's tips. Driven on 2026-09-23 (MS7a tray ladder), both flush against the left
+wall at yaw 0 and 5 degrees closed end to end along the wall, lifted and stowed. The landing
+gap of a 60 mm grasp is 42 mm, inside OPEN_HALF_GAP. # INITIAL"""
+
+
 @dataclass(frozen=True)
 class Wall:
     """A static wall the jaws must not land on: its top-down footprint, its direction of
@@ -120,6 +131,20 @@ def along_wall(heading: float, wall: Wall) -> bool:
     """Is a closing axis at ``heading`` within WALL_BAND_RAD of the wall's direction?"""
     off = abs((heading - wall.heading + math.pi / 2) % math.pi - math.pi / 2)
     return off <= WALL_BAND_RAD
+
+
+def hugs_wall(
+    pos: torch.Tensor, heading: float, width: float, half_height: float, walls: Sequence[Wall]
+) -> bool:
+    """Is this grasp within its finger reach of a wall that stands in its grip band, with
+    its closing axis along that wall (``wall_allows``'s band, from the passing side)?"""
+    band = float(pos[2]) + half_height - MIN_GRIP_OVERLAP
+    xy = (float(pos[0]), float(pos[1]))
+    near = landing_half_gap(width) + TIP_THICKNESS + WALL_BAND_MARGIN
+    return any(
+        wall.top > band and wall_distance(xy, wall) < near and along_wall(heading, wall)
+        for wall in walls
+    )
 
 
 def wall_allows(
@@ -229,7 +254,8 @@ def candidate_grasps(
     walls: Sequence[Wall] = (),
 ) -> list[Grasp]:
     """Every closing axis within AXIS_MAX_TILT_RAD of the jaw plane, under MAX_GRASP_WIDTH,
-    that the ``walls`` allow (``wall_allows``; none on the bare desk).
+    that the ``walls`` allow (``wall_allows``; none on the bare desk). Beside a wall an axis
+    along it may reach WALL_MAX_GRASP_WIDTH (``hugs_wall``).
 
     The jaw plane is horizontal at ``tilt_rad = 0.0``. ``closing_axes`` are the body axes the
     part's shape allows (``parts.Part.closing_axes``): a slope offers only its y axis.
@@ -242,10 +268,13 @@ def candidate_grasps(
         if float(off_plane[k]) > math.sin(AXIS_MAX_TILT_RAD):
             continue
         width = float(size[k])
-        if width > MAX_GRASP_WIDTH:
+        wide = width > MAX_GRASP_WIDTH
+        if wide and not (walls and width <= WALL_MAX_GRASP_WIDTH):
             continue
         heading = math.atan2(float(axes[k, 1]), float(axes[k, 0]))
         if walls and not wall_allows(pos, heading, width, half_height, walls):
+            continue
+        if wide and not hugs_wall(pos, heading, width, half_height, walls):
             continue
         found.append(Grasp(part, heading, width, half_height, float("nan"), float(pos[2])))
     return found
