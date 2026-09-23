@@ -16,7 +16,7 @@ own. The metric never reads the cycle end: it is the at-rest grader at the episo
 There is no reset between cycles. The episode ends when the selector returns None (no
 candidate, or the cycle budget is spent) or every part is stowed.
 
-Five protocol switches, all off by default so the old protocol stays reproducible
+Six protocol switches, all off by default so the old protocol stays reproducible
 (2026-09-22): ``select_at_release`` selects the next target when the release opens the jaws
 (``release_ready``) instead of at the retreat (``select_ready``), and ends a cycle at the
 release of a lifted part wherever it landed (``released_after_lift``), and lets a cycle that
@@ -27,7 +27,9 @@ from the live scene at a re-open that lifted nothing (``reopen_edge``, ``refresh
 teacher's REOPEN refresh; ``squeeze_floor`` caps a closing gap command at the teacher's close
 set point (``floored_gap``) and ``close_gate`` holds the jaws at the landing gap while the
 pick point is still descending onto the target (``gated_gap``), two serving-side gripper
-levers applied in that order, gate first. The payload's ``inference`` block records all five.
+levers applied in that order, gate first; ``square_wrist`` turns the wrist roll command toward
+the served row's closing axis on the final approach (``squared_roll``). The payload's
+``inference`` block records all six.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
@@ -54,9 +56,15 @@ from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.dagger_loop import DECLINE_COOLDOWN, trigger_reason
 from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _nearest_brick_cm
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
+from maker_arm_lab.core.global_ik import fold_to_half_turn
 from maker_arm_lab.core.heap_oracle import CANDIDATE_MAX_Z, target_context
 from maker_arm_lab.core.stowed import _brick_states, env_heap_bin_centers, per_brick_stowed
-from maker_arm_lab.robots.frames import ARM_JOINT_REGEX, TOOL_BODY
+from maker_arm_lab.robots.frames import (
+    ARM_JOINT_REGEX,
+    JAW_AXIS_BODY,
+    TOOL_BODY,
+    WRIST_ROLL_INDEX,
+)
 
 CYCLE_STEP_BUDGET = 800
 """Control steps one policy cycle may take. The phase B preflight (plan Task 15) reads the k
@@ -318,6 +326,70 @@ def gated_gap(
     return 2.0 * (grasp.landing_half_gap(width) - grasp.JAW_HOLD_BAND)
 
 
+SQUARE_RADIUS = 0.040
+"""m: ``square_wrist`` acts while the pick point is this close in xy to the row centre.
+
+Read on the T0 250k trace of 2026-09-22 (draws 0 and 1, 271 cycles with a close): the final
+descent (the pick point below the row's top plus ``SQUARE_ABOVE``) begins a median 17 to 21
+mm from the centre in xy, p75 29 to 37 mm. A 20 mm radius would start the correction after
+the descent had begun in half the cycles; 40 mm starts it with the descent in about 80% of
+them. The policy's own roll moves little in there (a median 5 to 9 degrees from the radius to
+the close), so what the lever adds is the correction, not a race against the policy."""
+SQUARE_ABOVE = 0.040
+"""m: and while the pick point is below the row's top (centre plus half height) plus this."""
+SQUARE_MAX_STEP = math.radians(3.0)
+"""rad: the most ``square_wrist`` moves the served roll command in one control step."""
+
+
+def squared_roll(ik, q, row, pick, prev: float, limits, held: bool = False) -> float:
+    """``square_wrist``: the wrist roll command that squares the jaws to the served row. Pure.
+
+    ``q`` is the (6,) arm command the policy served, ``row`` the served target row
+    (``target_context``: centre x y z, cos and sin of the closing axis heading, width, half
+    height), ``pick`` the rig's pick point, ``prev`` the roll command the env received on the
+    step before, ``limits`` the roll joint's (lower, upper) and ``held`` whether the cycle has
+    already held a part or lifted one. Returns ``q[WRIST_ROLL_INDEX]`` unchanged with no live
+    row (width 0), once the cycle has held or lifted a part, or while the pick point is more
+    than ``SQUARE_RADIUS`` from the row centre in xy or ``SQUARE_ABOVE`` above its top.
+
+    Otherwise the jaw heading of ``q`` comes from FK (``JAW_AXIS_BODY`` in the tool frame,
+    flattened to the world xy plane), and so does the sign of the roll joint's effect on it
+    (a finite difference; the tool points down, so +1 rad of roll turns the jaw about +1
+    rad). The error ``fold_to_half_turn(row heading - jaw heading)`` is folded into [-pi/2,
+    pi/2) because the parallel jaw is symmetric under a half turn, and the target roll is
+    ``q[5] + sign * error``. When that leaves the joint's limits, the other half-turn branch,
+    ``error -/+ pi``, is the target if it lies inside; when neither does, the command is left
+    alone. Rate rule: the returned command is the target clamped into ``prev`` plus or minus
+    ``SQUARE_MAX_STEP``, so the served roll moves at most 3 degrees per step while the lever
+    acts. Once the cycle holds or lifts a part the lever stops and the policy's own roll is
+    served at once, a step that can be as large as the correction was.
+
+    The T0 250k trace (2026-09-22): 55% of held_no_lift cycles end with one finger pad on top
+    of the target, and at the close the jaw is a median 24 degrees off the part's nearest
+    horizontal axis (the teacher 2 to 4). Against the row's own heading the policy's jaw sits
+    a median 53 to 57 degrees off at the close on held_no_lift and 32 to 47 on stows, so the
+    lever turns most grasps onto the row's axis, the axis the teacher closes across."""
+    roll = float(q[WRIST_ROLL_INDEX])
+    near = math.hypot(float(pick[0]) - float(row[0]), float(pick[1]) - float(row[1]))
+    top = float(row[2]) + float(row[6])
+    if held or float(row[5]) <= 0.0 or near > SQUARE_RADIUS or float(pick[2]) >= top + SQUARE_ABOVE:
+        return roll
+    q = torch.as_tensor(q, dtype=torch.float64)
+    nudged = q.clone()
+    nudged[WRIST_ROLL_INDEX] += 1e-3
+    _, rot = ik.fk_batch(torch.stack([q, nudged]))
+    jaw = rot @ torch.tensor(JAW_AXIS_BODY, dtype=torch.float64)
+    yaw = torch.atan2(jaw[:, 1], jaw[:, 0]).tolist()
+    sign = 1.0 if fold_to_half_turn(yaw[1] - yaw[0]) > 0.0 else -1.0
+    err = fold_to_half_turn(math.atan2(float(row[4]), float(row[3])) - yaw[0])
+    lo, hi = float(limits[0]), float(limits[1])
+    for turn in (err, err - math.copysign(math.pi, err)):
+        target = roll + sign * turn
+        if lo <= target <= hi:
+            return min(max(target, prev - SQUARE_MAX_STEP), prev + SQUARE_MAX_STEP)
+    return roll
+
+
 def failure_reason(
     held_no_rise: int, min_no_rise: int | None, lifted: bool, steps_in_cycle: int
 ) -> str | None:
@@ -414,6 +486,7 @@ class Cycle:
     refreshes: int = 0  # target rows ``row_refresh`` rewrote within the cycle
     floored_steps: int = 0  # steps ``squeeze_floor`` changed the gap command
     gated_steps: int = 0  # steps ``close_gate`` changed the gap command
+    squared_steps: int = 0  # steps ``square_wrist`` changed the roll command
     grace_steps: int = 0  # steps ``budget_ends_cycle``'s carry grace kept the cycle open
 
 
@@ -584,6 +657,7 @@ CENSUS_EXPORT = (
     "refreshes",
     "floored_steps",
     "gated_steps",
+    "squared_steps",
     "grace_steps",
 )
 """The ``Cycle`` fields each episode's ``cycle_census`` row exports, plus the two is_target
@@ -654,14 +728,16 @@ def rollout(
     row_refresh: bool = False,
     squeeze_floor: bool = False,
     close_gate: bool = False,
+    square_wrist: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
     ``policy`` is a ``policy_client.ServerPolicy`` or None for the oracle driver.
     ``takeover`` is a ``TakeoverConfig`` (the DAgger mode, phase B design 5.5) or None.
-    The five switches are the module docstring's; ``replan_on_switch`` needs a policy whose
+    The six switches are the module docstring's; ``replan_on_switch`` needs a policy whose
     ``step`` takes ``replan``, and the flag is left off the wire when the switch is off;
-    ``squeeze_floor`` and ``close_gate`` need the continuous gripper and a served target row.
+    ``squeeze_floor``, ``close_gate`` and ``square_wrist`` need the continuous gripper and a
+    served target row.
     ``on_frame(ordinal, step_in_cycle, wrist, overhead)`` is called with env 0's two policy
     frames every ``FRAME_EVERY`` steps of each of its cycles, for a forensics dump.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
@@ -695,7 +771,11 @@ def rollout(
     if takeover is not None and policy is None:
         raise EvalFailure("takeover", "the takeover triggers need a policy to take over from")
     ctx_target = getattr(env, "context_target", None)
-    for name, on in (("squeeze_floor", squeeze_floor), ("close_gate", close_gate)):
+    for name, on in (
+        ("squeeze_floor", squeeze_floor),
+        ("close_gate", close_gate),
+        ("square_wrist", square_wrist),
+    ):
         if on and (gripper_mode != "continuous" or ctx_target is None):
             raise EvalFailure(name, "needs the continuous gripper and a served target row")
     limits = robot.data.joint_pos_limits[:, arm_ids, :].to("cpu")
@@ -727,10 +807,13 @@ def rollout(
         "row_refresh": bool(row_refresh),
         "squeeze_floor": bool(squeeze_floor),
         "close_gate": bool(close_gate),
+        "square_wrist": bool(square_wrist),
     }
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
     pick_z_hist = [deque(maxlen=GATE_WINDOW + 1) for _ in range(num_envs)]
+    # The roll command each env received on the last step, ``square_wrist``'s rate read.
+    last_roll = robot.data.joint_pos[:, WRIST_ROLL_INDEX].to("cpu").clone()
 
     started = time.monotonic()
     max_steps = int(env.max_episode_length)
@@ -857,20 +940,33 @@ def rollout(
         if policy_action is not None:
             idle = torch.tensor(rig.idle)
             action_cpu[idle] = policy_action[idle]
-            if close_gate or squeeze_floor:
+            if close_gate or squeeze_floor or square_wrist:
                 for i, st in enumerate(states):
                     if st.cycle is None or not rig.idle[i] or bool(tracker.done[i]):
                         continue
                     row = ctx_target[i]  # CONTEXT_TARGET_NAMES: z at 2, width at 5, half height 6
                     width = float(row[5])
                     gap = float(action_cpu[i, 6])
+                    # ``census_step`` runs after this block, so both fields read the steps
+                    # before this one: no hold and no lift so far in the cycle.
+                    c = st.cycle
+                    held_so_far = c.held_steps > 0 or c.max_rise >= oracle.LIFT_MIN_RISE
+                    if square_wrist:
+                        roll = squared_roll(
+                            rig.ik,
+                            action_cpu[i, :6],
+                            row,
+                            picks[i],
+                            float(last_roll[i]),
+                            limits[i, WRIST_ROLL_INDEX],
+                            held=held_so_far,
+                        )
+                        if roll != float(action_cpu[i, WRIST_ROLL_INDEX]):
+                            action_cpu[i, WRIST_ROLL_INDEX] = roll
+                            c.squared_steps += 1
                     if close_gate:
                         hist = pick_z_hist[i]
                         descending = len(hist) > GATE_WINDOW and hist[0] - hist[-1] > GATE_DESCENT
-                        # ``census_step`` runs after this block, so both fields read the
-                        # steps before this one: no hold and no lift so far in the cycle.
-                        c = st.cycle
-                        held_so_far = c.held_steps > 0 or c.max_rise >= oracle.LIFT_MIN_RISE
                         gated = gated_gap(
                             gap,
                             width,
@@ -926,6 +1022,7 @@ def rollout(
         arm_clamped, overshoot = clamp_arm_actions(action_cpu[:, :6], limits)
         tracker.record_clamps(overshoot)
         clamped = torch.cat([arm_clamped, action_cpu[:, 6:7]], dim=-1)
+        last_roll = clamped[:, WRIST_ROLL_INDEX].clone()
         if step == max_steps - 1 and recorder is not None:
             # The time-out cuts a running takeover short of RETREAT: negate before the env's
             # step exports the episode (the six-brick DAgger loop's ruling P7).

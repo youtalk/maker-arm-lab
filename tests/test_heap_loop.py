@@ -965,6 +965,87 @@ def test_gated_gap_holds_the_landing_gap_only_while_descending_above_the_top():
     assert "gated_gap" not in inspect.getsource(eval_loop)
 
 
+def _square_pose():
+    """A grasp pose, tool tilted the shipping 20 degrees, with the jaw at heading 0.2 rad."""
+    from maker_arm_lab.core.global_ik import GlobalIK, GraspTarget
+    from maker_arm_lab.robots.frames import GRASP_TILT_RAD
+
+    ik = GlobalIK()
+    target = GraspTarget(
+        position=(0.2, 0.0, 0.03), tilt=GRASP_TILT_RAD, jaw_heading=0.2, lean_azimuth=0.0
+    )
+    return ik, ik.solve(target).q
+
+
+def _jaw_heading(ik, q, roll):
+    from maker_arm_lab.robots.frames import JAW_AXIS_BODY
+
+    q = q.clone()
+    q[5] = roll
+    _, rot = ik.fk(q)
+    jaw = rot @ torch.tensor(JAW_AXIS_BODY, dtype=torch.float64)
+    return math.atan2(float(jaw[1]), float(jaw[0]))
+
+
+def _square_row(heading, width=0.0158):
+    return [0.2, 0.0, 0.01, math.cos(heading), math.sin(heading), width, 0.0057]
+
+
+def test_squared_roll_turns_the_jaw_onto_the_rows_axis_at_three_degrees_a_step():
+    ik, q = _square_pose()
+    roll, lim, step = float(q[5]), (-2.7, 2.7), loop.SQUARE_MAX_STEP
+    pick = (0.21, 0.01, 0.03)  # 14 mm off the centre in xy, 14 mm above the top
+    row = _square_row(0.2 + 0.3)  # the row's axis 0.3 rad round from the jaw
+    # The sign comes from FK: the first step turns the roll 3 degrees toward the row.
+    first = loop.squared_roll(ik, q, row, pick, roll, lim)
+    assert first == pytest.approx(roll + step)
+    assert _jaw_heading(ik, q, first) > _jaw_heading(ik, q, roll)
+    # Stepped with the served command as ``prev``, the jaw lands on the row's axis (to the
+    # 20 degree tilt's 5% roll-to-heading ratio) and stays there.
+    served = roll
+    for _ in range(12):
+        served = loop.squared_roll(ik, q, row, pick, served, lim)
+    assert served == pytest.approx(roll + 0.3)
+    assert _jaw_heading(ik, q, served) == pytest.approx(0.5, abs=0.03)
+    # The rate rule holds on the way back too: a command above the target comes down 3 degrees.
+    assert loop.squared_roll(ik, q, row, pick, roll + 1.0, lim) == pytest.approx(roll + 1.0 - step)
+    # The fold: the axis half a turn round is the same grasp, the one 0.1 rad the other way too.
+    row = _square_row(0.2 + math.pi + 0.1)
+    assert loop.squared_roll(ik, q, row, pick, roll + 0.1, lim) == pytest.approx(roll + 0.1)
+    row = _square_row(0.2 - 0.1)
+    assert loop.squared_roll(ik, q, row, pick, roll - 0.1, lim) == pytest.approx(roll - 0.1)
+
+
+def test_squared_roll_takes_the_other_half_turn_at_a_limit_and_else_leaves_the_roll():
+    ik, q = _square_pose()
+    roll = float(q[5])
+    pick, row = (0.2, 0.0, 0.03), _square_row(0.2 + 0.3)
+    other = roll + 0.3 - math.pi  # the same grasp half a turn round
+    assert loop.squared_roll(ik, q, row, pick, other, (roll - 3.0, roll + 0.2)) == pytest.approx(
+        other
+    )
+    assert loop.squared_roll(ik, q, row, pick, roll, (roll - 1.0, roll + 0.2)) == roll
+
+
+def test_squared_roll_leaves_the_roll_after_a_hold_with_no_row_and_off_the_approach():
+    import inspect
+
+    from maker_arm_lab.core import eval_loop
+
+    ik, q = _square_pose()
+    roll, lim = float(q[5]), (-2.7, 2.7)
+    row, pick = _square_row(0.5), (0.2, 0.0, 0.03)
+    assert loop.squared_roll(ik, q, row, pick, roll, lim) != roll  # the lever acts here
+    assert loop.squared_roll(ik, q, row, pick, roll, lim, held=True) == roll  # held or lifted
+    assert loop.squared_roll(ik, q, _square_row(0.5, width=0.0), pick, roll, lim) == roll
+    far = (0.2 + loop.SQUARE_RADIUS + 0.001, 0.0, 0.03)
+    assert loop.squared_roll(ik, q, row, far, roll, lim) == roll
+    high = (0.2, 0.0, 0.01 + 0.0057 + loop.SQUARE_ABOVE)
+    assert loop.squared_roll(ik, q, row, high, roll, lim) == roll
+    assert "squared_steps" in loop.CENSUS_EXPORT
+    assert "squared_roll" not in inspect.getsource(eval_loop)
+
+
 def test_refreshed_row_follows_the_live_centre_and_keeps_the_grasp_when_nothing_ranks(
     monkeypatch,
 ):
@@ -1028,6 +1109,7 @@ def test_the_switches_select_at_once_after_a_budget_end_refresh_at_a_reopen_and_
         "row_refresh": True,
         "squeeze_floor": False,
         "close_gate": False,
+        "square_wrist": False,
     }
     # Every cycle ended on its budget, so no selection waited for a retreat.
     assert ep["cycle_reasons"] == ["budget"] * 3 and ep["select_wait_steps"] == 0

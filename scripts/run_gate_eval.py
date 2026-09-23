@@ -98,6 +98,7 @@ LOOP_SWITCHES = (
     "row_refresh",
     "squeeze_floor",
     "close_gate",
+    "square_wrist",
 )
 """The heap loop's protocol switches (core.loop.rollout); the client records them in the
 payload's inference block under "loop", and the cache matches on them."""

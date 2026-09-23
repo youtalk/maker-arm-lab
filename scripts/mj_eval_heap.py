@@ -117,6 +117,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         "descending onto the served target (loop.gated_gap); applied before --squeeze_floor",
     )
     parser.add_argument(
+        "--square_wrist",
+        action="store_true",
+        help="turn the wrist roll command toward the served row's closing axis on the final "
+        "approach, before the first hold (loop.squared_roll)",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -207,6 +213,7 @@ def main(argv=None) -> int:
             row_refresh=args.row_refresh,
             squeeze_floor=args.squeeze_floor,
             close_gate=args.close_gate,
+            square_wrist=args.square_wrist,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
