@@ -463,7 +463,8 @@ PHASE_TO_INT = {
     "DONE": 10,
     "ABANDON": 11,
     # MS6 heap teacher (design 7.3). Appended, never renumbered: the converter drops 0/10/11
-    # by pinned integer and keeps everything else as in-cycle frames.
+    # and these six correctives by pinned integer (CORRECTIVE_INTS, since the MS7a tray
+    # rake) and keeps everything else as in-cycle frames.
     "PUSH_HOVER": 12,
     "PUSH_DESCEND": 13,
     "PUSH_SWEEP": 14,

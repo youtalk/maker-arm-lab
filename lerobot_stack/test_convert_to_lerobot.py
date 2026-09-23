@@ -192,6 +192,21 @@ def test_cycle_segments_cut_on_actor_changes_and_drop_nonpositive_actors():
     assert [s.tolist() for s in segs] == [[0, 1, 4, 5]]
 
 
+def test_cycle_segments_drop_the_tray_rake_between_two_picks():
+    """The shape of a recorded MS7a rake (K = 20 tray heap, 2026-09-23): the retreating cycle
+    of part 9 under actor 17, the rake (PUSH_HOVER, PUSH_DESCEND, PUSH_SWEEP: 12, 13, 14)
+    under the NEXT pick's actor 18 with no target (brick -1), then that pick's HOVER on part
+    17. The rake used to become a training episode of its own; it is dropped."""
+    phase = np.array([9, 9, 12, 12, 13, 14, 14, 1, 2, 3], np.int8)
+    brick = np.array([9, 9, -1, -1, -1, -1, -1, 17, 17, 17], np.int8)
+    actor = np.array([17, 17, 18, 18, 18, 18, 18, 18, 18, 18], np.int16)
+    segs = c2l.cycle_segments(phase, brick, actor=actor)
+    assert [s.tolist() for s in segs] == [[0, 1], [7, 8, 9]]
+    # The tip-up's phases (15, 16, 17) are correctives too.
+    tip = np.array([1, 15, 16, 17, 2], np.int8)
+    assert [s.tolist() for s in c2l.cycle_segments(tip, np.zeros(5, np.int8))] == [[0, 4]]
+
+
 def test_dagger_conversion_keeps_takeover_cycles_only(tmp_path):
     shard = _shard(tmp_path / "s.hdf5", actor=[1, 1, 1, 0, 0, -2, -2, -2])
     converted, total, *_ = c2l.convert(

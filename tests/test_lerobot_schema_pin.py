@@ -29,6 +29,15 @@ def test_the_converter_names_both_gripper_contracts():
     assert '"gripper_gap_m"' in text and 'GRIPPER_MODES = ("binary", "continuous")' in text
 
 
+def test_the_converter_drops_the_corrective_phases_by_their_ids():
+    from maker_arm_lab.core.oracle import PHASE_TO_INT
+
+    text = CONVERT.read_text()
+    pinned = re.search(r"^CORRECTIVE_INTS = \(([0-9, ]+)\)", text, re.MULTILINE).group(1)
+    names = [n for n in PHASE_TO_INT if n.startswith(("PUSH_", "TIP_"))]
+    assert [int(v) for v in pinned.split(",")] == [PHASE_TO_INT[n] for n in names]
+
+
 def test_protocol_state_is_seven_wide():
     if not PROTOCOL.exists():
         pytest.skip("lerobot_stack/policy_protocol.py is ported by Task E2")
