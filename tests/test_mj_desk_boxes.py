@@ -235,7 +235,34 @@ def test_the_loop_serves_the_box_of_every_target_it_selects(monkeypatch):
     served = [(t, box) for t, box in policy.seen if t >= 0]
     for target, box in served:
         assert np.allclose(box, FIXED[destination[target]], atol=1e-6)
-    assert len({t for t, _ in served}) >= 2, payload["episodes"][0]["cycle_targets"]
+    # The row switches with the target's class: parts 0 and 1 are wide, part 2 narrow.
+    boxes = {destination[t] for t, _ in served}
+    assert len(boxes) >= 2, payload["episodes"][0]["cycle_targets"]
+
+
+def test_recorded_teacher_frames_carry_the_box_of_their_target(tmp_path):
+    env, rig = _teacher_env_and_rig(
+        4, FIXED, gripper_mode="continuous", export_dir=tmp_path, export_all=True
+    )
+    _place(env, SPREAD)
+    destination = env.destination_bins[0].tolist()
+    for _ in range(9000):
+        out = rig.step()
+        if bool(out["dones"][0]) or bool(out["abandoned"][0]):
+            break
+    env.close()
+    with h5py.File(tmp_path / "shard.hdf5") as f:
+        obs = f["data/demo_0/obs"]
+        target, box = obs["target_part"][()], obs["context_box"][()]
+        phase, cycle = obs["cycle_phase"][()], obs["cycle_brick"][()]
+    marked = target >= 0
+    expected = np.array([FIXED[destination[t]] for t in target[marked]])
+    assert np.allclose(box[marked], expected, atol=1e-6)
+    # The row names the next part's box from the frame RELEASE ends: RETREAT frames of a cycle
+    # whose next part has another class already carry that class's box.
+    switched = (phase == oracle.PHASE_TO_INT["RETREAT"]) & marked & (target != cycle)
+    assert switched.any()
+    assert len({destination[t] for t in target[marked]}) >= 2
 
 
 def test_the_oracle_driver_stows_through_the_loop_into_one_box():
