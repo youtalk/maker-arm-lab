@@ -198,6 +198,17 @@ uv run python scripts/mj_dagger_heap.py --num_envs 5 --heap_k 50 --parts_split t
     --out_dir ~/data/maker-arm-ms6/l/dagger/r1 --shard_name proc_0
 ```
 
+`scripts/fleet.py` runs the MS7a campaign across hosts. It uses only the standard library. It reads the host table `<campaign>/hosts.json`, and the default campaign is `~/data/maker-arm-ms7`. `sync` puts the campaign worktree of every host on one SHA from GitHub and runs a fast test subset. `ship` copies a directory or a file with rsync and compares the file lists at both ends. `run` starts a logged job in the worktree of a host. `read` splits one gate read across hosts by their lane caps. It pulls the payloads into one new TAG directory and refuses a payload older than the read. Then it runs the aggregate pass. `status` prints the last token line of every job log. A payload records the checkpoint path as its policy id, so every path must be the same absolute path on every host.
+
+```bash
+python3 scripts/fleet.py sync --sha "$(git rev-parse origin/main)"             # SYNC_OK {...}
+python3 scripts/fleet.py ship <dir> aarch64:<dir> --streams 4                   # SHIP_OK {...}
+python3 scripts/fleet.py run aarch64 <name> -- <command>                        # RUN_OK {...}
+python3 scripts/fleet.py read --ckpt <abs pretrained_model> --tag <TAG> --seed 20261700 \
+    --draws 0-11 --hosts c,a,b [-- <more run_gate_eval.py flags>]  # GATE_OK {...}
+python3 scripts/fleet.py status                                                 # STATUS_OK
+```
+
 ## Training smoke
 
 ```bash
