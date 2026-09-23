@@ -1315,7 +1315,12 @@ class OracleRig:
         made the same two-episode gate run 6.0 -> 8.1 minutes. The obvious optimisation is a
         pessimisation here; do not re-add it without timing it.
         """
-        for offset in HEADING_RELAXATION_RAD:
+        offsets = HEADING_RELAXATION_RAD
+        if getattr(self.oracles[i], "carry_half_turn", False):
+            # The jaws are symmetric under a half turn, so the other representative of the held
+            # heading is the same grasp, with the wrist a half turn away (``EnvOracle``).
+            offsets += tuple(half + o for half in (-math.pi, math.pi) for o in offsets)
+        for offset in offsets:
             plan = self._plan_cartesian(
                 i, goal, start, pick_from, tilt_from, pick_to, tilt_to, heading, heading + offset
             )

@@ -58,7 +58,12 @@ from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _neares
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
 from maker_arm_lab.core.global_ik import fold_to_half_turn
 from maker_arm_lab.core.heap_oracle import CANDIDATE_MAX_Z, target_context
-from maker_arm_lab.core.stowed import _brick_states, env_heap_bin_centers, per_brick_stowed
+from maker_arm_lab.core.stowed import (
+    _brick_states,
+    env_heap_bin_centers,
+    parts_in_desk_boxes,
+    per_brick_stowed,
+)
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_REGEX,
     JAW_AXIS_BODY,
@@ -126,13 +131,16 @@ anyway: 300 steps at the 800-step budget, and the teacher's RETREAT converges in
 its 300 steps. A fraction, so a test that shrinks the budget shrinks the wait with it."""
 
 
-def select_ready(pick_point, open_fraction: float, waited: int) -> bool:
+def select_ready(
+    pick_point, open_fraction: float, waited: int, retreat=oracle.RETREAT_POINT
+) -> bool:
     """May the loop hand the policy its next target now? Pure. ``pick_point`` is the rig's
     (3,) pick point, ``open_fraction`` the measured jaw opening in [0, 1], ``waited`` the steps
-    since the last cycle closed."""
+    since the last cycle closed, ``retreat`` the selector's retreat point (desk boxes have
+    their own, ``desk_boxes.DESK_BOX_RETREAT_POINT``)."""
     if waited >= int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET):
         return True
-    near = float((torch.as_tensor(pick_point) - torch.tensor(oracle.RETREAT_POINT)).norm())
+    near = float((torch.as_tensor(pick_point) - torch.tensor(retreat)).norm())
     return near <= SELECT_RETREAT_RADIUS and open_fraction >= SELECT_OPEN_FRACTION
 
 
@@ -684,13 +692,19 @@ def cycle_class(cycle: Cycle, reason: str) -> str:
     return "carrying" if cycle.holding else "lifted_lost"
 
 
-def resting_out_of_reach(pos, speed: float, held: bool, bl, stow_half_xy) -> bool:
+def resting_out_of_reach(pos, speed: float, held: bool, bl, stow_half_xy, in_box=None) -> bool:
     """A part knocked out of reach: at rest (the grader's speed rule), not between the jaws,
     down on the desk or heap (the selector's ``CANDIDATE_MAX_Z``), outside ``layout.in_reach``
-    and outside the destination bin's footprint. A slow or paused carry is none of these."""
+    and outside the destination bin's footprint. A slow or paused carry is none of these.
+
+    With desk boxes ``in_box`` says whether the part lies in any box. A part at rest in its own
+    box is stowed before this is asked (``cycle_end``), so one in a box here is in another
+    box: out of play, like a part out of reach (the class branch names it ``wrong_box``)."""
     x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
     if held or speed > AT_REST_SPEED or z > CANDIDATE_MAX_Z:
         return False
+    if in_box is not None:
+        return bool(in_box) or not layout.in_reach(x, y, bl)
     cx, cy, _ = layout.heap_bin_center(bl)
     in_bin = abs(x - cx) <= float(stow_half_xy[0]) and abs(y - cy) <= float(stow_half_xy[1])
     return not in_bin and not layout.in_reach(x, y, bl)
@@ -771,6 +785,8 @@ def rollout(
     if takeover is not None and policy is None:
         raise EvalFailure("takeover", "the takeover triggers need a policy to take over from")
     ctx_target = getattr(env, "context_target", None)
+    # MS7a desk boxes: one destination box per part, and the served box part follows the target.
+    per_part = torch.as_tensor(env.destination_bins).dim() == 2
     for name, on in (
         ("squeeze_floor", squeeze_floor),
         ("close_gate", close_gate),
@@ -830,6 +846,7 @@ def rollout(
         right_mag = env.scene["finger_right_brick"].data.force_matrix_w.norm(dim=-1).squeeze(1)
         held = held_brick_from_forces(left_mag, right_mag, min_force=HELD_MIN_FORCE).to("cpu")
         openings = policy_state(robot.data.joint_pos)[:, 6].to("cpu")
+        boxed = parts_in_desk_boxes(env).to("cpu") if per_part else None
         # 1. Grade and select on the envs the loop holds: episode live, rig idle.
         for i in range(num_envs):
             if bool(tracker.done[i]) or not rig.idle[i]:
@@ -844,6 +861,7 @@ def rollout(
                     int(held[i]) == b,
                     _layout_of(rig, i),
                     env.stow_half_extents,
+                    in_box=None if boxed is None else bool(boxed[i, b]),
                 )
                 end = cycle_end(st.cycle, stowed_now, out, step, set(st.stowed_parts))
                 if select_at_release and (end is None or end[0] == "budget"):
@@ -870,7 +888,12 @@ def rollout(
                         opening, step - st.idle_since, st.reasons[-1] in RELEASE_ENDS
                     )
                 else:
-                    ready = select_ready(rig.pick_point(i).to("cpu"), opening, step - st.idle_since)
+                    ready = select_ready(
+                        rig.pick_point(i).to("cpu"),
+                        opening,
+                        step - st.idle_since,
+                        st.selector.retreat_point,
+                    )
                 if not ready:
                     st.select_wait_steps += 1
                     continue
@@ -896,6 +919,8 @@ def rollout(
                 wait_capped=waited >= int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET),
             )
             env.target_part[i] = target
+            if per_part:
+                env.set_context_box(i, int(env.destination_bins[i, target]))
             if ctx_target is not None:
                 ctx_target[i] = target_context(scene.brick_pos[target], st.selector.grasp)
             replan[i] = True

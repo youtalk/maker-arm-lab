@@ -55,6 +55,19 @@ ARM_BASE_RADIUS = 0.08  # INITIAL
 """Radius (m) of the arm base in the pick corridor. The collision hulls of ``base_link`` and
 ``link_002`` reach 0.074 m and 0.082 m from the base axis below 0.1 m (read off the MuJoCo
 model's geom bounds at the home pose, 2026-09-23)."""
+DESK_BOX_RELEASE_CLEARANCE = 0.055  # INITIAL
+"""m from the rim up to the pick point at the release. A held part hangs about half its
+height below the pick point, and the tallest catalog part (brick_1x2x5) is 48 mm tall, so it
+clears the rim by about 3 cm before the jaws open and drops straight down, level jaws."""
+DESK_BOX_RETREAT_POINT = (0.15, 0.0, 0.12)  # INITIAL
+"""Where RETREAT ends over desk boxes: over the near half of the tray, at the pick tilt.
+
+The shelf's ``oracle.RETREAT_POINT`` (0.26, 0.0, 0.28) sits at the release tilt of 80 degrees,
+and a near-level tool cannot hold 0.22 m over the band (``oracle.RAISE_CLEARANCE_Z``). A desk
+box releases at the pick tilt, so the retreat stays at it too and low. Driven from releases
+over the band (40 trials each): (0.12, 0.0, 0.15) planned 23 times, and (0.15, 0.0, 0.12),
+(0.18, 0.0, 0.14) and (0.20, 0.0, 0.12) all 40, in 10 to 61 steps. The nearest of the three
+to the arm keeps the most of the heap in the overhead frame."""
 DRAW_TRIES = 5000
 
 
@@ -65,6 +78,11 @@ def outer_half() -> tuple[float, float]:
 
 def rim_z() -> float:
     return DESK_BOX_WALL + DESK_BOX_INTERIOR[2]
+
+
+def release_z() -> float:
+    """The pick point's height at the release over a desk box."""
+    return rim_z() + DESK_BOX_RELEASE_CLEARANCE
 
 
 def stow_region() -> tuple[float, tuple[float, float, float]]:

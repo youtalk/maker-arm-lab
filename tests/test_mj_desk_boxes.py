@@ -1,6 +1,7 @@
 """MS7a desk boxes on the MuJoCo env: the scene, the per-part destination, the box context
 row, the recorded scene and the teacher's release into its own box."""
 
+import math
 import random
 
 import h5py
@@ -8,10 +9,13 @@ import numpy as np
 import pytest
 import torch
 
-from maker_arm_lab.core import desk_boxes, layout
+from maker_arm_lab.core import desk_boxes, layout, loop, oracle
+from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.mj.env import MjLegoSortEnv
+from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
+from test_heap_loop import SPREAD
 from test_mj_heap_oracle import PARTS, _place
 
 FIXED = [(0.08, 0.20, 0.3), (0.10, -0.20, -0.5), (0.20, 0.21, 0.0), (0.20, -0.21, 0.6)]
@@ -135,3 +139,108 @@ def test_the_recorded_initial_state_carries_the_boxes_and_each_parts_destination
         assert np.allclose(init["desk_box_poses"][0], poses, atol=1e-6)
         assert init["destination_bin"][()].tolist() == [0, 1, 2]
         assert f["data/demo_0/obs/context_box"].shape[1] == 3
+
+
+def _teacher_env_and_rig(n, poses, **env_kwargs):
+    env = _env(n, **env_kwargs)
+    env.reset(seed=11)
+    env.place_desk_boxes(0, poses)
+    rng = random.Random(1)
+
+    def factory(i, bl, episode_draw):
+        return HeapOracle(
+            bl,
+            env.parts,
+            env.destination_bins[i],
+            episode_draw,
+            rng=rng,
+            cycle_budget=4,
+            boxes=env.desk_box_poses[i],
+        )
+
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)
+    return env, rig
+
+
+def test_the_teacher_carries_each_part_to_its_own_box_without_a_raise():
+    env, rig = _teacher_env_and_rig(4, FIXED, gripper_mode="continuous")
+    _place(env, SPREAD)
+    phases, success = set(), False
+    for _ in range(9000):
+        out = rig.step()
+        if rig.goals[0] is not None:
+            phases.add(rig.goals[0].phase)
+        if bool(out["dones"][0]) or bool(out["abandoned"][0]):
+            # The last part came to rest in its box: every part is stowed, and the env keeps
+            # the terminating step's success until its next step (it has already reset).
+            success = bool(env.termination_manager.get_term("success")[0])
+            break
+    stats = rig.episode_stats(0)
+    env.close()
+    assert oracle.Phase.RAISE not in phases and oracle.Phase.EXTEND in phases
+    assert success and stats["unplanned_legs"] == 0, stats
+
+
+class _RecordingHold:
+    """Holds still and records the served box part and the loop's target on every step."""
+
+    def __init__(self, env):
+        self.env = env
+        self.context_dim = 16
+        self.policy_id = "fake:hold"
+        self.n_action_steps = 1
+        self.inference = {}
+        self.action_space = "absolute"
+        self.gripper = env.gripper_mode
+        self.seen = []
+
+    def step(self, state, wrist, overhead, context=None, anchor=None):
+        self.seen.append((int(self.env.target_part[0]), context[0, 6:9].copy()))
+        action = np.zeros((state.shape[0], 7), dtype=np.float32)
+        action[:, :6] = state[:, :6]
+        action[:, 6] = 1.0
+        return action
+
+
+def test_the_loop_serves_the_box_of_every_target_it_selects(monkeypatch):
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 30)
+    env, rig = _teacher_env_and_rig(
+        4, FIXED, context="camera_box_target", episode_length_s=loop.episode_length_s(4)
+    )
+    _place(env, SPREAD)
+    policy = _RecordingHold(env)
+    payload = loop.rollout(
+        env,
+        rig,
+        policy,
+        run_seed=11,
+        layout_seed=5,
+        permutation=(0, 1, 2, 3),
+        cycle_budget=4,
+        max_wall_minutes=5.0,
+    )
+    env.close()
+    targets = {t for t, _ in policy.seen if t >= 0}
+    assert len(targets) >= 2, payload["episodes"][0]["cycle_targets"]
+    for target, box in policy.seen:
+        if target >= 0:
+            assert np.allclose(box, FIXED[target % 4], atol=1e-6)
+
+
+def test_the_oracle_driver_stows_through_the_loop_into_one_box():
+    env, rig = _teacher_env_and_rig(1, [FIXED[1]], episode_length_s=loop.episode_length_s(4))
+    _place(env, SPREAD)
+    payload = loop.rollout(
+        env,
+        rig,
+        None,
+        run_seed=11,
+        layout_seed=5,
+        permutation=(0, 1, 2, 3),
+        cycle_budget=4,
+        max_wall_minutes=5.0,
+    )
+    env.close()
+    ep = payload["episodes"][0]
+    assert ep["bricks_stowed"] == 3 and ep["cycle_reasons"] == ["stowed"] * 3, ep
+    assert math.isclose(payload["cycles_per_stowed"], 1.0)

@@ -14,7 +14,10 @@ from maker_arm_lab.core import (
     cameras,
     checker,
     desk_boxes,
+    heap_oracle,
     layout,
+    oracle,
+    parts,
     stowed,
 )
 from maker_arm_lab.core.grasp import polygon_distance
@@ -205,3 +208,70 @@ def test_every_box_corner_at_every_band_extreme_is_in_the_overhead_frame():
             u, v = overlay.project_point(pos, mat, cameras.OVERHEAD_FOV_DEG, 224, 224, p)
             worst = min(worst, u, v, 224 - u, 224 - v)
     assert worst > 0.0, worst
+
+
+# -- the teacher on stub snapshots -----------------------------------------------------------
+
+BRICK = parts.make_part("brick", 2, 4)
+
+
+def _snapshot(positions):
+    pos = torch.tensor(positions, dtype=torch.float32)
+    n = pos.shape[0]
+    return oracle.SceneSnapshot(
+        brick_pos=pos,
+        brick_yaw=torch.zeros(n),
+        brick_lin_vel=torch.zeros(n, 3),
+        pick_point=torch.tensor([0.15, 0.0, 0.12]),
+        brick_quat=torch.tensor([1.0, 0.0, 0.0, 0.0]).expand(n, 4).clone(),
+    )
+
+
+def _teacher(destination):
+    return heap_oracle.HeapOracle(
+        layout.DEFAULT_BIN_LAYOUT,
+        [BRICK] * 3,
+        destination,
+        oracle.nominal_draw(),
+        rng=random.Random(0),
+        boxes=POSES,
+    )
+
+
+def test_the_teacher_releases_over_the_parts_own_box_at_the_pick_tilt_with_no_raise():
+    orc = _teacher(torch.tensor([1, 0, 1]))
+    assert orc.part_boxes == [1, 0, 1] and orc.destination is None
+    for part, box in ((0, 1), (1, 0)):
+        x, y, _ = POSES[box]
+        target = orc._release_target(part)
+        assert target.tolist() == pytest.approx([x, y, desk_boxes.release_z()])
+    assert orc.release_tilt == oracle.PICK_TILT_RAD and not orc.raises
+    assert orc.retreat_point == desk_boxes.DESK_BOX_RETREAT_POINT
+    # A lifted part goes straight to EXTEND, whose goal is the part's own box.
+    scene = _snapshot([(0.19, -0.04, 0.005), (0.19, 0.0, 0.005), (0.19, 0.04, 0.005)])
+    orc.phase, orc.target_brick = oracle.Phase.LIFT, 1
+    orc.report(oracle.PhaseResult(outcome="converged", lifted=True), scene)
+    assert orc.phase == oracle.Phase.EXTEND
+    goal = orc.next_goal(scene)
+    assert goal.target_pos[:2].tolist() == pytest.approx(POSES[0][:2], abs=1e-6)
+    assert goal.tilt_rad == oracle.PICK_TILT_RAD
+
+
+def test_the_teacher_grades_its_own_box_and_never_targets_a_boxed_part():
+    orc = _teacher(0)  # one index for every part
+    assert orc.part_boxes == [0, 0, 0]
+    floor = desk_boxes.DESK_BOX_WALL + 0.005
+    scene = _snapshot(
+        [_in_box(POSES[0], 0.0, 0.0, floor), _in_box(POSES[1], 0.0, 0.0, floor), (0.19, 0, 0.005)]
+    )
+    assert orc._stowed(scene) == {0}  # part 1 rests in box 1, not its own
+    assert orc._candidates(scene).tolist() == [False, False, True]
+
+
+def test_the_ms6_constructor_path_is_unchanged():
+    orc = heap_oracle.HeapOracle(
+        layout.DEFAULT_BIN_LAYOUT, [BRICK], torch.tensor(1), oracle.nominal_draw()
+    )
+    assert orc.destination == 1 and orc.part_boxes is None and orc.raises
+    assert orc.release_tilt == oracle.RELEASE_TILT_RAD
+    assert orc.retreat_point == oracle.RETREAT_POINT

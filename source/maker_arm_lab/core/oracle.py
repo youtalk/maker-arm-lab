@@ -723,6 +723,21 @@ class EnvOracle:
         another bin, and the gated corpus was recorded with this LIFT. ``HeapOracle`` turns it
         on, where one bin takes every part. The runtime's LIFT gate reads it
         (``oracle_runtime.OracleRig._lift_result``)."""
+        self.release_tilt = RELEASE_TILT_RAD
+        """The tool tilt EXTEND, RELEASE and RETREAT hold: the shelf's measured release attitude.
+        ``HeapOracle`` over desk boxes holds the pick tilt instead (MS7a design, desk boxes)."""
+        self.retreat_point = RETREAT_POINT
+        """Where RETREAT ends, before the episode's via jitter."""
+        self.raises = True
+        """Does a lifted part climb RAISE's rim clearance before EXTEND? The shelf rim needs
+        it; a desk box's rim is under the lift height, so ``HeapOracle`` skips it there."""
+        self.carry_half_turn = False
+        """May a carry leg end with the wrist a half turn round when no relaxed heading plans
+        (``OracleRig._plan_carry``)? Off here, so the shelf's legs plan as they always did.
+        ``HeapOracle`` over desk boxes turns it on: with the jaw's closing axis near 45
+        degrees, HOVER's fold leaves the wrist 0.3 rad from its stop, and an EXTEND to a box
+        on the right (-y) only planned with the heading turned 75 degrees or more, past the
+        ladder's 60 (``scripts/mj_release_envelope_check.py``, 2026-09-23)."""
         self.preselects_next_target = False
         """Is the next target chosen when RELEASE ends, before RETREAT, so its row and marker
         show through the whole retreat?
@@ -931,7 +946,7 @@ class EnvOracle:
         return (
             (float(target[0]), float(target[1])),
             (float(release[0]), float(release[1])),
-            (RETREAT_POINT[0] + self.draw.via_dx, RETREAT_POINT[1] + self.draw.via_dy),
+            (self.retreat_point[0] + self.draw.via_dx, self.retreat_point[1] + self.draw.via_dy),
         )
 
     def descend_goal(self, yaw: float) -> Goal:
@@ -976,7 +991,7 @@ class EnvOracle:
             Phase.EXTEND,
             self._release_target(self.target_brick),
             None,
-            RELEASE_TILT_RAD,
+            self.release_tilt,
             -1.0,
             0.008,
             0,
@@ -1091,7 +1106,7 @@ class EnvOracle:
             return self.extend_goal()
         if self.phase == Phase.RELEASE:
             return self._goal(
-                Phase.RELEASE, None, None, RELEASE_TILT_RAD, 1.0, None, 0, 20, hold=20
+                Phase.RELEASE, None, None, self.release_tilt, 1.0, None, 0, 20, hold=20
             )
         if self.phase == Phase.RETREAT:
             # tilt_rad=RELEASE_TILT_RAD, not 0.0 (level): OpenYAM measured
@@ -1113,11 +1128,11 @@ class EnvOracle:
             # old 0.70 rad tilt (its sweep put the ceiling at radius 0.26 at
             # 0.242 m, under the 0.28 m target) is consistent with this: at
             # 1.40 rad the same point is reached with room to spare.
-            target = torch.tensor(RETREAT_POINT)
+            target = torch.tensor(self.retreat_point)
             target[0] += self.draw.via_dx
             target[1] += self.draw.via_dy
             return self._goal(
-                Phase.RETREAT, target, None, RELEASE_TILT_RAD, 1.0, 0.01, 0, DEFAULT_MAX_STEPS
+                Phase.RETREAT, target, None, self.release_tilt, 1.0, 0.01, 0, DEFAULT_MAX_STEPS
             )
         raise AssertionError(f"unhandled phase {self.phase}")
 
@@ -1139,7 +1154,7 @@ class EnvOracle:
             # the asymmetry limit and the stall floor's own boundary, while the part rose
             # 90 mm or more in the jaws. `pinch_ok` stays on the result as telemetry.
             if result.lifted:
-                self.phase = Phase.RAISE
+                self.phase = Phase.RAISE if self.raises else Phase.EXTEND
             elif self.retries_used < MAX_GRASP_RETRIES:
                 self.retries_used += 1
                 self.phase = Phase.REOPEN

@@ -17,7 +17,10 @@ What changes against the six-brick oracle, and nothing else:
   edge first, with a short stroke into it, and picked on a later scan (MS6 rework section 7);
 * the episode ends DONE, never ABANDON, at the cycle budget or with no candidate left;
 * the next target is chosen the moment RELEASE ends, so its row and marker show through
-  RETREAT, and HOVER adopts that choice (``preselects_next_target``, 2026-09-22).
+  RETREAT, and HOVER adopts that choice (``preselects_next_target``, 2026-09-22);
+* with desk boxes (``boxes``, MS7a design, desk boxes) every part has its own box, the
+  release is at the pick tilt over that box's centre with no RAISE, and a part inside any box
+  is never a target.
 
 The phases, the correctives, the induction and the retry ladder are the base class's.
 """
@@ -31,7 +34,7 @@ from dataclasses import dataclass
 
 import torch
 
-from maker_arm_lab.core import checker, grasp, layout, oracle
+from maker_arm_lab.core import checker, desk_boxes, grasp, layout, oracle
 from maker_arm_lab.core.parts import Part
 
 CYCLE_BUDGET = 50
@@ -133,10 +136,26 @@ class HeapOracle(oracle.EnvOracle):
         induction: oracle.FailureInduction | None = None,
         rng: random.Random | None = None,
         cycle_budget: int = CYCLE_BUDGET,
+        boxes: Sequence[Sequence[float]] = (),
     ):
+        """``destination`` is the MS6 bin index, or with ``boxes`` (one (x, y, yaw) per desk
+        box) the box index of every part, (K,), or one index for them all."""
         super().__init__(bl, len(parts), draw, induction=induction, rng=rng)
         self.parts = tuple(parts)
-        self.destination = int(destination)
+        self.boxes = tuple(tuple(float(v) for v in box) for box in boxes)
+        if self.boxes:
+            dest = torch.as_tensor(destination).long()
+            self.part_boxes = (
+                dest.expand(len(self.parts)).tolist() if dest.dim() == 0 else dest.tolist()
+            )
+            self.destination = None
+            self.release_tilt = oracle.PICK_TILT_RAD
+            self.retreat_point = desk_boxes.DESK_BOX_RETREAT_POINT
+            self.raises = False
+            self.carry_half_turn = True
+        else:
+            self.part_boxes = None
+            self.destination = int(destination)
         self.sizes = torch.tensor([p.size for p in self.parts], dtype=torch.float32)
         self.cycle_budget = cycle_budget
         self.grasp: grasp.Grasp | None = None
@@ -175,7 +194,23 @@ class HeapOracle(oracle.EnvOracle):
 
     # -- grading against the destination -----------------------------------
 
+    def _box_tensor(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """(1,M,4) grader boxes and their half extents, as ``stowed.env_desk_boxes`` builds."""
+        z, half = desk_boxes.stow_region()
+        boxes = torch.tensor([[(x, y, z, yaw) for x, y, yaw in self.boxes]])
+        return boxes, torch.tensor(half)
+
     def _stowed(self, scene: oracle.SceneSnapshot) -> set[int]:
+        if self.boxes:
+            boxes, half = self._box_tensor()
+            ok = checker.parts_at_rest_in_own_boxes(
+                scene.brick_pos.unsqueeze(0),
+                scene.brick_lin_vel.unsqueeze(0),
+                boxes,
+                half,
+                torch.tensor([self.part_boxes]),
+            )[0]
+            return {i for i in range(self.num_bricks) if bool(ok[i])}
         # The MS6 z-centre fix: heap mode has one physical bin, so grading reads
         # layout.heap_bin_center directly instead of the six-brick per-color array.
         ids = torch.zeros(self.num_bricks, dtype=torch.long)
@@ -189,6 +224,10 @@ class HeapOracle(oracle.EnvOracle):
         return {i for i in range(self.num_bricks) if bool(ok[i])}
 
     def _release_target(self, brick: int) -> torch.Tensor:
+        if self.boxes:
+            # Over the centre of the part's own box: the level jaws drop it straight down.
+            x, y, _ = self.boxes[self.part_boxes[brick]]
+            return torch.tensor([x, y, desk_boxes.release_z()])
         return torch.tensor(
             [
                 self.bl.bin_x - oracle.RELEASE_X_SETBACK,
@@ -226,6 +265,12 @@ class HeapOracle(oracle.EnvOracle):
     def _candidates(self, scene: oracle.SceneSnapshot) -> torch.Tensor:
         """(B,) bool: parts still to pick that the arm can reach and whose cell is open."""
         done = self._stowed(scene) | self._sorted
+        if self.boxes:
+            # A part in any box, its own or another, is out of play: the grasp model knows no
+            # walls, and a part in another box is the class branch's wrong_box, not a target.
+            boxes, half = self._box_tensor()
+            boxed = checker.in_boxes(scene.brick_pos.unsqueeze(0), boxes, half)[0].any(-1)
+            done |= {b for b in range(self.num_bricks) if bool(boxed[b])}
         mask = torch.zeros(self.num_bricks, dtype=torch.bool)
         self.out_of_reach = 0
         for b in range(self.num_bricks):
