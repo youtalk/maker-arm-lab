@@ -317,14 +317,18 @@ def in_reach(x: float, y: float, bl: BinLayout, margin: float = 0.0) -> bool:
     )
 
 
-def sample_heap_point(rng: random.Random, bl: BinLayout, inset: float) -> tuple[float, float]:
+def sample_heap_point(
+    rng: random.Random, bl: BinLayout, inset: float, zone=None
+) -> tuple[float, float]:
     """A drop point uniform over the scatter zone shrunk by ``inset`` on every edge.
 
     The zone is ``scatter_x(bl)`` by SCATTER_Y with the far corners clipped at
     SCATTER_MAX_RADIUS, the same region the six-brick task scatters over. Rejection on the
     radius keeps the draw uniform per unit area instead of piling parts on the arc.
+    ``zone``, ``((x0, x1), (y0, y1))``, replaces the scatter zone: the tray footprint when
+    desk boxes stand beside it (MS7a design, desk boxes).
     """
-    (x0, x1), (y0, y1) = scatter_x(bl), SCATTER_Y
+    (x0, x1), (y0, y1) = zone or (scatter_x(bl), SCATTER_Y)
     while True:
         x, y = rng.uniform(x0 + inset, x1 - inset), rng.uniform(y0 + inset, y1 - inset)
         if math.hypot(x, y) <= SCATTER_MAX_RADIUS - inset:
@@ -336,6 +340,7 @@ def sample_heap_batch(
     bl: BinLayout,
     half_diagonals: Sequence[float],
     tries: int = HEAP_DROP_TRIES,
+    zone=None,
 ) -> list[tuple[float, float]]:
     """Drop points for parts released into the air together, one per half diagonal.
 
@@ -349,14 +354,15 @@ def sample_heap_batch(
     whole: the edge is a reach bound on the part's CENTRE, not a wall, and the whole diagonal
     left a 4x8 brick a sliver 5 cm wide to land in, so two of them could not keep apart. The
     largest parts are placed first, so the small ones fill in around them. Measured over 300
-    batches of HEAP_DROP_BATCH catalog parts: no pair overlaps.
+    batches of HEAP_DROP_BATCH catalog parts: no pair overlaps. ``zone`` is
+    ``sample_heap_point``'s.
     """
     order = sorted(range(len(half_diagonals)), key=lambda k: -half_diagonals[k])
     points: dict[int, tuple[float, float]] = {}
     for k in order:
         hd = half_diagonals[k]
         for attempt in range(tries):
-            x, y = sample_heap_point(rng, bl, 0.25 * hd + HEAP_DROP_INSET)
+            x, y = sample_heap_point(rng, bl, 0.25 * hd + HEAP_DROP_INSET, zone)
             clear = all(
                 math.dist((x, y), q) >= hd + half_diagonals[j] + HEAP_DROP_GAP
                 for j, q in points.items()

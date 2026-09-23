@@ -23,7 +23,9 @@ consumers and are unchanged):
     initial_state/rigid_object/brick_N/{root_pose,root_velocity}     one leading axis of 1
     initial_state/bin_layout (1,5) f32: bin_x and the four slot y values of this episode's
         layout
-    initial_state/destination_bin (1,) i64      MS6 heap shards only
+    initial_state/destination_bin (1,) i64      MS6 heap shards only; (K,) one box per part
+        with desk boxes (MS7a)
+    initial_state/desk_box_poses (1,M,3) f32    desk box shards only: each box's x, y, yaw
     attrs: parts (JSON list of part names, MS6 heap shards only)
     attrs (file level): gripper_mode ("binary" | "continuous", MS6 phase B design 5.4)
 
@@ -237,6 +239,10 @@ class ShardRecorder:
             init.create_dataset("bin_layout", data=state["bin_layout"][None].astype(np.float32))
         if "destination_bin" in state:
             init.create_dataset("destination_bin", data=state["destination_bin"].astype(np.int64))
+        if "desk_box_poses" in state:
+            init.create_dataset(
+                "desk_box_poses", data=state["desk_box_poses"][None].astype(np.float32)
+            )
         if self._parts[env_index] is not None:
             group.attrs["parts"] = json.dumps(self._parts[env_index])
         rigid = init.create_group("rigid_object")

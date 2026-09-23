@@ -31,6 +31,10 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
         env.stamp_markers() (the heap loop stamps the frame it hands the policy),
         env.marker_from_rig (default True; the heap loop's policy mode sets False so a
         takeover keeps the marker on the loop's target)
+    desk boxes (MS7a, ``desk_boxes`` > 0, heap mode only): env.desk_boxes, env.desk_box_poses
+        (N, M, 3) float64 per-episode (x, y, yaw) of each box, env.destination_bins (N, K) long
+        (part b of env i goes to box destination_bins[i, b]), env.place_desk_boxes(i, poses),
+        env.set_context_box(i, box) (the context row's box part, set per target)
 
 Semantics carried over from ``ManagerBasedRLEnv`` because the rig depends on them: a done
 env is auto-reset INSIDE ``step`` (its state tensors already show the next episode when
@@ -60,6 +64,7 @@ import torch
 
 from maker_arm_lab.assets.urdf_prep import gripper_velocity_limit
 from maker_arm_lab.core import cameras, layout
+from maker_arm_lab.core import desk_boxes as _boxes
 from maker_arm_lab.core import profile as _profile
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.heap_oracle import STOW_HALF_EXTENTS
@@ -249,6 +254,7 @@ class MjLegoSortEnv:
         shard_name: str = "shard",
         export_all: bool = False,
         gripper_mode: str = "binary",
+        desk_boxes: int = 0,
     ):
         # MS6 phase B design 5.4: "binary" is the raw >= 0 opens contract every corpus before
         # phase B was recorded with; "continuous" reads action[:, 6] as the jaw gap in meters.
@@ -295,6 +301,11 @@ class MjLegoSortEnv:
             raise ValueError("the target channel is a heap channel; six bricks serve camera")
         elif num_bricks > CONTEXT_MAX_BRICKS:
             raise ValueError(f"context channels hold {CONTEXT_MAX_BRICKS} bricks, got {num_bricks}")
+        if desk_boxes < 0 or (desk_boxes > 0 and self.parts is None):
+            raise ValueError(f"desk_boxes needs a heap and a count >= 0, got {desk_boxes}")
+        # MS7a design, desk boxes: N boxes on the desk replace the shelf and its heap bin.
+        self.desk_boxes = desk_boxes
+        self.desk_box_poses = np.zeros((num_envs, desk_boxes, 3))
         self.context_mode = context
         self.context_camera = np.zeros((num_envs, CONTEXT_DIMS["camera"]), dtype=np.float32)
         self.context_privileged = np.zeros((num_envs, CONTEXT_DIMS["privileged"]), dtype=np.float32)
@@ -319,7 +330,9 @@ class MjLegoSortEnv:
         self.run_draw = dict(draw)
         self.episode_draws = [self.run_draw] * num_envs
         self.bin_layouts: list[layout.BinLayout] = [bl] * num_envs
-        base_model, self.handles = scene.build_model(draw, num_bricks, cameras, parts=self.parts)
+        base_model, self.handles = scene.build_model(
+            draw, num_bricks, cameras, parts=self.parts, num_desk_boxes=desk_boxes
+        )
         self.models = [base_model] + [copy.copy(base_model) for _ in range(num_envs - 1)]
         self.datas = [mujoco.MjData(m) for m in self.models]
         self._nominal_inertia = base_model.body_inertia[list(self.handles.brick_bodies)].copy()
@@ -351,8 +364,12 @@ class MjLegoSortEnv:
         }
         self._np_rng = np.random.default_rng(0)
         if self.parts is not None:
-            self.destination_bins = torch.zeros(num_envs, dtype=torch.long)
-            self.stow_half_extents = torch.tensor(STOW_HALF_EXTENTS)
+            if desk_boxes:
+                self.destination_bins = torch.zeros(num_envs, num_bricks, dtype=torch.long)
+                self.stow_half_extents = torch.tensor(_boxes.stow_region()[1])
+            else:
+                self.destination_bins = torch.zeros(num_envs, dtype=torch.long)
+                self.stow_half_extents = torch.tensor(STOW_HALF_EXTENTS)
             self.target_part = torch.full((num_envs,), -1, dtype=torch.int16)
             if cameras:
                 self._depth = np.zeros((num_envs, 224, 224), dtype=np.uint16)
@@ -499,6 +516,8 @@ class MjLegoSortEnv:
         for i in range(self.num_envs):
             if actor is None or int(actor[i]) > 0:
                 self.target_part[i] = int(marker[i])
+                if self.desk_boxes and int(marker[i]) >= 0:
+                    self.set_context_box(i, int(self.destination_bins[i, int(marker[i])]))
                 if target is None:
                     continue
                 row = target[i].numpy()
@@ -511,6 +530,36 @@ class MjLegoSortEnv:
                 if actor is not None and marked_no_grasp and self.context_target[i].any():
                     continue
                 self.context_target[i] = row
+
+    def set_context_box(self, i: int, box: int) -> None:
+        """Serve box ``box``'s pose as env ``i``'s context box part (``CONTEXT_BOX_NAMES``).
+
+        Writes ``context_box`` and its copies in the camera_box and camera_box_target rows, so
+        a recorded frame and a served one agree. With desk boxes (MS7a design, desk boxes) the
+        row is the box's (x, y, yaw) and follows the current target's box: the rig's marker in
+        ``step`` and the heap loop's selection both call this. Without them it is the one heap
+        bin, ``(bin_x, bin_y, 0)``, for the whole episode, as in MS6.
+        """
+        if self.desk_boxes:
+            row = self.desk_box_poses[i, box]
+        else:
+            bl = self.bin_layouts[i]
+            row = (bl.bin_x, bl.bin_ys[box], 0.0)
+        self.context_box[i] = row
+        self.context_camera_box[i, 6:] = self.context_box[i]
+        self.context_camera_box_target[i, 6:9] = self.context_box[i]
+
+    def place_desk_boxes(self, i: int, poses) -> None:
+        """Stand env ``i``'s desk boxes at ``poses``, one (x, y, yaw) per box, on the desk.
+
+        Writes the mocap bodies; the next ``mj_forward`` or step moves the geoms.
+        """
+        d = self.datas[i]
+        for j, (x, y, yaw) in enumerate(poses):
+            self.desk_box_poses[i, j] = (x, y, yaw)
+            mocap = self.handles.desk_box_mocap[j]
+            d.mocap_pos[mocap] = (x, y, 0.0)
+            d.mocap_quat[mocap] = (math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0))
 
     def stamp_markers(self) -> None:
         """Draw the target marker into the overhead frame about to be observed (design 9).
@@ -563,7 +612,8 @@ class MjLegoSortEnv:
                 bl = replace(bl, bin_ys=(0.0, 0.0, 0.0, 0.0))
             self.episode_draws[i] = ep
             self.bin_layouts[i] = bl
-            scene.apply_bins(m, bl, heap=self.parts is not None)
+            if not self.desk_boxes:  # desk boxes build no bins
+                scene.apply_bins(m, bl, heap=self.parts is not None)
             scene.apply_lighting(m, ep)
             scene.apply_cameras(m, ep)
         # Physics DR first: mj_setConst re-derives the model constants AT qpos0 and resets the
@@ -619,12 +669,11 @@ class MjLegoSortEnv:
         pos, rot = scene.overhead_camera_pose(self.episode_draws[i])
         self.context_camera[i] = np.array([*pos, *rpy_from_quat(rot)], dtype=np.float32)
         if self.parts is not None:
-            bl = self.bin_layouts[i]
-            dest = int(self.destination_bins[i])
-            self.context_box[i] = np.array([bl.bin_x, bl.bin_ys[dest], 0.0], dtype=np.float32)
             self.context_camera_box[i, :6] = self.context_camera[i]
-            self.context_camera_box[i, 6:] = self.context_box[i]
-            self.context_camera_box_target[i, :9] = self.context_camera_box[i]
+            self.context_camera_box_target[i, :6] = self.context_camera[i]
+            # Desk boxes: box 0 until the first target names its own box (the only box of
+            # rung 1). MS6: the one heap bin.
+            self.set_context_box(i, 0 if self.desk_boxes else int(self.destination_bins[i]))
             self.context_target[i] = 0.0
         mujoco.mj_forward(m, d)
         self.episode_length_buf[i] = 0
@@ -638,10 +687,18 @@ class MjLegoSortEnv:
     def _drop_heap(self, i: int) -> None:
         """Design section 6: a destination, a color per part, a drop on the desk, a settle."""
         m, d, h = self.models[i], self.datas[i], self.handles
-        # MS6 rework section 6: heap mode has one bin, at y = 0.0. The release target, the
-        # grader's bin centre and the built box are then the same box.
-        self.destination_bins[i] = 0
         k = self.cfg.num_bricks
+        zone = None
+        if self.desk_boxes:
+            # MS7a design, desk boxes: the boxes stand first, from the same per-reset rng, and
+            # the heap drops on the tray footprint beside them, walls or not.
+            self.place_desk_boxes(i, _boxes.sample_boxes(self._rng, self.desk_boxes))
+            self.destination_bins[i] = torch.tensor(_boxes.part_destinations(k, self.desk_boxes))
+            zone = layout.tray_bounds()
+        else:
+            # MS6 rework section 6: heap mode has one bin, at y = 0.0. The release target,
+            # the grader's bin centre and the built box are then the same box.
+            self.destination_bins[i] = 0
         z_top = layout.HEAP_DROP_Z_MIN + layout.HEAP_DROP_Z_PER_PART * k
         # Hold the arm where the reset left it while the heap settles; nothing is recorded.
         d.ctrl[list(h.arm_actuators)] = d.qpos[list(h.joint_qpos[:6])]
@@ -659,7 +716,10 @@ class MjLegoSortEnv:
         for start in range(0, k, layout.HEAP_DROP_BATCH):
             batch = list(range(start, min(start + layout.HEAP_DROP_BATCH, k)))
             points = layout.sample_heap_batch(
-                self._rng, self.bin_layouts[i], [self.parts[b].half_diagonal for b in batch]
+                self._rng,
+                self.bin_layouts[i],
+                [self.parts[b].half_diagonal for b in batch],
+                zone=zone,
             )
             for b, (x, y) in zip(batch, points):
                 adr = h.brick_qpos[b]
@@ -687,7 +747,11 @@ class MjLegoSortEnv:
             ),
             "bin_layout": np.array([bl.bin_x, *bl.bin_ys], dtype=np.float32),
         }
-        if self.parts is not None:
+        if self.desk_boxes:
+            # One destination per part and every box pose, so forensics rebuild the scene.
+            state["destination_bin"] = self.destination_bins[i].numpy().astype(np.int64)
+            state["desk_box_poses"] = self.desk_box_poses[i].astype(np.float32)
+        elif self.parts is not None:
             state["destination_bin"] = np.array([int(self.destination_bins[i])], dtype=np.int64)
         return state
 
