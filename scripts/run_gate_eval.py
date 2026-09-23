@@ -88,6 +88,7 @@ class GateCfg:
     max_cycles_per_stowed: float | None = None  # the second gate rule, None: not applied
     gripper: str = "binary"  # MuJoCo only: the checkpoint's handshake (MS6 phase B design 5.4)
     desk_boxes: int = 0  # MuJoCo heap only: MS7a desk boxes; 0 is the MS6 shelf bin
+    tray: bool = False  # MuJoCo heap only: the heap drops into the tray (MS7a)
     # MuJoCo only: extra flags handed to the eval client verbatim, e.g. the heap loop's
     # protocol switches. A cached payload must have run with the same switches.
     client_flags: tuple = ()
@@ -374,6 +375,8 @@ def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
             prefix += ["--gripper", cfg.gripper]
             if cfg.desk_boxes:
                 prefix += ["--desk_boxes", str(cfg.desk_boxes)]
+            if cfg.tray:
+                prefix.append("--tray")
         prefix += list(cfg.client_flags)
     else:
         prefix = [
@@ -452,6 +455,7 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
             and payload.get("cycle_budget") == budget
             and payload.get("gripper", "binary") == cfg.gripper
             and payload.get("desk_boxes", 0) == cfg.desk_boxes
+            and payload.get("tray", False) == cfg.tray
         )
     # The served inference configuration is part of what a draw measured. An open-loop read
     # (the checkpoint's own n_action_steps) must never stand in for a temporal-ensemble read.
@@ -653,6 +657,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "heap client",
     )
     parser.add_argument(
+        "--tray",
+        action="store_true",
+        help="MuJoCo heap only: forwarded to the heap client, which drops the heap into the "
+        "tray (MS7a)",
+    )
+    parser.add_argument(
         "--client_flags",
         type=str,
         default="",
@@ -669,6 +679,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
     if args.desk_boxes and (args.heap_k <= 0 or args.backend != "mujoco" or args.desk_boxes < 0):
         # Only the MuJoCo heap client builds desk boxes (MS7a design, desk boxes).
         raise ValueError("--desk_boxes needs a positive count, --heap_k > 0 and --backend mujoco")
+    if args.tray and args.heap_k <= 0:
+        raise ValueError("--tray needs --heap_k > 0: the tray holds a heap")
     if args.heap_k > 0:
         if args.backend != "mujoco":
             raise ValueError("--heap_k needs --backend mujoco: the Isaac env has no heap")
@@ -706,6 +718,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         max_cycles_per_stowed=args.max_cycles_per_stowed,
         gripper=args.gripper,
         desk_boxes=args.desk_boxes,
+        tray=args.tray,
         client_flags=tuple(shlex.split(args.client_flags)),
     )
 

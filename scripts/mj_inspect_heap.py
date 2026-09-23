@@ -285,6 +285,7 @@ def run(args: argparse.Namespace) -> dict:
         frame_jitter=args.frame_jitter,
         gripper_mode=args.gripper,
         desk_boxes=args.desk_boxes,
+        tray=args.tray,
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)

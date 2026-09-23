@@ -76,6 +76,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="the env's gripper contract; must match the checkpoint's handshake",
     )
     parser.add_argument("--heap_k", type=int, default=50, help="parts in the heap (> 0)")
+    parser.add_argument(
+        "--tray",
+        action="store_true",
+        help="MuJoCo heap only: drop the heap into the walled tray (MS7a); off is the bare desk",
+    )
     parser.add_argument("--parts_seed", type=int, default=20260915)
     parser.add_argument("--parts_split", choices=PARTS_SPLITS, default="train")
     parser.add_argument(
@@ -180,6 +185,7 @@ def main(argv=None) -> int:
             export_all=True,
             gripper_mode=args.gripper,
             desk_boxes=args.desk_boxes,
+            tray=args.tray,
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
@@ -224,6 +230,7 @@ def main(argv=None) -> int:
         payload["trigger"] = args.trigger
         payload["parts_split"] = args.parts_split
         payload["desk_boxes"] = args.desk_boxes
+        payload["tray"] = args.tray
         payload["shard"] = str(Path(args.out_dir) / f"{args.shard_name}.hdf5")
     except EvalFailure as err:
         print("DAGGER_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True)

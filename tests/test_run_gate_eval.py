@@ -610,6 +610,7 @@ def test_cached_payload_matches_the_task_as_well_as_the_draw(tmp_path):
         {"parts_seed": 1},
         {"cycle_budget": 9},
         {"gripper": "continuous"},
+        {"tray": True},
     ):
         assert not cached(heap_cfg, _heap_payload(draw, **other)), other
     heap_cfg.cycle_budget = 70
@@ -634,6 +635,25 @@ def test_eval_command_forwards_the_gripper_to_the_heap_client(tmp_path):
     )
     cmd = ge._eval_command(cfg, ge.make_eval_draws(1, 1)[0])
     assert cmd[cmd.index("--gripper") + 1] == "continuous"
+    assert "--tray" not in cmd
+
+
+def test_the_tray_reaches_only_the_heap_client_and_its_cache(tmp_path):
+    base = ["--checkpoint", "ck", "--out_dir", str(tmp_path), "--ledger", "l"]
+    base += ["--threshold", "0.85", "--seed", "1", "--backend", "mujoco", "--tray"]
+    cfg = ge._build_cfg(ge._parse_args(base + ["--heap_k", "50"]))
+    assert cfg.tray and "--tray" in ge._eval_command(cfg, ge.make_eval_draws(1, 1)[0])
+    with pytest.raises(ValueError, match="--tray"):
+        ge._build_cfg(ge._parse_args(base))
+    cached = _cfg(tmp_path, _fake_ledger(tmp_path), processes=1, backend="mujoco", heap_k=50)
+    cached.tray = True
+    cached.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    path = cached.out_dir / "eval_000.json"
+    path.write_text(json.dumps(_heap_payload(draw, tray=True)))
+    assert ge._cached_payload(cached, draw) is not None
+    path.write_text(json.dumps(_heap_payload(draw)))
+    assert ge._cached_payload(cached, draw) is None
 
 
 def test_a_heap_gate_defaults_the_cycles_rule_and_refuses_the_isaac_backend(

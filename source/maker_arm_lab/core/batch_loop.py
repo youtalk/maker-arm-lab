@@ -163,6 +163,7 @@ def run_meta(
         "parts_seed": int(getattr(args, "parts_seed", 0)),
         "parts_split": getattr(args, "parts_split", "train"),
         "cycle_budget": int(getattr(args, "cycle_budget", 0)),
+        "tray": bool(getattr(args, "tray", False)),
         "gripper": getattr(args, "gripper", "binary"),
         # MS7a design, desk boxes: 0 is the MS6 scene, the shelf's one heap bin.
         "desk_boxes": int(getattr(args, "desk_boxes", 0)),
@@ -508,6 +509,11 @@ def add_batch_arguments(parser) -> None:
     )
     parser.add_argument(
         "--cycle_budget", type=int, default=50, help="pick cycles a heap episode may spend"
+    )
+    parser.add_argument(
+        "--tray",
+        action="store_true",
+        help="MuJoCo heap only: drop the heap into the walled tray (MS7a); off is the bare desk",
     )
     parser.add_argument(
         "--gripper",

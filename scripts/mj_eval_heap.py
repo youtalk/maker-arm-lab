@@ -60,6 +60,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         default="camera_box",
     )
     parser.add_argument("--heap_k", type=int, default=50, help="parts in the heap (> 0)")
+    parser.add_argument(
+        "--tray",
+        action="store_true",
+        help="MuJoCo heap only: drop the heap into the walled tray (MS7a); off is the bare desk",
+    )
     parser.add_argument("--parts_seed", type=int, default=20260915)
     parser.add_argument("--parts_split", choices=PARTS_SPLITS, default="heldout")
     parser.add_argument(
@@ -190,6 +195,7 @@ def main(argv=None) -> int:
             episode_length_s=episode_length_s(args.cycle_budget),
             gripper_mode=args.gripper,
             desk_boxes=args.desk_boxes,
+            tray=args.tray,
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
@@ -229,6 +235,7 @@ def main(argv=None) -> int:
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
         payload["desk_boxes"] = args.desk_boxes
+        payload["tray"] = args.tray
     except EvalFailure as err:
         print("EVAL_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True)
         return 1

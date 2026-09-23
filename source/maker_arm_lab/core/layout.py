@@ -188,11 +188,52 @@ TRAY_WALL_HEIGHT = 0.02
 TRAY_WALL = 0.005
 
 
+TRAY_DROP_INSET = 0.005
+"""Inset (m) of the tray drop over a part's whole half diagonal, so no part starts over a wall
+at any orientation. # INITIAL: the MS7a tray ladder reads the spill over the walls."""
+
+
 def tray_bounds() -> tuple[tuple[float, float], tuple[float, float]]:
     """((x_min, x_max), (y_min, y_max)) of the tray interior."""
     cx, cy = TRAY_CENTER
     hx, hy = TRAY_INTERIOR[0] / 2, TRAY_INTERIOR[1] / 2
     return ((cx - hx, cx + hx), (cy - hy, cy + hy))
+
+
+def tray_static_boxes() -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
+    """(name, center, size) for the four tray walls, as static colliders on the desk.
+
+    The near and far walls (at -x and +x) run the full outer length, so they close the corners.
+    """
+    (x0, x1), (y0, y1) = tray_bounds()
+    z = TRAY_WALL_HEIGHT / 2
+    w = TRAY_WALL
+    long_y = TRAY_INTERIOR[1] + 2 * w
+    return [
+        ("tray_wall_near", (x0 - w / 2, TRAY_CENTER[1], z), (w, long_y, TRAY_WALL_HEIGHT)),
+        ("tray_wall_far", (x1 + w / 2, TRAY_CENTER[1], z), (w, long_y, TRAY_WALL_HEIGHT)),
+        (
+            "tray_wall_left",
+            (TRAY_CENTER[0], y0 - w / 2, z),
+            (TRAY_INTERIOR[0], w, TRAY_WALL_HEIGHT),
+        ),
+        (
+            "tray_wall_right",
+            (TRAY_CENTER[0], y1 + w / 2, z),
+            (TRAY_INTERIOR[0], w, TRAY_WALL_HEIGHT),
+        ),
+    ]
+
+
+def sample_tray_point(rng: random.Random, inset: float) -> tuple[float, float]:
+    """A drop point uniform over the tray interior shrunk by ``inset`` on every edge.
+
+    An inset past half the interior collapses that axis onto the tray's center line.
+    """
+    (x0, x1), (y0, y1) = tray_bounds()
+    ix = min(inset, (x1 - x0) / 2)
+    iy = min(inset, (y1 - y0) / 2)
+    return rng.uniform(x0 + ix, x1 - ix), rng.uniform(y0 + iy, y1 - iy)
 
 
 HEAP_RADIUS = 0.088
@@ -341,6 +382,7 @@ def sample_heap_batch(
     half_diagonals: Sequence[float],
     tries: int = HEAP_DROP_TRIES,
     zone=None,
+    tray: bool = False,
 ) -> list[tuple[float, float]]:
     """Drop points for parts released into the air together, one per half diagonal.
 
@@ -356,13 +398,20 @@ def sample_heap_batch(
     largest parts are placed first, so the small ones fill in around them. Measured over 300
     batches of HEAP_DROP_BATCH catalog parts: no pair overlaps. ``zone`` is
     ``sample_heap_point``'s.
+
+    ``tray`` (MS7a design, the tray) draws inside the tray interior instead, inset by the
+    whole half diagonal plus TRAY_DROP_INSET: there the edge is a wall, not a reach bound. It
+    takes the place of ``zone``.
     """
     order = sorted(range(len(half_diagonals)), key=lambda k: -half_diagonals[k])
     points: dict[int, tuple[float, float]] = {}
     for k in order:
         hd = half_diagonals[k]
         for attempt in range(tries):
-            x, y = sample_heap_point(rng, bl, 0.25 * hd + HEAP_DROP_INSET, zone)
+            if tray:
+                x, y = sample_tray_point(rng, hd + TRAY_DROP_INSET)
+            else:
+                x, y = sample_heap_point(rng, bl, 0.25 * hd + HEAP_DROP_INSET, zone)
             clear = all(
                 math.dist((x, y), q) >= hd + half_diagonals[j] + HEAP_DROP_GAP
                 for j, q in points.items()

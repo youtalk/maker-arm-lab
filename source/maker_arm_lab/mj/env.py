@@ -30,7 +30,8 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
         (N,16), env.obs_buf["images"]["overhead_depth"] (N,224,224) uint16,
         env.stamp_markers() (the heap loop stamps the frame it hands the policy),
         env.marker_from_rig (default True; the heap loop's policy mode sets False so a
-        takeover keeps the marker on the loop's target)
+        takeover keeps the marker on the loop's target), env.tray (MS7a: the heap drops
+        inside the four walls of layout.tray_static_boxes)
     desk boxes (MS7a, ``desk_boxes`` > 0, heap mode only): env.desk_boxes, env.desk_box_poses
         (N, M, 3) float64 per-episode (x, y, yaw) of each box, env.destination_bins (N, K) long
         (part b of env i goes to box destination_bins[i, b]), env.place_desk_boxes(i, poses),
@@ -255,6 +256,7 @@ class MjLegoSortEnv:
         export_all: bool = False,
         gripper_mode: str = "binary",
         desk_boxes: int = 0,
+        tray: bool = False,
     ):
         # MS6 phase B design 5.4: "binary" is the raw >= 0 opens contract every corpus before
         # phase B was recorded with; "continuous" reads action[:, 6] as the jaw gap in meters.
@@ -284,6 +286,9 @@ class MjLegoSortEnv:
         if context not in CONTEXT_DIMS:
             raise ValueError(f"context must be one of {sorted(CONTEXT_DIMS)}, got {context!r}")
         self.parts = tuple(parts) if parts is not None else None
+        if tray and self.parts is None:
+            raise ValueError("the tray holds a heap; the six-brick task has none")
+        self.tray = tray
         if self.parts is not None:
             # MS6 rework section 6: heap mode has one bin, at y = 0.0. Flatten the layout
             # this env starts with so self.bin_layouts, the built box, the release target and
@@ -331,7 +336,7 @@ class MjLegoSortEnv:
         self.episode_draws = [self.run_draw] * num_envs
         self.bin_layouts: list[layout.BinLayout] = [bl] * num_envs
         base_model, self.handles = scene.build_model(
-            draw, num_bricks, cameras, parts=self.parts, num_desk_boxes=desk_boxes
+            draw, num_bricks, cameras, parts=self.parts, num_desk_boxes=desk_boxes, tray=tray
         )
         self.models = [base_model] + [copy.copy(base_model) for _ in range(num_envs - 1)]
         self.datas = [mujoco.MjData(m) for m in self.models]
@@ -685,7 +690,8 @@ class MjLegoSortEnv:
             )
 
     def _drop_heap(self, i: int) -> None:
-        """Design section 6: a destination, a color per part, a drop on the desk, a settle."""
+        """Design section 6: a destination, a color per part, a drop on the desk or into the
+        tray (``self.tray``), a settle."""
         m, d, h = self.models[i], self.datas[i], self.handles
         k = self.cfg.num_bricks
         zone = None
@@ -720,6 +726,7 @@ class MjLegoSortEnv:
                 self.bin_layouts[i],
                 [self.parts[b].half_diagonal for b in batch],
                 zone=zone,
+                tray=self.tray,
             )
             for b, (x, y) in zip(batch, points):
                 adr = h.brick_qpos[b]

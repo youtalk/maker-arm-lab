@@ -445,3 +445,77 @@ def test_the_heap_bin_is_one_box_on_the_shelf_at_y_zero():
         assert abs(center[1]) <= half_y + 1e-9
     (_x_range, y_range, _z) = layout.overhead_view_region()
     assert y_range[0] <= -half_y and y_range[1] >= half_y
+
+
+def test_the_tray_interior_lies_inside_the_measured_reach():
+    """MS7a design, the tray: every interior point is a pick the arm tracks to."""
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    for x, y in ((x0, y0), (x0, y1), (x1, y0), (x1, y1)):
+        assert math.hypot(x, y) <= layout.SCATTER_MAX_RADIUS
+    tightest = layout.BinLayout(bin_x=0.43)  # the smallest bin_x the run draw produces
+    for i, j in itertools.product(range(11), range(11)):
+        x, y = x0 + (x1 - x0) * i / 10, y0 + (y1 - y0) * j / 10
+        assert layout.in_reach(x, y, tightest), (x, y)
+
+
+def test_the_tray_walls_enclose_the_interior():
+    boxes = {name: (center, size) for name, center, size in layout.tray_static_boxes()}
+    assert list(boxes) == ["tray_wall_near", "tray_wall_far", "tray_wall_left", "tray_wall_right"]
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    w = layout.TRAY_WALL
+    assert boxes["tray_wall_near"][0][0] - boxes["tray_wall_near"][1][0] / 2 == pytest.approx(
+        x0 - w
+    )
+    assert boxes["tray_wall_near"][0][0] + boxes["tray_wall_near"][1][0] / 2 == pytest.approx(x0)
+    assert boxes["tray_wall_far"][0][0] - boxes["tray_wall_far"][1][0] / 2 == pytest.approx(x1)
+    assert boxes["tray_wall_left"][0][1] + boxes["tray_wall_left"][1][1] / 2 == pytest.approx(y0)
+    assert boxes["tray_wall_right"][0][1] - boxes["tray_wall_right"][1][1] / 2 == pytest.approx(y1)
+    # The near and far walls close the corners.
+    assert boxes["tray_wall_near"][1][1] == pytest.approx(y1 - y0 + 2 * w)
+    for center, size in boxes.values():
+        assert size[2] == layout.TRAY_WALL_HEIGHT
+        assert center[2] - size[2] / 2 == pytest.approx(0.0)  # standing on the desk
+
+
+def test_a_tray_drop_keeps_every_part_clear_of_the_walls():
+    rng = random.Random(4)
+    _, heldout = parts.split(parts.catalog(), 20260915)
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    for _ in range(50):
+        batch = parts.sample_parts(rng, heldout, layout.HEAP_DROP_BATCH)
+        hds = [p.half_diagonal for p in batch]
+        points = layout.sample_heap_batch(rng, layout.DEFAULT_BIN_LAYOUT, hds, tray=True)
+        for (x, y), hd in zip(points, hds):
+            inset = hd + layout.TRAY_DROP_INSET
+            assert x0 + inset <= x <= x1 - inset and y0 + inset <= y <= y1 - inset
+
+
+def _segment_hits_box(p, q, center, size) -> bool:
+    """Slab test: does the segment p-q pass through the axis-aligned box?"""
+    t0, t1 = 0.0, 1.0
+    for a in range(3):
+        lo, hi = center[a] - size[a] / 2, center[a] + size[a] / 2
+        d = q[a] - p[a]
+        if abs(d) < 1e-12:
+            if not lo <= p[a] <= hi:
+                return False
+            continue
+        ta, tb = sorted(((lo - p[a]) / d, (hi - p[a]) / d))
+        t0, t1 = max(t0, ta), min(t1, tb)
+        if t0 > t1:
+            return False
+    return True
+
+
+def test_the_tray_walls_hide_no_part_top_from_the_overhead_camera():
+    """The camera stands at x 0.301, just past the far wall, so that wall hides a sliver of
+    DESK about 1 mm wide at its foot and nothing at the height of any part's top."""
+    from maker_arm_lab.core import cameras
+
+    camera = cameras.OVERHEAD_CAM_POS
+    top = min(min(p.size) for p in parts.catalog())  # the lowest a resting part's top sits
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    walls = layout.tray_static_boxes()
+    for i, j in itertools.product(range(14), range(21)):
+        p = (x0 + 0.001 + (x1 - x0 - 0.002) * i / 13, y0 + 0.001 + (y1 - y0 - 0.002) * j / 20, top)
+        assert not any(_segment_hits_box(p, camera, c, s) for _, c, s in walls), p
