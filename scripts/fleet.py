@@ -139,6 +139,16 @@ def ship_bundle(host: dict, sha: str, campaign: Path) -> None:
 
 
 def cmd_sync(args, hosts):
+    names = args.hosts.split(",") if args.hosts else list(hosts)
+    # A job reads its worktree for hours; moving the checkout under it kills it (campaign n).
+    busy = {}
+    for n in [] if args.force else names:
+        jobs = [j for j, tok in job_tokens(hosts[n], args.campaign).items() if tok == "RUNNING"]
+        if jobs:
+            busy[n] = jobs
+    if busy:
+        raise FleetError(f"jobs still RUNNING, the worktree stays put (--force moves it): {busy}")
+
     def one(name):
         t0 = time.monotonic()
         if hosts[name].get("fetch") == "bundle":
@@ -147,7 +157,7 @@ def cmd_sync(args, hosts):
         return name, result, time.monotonic() - t0
 
     summary = {}
-    for name, result, wall in parallel(one, hosts):
+    for name, result, wall in parallel(one, names):
         out = (result.stdout + result.stderr).strip().splitlines()
         last = result.stdout.strip().splitlines()[-1:] if result.returncode == 0 else out[-1:]
         print(f"[sync] {name}: rc={result.returncode} wall={wall:.0f}s {' '.join(last)}")
@@ -538,6 +548,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     sub = parser.add_subparsers(dest="command", required=True)
     p_sync = sub.add_parser("sync")
     p_sync.add_argument("--sha", required=True, type=lambda s: re.fullmatch("[0-9a-f]{40}", s)[0])
+    p_sync.add_argument("--hosts", help="name,name (default: every host in hosts.json)")
+    p_sync.add_argument("--force", action="store_true", help="move a worktree under RUNNING jobs")
     p_ship = sub.add_parser("ship")
     p_ship.add_argument("src", help="PATH or HOST:PATH")
     p_ship.add_argument("dst", help="PATH or HOST:PATH")
