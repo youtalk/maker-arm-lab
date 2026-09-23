@@ -711,10 +711,17 @@ def _tray_oracle(part_list):
     )
 
 
+@pytest.fixture
+def narrow_band(monkeypatch):
+    """The stuck scene below needs a band narrower than 45 degrees: at 45 a box part always
+    keeps an axis in the band. The rake itself does not read the band's width."""
+    monkeypatch.setattr(grasp, "WALL_BAND_RAD", math.radians(20.0))
+
+
 def _stuck_scene(extra=()):
-    """A 2x4 brick at yaw 45 degrees, its centre 25 mm from the left wall: both closing axes
-    lie 45 degrees off the wall and both fingers would reach it, so no grasp ranks. Its near
-    corner stays 8 mm off the wall face, room for the closed tips behind it."""
+    """A 2x4 brick at yaw 45 degrees, its centre 25 mm from the left wall: under a 20 degree
+    band both closing axes lie outside it and both fingers would reach the wall, so no grasp
+    ranks (``narrow_band``). Its near corner stays 8 mm off the wall face."""
     (_, _), (y0, _) = layout.tray_bounds()
     rows = [[layout.TRAY_CENTER[0], y0 + 0.025, 0.0048], *extra]
     scene = _snapshot(rows)
@@ -722,7 +729,7 @@ def _stuck_scene(extra=()):
     return scene
 
 
-def test_the_rake_fires_when_no_grasp_ranks_and_a_part_lies_in_a_wall_band():
+def test_the_rake_fires_when_no_grasp_ranks_and_a_part_lies_in_a_wall_band(narrow_band):
     orc = _tray_oracle([BRICK])
     scene = _stuck_scene()
     assert orc._ranked(scene, orc._candidates(scene)) == []
@@ -757,7 +764,7 @@ def _push_phases_counted(orc, scene):
     assert orc.phase is oracle.Phase.HOVER and orc.push is None
 
 
-def test_the_rake_never_fires_while_any_grasp_ranks():
+def test_the_rake_never_fires_while_any_grasp_ranks(narrow_band):
     # A free brick in the middle of the tray ranks, so the stuck one waits.
     free = [layout.TRAY_CENTER[0], layout.TRAY_CENTER[1] + 0.03, 0.0048]
     orc = _tray_oracle([BRICK, BRICK])
@@ -766,7 +773,7 @@ def test_the_rake_never_fires_while_any_grasp_ranks():
     assert hover.phase is oracle.Phase.HOVER and orc.target_brick == 1 and orc.push is None
 
 
-def test_the_rake_never_fires_away_from_a_wall_or_without_the_tray():
+def test_the_rake_never_fires_away_from_a_wall_or_without_the_tray(narrow_band):
     # A brick propped at 45 and 30 degrees in the middle of the tray: no body axis lies
     # near the jaw plane, so nothing ranks, and no wall is near it.
     tilted = torch.tensor(quat_from_rpy_deg((45.0, 30.0, 0.0)))
@@ -783,7 +790,7 @@ def test_the_rake_never_fires_away_from_a_wall_or_without_the_tray():
     assert bare.target_brick == 0 and bare.push is None
 
 
-def test_the_rakes_are_capped_per_part_and_per_episode(monkeypatch):
+def test_the_rakes_are_capped_per_part_and_per_episode(narrow_band):
     orc = _tray_oracle([BRICK])
     scene = _stuck_scene()  # a stub: the rakes move nothing
     _to_hover(orc, scene)
@@ -798,7 +805,7 @@ def test_the_rakes_are_capped_per_part_and_per_episode(monkeypatch):
     assert capped.phase is oracle.Phase.DONE and capped.push is None
 
 
-def test_an_unplanned_rake_hover_turns_the_jaws_then_holds_them_then_gives_up():
+def test_an_unplanned_rake_hover_turns_the_jaws_then_holds_them_then_gives_up(narrow_band):
     """Driven 2026-09-23: the blade does not plan off the near and far walls, the knife not
     off the left wall; the rake then tries the next jaw heading before it is spent."""
     orc = _tray_oracle([BRICK])

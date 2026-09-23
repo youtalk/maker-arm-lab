@@ -73,10 +73,15 @@ HEIGHT_BAND = 0.005
 PUSH_CELL_M = 0.05
 """Grid cell of the failure memory and of the densest-cell push (design 7.2)."""
 PUSH_HALF_LENGTH_M = 0.04
-WALL_BAND_RAD = math.radians(20.0)
+WALL_BAND_RAD = math.radians(45.0)
 """MS7a design, the tray: near a wall, a closing axis must run within this of the wall's
-direction, so no finger lands between the part and the wall. # INITIAL: the tray teacher
-ladder reads it."""
+direction, so no finger lands straight between the part and the wall.
+
+Read on the tray ladder of 2026-09-23 (six held-out K = 50 heaps, seeds 20267500 + n, wall
+term, rake and wedge on): 20 degrees stowed 252 of 300, 30 degrees 259, 45 degrees 267. A
+box part keeps two horizontal axes a quarter turn apart, so at 45 degrees one of them always
+survives the band and the finger stroke decides (``wall_allows``); a narrower band left a
+part lying at a slant 12 to 25 mm off a wall with no grasp, where the stroke clears."""
 WALL_BAND_MARGIN = 0.005
 """How far (m) past a grasp's own finger reach a wall still bands its heading.
 
