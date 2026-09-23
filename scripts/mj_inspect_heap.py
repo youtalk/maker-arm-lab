@@ -302,6 +302,7 @@ def run(args: argparse.Namespace) -> dict:
             rng=rig_rng,
             cycle_budget=args.cycle_budget,
             boxes=env.desk_box_poses[i],
+            tray=env.tray,
         )
         holder.append(orc)
         return orc

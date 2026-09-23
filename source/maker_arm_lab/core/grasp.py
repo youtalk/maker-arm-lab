@@ -13,7 +13,8 @@ the physics tolerates (a brick target is stowed with a brick or a plate in the s
 lone-part reads 2026-09-16). A standing neighbor under a landing spot stalls the descend
 early. Grasps rank by height band, then by how many standing neighbors the stroke sweeps,
 then by clearance. The heap lies on the bare desk since 2026-09-18, so the only obstacles
-are other parts; the dish rim this module once modeled as a hard stop is gone.
+are other parts, unless the MS7a tray is on: its walls enter through ``wall_allows``, which
+keeps a finger off a wall and, near one, the closing axis along it.
 """
 
 from __future__ import annotations
@@ -72,12 +73,91 @@ HEIGHT_BAND = 0.005
 PUSH_CELL_M = 0.05
 """Grid cell of the failure memory and of the densest-cell push (design 7.2)."""
 PUSH_HALF_LENGTH_M = 0.04
+WALL_BAND_RAD = math.radians(20.0)
+"""MS7a design, the tray: near a wall, a closing axis must run within this of the wall's
+direction, so no finger lands between the part and the wall. # INITIAL: the tray teacher
+ladder reads it."""
+WALL_BAND_MARGIN = 0.005
+"""How far (m) past a grasp's own finger reach a wall still bands its heading.
+
+A grasp is near a wall when the part centre is closer to the wall than the outer face of a
+finger pointed at it, ``landing_half_gap(width) + TIP_THICKNESS``, plus this margin. The
+design wrote ``OPEN_HALF_GAP`` for that reach, the fully open jaw of MS6 phase A. On the
+0.13 x 0.20 m tray that bands the headings of every part within 57 mm of two walls both
+ways, half the tray, where no heading can then survive. # INITIAL"""
+
+
+@dataclass(frozen=True)
+class Wall:
+    """A static wall the jaws must not land on: its top-down footprint, its direction of
+    length (rad, a line, so ``heading`` and ``heading + pi`` are the same wall) and its top."""
+
+    footprint: tuple[tuple[float, float], ...]
+    heading: float
+    top: float
+
+
+def tray_walls() -> tuple[Wall, ...]:
+    """The four walls of ``layout.tray_static_boxes`` for the grasp model."""
+    walls = []
+    for _, center, size in layout.tray_static_boxes():
+        corners = [
+            (center[0] + sx * size[0] / 2, center[1] + sy * size[1] / 2)
+            for sx in (-1.0, 1.0)
+            for sy in (-1.0, 1.0)
+        ]
+        heading = 0.0 if size[0] >= size[1] else math.pi / 2
+        walls.append(Wall(tuple(convex_hull(corners)), heading, center[2] + size[2] / 2))
+    return tuple(walls)
+
+
+def wall_distance(xy: tuple[float, float], wall: Wall) -> float:
+    """Distance (m) from a point to the wall's footprint, negative inside it."""
+    return polygon_distance([xy], list(wall.footprint))
+
+
+def along_wall(heading: float, wall: Wall) -> bool:
+    """Is a closing axis at ``heading`` within WALL_BAND_RAD of the wall's direction?"""
+    off = abs((heading - wall.heading + math.pi / 2) % math.pi - math.pi / 2)
+    return off <= WALL_BAND_RAD
+
+
+def wall_allows(
+    pos: torch.Tensor, heading: float, width: float, half_height: float, walls: Sequence[Wall]
+) -> bool:
+    """Can the jaws close along ``heading`` on a part at ``pos`` beside these walls?
+
+    A wall counts only where it stands in the part's grip band, the same rule a neighbor
+    obeys in ``jaw_clearance``: a part resting higher than the wall top is gripped above it.
+    Two tests then, per standing wall:
+
+    * the band: within its finger reach of the wall (``WALL_BAND_MARGIN``), the closing axis
+      runs along the wall (``along_wall``);
+    * the stroke: each finger's path from the part face out to the tip's OUTER face, the
+      tip's own 8 mm face across, stays off the wall. Only the tip counts, not the hull above
+      it: a tip that lands inside the wall face picks with the hull resting on the wall top,
+      one whose outer face lands past it does not (the MS6 wall reads of 2026-09-16,
+      docs/ms6-teacher-inspection.md). So a wall is a neighbor of unbounded length that the
+      finger clears by its thickness.
+    """
+    band = float(pos[2]) + half_height - MIN_GRIP_OVERLAP
+    xy = (float(pos[0]), float(pos[1]))
+    reach = landing_half_gap(width) + TIP_THICKNESS
+    strokes = sweep_footprints(pos, heading, width, reach)
+    for wall in walls:
+        if wall.top <= band:
+            continue
+        if wall_distance(xy, wall) < reach + WALL_BAND_MARGIN and not along_wall(heading, wall):
+            return False
+        if any(polygon_distance(s, list(wall.footprint)) < CLEARANCE_MIN for s in strokes):
+            return False
+    return True
 
 
 @dataclass(frozen=True)
 class Grasp:
     part: int
-    heading: float  # world heading of the closing axis, rad
+    heading: float  # world heading of the CLOSING axis (the jaw travel), rad
     width: float  # part size along the closing axis, m
     half_height: float  # half the part size along its most vertical axis, m
     clearance: float  # m from the landing tips to the nearest standing neighbor
@@ -146,8 +226,10 @@ def candidate_grasps(
     quat: torch.Tensor,
     tilt_rad: float = 0.0,
     closing_axes: tuple[int, ...] = (0, 1, 2),
+    walls: Sequence[Wall] = (),
 ) -> list[Grasp]:
-    """Every closing axis within AXIS_MAX_TILT_RAD of the jaw plane, under MAX_GRASP_WIDTH.
+    """Every closing axis within AXIS_MAX_TILT_RAD of the jaw plane, under MAX_GRASP_WIDTH,
+    that the ``walls`` allow (``wall_allows``; none on the bare desk).
 
     The jaw plane is horizontal at ``tilt_rad = 0.0``. ``closing_axes`` are the body axes the
     part's shape allows (``parts.Part.closing_axes``): a slope offers only its y axis.
@@ -163,6 +245,8 @@ def candidate_grasps(
         if width > MAX_GRASP_WIDTH:
             continue
         heading = math.atan2(float(axes[k, 1]), float(axes[k, 0]))
+        if walls and not wall_allows(pos, heading, width, half_height, walls):
+            continue
         found.append(Grasp(part, heading, width, half_height, float("nan"), float(pos[2])))
     return found
 
@@ -333,12 +417,14 @@ def rank_grasps(
     candidates: torch.Tensor,
     tilt_rad: float = 0.0,
     closing_axes: Sequence[tuple[int, ...]] | None = None,
+    walls: Sequence[Wall] = (),
 ) -> list[Grasp]:
     """Every grasp of every candidate part with its clearance, best first.
 
     Other parts enter through ``neighbor_extents`` and ``footprint``. ``closing_axes`` is
     one axis tuple per part (``parts.Part.closing_axes``); None lets every part offer all
-    three. The order is the height band (highest first), then the swept count, then the
+    three. A grasp the ``walls`` refuse never ranks, so no forced pick lands a finger on a
+    wall. The order is the height band (highest first), then the swept count, then the
     clearance, then the narrower width: a wide grasp closes on one side first and slides the
     part away (docs/ms6-matched-jaw-opening.md section 5), so it is the last resort at a tie.
     """
@@ -351,7 +437,7 @@ def rank_grasps(
         other_pos, other_hz = pos[others], hz[others]
         other_prints = [prints[k] for k in torch.nonzero(others).flatten().tolist()]
         axes_b = (0, 1, 2) if closing_axes is None else closing_axes[b]
-        for g in candidate_grasps(b, sizes[b], pos[b], quat[b], tilt_rad, axes_b):
+        for g in candidate_grasps(b, sizes[b], pos[b], quat[b], tilt_rad, axes_b, walls):
             clearance, swept = jaw_clearance(
                 pos[b], g.heading, g.width, g.half_height, other_pos, other_hz, other_prints
             )

@@ -682,3 +682,20 @@ def test_the_six_brick_oracle_selects_at_hover_only():
     assert oracle.EnvOracle(BL, 6, oracle.nominal_draw()).preselects_next_target is False
     assert not hasattr(oracle.EnvOracle(BL, 6, oracle.nominal_draw()), "next_brick")
     assert _oracle([BRICK]).preselects_next_target is True
+
+
+def test_the_tray_teacher_squares_the_jaws_along_a_wall():
+    """MS7a design, the tray: a brick 12 mm from the left wall at yaw 90 degrees closes across
+    its 15.8 mm axis, which then runs along x, the wall's direction."""
+    (_, _), (y0, _) = layout.tray_bounds()
+    scene = _snapshot([[layout.TRAY_CENTER[0], y0 + 0.012, 0.0048]])
+    scene.brick_quat[0] = torch.tensor(quat_from_rpy_deg((0.0, 0.0, 90.0)))
+    orc = heap_oracle.HeapOracle(
+        BL, [BRICK], 1, oracle.nominal_draw(), rng=random.Random(0), tray=True
+    )
+    assert len(orc.walls) == 4
+    hover = _to_hover(orc, scene)
+    assert orc.target_brick == 0 and orc.grasp.width == pytest.approx(0.0158)
+    assert math.sin(orc.grasp.heading) == pytest.approx(0.0, abs=1e-6)  # closing along x
+    assert hover.yaw == pytest.approx(orc.grasp.heading - math.pi / 2)
+    assert _oracle([BRICK]).walls == ()  # the bare desk ranks no walls

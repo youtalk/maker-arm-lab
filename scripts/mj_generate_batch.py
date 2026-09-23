@@ -123,6 +123,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
                 rng=rig_rng,
                 cycle_budget=args.cycle_budget,
                 boxes=env.desk_box_poses[i],
+                tray=env.tray,
             )
 
     rig = OracleRig(

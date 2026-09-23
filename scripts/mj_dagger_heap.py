@@ -199,6 +199,7 @@ def main(argv=None) -> int:
                 rng=rig_rng,
                 cycle_budget=args.cycle_budget,
                 boxes=env.desk_box_poses[i],
+                tray=env.tray,
             )
 
         rig = OracleRig(

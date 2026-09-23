@@ -137,10 +137,14 @@ class HeapOracle(oracle.EnvOracle):
         rng: random.Random | None = None,
         cycle_budget: int = CYCLE_BUDGET,
         boxes: Sequence[Sequence[float]] = (),
+        tray: bool = False,
     ):
         """``destination`` is the MS6 bin index, or with ``boxes`` (one (x, y, yaw) per desk
         box) the box index of every part, (K,), or one index for them all."""
         super().__init__(bl, len(parts), draw, induction=induction, rng=rng)
+        # MS7a design, the tray: the heap lies inside four walls that ``core.grasp`` ranks
+        # against (``grasp.wall_allows``). Off, the heap lies on the bare desk as in MS6.
+        self.walls = grasp.tray_walls() if tray else ()
         self.parts = tuple(parts)
         self.boxes = tuple(tuple(float(v) for v in box) for box in boxes)
         if self.boxes:
@@ -293,6 +297,7 @@ class HeapOracle(oracle.EnvOracle):
             mask,
             oracle.PICK_TILT_RAD,
             [p.closing_axes for p in self.parts],
+            self.walls,
         )
 
     def _push_heading(self, center: tuple[float, float]) -> float:

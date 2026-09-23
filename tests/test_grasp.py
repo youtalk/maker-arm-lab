@@ -302,3 +302,114 @@ def test_the_landing_gap_follows_the_grasp_width():
     assert narrow == pytest.approx(0.0158 / 2 + grasp.JAW_APPROACH_CLEARANCE + grasp.JAW_HOLD_BAND)
     # A part wider than the jaws can straddle never asks for more than the full opening.
     assert grasp.landing_half_gap(2.0 * grasp.OPEN_HALF_GAP) == pytest.approx(grasp.OPEN_HALF_GAP)
+
+
+# -- MS7a design, the tray: the wall term ------------------------------------------------------
+
+WALLS = grasp.tray_walls()
+(TX0, TX1), (TY0, TY1) = layout.tray_bounds()
+TRAY_MID_X = layout.TRAY_CENTER[0]
+YAW_90 = torch.tensor([math.cos(math.pi / 4), 0.0, 0.0, math.sin(math.pi / 4)])
+
+
+def _yaw(deg: float) -> torch.Tensor:
+    half = math.radians(deg) / 2
+    return torch.tensor([math.cos(half), 0.0, 0.0, math.sin(half)])
+
+
+def _left_wall():
+    wall = next(w for w in WALLS if max(y for _, y in w.footprint) <= TY0 + 1e-9)
+    return wall
+
+
+def test_the_tray_walls_run_along_the_interior_edges():
+    assert len(WALLS) == 4
+    headings = sorted(round(w.heading, 6) for w in WALLS)
+    assert headings == [0.0, 0.0, round(math.pi / 2, 6), round(math.pi / 2, 6)]
+    left = _left_wall()
+    assert left.heading == 0.0 and left.top == pytest.approx(layout.TRAY_WALL_HEIGHT)
+    # The interior face: a point on the tray's edge touches it, one 5 mm in clears it by 5 mm.
+    assert grasp.wall_distance((TRAY_MID_X, TY0), left) == pytest.approx(0.0, abs=1e-9)
+    assert grasp.wall_distance((TRAY_MID_X, TY0 + 0.005), left) == pytest.approx(0.005)
+
+
+def test_the_heading_is_the_closing_axis_and_near_a_wall_it_runs_along_the_wall():
+    """A 2x4 brick 12 mm from the left wall (y = -0.10, running along x).
+
+    ``Grasp.heading`` is the world heading of the CLOSING axis, the line the two fingers
+    travel on; the fingers land ``landing_half_gap(width)`` out along it on both sides. At yaw
+    0 the brick's long axis (31.8 mm) lies along x, the wall's direction, so closing across
+    its length keeps both fingers beside the wall, and closing across its 15.8 mm width
+    points a finger into it. Turned 90 degrees, the survivor is the 15.8 mm axis, now on x.
+    """
+    pos = torch.tensor([TRAY_MID_X, TY0 + 0.012, 0.0048])
+    found = grasp.candidate_grasps(0, _size(BRICK), pos, IDENTITY, walls=WALLS)
+    assert [(abs(round(g.heading, 6)), g.width) for g in found] == [(0.0, pytest.approx(0.0318))]
+    turned = grasp.candidate_grasps(0, _size(BRICK), pos, YAW_90, walls=WALLS)
+    assert [(round(abs(g.heading), 6), g.width) for g in turned] == [
+        (round(math.pi, 6), pytest.approx(0.0158))
+    ]
+    # Without walls (the bare desk) both axes are offered, as before.
+    assert len(grasp.candidate_grasps(0, _size(BRICK), pos, IDENTITY)) == 2
+
+
+@pytest.mark.parametrize("gap_mm", [8, 12, 20, 26])
+@pytest.mark.parametrize("yaw_deg", range(0, 180, 10))
+def test_near_a_wall_every_surviving_heading_lies_inside_the_wall_band(gap_mm, yaw_deg):
+    left = _left_wall()
+    pos = torch.tensor([TRAY_MID_X, TY0 + gap_mm / 1000, 0.0048])
+    for part in (BRICK, parts.make_part("brick", 1, 6), parts.make_part("brick", 2, 3)):
+        for g in grasp.candidate_grasps(0, _size(part), pos, _yaw(yaw_deg), walls=WALLS):
+            reach = grasp.landing_half_gap(g.width) + grasp.TIP_THICKNESS
+            if grasp.wall_distance((float(pos[0]), float(pos[1])), left) < reach:
+                assert grasp.along_wall(g.heading, left), (part.name, g)
+
+
+def test_the_stroke_refuses_a_finger_through_a_wall_and_accepts_one_along_it(monkeypatch):
+    # The band off, so only the finger's own path is tested.
+    monkeypatch.setattr(grasp, "WALL_BAND_RAD", math.pi / 2)
+    width = 0.0158
+    reach = grasp.landing_half_gap(width) + grasp.TIP_THICKNESS  # the tip's outer face
+
+    def allows(gap: float, heading: float) -> bool:
+        pos = torch.tensor([TRAY_MID_X, TY0 + gap, 0.0048])
+        return grasp.wall_allows(pos, heading, width, 0.0048, WALLS)
+
+    across = math.pi / 2  # the closing axis points at the left wall
+    assert allows(reach + 0.0005, across)  # the outer face lands half a millimeter inside
+    assert not allows(reach - 0.0005, across)  # ... or half a millimeter past the wall face
+    assert allows(0.008, 0.0)  # along the wall the fingers never reach it
+    # The tip is 8 mm across, so along the wall a centre closer than its half face is refused.
+    assert not allows(grasp.TIP_HALF_FACE - 0.0005, 0.0)
+
+
+def test_the_band_refuses_a_heading_at_the_wall_that_the_stroke_alone_would_pass():
+    width = 0.0158
+    reach = grasp.landing_half_gap(width) + grasp.TIP_THICKNESS
+    pos = torch.tensor([TRAY_MID_X, TY0 + reach + grasp.WALL_BAND_MARGIN / 2, 0.0048])
+    assert not grasp.wall_allows(pos, math.pi / 2, width, 0.0048, WALLS)
+    far = torch.tensor([TRAY_MID_X, TY0 + reach + 2 * grasp.WALL_BAND_MARGIN, 0.0048])
+    assert grasp.wall_allows(far, math.pi / 2, width, 0.0048, WALLS)
+
+
+def test_a_wall_under_the_grip_band_is_no_obstacle():
+    """A part standing on end grips above the 20 mm wall top, as a neighbor under the band."""
+    tall = parts.make_part("brick", 1, 2, 5)  # 48 mm high, standing on end at the identity
+    pos = torch.tensor([TRAY_MID_X, TY0 + 0.006, 0.024])
+    found = grasp.candidate_grasps(0, _size(tall), pos, IDENTITY, walls=WALLS)
+    assert sorted(round(g.width, 4) for g in found) == [0.0078, 0.0158]  # both, one at the wall
+    # The same footprint one brick high: the wall stands in its grip band, so the axis that
+    # points at the wall goes.
+    low = torch.tensor([TRAY_MID_X, TY0 + 0.006, 0.0048])
+    short = parts.make_part("brick", 1, 2)
+    found = grasp.candidate_grasps(0, _size(short), low, IDENTITY, walls=WALLS)
+    assert [round(g.width, 4) for g in found] == [0.0158]
+
+
+def test_a_corner_part_keeps_no_heading_and_ranking_honors_the_walls():
+    corner = torch.tensor([TX0 + 0.012, TY0 + 0.012, 0.0048])
+    assert not grasp.candidate_grasps(0, _size(BRICK), corner, IDENTITY, walls=WALLS)
+    sizes, pos, quat = _heap((BRICK, float(corner[0]), float(corner[1]), 0.0048, IDENTITY))
+    mask = torch.ones(1, dtype=torch.bool)
+    assert grasp.rank_grasps(sizes, pos, quat, mask, walls=WALLS) == []
+    assert len(grasp.rank_grasps(sizes, pos, quat, mask)) == 2
