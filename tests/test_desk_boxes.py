@@ -36,8 +36,9 @@ def _tray_outer():
     return [(x0 - w, y0 - w), (x1 + w, y0 - w), (x1 + w, y1 + w), (x0 - w, y1 + w)]
 
 
-def test_the_band_lies_beside_the_arm_never_behind_it_or_in_front_of_the_tray():
-    (x0, x1), (y0, y1) = desk_boxes.DESK_BOX_BAND_X, desk_boxes.DESK_BOX_BAND_Y
+@pytest.mark.parametrize("n", [1, 4])
+def test_the_band_lies_beside_the_arm_never_behind_it_or_in_front_of_the_tray(n):
+    (x0, x1), (y0, y1) = desk_boxes.band_x(n), desk_boxes.DESK_BOX_BAND_Y
     tray_far = layout.tray_bounds()[0][1] + layout.TRAY_WALL
     assert 0.0 <= x0 <= x1 <= tray_far
     assert 0.0 < y0 <= y1
@@ -52,15 +53,15 @@ def test_every_drawn_box_is_in_the_band_on_its_side_and_clear(n):
         poses = desk_boxes.sample_boxes(rng, n)
         assert len(poses) == n
         for pose in poses:
-            assert desk_boxes.in_band(pose), pose
+            assert desk_boxes.in_band(pose, n), pose
             assert abs(pose[2]) <= math.radians(45.0) + 1e-12
-            print_ = desk_boxes.corners(pose)
+            print_ = desk_boxes.corners(pose, n)
             assert polygon_distance(print_, corridor) >= desk_boxes.DESK_BOX_CLEARANCE
             assert polygon_distance(print_, _tray_outer()) >= desk_boxes.DESK_BOX_CLEARANCE
             # Never under the arm base either: every corner stays off the base disc.
             assert min(math.hypot(*c) for c in print_) > desk_boxes.ARM_BASE_RADIUS
         for a, b in itertools.combinations(poses, 2):
-            gap = polygon_distance(desk_boxes.corners(a), desk_boxes.corners(b))
+            gap = polygon_distance(desk_boxes.corners(a, n), desk_boxes.corners(b, n))
             assert gap >= desk_boxes.DESK_BOX_GAP
         if n == 4:
             # Two per side: boxes 0 and 2 on the left (+y), 1 and 3 on the right.
@@ -84,15 +85,32 @@ def test_one_box_takes_every_part_and_the_placeholder_spreads_them_over_four():
 
 def test_a_box_footprint_on_the_corridor_is_refused():
     x0, y0 = desk_boxes.DESK_BOX_BAND_X[0], desk_boxes.DESK_BOX_BAND_Y[0]
-    assert not desk_boxes.clear([(layout.TRAY_CENTER[0], 0.12, 0.0)])  # on the tray wall
-    assert not desk_boxes.clear([(0.1, 0.3, 0.0), (0.1, 0.35, 0.0)])  # two boxes overlap
-    assert desk_boxes.clear([(x0 + 0.05, y0 + 0.03, 0.0)])
+    assert not desk_boxes.clear([(layout.TRAY_CENTER[0], 0.12, 0.0)], 1)  # on the tray wall
+    assert not desk_boxes.clear([(0.1, 0.3, 0.0), (0.1, 0.35, 0.0)], 4)  # two boxes overlap
+    assert desk_boxes.clear([(x0 + 0.05, y0 + 0.03, 0.0)], 4)
+    # The one box of rung 1 is 2 cm wider, so the same pose can clear as one of four and not
+    # alone: a 45 degree yaw at the band's inner edge beside the tray.
+    tight = (layout.TRAY_CENTER[0], 0.20, math.radians(45.0))
+    assert desk_boxes.clear([tight], 4) and not desk_boxes.clear([tight], 1)
+
+
+def test_one_box_is_the_11_cm_box_and_four_keep_the_9_cm_box():
+    assert desk_boxes.interior(1) == (0.11, 0.11, 0.06)
+    assert desk_boxes.interior(4) == layout.BIN_INTERIOR == (0.09, 0.09, 0.04)
+    assert desk_boxes.rim_z(1) == pytest.approx(0.065)
+    z, half = desk_boxes.stow_region(1)
+    assert z - half[2] == pytest.approx(desk_boxes.DESK_BOX_WALL)  # the band starts at the floor
+    assert half == pytest.approx((0.055, 0.055, 0.04))
+    # The band stops under the release: a part held there over the box is not in it yet.
+    assert z + half[2] < desk_boxes.DESK_BOX_RELEASE_Z - 0.01
+    z4, half4 = desk_boxes.stow_region(4)
+    assert z4 == pytest.approx(0.045) and half4 == pytest.approx((0.045, 0.045, 0.04))
 
 
 # -- the grader ------------------------------------------------------------------------------
 
-Z, HALF = desk_boxes.stow_region()
 POSES = [(0.08, 0.22, math.radians(40.0)), (0.08, -0.22, math.radians(-30.0))]
+Z, HALF = desk_boxes.stow_region(len(POSES))
 
 
 def _boxes():
@@ -108,7 +126,7 @@ def _in_box(pose, u, v, z):
 
 def test_a_part_at_rest_in_its_own_yawed_box_counts_and_nowhere_else():
     floor = desk_boxes.DESK_BOX_WALL
-    half_x = desk_boxes.DESK_BOX_INTERIOR[0] / 2
+    half_x = desk_boxes.interior(len(POSES))[0] / 2
     pos = torch.tensor(
         [
             [
@@ -117,7 +135,7 @@ def test_a_part_at_rest_in_its_own_yawed_box_counts_and_nowhere_else():
                 (0.2, 0.0, 0.005),  # on the desk, in no box
                 # inside the box's axis-aligned bounding square, outside the yawed interior
                 _in_box(POSES[1], half_x + 0.004, half_x + 0.004, floor + 0.005),
-                _in_box(POSES[1], 0.0, 0.01, floor + 2.2 * desk_boxes.DESK_BOX_INTERIOR[2]),
+                _in_box(POSES[1], 0.0, 0.01, floor + 2.2 * desk_boxes.interior(2)[2]),
                 _in_box(POSES[1], -0.02, 0.0, floor + 0.01),  # own box (1)
             ]
         ]
@@ -196,15 +214,16 @@ def _camera_poses():
             yield pos, mat
 
 
-def test_every_box_corner_at_every_band_extreme_is_in_the_overhead_frame():
-    (x0, x1), (y0, y1) = desk_boxes.DESK_BOX_BAND_X, desk_boxes.DESK_BOX_BAND_Y
-    rim = desk_boxes.rim_z()
+@pytest.mark.parametrize("n", [1, 4])
+def test_every_box_corner_at_every_band_extreme_is_in_the_overhead_frame(n):
+    (x0, x1), (y0, y1) = desk_boxes.band_x(n), desk_boxes.DESK_BOX_BAND_Y
+    rim = desk_boxes.rim_z(n)
     centres = [(x, s * y) for x in (x0, x1) for y in (y0, y1) for s in (1.0, -1.0)]
     points = [
         (*c, z)
         for x, y in centres
         for yaw in (-desk_boxes.DESK_BOX_MAX_YAW, 0.0, desk_boxes.DESK_BOX_MAX_YAW)
-        for c in desk_boxes.corners((x, y, yaw))
+        for c in desk_boxes.corners((x, y, yaw), n)
         for z in (0.0, rim)
     ]
     worst = math.inf
@@ -249,7 +268,7 @@ def test_the_teacher_releases_over_the_parts_own_box_at_the_pick_tilt_with_no_ra
     for part, box in ((0, 1), (1, 0)):
         x, y, _ = POSES[box]
         target = orc._release_target(part)
-        assert target.tolist() == pytest.approx([x, y, desk_boxes.release_z()])
+        assert target.tolist() == pytest.approx([x, y, desk_boxes.DESK_BOX_RELEASE_Z])
     assert orc.release_tilt == oracle.PICK_TILT_RAD and not orc.raises
     assert orc.retreat_point == desk_boxes.DESK_BOX_RETREAT_POINT
     # A lifted part goes straight to EXTEND, whose goal is the part's own box.

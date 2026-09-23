@@ -109,8 +109,8 @@ def _brick_states(env) -> tuple[torch.Tensor, torch.Tensor]:
 def env_desk_boxes(env, device: str) -> tuple[torch.Tensor, torch.Tensor]:
     """(N,M,4) grader boxes (x, y, centre z, yaw) and their (3,) half extents, from
     ``env.desk_box_poses`` (N,M,3) and ``desk_boxes.stow_region``."""
-    z, half = desk_boxes.stow_region()
     poses = torch.as_tensor(env.desk_box_poses, dtype=torch.float32)
+    z, half = desk_boxes.stow_region(poses.shape[1])
     boxes = torch.cat((poses[..., :2], torch.full_like(poses[..., :1], z), poses[..., 2:]), -1)
     return boxes.to(device), torch.tensor(half).to(device)
 

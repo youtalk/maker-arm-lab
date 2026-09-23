@@ -22,9 +22,14 @@ from collections.abc import Sequence
 from maker_arm_lab.core import layout
 from maker_arm_lab.core.grasp import polygon_distance
 
-DESK_BOX_INTERIOR = layout.BIN_INTERIOR  # INITIAL: the teacher ladder decides, 9 or 11 cm
-"""Interior (x, y, z) of a desk box, m. It starts at the six-brick bin's 0.09 x 0.09 x 0.04;
-the teacher ladder may raise it to 0.11 x 0.11 x 0.06 if it loses parts on the drop."""
+DESK_BOX_INTERIOR_ONE = (0.11, 0.11, 0.06)  # INITIAL: rung 1, one box takes all 50 parts
+"""Interior (x, y, z) of the one desk box of rung 1, m. The six-brick bin's 0.09 x 0.09 x 0.04
+lost parts over its rim: the first one-box teacher smoke (2026-09-23, two held-out heaps of
+50) stowed 93 of 100, and on heap 1 five failed cycles left their part piled at z 0.086 to
+0.096 m, above the grader's band (twice the 0.04 m interior)."""
+DESK_BOX_INTERIOR_MANY = layout.BIN_INTERIOR  # INITIAL: rung 2, four boxes of ~12 parts each
+"""Interior of each desk box when there are several: the six-brick bin's 0.09 x 0.09 x 0.04.
+Four boxes share a heap of 50, and the four-box smoke stowed 97 of 100 with no pile loss."""
 DESK_BOX_WALL = layout.BIN_WALL
 DESK_BOX_RGBA = (0.12, 0.12, 0.14, 1.0)
 """Near black. The desk color draw (``mj.env.DESK_COLOR_RANGE``) is brown to pink, and a
@@ -47,13 +52,25 @@ EXTEND has no plan at all (the tool leans toward +x, ``core.global_ik``). The ba
 
 Certified by ``scripts/mj_release_envelope_check.py`` on Machine A, 2026-09-23: the band's
 four corners and its centre, both sides, box yaw -45 and +45 degrees, part yaw 0, 45, 90 and
--45 degrees, continuous gripper, release at ``release_z()`` 0.10 m. brick_2x4, brick_1x2x5
+-45 degrees, continuous gripper, release at DESK_BOX_RELEASE_Z 0.10 m. brick_2x4, brick_1x2x5
 and brick_2x7 each landed 80 of 80 with EXTEND converged: EXTEND residual at most 1.19 mm,
 RETREAT's at most 0.78 mm, landing at most 21 mm from the box centre, no arm geom touching a
 box, tightest joint 0.039 rad from its stop at the release.
 
 Two boxes on one side fill it: 1.6 % of joint draws are clear (0.92 for one box), and the
 clear ones lean to small yaws, 19 % over 30 degrees against 33 % for a uniform yaw."""
+DESK_BOX_BAND_X_ONE = (0.08, 0.21)
+"""The one 11 cm box of rung 1 starts its band at x 0.08, not 0.05. Its outer corner hangs
+8.5 cm from its centre at a 45 degree yaw, 65 mm up at the rim, and at x 0.05 that corner
+left the overhead frame by 6.1 px with the episode's camera draw at its extremes (+-0.01 m,
++-2 degrees per axis); at 0.08 it keeps 3.5 px (projected, 2026-09-23).
+
+Certified with the 11 cm box by ``scripts/mj_release_envelope_check.py --desk_boxes 1`` the
+same day, same grid of points and yaws as the band above: brick_2x4, brick_1x2x5 and
+brick_2x7 each landed 80 of 80 with EXTEND converged (residual at most 1.19 mm, RETREAT's
+at most 0.84 mm, landing at most 24 mm from the box centre, no arm geom touching the box,
+tightest joint 0.099 rad from its stop). The 9 cm box, now the four-box box, re-read 80 of
+80 on brick_2x4 with ``--desk_boxes 4`` (the other three boxes parked off the desk)."""
 DESK_BOX_CLEARANCE = 0.015
 """m between a box footprint and the pick corridor."""
 DESK_BOX_GAP = 0.02
@@ -62,10 +79,20 @@ ARM_BASE_RADIUS = 0.08  # INITIAL
 """Radius (m) of the arm base in the pick corridor. The collision hulls of ``base_link`` and
 ``link_002`` reach 0.074 m and 0.082 m from the base axis below 0.1 m (read off the MuJoCo
 model's geom bounds at the home pose, 2026-09-23)."""
-DESK_BOX_RELEASE_CLEARANCE = 0.055  # INITIAL
-"""m from the rim up to the pick point at the release. A held part hangs about half its
-height below the pick point, and the tallest catalog part (brick_1x2x5) is 48 mm tall, so it
-clears the rim by about 3 cm before the jaws open and drops straight down, level jaws."""
+DESK_BOX_RELEASE_Z = 0.10  # INITIAL
+"""The pick point's height at the release over any desk box, m. A held part hangs about half
+its height below the pick point: the tallest catalog part (brick_1x2x5, 48 mm) clears the
+9 cm box's 45 mm rim by about 3 cm and the 11 cm box's 65 mm rim by about 1 cm, then drops
+straight down between the level jaws. It is not raised with the 11 cm box's rim: at 0.12 m
+the driven reach over the band shrank (4 trials a cell, 2026-09-23) to x 0.08-0.22 at |y|
+0.18, 0.09-0.22 at 0.20, 0.11-0.20 at 0.21 and 0.14-0.16 at 0.22, against x 0.02-0.24 up to
+|y| 0.20 at 0.10 m, and a 45 degree box beside the tray needs |y| 0.205 or more."""
+DESK_BOX_STOW_HEIGHT = 0.08
+"""How far above a box floor the grader still counts a part in the box, m: twice the 9 cm
+box's 0.04 m interior, so a pile over its rim counts (MS6 design H6). The 11 cm box keeps the
+same 0.08 m, not twice its 0.06 m: that band would reach 0.125 m, above DESK_BOX_RELEASE_Z,
+and a part still in the jaws over the box counted as stowed. The first 11 cm smoke ended
+heap 2 as a success that way, its last part held at z 0.099 m (2026-09-23)."""
 DESK_BOX_RETREAT_POINT = (0.15, 0.0, 0.12)  # INITIAL
 """Where RETREAT ends over desk boxes: over the near half of the tray, at the pick tilt.
 
@@ -78,33 +105,33 @@ to the arm keeps the most of the heap in the overhead frame."""
 DRAW_TRIES = 5000
 
 
-def outer_half() -> tuple[float, float]:
+def interior(n: int) -> tuple[float, float, float]:
+    """The interior of every box when ``n`` desk boxes stand on the desk. Every function below
+    that takes ``n`` sizes its box this way."""
+    return DESK_BOX_INTERIOR_ONE if n == 1 else DESK_BOX_INTERIOR_MANY
+
+
+def outer_half(n: int) -> tuple[float, float]:
     """Half the outer footprint (x, y) of a box in its own frame, m."""
-    return (DESK_BOX_INTERIOR[0] / 2 + DESK_BOX_WALL, DESK_BOX_INTERIOR[1] / 2 + DESK_BOX_WALL)
+    ix, iy, _ = interior(n)
+    return (ix / 2 + DESK_BOX_WALL, iy / 2 + DESK_BOX_WALL)
 
 
-def rim_z() -> float:
-    return DESK_BOX_WALL + DESK_BOX_INTERIOR[2]
+def rim_z(n: int) -> float:
+    return DESK_BOX_WALL + interior(n)[2]
 
 
-def release_z() -> float:
-    """The pick point's height at the release over a desk box."""
-    return rim_z() + DESK_BOX_RELEASE_CLEARANCE
+def stow_region(n: int) -> tuple[float, tuple[float, float, float]]:
+    """(centre z, half extents in the box frame) of the grader's box: the interior footprint,
+    and z from the box floor up DESK_BOX_STOW_HEIGHT."""
+    ix, iy, _ = interior(n)
+    h = DESK_BOX_STOW_HEIGHT
+    return DESK_BOX_WALL + h / 2, (ix / 2, iy / 2, h / 2)
 
 
-def stow_region() -> tuple[float, tuple[float, float, float]]:
-    """(centre z, half extents in the box frame) of the grader's box.
-
-    The interior footprint, and z from the box floor up to twice the interior height, so a pile
-    over the rim still counts (MS6 design H6).
-    """
-    ix, iy, iz = DESK_BOX_INTERIOR
-    return DESK_BOX_WALL + iz, (ix / 2, iy / 2, iz)
-
-
-def box_geoms() -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
+def box_geoms(n: int) -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
     """(name, centre, size) of the floor and the four walls, in the box's own frame."""
-    ix, iy, iz = DESK_BOX_INTERIOR
+    ix, iy, iz = interior(n)
     w = DESK_BOX_WALL
     wall_z = w + iz / 2
     return [
@@ -116,10 +143,10 @@ def box_geoms() -> list[tuple[str, tuple[float, float, float], tuple[float, floa
     ]
 
 
-def corners(pose: Sequence[float]) -> list[tuple[float, float]]:
+def corners(pose: Sequence[float], n: int) -> list[tuple[float, float]]:
     """The outer footprint's four corners in the world, counter-clockwise."""
     x, y, yaw = (float(v) for v in pose)
-    hx, hy = outer_half()
+    hx, hy = outer_half(n)
     c, s = math.cos(yaw), math.sin(yaw)
     return [
         (x + c * u - s * v, y + s * u + c * v)
@@ -154,20 +181,27 @@ def pick_corridor() -> list[tuple[float, float]]:
     return chain(points) + chain(reversed(points))
 
 
-def in_band(pose: Sequence[float]) -> bool:
+def band_x(n: int) -> tuple[float, float]:
+    """The band's x range when ``n`` desk boxes stand on the desk."""
+    return DESK_BOX_BAND_X_ONE if n == 1 else DESK_BOX_BAND_X
+
+
+def in_band(pose: Sequence[float], n: int) -> bool:
     """Is the centre inside the side band, on either side, and the yaw inside its range?"""
     x, y, yaw = (float(v) for v in pose)
+    x0, x1 = band_x(n)
     return (
-        DESK_BOX_BAND_X[0] <= x <= DESK_BOX_BAND_X[1]
+        x0 <= x <= x1
         and DESK_BOX_BAND_Y[0] <= abs(y) <= DESK_BOX_BAND_Y[1]
         and abs(yaw) <= DESK_BOX_MAX_YAW
     )
 
 
-def clear(poses: Sequence[Sequence[float]]) -> bool:
-    """Every footprint clears the pick corridor and every other footprint."""
+def clear(poses: Sequence[Sequence[float]], n: int) -> bool:
+    """Every footprint of these boxes, ``n`` on the desk in all, clears the pick corridor and
+    every other footprint."""
     corridor = pick_corridor()
-    prints = [corners(p) for p in poses]
+    prints = [corners(p, n) for p in poses]
     if any(polygon_distance(c, corridor) < DESK_BOX_CLEARANCE for c in prints):
         return False
     return all(
@@ -195,13 +229,13 @@ def sample_boxes(rng: random.Random, n: int) -> list[tuple[float, float, float]]
         for _ in range(DRAW_TRIES):
             side = [
                 (
-                    rng.uniform(*DESK_BOX_BAND_X),
+                    rng.uniform(*band_x(n)),
                     sign * rng.uniform(*DESK_BOX_BAND_Y),
                     rng.uniform(-DESK_BOX_MAX_YAW, DESK_BOX_MAX_YAW),
                 )
                 for _ in slots
             ]
-            if clear(side):
+            if clear(side, n):
                 break
         else:
             raise RuntimeError(

@@ -49,9 +49,9 @@ def test_desk_boxes_replace_the_shelf_and_stand_at_the_drawn_poses(n):
     assert env.destination_bins.tolist() == [desk_boxes.part_destinations(len(PARTS), n)] * 2
     assert env.desk_box_poses.shape == (2, n, 3)
     for i in range(2):
-        assert desk_boxes.clear(env.desk_box_poses[i])
+        assert desk_boxes.clear(env.desk_box_poses[i], n)
         for j in range(n):
-            assert desk_boxes.in_band(env.desk_box_poses[i, j])
+            assert desk_boxes.in_band(env.desk_box_poses[i, j], n)
             assert np.allclose(_box_floor_xy(env, i, j), env.desk_box_poses[i, j, :2])
         # The heap drops on the tray footprint beside the boxes.
         (x0, x1), (y0, y1) = layout.tray_bounds()

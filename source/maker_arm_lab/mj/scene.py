@@ -360,7 +360,7 @@ def build_spec(
     for j in range(num_desk_boxes):
         # Parked off the desk until the first reset draws the episode's poses.
         body = spec.worldbody.add_body(name=f"desk_box_{j}", mocap=True, pos=[-1.0, 0.2 * j, 0])
-        for name, center, size in desk_boxes.box_geoms():
+        for name, center, size in desk_boxes.box_geoms(num_desk_boxes):
             scene_geoms.append(
                 body.add_geom(
                     name=f"desk_box_{j}_{name}",

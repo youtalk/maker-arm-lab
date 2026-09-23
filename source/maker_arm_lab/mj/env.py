@@ -366,7 +366,7 @@ class MjLegoSortEnv:
         if self.parts is not None:
             if desk_boxes:
                 self.destination_bins = torch.zeros(num_envs, num_bricks, dtype=torch.long)
-                self.stow_half_extents = torch.tensor(_boxes.stow_region()[1])
+                self.stow_half_extents = torch.tensor(_boxes.stow_region(desk_boxes)[1])
             else:
                 self.destination_bins = torch.zeros(num_envs, dtype=torch.long)
                 self.stow_half_extents = torch.tensor(STOW_HALF_EXTENTS)

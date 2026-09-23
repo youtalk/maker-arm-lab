@@ -196,7 +196,7 @@ class HeapOracle(oracle.EnvOracle):
 
     def _box_tensor(self) -> tuple[torch.Tensor, torch.Tensor]:
         """(1,M,4) grader boxes and their half extents, as ``stowed.env_desk_boxes`` builds."""
-        z, half = desk_boxes.stow_region()
+        z, half = desk_boxes.stow_region(len(self.boxes))
         boxes = torch.tensor([[(x, y, z, yaw) for x, y, yaw in self.boxes]])
         return boxes, torch.tensor(half)
 
@@ -227,7 +227,7 @@ class HeapOracle(oracle.EnvOracle):
         if self.boxes:
             # Over the centre of the part's own box: the level jaws drop it straight down.
             x, y, _ = self.boxes[self.part_boxes[brick]]
-            return torch.tensor([x, y, desk_boxes.release_z()])
+            return torch.tensor([x, y, desk_boxes.DESK_BOX_RELEASE_Z])
         return torch.tensor(
             [
                 self.bl.bin_x - oracle.RELEASE_X_SETBACK,

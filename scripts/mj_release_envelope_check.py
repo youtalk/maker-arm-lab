@@ -1,7 +1,7 @@
 """Desk-box release envelope: the MuJoCo twin of ``scripts/release_envelope_check.py`` (MS7a).
 
 MS7a design, desk boxes: this check certifies the side band that the box draw samples from
-(``core.desk_boxes.DESK_BOX_BAND_X`` / ``DESK_BOX_BAND_Y``). One lone part lies at a fixed tray
+(``core.desk_boxes.band_x`` and ``DESK_BOX_BAND_Y``). One lone part lies at a fixed tray
 point, the tray centre, so the pick leg is the same for every box and only the release leg
 varies; the part's yaw steps through ``--part_yaws`` over the trials of a point, because the
 grasp heading the carry holds decides whether EXTEND plans at all. One desk box stands at a band point: the band's four corners and its centre, on both
@@ -50,6 +50,8 @@ from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import (
     OracleRig,
 )
 
+PARK_BOX_X = -0.6
+"""Where the boxes not under test wait: behind the arm and off the desk."""
 EXTEND_STOP_M = 0.008
 """EXTEND's own stop tolerance (``EnvOracle.extend_goal``), read against the driven arm."""
 SETTLE_STEPS = 60
@@ -72,7 +74,9 @@ def _pair(text: str) -> tuple[float, float]:
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = _TokenEmittingParser(description=__doc__)
-    parser.add_argument("--band_x", type=_pair, default=desk_boxes.DESK_BOX_BAND_X)
+    parser.add_argument(
+        "--band_x", type=_pair, default=None, help="default: core.desk_boxes.band_x(--desk_boxes)"
+    )
     parser.add_argument("--band_y", type=_pair, default=desk_boxes.DESK_BOX_BAND_Y)
     parser.add_argument("--trials", type=int, default=4, help="driven trials per band point")
     parser.add_argument(
@@ -84,8 +88,18 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20267400)
     parser.add_argument("--part", type=str, default="brick_2x4", help="a catalog part name")
     parser.add_argument("--gripper", choices=("binary", "continuous"), default="continuous")
+    parser.add_argument(
+        "--desk_boxes",
+        type=int,
+        default=1,
+        help="boxes in the scene, which sizes the box (core.desk_boxes.interior); box 0 "
+        "stands at the band point and the others wait off the desk",
+    )
     parser.add_argument("--out", type=str, default="", help="write the trial records here")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.band_x is None:
+        args.band_x = desk_boxes.band_x(args.desk_boxes)
+    return args
 
 
 def band_points(band_x, band_y) -> list[tuple[float, float]]:
@@ -130,7 +144,9 @@ def _joint_margin(rig) -> float:
 
 def run_trial(env, rig, part, pose, seed: int, part_yaw: float = 0.0) -> dict:
     env.reset(seed=seed)
-    env.place_desk_boxes(0, [pose])
+    parked = [(PARK_BOX_X, 0.3 * j, 0.0) for j in range(1, env.desk_boxes)]
+    env.place_desk_boxes(0, [pose, *parked])
+    env.destination_bins[0] = 0  # the lone part goes to box 0 whatever the scene's map
     _place_part(env, part, part_yaw)
     rig.rearm([0])
     m = env.models[0]
@@ -194,7 +210,7 @@ def run(args) -> dict:
         start_pose_offset_rad=0.0,
         episode_length_s=EPISODE_LENGTH_S,
         gripper_mode=args.gripper,
-        desk_boxes=1,
+        desk_boxes=args.desk_boxes,
     )
     env.reset(seed=args.seed)
     rng = random.Random(args.seed)
@@ -250,8 +266,9 @@ def run(args) -> dict:
         "part": args.part,
         "part_yaws": args.part_yaws,
         "gripper": args.gripper,
-        "interior": list(desk_boxes.DESK_BOX_INTERIOR),
-        "release_z": desk_boxes.release_z(),
+        "desk_boxes": args.desk_boxes,
+        "interior": list(desk_boxes.interior(args.desk_boxes)),
+        "release_z": desk_boxes.DESK_BOX_RELEASE_Z,
         "trials": n,
         "landed": sum(p["landed"] for p in points),
         "extend_ok": sum(p["extend_ok"] for p in points),
