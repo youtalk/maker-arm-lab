@@ -8,7 +8,9 @@ rules are the MS7a design's hosts and data flow:
 
   sync --sha SHA  SYNC_OK / SYNC_FAIL. Every host fetches origin, checks SHA out detached in
                   its campaign worktree (added on first use, venvs symlinked from the main
-                  clone) and runs FAST_TESTS.
+                  clone) and runs FAST_TESTS. A host with "fetch": "bundle" cannot reach
+                  GitHub (Machine C's resolver times out), so it fetches SHA from a
+                  git bundle this host builds from origin and ships to <campaign>/sync.bundle.
   ship SRC DST    SHIP_OK / SHIP_FAIL. rsync --partial; either end may be HOST:PATH. The file
                   lists (names and sizes) of both ends must match after the copy. A
                   pretrained_model gets its action_space.json marker.
@@ -68,6 +70,7 @@ FAIL = {
     "status": "STATUS_FAIL",
 }
 LOCAL = {"ssh": None}
+BUNDLE_REF = "refs/fleet/sync"
 q = shlex.quote
 
 
@@ -104,9 +107,11 @@ def parallel(fn, items) -> list:
 
 def sync_script(host: dict, sha: str, campaign: Path) -> str:
     wt, clone = q(host["worktree"]), q(host["clone"])
+    source = q(str(campaign / "sync.bundle")) + " " + BUNDLE_REF
+    fetch = source if host.get("fetch") == "bundle" else "origin"
     return f"""set -e
 {host["setup"]}
-git -C {clone} fetch -q origin
+git -C {clone} fetch -q {fetch}
 [ -e {wt} ] || git -C {clone} worktree add -q --detach {wt} {sha}
 [ -e {wt}/.venv ] || ln -s {clone}/.venv {wt}/.venv
 [ -e {wt}/lerobot_stack/.venv ] || ln -s {clone}/lerobot_stack/.venv {wt}/lerobot_stack/.venv
@@ -119,9 +124,25 @@ PYTHONPATH={wt}/source .venv/bin/python -m pytest -q -p no:cacheprovider $tests
 """
 
 
+def ship_bundle(host: dict, sha: str, campaign: Path) -> None:
+    """Build a bundle holding SHA from this host's origin and copy it to the host."""
+    repo = ["git", "-C", str(Path(__file__).resolve().parents[1])]
+    path = campaign / "sync.bundle"
+    check(sh(host, f"mkdir -p {q(str(campaign))}"), "mkdir")
+    for cmd in (
+        repo + ["fetch", "-q", "origin"],
+        repo + ["update-ref", BUNDLE_REF, sha],
+        repo + ["bundle", "create", "-q", str(path), BUNDLE_REF],
+        RSYNC + [str(path), rsync_url(host, str(path))],
+    ):
+        check(subprocess.run(cmd, capture_output=True, text=True, check=False), "bundle")
+
+
 def cmd_sync(args, hosts):
     def one(name):
         t0 = time.monotonic()
+        if hosts[name].get("fetch") == "bundle":
+            ship_bundle(hosts[name], args.sha, args.campaign)
         result = sh(hosts[name], sync_script(hosts[name], args.sha, args.campaign))
         return name, result, time.monotonic() - t0
 
