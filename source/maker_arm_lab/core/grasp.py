@@ -506,3 +506,86 @@ def push_segment(
     return clamp_to_reach((center[0] - dx, center[1] - dy)), clamp_to_reach(
         (center[0] + dx, center[1] + dy)
     )
+
+
+RAKE_BAND_M = 0.03
+"""MS7a design, the rake: a candidate with no grasp whose centre lies this close (m) to a
+wall is raked off it. # INITIAL: the tray teacher ladder reads it."""
+RAKE_START_GAP_M = 0.002
+"""Gap (m) between the raked part's footprint and the closed tips where they land."""
+RAKE_SWINGS_RAD = (0.0, 0.5, -0.5, 1.0, -1.0)
+"""Sweep directions tried, off the wall's normal, when the straight one has no room behind
+the part: a swung sweep catches the part's end and turns it off the wall (the wall push of
+MS6 phase A swung the same way, git f93e010^:core/grasp.py)."""
+
+
+def rake_footprint(point: tuple[float, float], heading: float) -> list[tuple[float, float]]:
+    """The closed tips at the desk, sweeping along ``heading``.
+
+    The rake closes the jaws with the closing axis along the sweep, so the two finger plates
+    stand parallel to the wall it sweeps from, a blade whose leading face is the tips' 8 mm
+    face: the two 2 mm tips meet, 4 mm along the sweep and 8 mm across it.
+    """
+    c, s = math.cos(heading), math.sin(heading)
+    return convex_hull(
+        [
+            (point[0] + c * lx - s * ly, point[1] + s * lx + c * ly)
+            for lx in (-TIP_THICKNESS, TIP_THICKNESS)
+            for ly in (-TIP_HALF_FACE, TIP_HALF_FACE)
+        ]
+    )
+
+
+def rake_segment(
+    part_xy: tuple[float, float],
+    part_print: list[tuple[float, float]],
+    length: float,
+    wall: Wall,
+    walls: Sequence[Wall],
+    blocked: Sequence[list[tuple[float, float]]],
+) -> tuple[tuple[float, float], tuple[float, float], float] | None:
+    """``(start, end, heading)`` of a rake that sweeps a part off ``wall``, or None.
+
+    The closed tips land behind the part, on the wall side, ``RAKE_START_GAP_M`` off its
+    footprint, clear of every wall and of every footprint in ``blocked``, and sweep through
+    the part's centre to ``length`` past it, away from the wall. ``heading`` is the sweep
+    direction, which is also the closing axis (``rake_footprint``). The straight sweep runs
+    along the wall's normal; with no room behind the part the sweep swings off it
+    (``RAKE_SWINGS_RAD``). The end is pulled back until the tips clear every wall, and both
+    ends stay in reach.
+    """
+    cx = sum(x for x, _ in wall.footprint) / len(wall.footprint)
+    cy = sum(y for _, y in wall.footprint) / len(wall.footprint)
+    nx, ny = -math.sin(wall.heading), math.cos(wall.heading)
+    if (part_xy[0] - cx) * nx + (part_xy[1] - cy) * ny < 0.0:
+        nx, ny = -nx, -ny
+    normal = math.atan2(ny, nx)
+    for swing in RAKE_SWINGS_RAD:
+        heading = normal + swing
+        c, s = math.cos(heading), math.sin(heading)
+        start = None
+        for k in range(1, 61):  # back off from the centre, 1 mm at a time
+            point = (part_xy[0] - 0.001 * k * c, part_xy[1] - 0.001 * k * s)
+            tips = rake_footprint(point, heading)
+            if polygon_distance(tips, part_print) >= RAKE_START_GAP_M:
+                start = point
+                break
+        if start is None or clamp_to_reach(start) != start:
+            continue
+        tips = rake_footprint(start, heading)
+        if any(polygon_distance(tips, list(w.footprint)) < 0.0 for w in walls):
+            continue
+        if any(polygon_distance(tips, b) < 0.0 for b in blocked):
+            continue
+        reach = length
+        end = None
+        while reach >= 0.5 * length:
+            point = clamp_to_reach((part_xy[0] + reach * c, part_xy[1] + reach * s))
+            tips = rake_footprint(point, heading)
+            if all(polygon_distance(tips, list(w.footprint)) >= 0.0 for w in walls):
+                end = point
+                break
+            reach -= 0.002
+        if end is not None:
+            return start, end, heading
+    return None

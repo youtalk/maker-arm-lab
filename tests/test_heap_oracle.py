@@ -394,6 +394,7 @@ def test_extra_stats_report_the_counters():
     assert stats == {
         "cycles": 0,
         "pushes": 0,
+        "rakes": 0,
         "tips": 0,
         "tips_ok": 0,
         "forced_picks": 0,
@@ -699,3 +700,96 @@ def test_the_tray_teacher_squares_the_jaws_along_a_wall():
     assert math.sin(orc.grasp.heading) == pytest.approx(0.0, abs=1e-6)  # closing along x
     assert hover.yaw == pytest.approx(orc.grasp.heading - math.pi / 2)
     assert _oracle([BRICK]).walls == ()  # the bare desk ranks no walls
+
+
+# -- MS7a design, the rake -----------------------------------------------------------------------
+
+
+def _tray_oracle(part_list):
+    return heap_oracle.HeapOracle(
+        BL, part_list, 1, oracle.nominal_draw(), rng=random.Random(0), tray=True
+    )
+
+
+def _stuck_scene(extra=()):
+    """A 2x4 brick at yaw 45 degrees, its centre 25 mm from the left wall: both closing axes
+    lie 45 degrees off the wall and both fingers would reach it, so no grasp ranks. Its near
+    corner stays 8 mm off the wall face, room for the closed tips behind it."""
+    (_, _), (y0, _) = layout.tray_bounds()
+    rows = [[layout.TRAY_CENTER[0], y0 + 0.025, 0.0048], *extra]
+    scene = _snapshot(rows)
+    scene.brick_quat[0] = torch.tensor(quat_from_rpy_deg((0.0, 0.0, 45.0)))
+    return scene
+
+
+def test_the_rake_fires_when_no_grasp_ranks_and_a_part_lies_in_a_wall_band():
+    orc = _tray_oracle([BRICK])
+    scene = _stuck_scene()
+    assert orc._ranked(scene, orc._candidates(scene)) == []
+    hover = _to_hover(orc, scene)
+    assert hover.phase is oracle.Phase.PUSH_HOVER and orc.target_brick is None
+    push = orc.push
+    assert push.part == 0 and hover.gripper == -1.0  # the jaws closed
+    # The blade: the closing axis runs along the sweep, which runs off the wall (+y).
+    assert hover.yaw == pytest.approx(push.heading - math.pi / 2)
+    assert math.sin(push.heading) > 0.8
+    (_, _), (y0, _) = layout.tray_bounds()
+    part_y = float(scene.brick_pos[0, 1])
+    assert y0 < push.start[1] < part_y < push.end[1]
+    assert push.end[1] - part_y >= 0.5 * BRICK.size[0]  # about one part length past the centre
+    tips = grasp.rake_footprint(push.start, push.heading)
+    assert all(grasp.polygon_distance(tips, list(w.footprint)) >= 0.0 for w in orc.walls)
+    part = grasp.footprint(orc.sizes[0], scene.brick_pos[0], scene.brick_quat[0])
+    assert grasp.polygon_distance(tips, part) >= grasp.RAKE_START_GAP_M - 1e-6
+    _push_phases_counted(orc, scene)
+    assert orc.rakes == 1 and orc.pushes == 0 and orc.raked == {0: 1}
+    assert orc.extra_stats()["rakes"] == 1
+
+
+def _push_phases_counted(orc, scene):
+    for phase in (oracle.Phase.PUSH_HOVER, oracle.Phase.PUSH_DESCEND, oracle.Phase.PUSH_SWEEP):
+        goal = orc.next_goal(scene)
+        assert goal.phase is phase
+        orc.report(oracle.PhaseResult(outcome="converged"), scene)
+    assert orc.phase is oracle.Phase.HOVER and orc.push is None
+
+
+def test_the_rake_never_fires_while_any_grasp_ranks():
+    # A free brick in the middle of the tray ranks, so the stuck one waits.
+    free = [layout.TRAY_CENTER[0], layout.TRAY_CENTER[1] + 0.03, 0.0048]
+    orc = _tray_oracle([BRICK, BRICK])
+    scene = _stuck_scene([free])
+    hover = _to_hover(orc, scene)
+    assert hover.phase is oracle.Phase.HOVER and orc.target_brick == 1 and orc.push is None
+
+
+def test_the_rake_never_fires_away_from_a_wall_or_without_the_tray():
+    # A brick propped at 45 and 30 degrees in the middle of the tray: no body axis lies
+    # near the jaw plane, so nothing ranks, and no wall is near it.
+    tilted = torch.tensor(quat_from_rpy_deg((45.0, 30.0, 0.0)))
+    orc = _tray_oracle([BRICK])
+    scene = _snapshot([[layout.TRAY_CENTER[0], layout.TRAY_CENTER[1], 0.012]])
+    scene.brick_quat[0] = tilted
+    assert orc._ranked(scene, orc._candidates(scene)) == []
+    _to_hover(orc, scene)
+    assert orc.phase is oracle.Phase.DONE and orc.push is None and orc.rakes == 0
+    # The same stuck part with the tray off: the bare desk has no walls to rake from, and
+    # with no walls the part ranks both its grasps.
+    bare = _oracle([BRICK])
+    _to_hover(bare, _stuck_scene())
+    assert bare.target_brick == 0 and bare.push is None
+
+
+def test_the_rakes_are_capped_per_part_and_per_episode(monkeypatch):
+    orc = _tray_oracle([BRICK])
+    scene = _stuck_scene()  # a stub: the rakes move nothing
+    _to_hover(orc, scene)
+    for _ in range(heap_oracle.RAKE_PART_CAP):
+        _push_phases_counted(orc, scene)
+        orc.next_goal(scene)
+    assert orc.rakes == heap_oracle.RAKE_PART_CAP
+    assert orc.phase is oracle.Phase.DONE
+    capped = _tray_oracle([BRICK])
+    capped.rakes = heap_oracle.MAX_RAKES
+    _to_hover(capped, _stuck_scene())
+    assert capped.phase is oracle.Phase.DONE and capped.push is None

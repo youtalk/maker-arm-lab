@@ -129,7 +129,12 @@ class InspectHeapOracle(HeapOracle):
             },
             push=None
             if self.push is None or chosen is not None
-            else {"start": self.push.start, "end": self.push.end},
+            else {
+                "start": self.push.start,
+                "end": self.push.end,
+                "part": self.push.part,
+                "heading": self.push.heading,
+            },
             pushes_in_a_row=pushes_before,
             cycles=self.cycles,
             budget_left=self.cycle_budget - self.cycles,

@@ -381,6 +381,7 @@ def run_stats(
         stats["parts_out_of_reach"] = sum(int(e.get("parts_out_of_reach", 0)) for e in episodes)
         stats["cycles"] = sum(int(e.get("cycles", 0)) for e in episodes)
         stats["pushes"] = sum(int(e.get("pushes", 0)) for e in episodes)
+        stats["rakes"] = sum(int(e.get("rakes", 0)) for e in episodes)
         stats["cycles_per_stowed"] = stats["cycles"] / stowed if stowed else None
     if probe:
         # A heap probe grades on every episode the recorder wrote, not the fully-stowed

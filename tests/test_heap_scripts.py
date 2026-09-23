@@ -66,6 +66,7 @@ def test_read_meta_aggregates_parts_cycles_and_families(tmp_path):
                 "bricks_delivered": 3,
                 "cycles": 4,
                 "pushes": 1,
+                "rakes": 2,
                 "parts_out_of_reach": 0,
                 "cycle_parts": [0, 1, 1, 2],
                 "cycle_outcomes": [True, False, True, True],
@@ -91,6 +92,7 @@ def test_read_meta_aggregates_parts_cycles_and_families(tmp_path):
     assert summary["stowed_fraction"] == pytest.approx(5 / 6)
     assert summary["cycles"] == 7 and summary["cycles_per_stowed"] == pytest.approx(7 / 5)
     assert summary["pushes"] == 1 and summary["parts_out_of_reach"] == 1
+    assert summary["rakes"] == 2  # a meta without the key (b, the bare desk) counts none
     assert summary["families"]["plate"] == {"attempts": 3, "stowed": 1}
     assert summary["families"]["brick"] == {"attempts": 2, "stowed": 2}
     assert summary["families"]["slope"] == {"attempts": 2, "stowed": 2}

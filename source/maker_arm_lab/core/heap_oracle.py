@@ -20,7 +20,9 @@ What changes against the six-brick oracle, and nothing else:
   RETREAT, and HOVER adopts that choice (``preselects_next_target``, 2026-09-22);
 * with desk boxes (``boxes``, MS7a design, desk boxes) every part has its own box, the
   release is at the pick tilt over that box's centre with no RAISE, and a part inside any box
-  is never a target.
+  is never a target;
+* in the MS7a tray, when no grasp ranks and a candidate lies within ``grasp.RAKE_BAND_M`` of
+  a wall, the closed jaws rake it off the wall through the push phases (``_plan_rake``).
 
 The phases, the correctives, the induction and the retry ladder are the base class's.
 """
@@ -51,6 +53,10 @@ the part (``core.grasp``), so the model's refusal is stricter than the physics. 
 value the dish ran; the push machinery stays and this constant turns it back on.
 """
 PUSH_BUDGET = CYCLE_BUDGET
+MAX_RAKES = 20
+"""Rakes one episode may spend (MS7a design, the rake). # INITIAL"""
+RAKE_PART_CAP = 2
+"""Rakes one part may take before it is left where it lies. # INITIAL"""
 CANDIDATE_MAX_Z = 0.10
 """A part above this height sits in a bin or on the shelf, never on the heap."""
 PUSH_HOVER_Z = 0.08
@@ -117,6 +123,8 @@ def target_context(pos, chosen: grasp.Grasp | None) -> list[float]:
 class Push:
     start: tuple[float, float]
     end: tuple[float, float]
+    part: int | None = None  # the raked part; None is the densest-cell push
+    heading: float | None = None  # a rake's closing axis, along its sweep; None holds the jaws
 
 
 @dataclass(frozen=True)
@@ -185,6 +193,8 @@ class HeapOracle(oracle.EnvOracle):
         self.tip: Tip | None = None
         self.cycles = 0
         self.pushes = 0
+        self.rakes = 0
+        self.raked: dict[int, int] = {}
         self.tips = 0
         self.tips_ok = 0
         self.forced_picks = 0
@@ -399,6 +409,8 @@ class HeapOracle(oracle.EnvOracle):
             if chosen is None:
                 if ranked and self.pushes < PUSH_BUDGET:
                     self.push = self._plan_push(scene, mask)
+                elif not ranked and self.walls and self.rakes < MAX_RAKES:
+                    self.push = self._plan_rake(scene, mask)
                 return None
             if 2.0 * chosen.half_height < TIP_MIN_GRIP_HEIGHT:
                 # MS6 rework section 7: a flat part offers only its in-plane axes, so the
@@ -422,6 +434,45 @@ class HeapOracle(oracle.EnvOracle):
         """A sweep through the densest cell of the candidates (design H8)."""
         center = grasp.densest_cell(scene.brick_pos[mask, :2])
         return Push(*grasp.push_segment(center, self._push_heading(center)))
+
+    def _plan_rake(self, scene: oracle.SceneSnapshot, mask: torch.Tensor) -> Push | None:
+        """A rake off a wall for the candidate nearest one, or None (MS7a design, the rake).
+
+        Called only when no grasp ranks. A candidate within ``grasp.RAKE_BAND_M`` of a wall
+        and under ``RAKE_PART_CAP`` rakes is swept off its nearest wall by one part length,
+        its longest side (at least ``grasp.PUSH_HALF_LENGTH_M``), the nearest first; a part
+        with no room for the tips behind it is skipped (``grasp.rake_segment``).
+        """
+        near = []
+        for b in torch.nonzero(mask).flatten().tolist():
+            if self.raked.get(b, 0) >= RAKE_PART_CAP:
+                continue
+            xy = tuple(scene.brick_pos[b, :2].tolist())
+            dist, wall = min((grasp.wall_distance(xy, w), k) for k, w in enumerate(self.walls))
+            if dist < grasp.RAKE_BAND_M:
+                near.append((dist, b, self.walls[wall]))
+        if not near:
+            return None
+        prints = {
+            b: grasp.footprint(self.sizes[b], scene.brick_pos[b], scene.brick_quat[b])
+            for b in range(self.num_bricks)
+            if float(scene.brick_pos[b, 2]) <= CANDIDATE_MAX_Z
+        }
+        for _, b, wall in sorted(near, key=lambda t: (t[0], t[1])):
+            length = max(max(self.parts[b].size), grasp.PUSH_HALF_LENGTH_M)
+            others = [f for k, f in prints.items() if k != b]
+            xy = tuple(scene.brick_pos[b, :2].tolist())
+            segment = grasp.rake_segment(xy, prints[b], length, wall, self.walls, others)
+            if segment is not None:
+                start, end, heading = segment
+                return Push(start, end, part=b, heading=heading)
+        return None
+
+    def _push_yaw(self) -> float | None:
+        """Goal.yaw of a push leg: a rake squares its closing axis to the sweep, a push holds."""
+        if self.push is None or self.push.heading is None:
+            return None
+        return self.push.heading - math.pi / 2
 
     def _plan_tip(self, scene: oracle.SceneSnapshot, part: int) -> Tip | None:
         """A short stroke into the part's edge, from outside its footprint toward its centre.
@@ -537,12 +588,13 @@ class HeapOracle(oracle.EnvOracle):
             return self._goal(
                 oracle.Phase.PUSH_HOVER,
                 target,
-                None,
+                self._push_yaw(),
                 0.0,
                 -1.0,
                 0.01,
                 0,
                 oracle.DEFAULT_MAX_STEPS,
+                hold_xy=(self.push.start, self.push.end) if self.push.heading is not None else (),
                 half_height=PUSH_HALF_HEIGHT,
             )
         if self.phase == oracle.Phase.PUSH_DESCEND:
@@ -550,12 +602,13 @@ class HeapOracle(oracle.EnvOracle):
             return self._goal(
                 oracle.Phase.PUSH_DESCEND,
                 target,
-                None,
+                self._push_yaw(),
                 0.0,
                 -1.0,
                 0.003,
                 oracle.DESCEND_STALL_STEPS,
                 oracle.DEFAULT_MAX_STEPS,
+                hold_xy=(self.push.start, self.push.end) if self.push.heading is not None else (),
                 half_height=PUSH_HALF_HEIGHT,
             )
         if self.phase == oracle.Phase.PUSH_SWEEP:
@@ -623,8 +676,12 @@ class HeapOracle(oracle.EnvOracle):
             self.phase = oracle.Phase.PUSH_SWEEP
             return
         if phase == oracle.Phase.PUSH_SWEEP:
-            self.pushes += 1
-            self.pushes_in_a_row += 1
+            if self.push.part is None:
+                self.pushes += 1
+                self.pushes_in_a_row += 1
+            else:
+                self.rakes += 1
+                self.raked[self.push.part] = self.raked.get(self.push.part, 0) + 1
             self.push = None
             self.phase = oracle.Phase.HOVER
             return
@@ -683,6 +740,7 @@ class HeapOracle(oracle.EnvOracle):
         return {
             "cycles": self.cycles,
             "pushes": self.pushes,
+            "rakes": self.rakes,
             "tips": self.tips,
             "tips_ok": self.tips_ok,
             "forced_picks": self.forced_picks,
