@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-from maker_arm_lab.core import grasp, layout, oracle
+from maker_arm_lab.core import desk_boxes, grasp, layout, oracle
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.dagger_loop import DECLINE_COOLDOWN, trigger_reason
 from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _nearest_brick_cm
@@ -123,6 +123,10 @@ held_no_lift cycles followed a stow and their first close was a median 13 cm fro
 at the bin."""
 SELECT_OPEN_FRACTION = 0.8
 """The measured jaw opening fraction that reads as the retreat's full gap."""
+DESK_REST_MAX_Z = desk_boxes.DESK_BOX_RELEASE_Z - oracle.LIFT_MIN_RISE
+"""m: with desk boxes, the highest a part off every box may lie to count as knocked out of
+reach, a lift's rise under the release. A teacher-driven policy's cycle ended out_of_reach at
+its own release, the part in the opening jaws at z 0.098 m over its box (2026-09-23)."""
 FRAME_EVERY = 10
 """Steps between two frames ``rollout``'s ``on_frame`` dump receives."""
 SELECT_WAIT_FRACTION = 0.375
@@ -699,12 +703,15 @@ def resting_out_of_reach(pos, speed: float, held: bool, bl, stow_half_xy, in_box
 
     With desk boxes ``in_box`` says whether the part lies in any box. A part at rest in its own
     box is stowed before this is asked (``cycle_end``), so one in a box here is in another
-    box: out of play, like a part out of reach (the class branch names it ``wrong_box``)."""
+    box: out of play, like a part out of reach (the class branch names it ``wrong_box``). Off
+    the boxes the part must also lie under DESK_REST_MAX_Z: a desk box's release is at
+    ``CANDIDATE_MAX_Z``'s own height, where a part the opening jaws hold under the force floor
+    and still read as at rest, out of reach beside the box."""
     x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
     if held or speed > AT_REST_SPEED or z > CANDIDATE_MAX_Z:
         return False
     if in_box is not None:
-        return bool(in_box) or not layout.in_reach(x, y, bl)
+        return bool(in_box) or (z <= DESK_REST_MAX_Z and not layout.in_reach(x, y, bl))
     cx, cy, _ = layout.heap_bin_center(bl)
     in_bin = abs(x - cx) <= float(stow_half_xy[0]) and abs(y - cy) <= float(stow_half_xy[1])
     return not in_bin and not layout.in_reach(x, y, bl)

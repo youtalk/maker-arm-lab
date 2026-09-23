@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import torch
 
-from maker_arm_lab.core import dagger_loop, layout, loop, oracle
+from maker_arm_lab.core import dagger_loop, desk_boxes, layout, loop, oracle
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj import overlay
@@ -155,6 +155,23 @@ def test_only_a_resting_part_off_the_reach_band_and_off_the_bin_is_out_of_reach(
     assert not loop.resting_out_of_reach(torch.tensor([0.60, 0.0, 0.15]), 0.0, False, bl, half)
     assert not loop.resting_out_of_reach(torch.tensor([cx, cy, 0.006]), 0.0, False, bl, half)
     assert not loop.resting_out_of_reach(torch.tensor([0.20, 0.0, 0.006]), 0.0, False, bl, half)
+
+
+def test_with_desk_boxes_only_a_part_down_on_the_desk_or_in_another_box_is_out_of_reach():
+    bl = layout.DEFAULT_BIN_LAYOUT
+    half = (0.05, 0.05)
+    beside_box = (0.077, 0.2)  # out of the reach band, beside a box's release point
+    assert not layout.in_reach(*beside_box, bl)
+    # A part in the opening jaws at the release is slow and under the force floor: not lost.
+    release = torch.tensor([*beside_box, desk_boxes.DESK_BOX_RELEASE_Z - 0.002])
+    assert not loop.resting_out_of_reach(release, 0.0, False, bl, half, in_box=False)
+    down = torch.tensor([*beside_box, 0.006])
+    assert loop.resting_out_of_reach(down, 0.0, False, bl, half, in_box=False)
+    in_another_box = torch.tensor([*beside_box, 0.03])
+    assert loop.resting_out_of_reach(in_another_box, 0.0, False, bl, half, in_box=True)
+    assert not loop.resting_out_of_reach(
+        torch.tensor([0.2, 0.0, 0.006]), 0.0, False, bl, half, in_box=False
+    )
 
 
 def test_the_oracle_driver_stows_three_spread_parts_through_the_loop():
