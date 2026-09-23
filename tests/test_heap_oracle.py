@@ -395,6 +395,7 @@ def test_extra_stats_report_the_counters():
         "cycles": 0,
         "pushes": 0,
         "rakes": 0,
+        "jams": 0,
         "tips": 0,
         "tips_ok": 0,
         "forced_picks": 0,
@@ -823,3 +824,31 @@ def test_an_unplanned_rake_hover_turns_the_jaws_then_holds_them_then_gives_up(na
     orc.report(unplanned, scene)
     assert orc.phase is oracle.Phase.HOVER and orc.push is None
     assert orc.rakes == 1 and orc.raked == {0: 1}  # spent, not retried forever
+
+
+def test_a_jammed_tray_pick_gives_up_the_cycle_and_a_bare_desk_one_the_episode():
+    scene = _snapshot([[layout.TRAY_CENTER[0], 0.0, 0.0048]])
+    bare = _oracle([BRICK])
+    _to_hover(bare, scene)
+    bare.phase = oracle.Phase.CLOSE
+    assert bare.recover_from_jam(scene) is False  # the rig abandons, as in MS6
+    orc = _tray_oracle([BRICK])
+    _to_hover(orc, scene)
+    orc.phase = oracle.Phase.CLOSE
+    assert orc.recover_from_jam(scene) is True
+    assert orc.phase is oracle.Phase.REOPEN and orc.cycle_outcomes == [False]
+    assert orc.failures[orc.cell_of(scene.brick_pos[0, :2].tolist())] == 1
+    _step(orc, scene)  # REOPEN ends the given-up cycle
+    assert orc.phase is oracle.Phase.HOVER and orc.target_brick is None
+    assert orc.extra_stats()["jams"] == 1
+    orc.phase = oracle.Phase.EXTEND  # a jam in transit still abandons
+    assert orc.recover_from_jam(scene) is False
+
+
+def test_a_jammed_rake_is_spent(narrow_band):
+    orc = _tray_oracle([BRICK])
+    scene = _stuck_scene()
+    _to_hover(orc, scene)
+    orc.report(oracle.PhaseResult(outcome="converged"), scene)  # PUSH_HOVER -> PUSH_DESCEND
+    assert orc.recover_from_jam(scene) is True
+    assert orc.phase is oracle.Phase.HOVER and orc.push is None and orc.rakes == 1

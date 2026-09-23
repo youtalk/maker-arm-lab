@@ -607,6 +607,19 @@ def test_the_watchdog_ignores_an_arm_resting_on_a_stop_it_was_sent_to():
     assert rig.stats[0]["abandon"] == "watchdog"
 
 
+def test_an_oracle_that_recovers_from_a_jam_keeps_its_episode():
+    """MS7a tray: HeapOracle.recover_from_jam gives up the jammed leg; the rig then re-enters
+    the oracle's next phase instead of abandoning. An oracle without the hook abandons."""
+    _, rig = _stub_rig()
+    seen = []
+    rig.oracles[0].recover_from_jam = lambda scene: seen.append(scene) or True
+    rig.q_cmd[0] = rig.limits.mean(dim=1).double()  # the arm sits on a stop it was not sent to
+    for _ in range(_rt.WATCHDOG_TRIP_STRIKES):
+        rig.step()
+    assert len(seen) == 1 and not bool(rig.abandoned[0]) and rig.watchdog_strikes[0] == 0
+    assert rig.stats[0]["abandon"] is None
+
+
 def test_episode_stats_carry_the_hover_jitter_count():
     """The per-episode sidecar must say how many corrective approaches the episode actually
     demonstrated (the run_meta range says only what was configured)."""

@@ -196,6 +196,7 @@ class HeapOracle(oracle.EnvOracle):
         self.pushes = 0
         self.rakes = 0
         self.raked: dict[int, int] = {}
+        self.jams = 0
         self.tips = 0
         self.tips_ok = 0
         self.forced_picks = 0
@@ -744,6 +745,33 @@ class HeapOracle(oracle.EnvOracle):
         if phase == oracle.Phase.RETREAT and brick is not None and brick not in self._sorted:
             self._mark_failure(scene, brick)
 
+    def recover_from_jam(self, scene: oracle.SceneSnapshot) -> bool:
+        """The rig's watchdog found the arm jammed: give up the leg, not the episode.
+
+        MS7a tray only; on the bare desk this returns False and the rig abandons the episode as
+        in MS6. A jammed pick (DESCEND, CLOSE or LIFT) ends its cycle the way a lift that
+        failed its retries does, through REOPEN with the cell marked; a jammed rake or push is
+        spent. On the 600-part tray read of 2026-09-23 two of twelve episodes were abandoned
+        with 19 and 7 parts still in the tray: the wrist roll 0.02 rad off its stop while a
+        forced pick's descend stalled on a neighbor, and a wedge rake at the near wall.
+        Anything else (a jam in transit) still abandons.
+        """
+        if not self.walls:
+            return False
+        if self.phase in oracle.PUSH_PHASES and self.push is not None:
+            self.jams += 1
+            self._end_push()
+            return True
+        picking = (oracle.Phase.DESCEND, oracle.Phase.CLOSE, oracle.Phase.LIFT)
+        if self.phase in picking and self.target_brick is not None:
+            self.jams += 1
+            self._mark_failure(scene, self.target_brick)
+            self.cycle_outcomes.append(False)
+            self._give_up = True
+            self.phase = oracle.Phase.REOPEN
+            return True
+        return False
+
     def _end_push(self) -> None:
         """Count the push or rake that just ended and scan again at HOVER."""
         if self.push.part is None:
@@ -765,6 +793,7 @@ class HeapOracle(oracle.EnvOracle):
             "cycles": self.cycles,
             "pushes": self.pushes,
             "rakes": self.rakes,
+            "jams": self.jams,
             "tips": self.tips,
             "tips_ok": self.tips_ok,
             "forced_picks": self.forced_picks,

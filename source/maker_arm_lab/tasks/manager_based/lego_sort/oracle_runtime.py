@@ -1798,6 +1798,13 @@ class OracleRig:
                 tripped = float(tracking) >= WATCHDOG_TRACKING_TOL_RAD
             self.watchdog_strikes[i] = self.watchdog_strikes[i] + 1 if tripped else 0
             if self.watchdog_strikes[i] >= WATCHDOG_TRIP_STRIKES:
+                # MS7a tray: an oracle that can give up the jammed leg instead of the episode
+                # says so (HeapOracle.recover_from_jam); every other oracle abandons as before.
+                recover = getattr(self.oracles[i], "recover_from_jam", None)
+                if recover is not None and recover(self.snapshot(i)):
+                    self.watchdog_strikes[i] = 0
+                    self._enter_phase(i, self.snapshot(i))
+                    continue
                 self.abandoned[i] = True
                 self.goals[i] = None
                 if self.stats[i]["abandon"] is None:
