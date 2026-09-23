@@ -197,6 +197,7 @@ class HeapOracle(oracle.EnvOracle):
         self.rakes = 0
         self.raked: dict[int, int] = {}
         self.jams = 0
+        self.push_takeover = False  # set by aim_push: this oracle runs one push, then idles
         self.tips = 0
         self.tips_ok = 0
         self.forced_picks = 0
@@ -475,6 +476,15 @@ class HeapOracle(oracle.EnvOracle):
         if self.push is None or self.push.jaw is None:
             return None
         return self.push.jaw - math.pi / 2
+
+    def aim_push(self, push: Push) -> None:
+        """Enter the push phases on ``push`` from the HOVER that ``resume`` left pending: the
+        heap loop's oracle driver runs a rake its selector planned as a takeover of its own
+        (``OracleRig.resume(push=...)``), which ends back at HOVER."""
+        self.push = push
+        self.push_takeover = True
+        self.target_brick = None
+        self.phase = oracle.Phase.PUSH_HOVER
 
     def _turn_rake_jaw(self) -> bool:
         """The rig could not plan the rake's hover at this jaw heading: take the next one.

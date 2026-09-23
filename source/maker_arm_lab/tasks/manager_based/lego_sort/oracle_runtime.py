@@ -876,6 +876,8 @@ class OracleRig:
                 # the brick sorted if it arrived; hand the env back instead of the next HOVER.
                 self._go_idle(i, brick in orc.sorted_bricks)
                 continue
+            if self._push_takeover_over(i):
+                continue
             self._enter_phase(i, scene, ending_phase=goal.phase)
 
     def _phase_result(self, i: int, goal: oracle.Goal) -> oracle.PhaseResult | None:
@@ -1594,13 +1596,15 @@ class OracleRig:
             if not idle:
                 self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE
 
-    def resume(self, i: int, target: int | None = None) -> bool:
+    def resume(self, i: int, target: int | None = None, push=None) -> bool:
         """Take idle env ``i`` over from the policy for one brick cycle (MS4 c2 design 6.2).
 
         Returns False, and leaves the env idle, when the oracle answers DONE or ABANDON at
         entry or the first leg cannot be planned. With ``target`` (the heap outer loop, phase
         B design 5.5) a takeover that holds nothing works that part instead of letting HOVER
-        select; it is declined when no grasp ranks on the part any more.
+        select; it is declined when no grasp ranks on the part any more. With ``push`` (a
+        ``HeapOracle.Push``, MS7a tray) the takeover runs that one push or rake instead and
+        hands the env back when it ends (``_push_takeover_over``).
         """
         if not self.idle[i]:
             raise RuntimeError(f"env {i} is not idle")
@@ -1648,7 +1652,12 @@ class OracleRig:
             self._go_idle(i, None)
             return False
         orc.resume(scene, held)
-        if target is not None and held < 0 and not orc.aim_hover_at(scene, target):
+        if push is not None:
+            if held >= 0:
+                self._go_idle(i, None)
+                return False
+            orc.aim_push(push)
+        elif target is not None and held < 0 and not orc.aim_hover_at(scene, target):
             self._go_idle(i, None)
             return False
         self.brick_start[i] = self._brick_pos(i, held) if held >= 0 else None
@@ -1659,6 +1668,19 @@ class OracleRig:
         if self.goals[i] is None or self.unplanned[i]:
             self._go_idle(i, None)
             return False
+        return True
+
+    def _push_takeover_over(self, i: int) -> bool:
+        """A takeover that ran one push (``resume(push=...)``) ends when its oracle is back
+        at HOVER with no target; hand the env back so the loop selects again."""
+        orc = self.oracles[i]
+        if not self.single_cycle[i] or getattr(orc, "push", None) is not None:
+            return False
+        if orc.phase != oracle.Phase.HOVER or orc.target_brick is not None:
+            return False
+        if not getattr(orc, "push_takeover", False):
+            return False
+        self._go_idle(i, None)
         return True
 
     def _go_idle(self, i: int, stowed: bool | None) -> None:
@@ -1803,7 +1825,8 @@ class OracleRig:
                 recover = getattr(self.oracles[i], "recover_from_jam", None)
                 if recover is not None and recover(self.snapshot(i)):
                     self.watchdog_strikes[i] = 0
-                    self._enter_phase(i, self.snapshot(i))
+                    if not self._push_takeover_over(i):
+                        self._enter_phase(i, self.snapshot(i))
                     continue
                 self.abandoned[i] = True
                 self.goals[i] = None

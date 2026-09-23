@@ -1153,3 +1153,32 @@ def test_the_release_selection_waits_for_nothing_after_the_teachers_stow():
     # on the step the cycle closes.
     assert ep["cycle_reasons"] == ["stowed"] * 3
     assert [r["wait_steps"] for r in ep["cycle_census"]] == [0, 0, 0]
+
+
+def test_the_oracle_driver_runs_a_tray_rake_as_its_own_takeover(monkeypatch):
+    """MS7a tray: a 2x4 brick at yaw 45 degrees 25 mm off the left wall has no grasp under a
+    20 degree band, so the selector plans a rake instead of a target. The oracle driver runs
+    it as a takeover of its own, books it in the selector, and then picks the freed brick."""
+    from maker_arm_lab.core import grasp, parts
+
+    monkeypatch.setattr(grasp, "WALL_BAND_RAD", math.radians(20.0))
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    brick = [parts.make_part("brick", 2, 4)]
+    env = MjLegoSortEnv(
+        1, draw, parts=brick, cameras=False, episode_length_s=loop.episode_length_s(3), tray=True
+    )
+    env.reset(seed=11)
+    rng = random.Random(1)
+
+    def factory(i, bl, episode_draw):
+        return HeapOracle(bl, env.parts, 0, episode_draw, rng=rng, cycle_budget=3, tray=env.tray)
+
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)
+    (_, _), (y0, _) = layout.tray_bounds()
+    _place(env, [(layout.TRAY_CENTER[0], y0 + 0.025, 0.0049, math.radians(45.0))])
+    payload = _rollout(env, rig, None, budget=3)
+    env.close()
+    ep = payload["episodes"][0]
+    assert ep["rakes"] >= 1 and payload["rakes"] == ep["rakes"]
+    assert ep["bricks_stowed"] == 1 and ep["cycle_outcomes"][-1] is True, ep

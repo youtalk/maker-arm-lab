@@ -520,6 +520,7 @@ class EnvState:
     done_reason: str | None = None
     idle_since: int | None = None  # the step the last cycle closed at, None before the first
     select_wait_steps: int = 0  # steps spent waiting for the retreat before a selection
+    rakes: int = 0  # MS7a tray: rakes the oracle driver ran between cycles
     preselected: tuple | None = None  # the rig's RELEASE pre-selection a takeover handed back
 
 
@@ -906,6 +907,15 @@ def rollout(
                     continue
             scene = rig.snapshot(i)
             target = _select(st, scene)
+            rake = getattr(st.selector, "push", None)
+            if target is None and policy is None and rake is not None and rake.part is not None:
+                # MS7a tray: no grasp ranks and the teacher planned a rake off a wall. The
+                # oracle driver runs it as a takeover of its own, not a cycle, and the
+                # selector books it (its per-part and per-episode caps), then selects again.
+                st.selector._end_push()
+                st.rakes += 1
+                rig.resume(i, push=rake)
+                continue
             if target is None:
                 loop_done[i] = True
                 st.done_reason = (
@@ -1159,6 +1169,7 @@ def rollout(
                 "takeovers_stowed": st.takeovers_stowed,
                 "takeovers_failed": st.takeovers_failed,
                 "select_wait_steps": st.select_wait_steps,
+                "rakes": st.rakes,
             }
         )
     steps_total = sum(e["steps"] for e in episodes)
@@ -1190,6 +1201,7 @@ def rollout(
         "takeovers": sum(e["takeovers"] for e in episodes),
         "takeovers_stowed": sum(e["takeovers_stowed"] for e in episodes),
         "takeovers_failed": sum(e["takeovers_failed"] for e in episodes),
+        "rakes": sum(e["rakes"] for e in episodes),
         "triggers": {} if triggers is None else dict(triggers.counts),
         "takeovers_declined": 0 if triggers is None else triggers.declined,
         "clamp_fraction": (
