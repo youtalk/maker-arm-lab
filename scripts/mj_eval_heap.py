@@ -141,6 +141,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         "LIFT and carries the part to its own box (loop.SCRIPTED_PLACE_RISE); needs the server",
     )
     parser.add_argument(
+        "--scripted_rake",
+        action="store_true",
+        help="MS7a tray: when the loop finds no target but the teacher would rake a part off a "
+        "wall, the rig runs that rake and hands the env back to the policy; needs the server",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -239,6 +245,7 @@ def main(argv=None) -> int:
             close_gate=args.close_gate,
             square_wrist=args.square_wrist,
             scripted_place=args.scripted_place,
+            scripted_rake=args.scripted_rake,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

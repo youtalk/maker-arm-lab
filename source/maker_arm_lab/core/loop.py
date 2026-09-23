@@ -31,8 +31,11 @@ levers applied in that order, gate first; ``square_wrist`` turns the wrist roll 
 the served row's closing axis on the final approach (``squared_roll``). A seventh,
 ``scripted_place`` (MS7a design, the fallback), hands the cycle to the teacher once the policy
 holds a part ``SCRIPTED_PLACE_RISE`` above where it lay: the rig resumes at LIFT and carries
-the part to its own box (``OracleRig.resume`` with ``start_z``). The payload's ``inference``
-block records all seven.
+the part to its own box (``OracleRig.resume`` with ``start_z``). An eighth, ``scripted_rake``
+(MS7a tray), runs the teacher's rake when the selector finds no target but plans a rake off a
+tray wall, as the oracle driver always does, and hands the env back to the policy: the policy
+never learned to rake, so without it a read ends at the first wall-stuck state. The payload's
+``inference`` block records all eight.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
@@ -799,12 +802,13 @@ def rollout(
     close_gate: bool = False,
     square_wrist: bool = False,
     scripted_place: bool = False,
+    scripted_rake: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
     ``policy`` is a ``policy_client.ServerPolicy`` or None for the oracle driver.
     ``takeover`` is a ``TakeoverConfig`` (the DAgger mode, phase B design 5.5) or None.
-    The seven switches are the module docstring's; ``replan_on_switch`` needs a policy whose
+    The eight switches are the module docstring's; ``replan_on_switch`` needs a policy whose
     ``step`` takes ``replan``, and the flag is left off the wire when the switch is off;
     ``squeeze_floor``, ``close_gate`` and ``square_wrist`` need the continuous gripper and a
     served target row.
@@ -842,6 +846,8 @@ def rollout(
         raise EvalFailure("takeover", "the takeover triggers need a policy to take over from")
     if scripted_place and policy is None:
         raise EvalFailure("scripted_place", "the scripted place takes over from a policy")
+    if scripted_rake and policy is None:
+        raise EvalFailure("scripted_rake", "the scripted rake serves a policy; the driver rakes")
     ctx_target = getattr(env, "context_target", None)
     # MS7a desk boxes: one destination box per part, and the served box part follows the target.
     per_part = torch.as_tensor(env.destination_bins).dim() == 2
@@ -888,6 +894,7 @@ def rollout(
         "close_gate": bool(close_gate),
         "square_wrist": bool(square_wrist),
         "scripted_place": bool(scripted_place),
+        "scripted_rake": bool(scripted_rake),
     }
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
@@ -968,10 +975,12 @@ def rollout(
             scene = rig.snapshot(i)
             target = _select(st, scene)
             rake = getattr(st.selector, "push", None)
-            if target is None and policy is None and rake is not None and rake.part is not None:
+            raking = policy is None or scripted_rake
+            if target is None and raking and rake is not None and rake.part is not None:
                 # MS7a tray: no grasp ranks and the teacher planned a rake off a wall. The
-                # oracle driver runs it as a takeover of its own, not a cycle, and the
-                # selector books it (its per-part and per-episode caps), then selects again.
+                # oracle driver (and a policy under ``scripted_rake``) runs it as a takeover of
+                # its own, not a cycle, and the selector books it (its per-part and per-episode
+                # caps), then selects again.
                 st.selector._end_push()
                 st.rakes += 1
                 rig.resume(i, push=rake)

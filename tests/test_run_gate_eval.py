@@ -933,3 +933,27 @@ def test_a_pass_through_the_scripted_place_is_its_own_outcome(tmp_path):
     (cfg.out_dir / "eval_000.json").unlink()
     results = ge.run_gate(cfg, run_eval=lambda d: _heap_payload(d), start_server=server)
     assert results["gate"]["outcome"] == "PASS" and draw.process_index == 0
+
+
+def test_the_scripted_rake_reaches_the_heap_client_only_and_keys_the_cache(
+    tmp_path, monkeypatch, capsys
+):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
+    argv += ["--threshold", "0.7", "--seed", "1"]
+    heap = ["--backend", "mujoco", "--heap_k", "50", "--tray"]
+    cfg = ge._build_cfg(ge._parse_args(argv + heap + ["--scripted_rake"]))
+    draw = ge.make_eval_draws(1, 1)[0]
+    assert "--scripted_rake" in ge._eval_command(cfg, draw)
+    assert ge.loop_switches(cfg.client_flags)["scripted_rake"] is True
+    plain = ge._build_cfg(ge._parse_args(argv + heap))
+    assert "--scripted_rake" not in ge._eval_command(plain, draw)
+    cfg.out_dir.mkdir()
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    for on, hit in ((True, True), (False, False)):
+        loop = {name: False for name in ge.LOOP_SWITCHES} | {"scripted_rake": on}
+        payload = _heap_payload(draw, tray=True, inference={**served, "loop": loop})
+        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        assert (ge._cached_payload(cfg, draw) is not None) is hit
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(argv + ["--backend", "isaac", "--scripted_rake"]) == 2
+    assert "--scripted_rake" in capsys.readouterr().err

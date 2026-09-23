@@ -1128,6 +1128,7 @@ def test_the_switches_select_at_once_after_a_budget_end_refresh_at_a_reopen_and_
         "close_gate": False,
         "square_wrist": False,
         "scripted_place": False,
+        "scripted_rake": False,
     }
     # Every cycle ended on its budget, so no selection waited for a retreat.
     assert ep["cycle_reasons"] == ["budget"] * 3 and ep["select_wait_steps"] == 0
@@ -1183,3 +1184,53 @@ def test_the_oracle_driver_runs_a_tray_rake_as_its_own_takeover(monkeypatch):
     ep = payload["episodes"][0]
     assert ep["rakes"] >= 1 and payload["rakes"] == ep["rakes"]
     assert ep["bricks_stowed"] == 1 and ep["cycle_outcomes"][-1] is True, ep
+
+
+def _stuck_tray_env_and_rig(monkeypatch):
+    """One 2x4 brick at yaw 45 degrees 25 mm off the left wall of the tray: under a 20 degree
+    band no grasp ranks, so the selector plans a rake instead of naming a target."""
+    from maker_arm_lab.core import grasp, parts
+
+    monkeypatch.setattr(grasp, "WALL_BAND_RAD", math.radians(20.0))
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(
+        1,
+        draw,
+        parts=[parts.make_part("brick", 2, 4)],
+        cameras=False,
+        episode_length_s=loop.episode_length_s(3),
+        tray=True,
+    )
+    env.reset(seed=11)
+    rng = random.Random(1)
+
+    def factory(i, bl, episode_draw):
+        return HeapOracle(bl, env.parts, 0, episode_draw, rng=rng, cycle_budget=3, tray=env.tray)
+
+    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)
+    (_, _), (y0, _) = layout.tray_bounds()
+    _place(env, [(layout.TRAY_CENTER[0], y0 + 0.025, 0.0049, math.radians(45.0))])
+    return env, rig
+
+
+def test_the_scripted_rake_frees_a_wall_stuck_part_for_the_policy(monkeypatch):
+    """A policy read stops at the first wall-stuck state; with --scripted_rake the rig runs
+    the teacher's rake, hands the env back, and the loop opens a cycle on the freed part."""
+    env, rig = _stuck_tray_env_and_rig(monkeypatch)
+    plain = _rollout(env, rig, _HoldPolicy(), budget=3)["episodes"][0]
+    assert plain["rakes"] == 0 and plain["cycles"] == 0 and plain["done_reason"] == "no_candidate"
+    env.close()
+    env, rig = _stuck_tray_env_and_rig(monkeypatch)
+    payload = _rollout(env, rig, _HoldPolicy(), budget=3, scripted_rake=True)
+    env.close()
+    ep = payload["episodes"][0]
+    assert ep["rakes"] >= 1 and payload["inference"]["loop"]["scripted_rake"] is True
+    assert ep["cycles"] >= 1 and ep["cycle_targets"][0] == 0  # the policy's turn, on the part
+    assert ep["takeovers"] == 0  # a rake is not a pick takeover
+    with pytest.raises(loop.EvalFailure, match="scripted_rake"):
+        env, rig = _stuck_tray_env_and_rig(monkeypatch)
+        try:
+            _rollout(env, rig, None, budget=3, scripted_rake=True)
+        finally:
+            env.close()

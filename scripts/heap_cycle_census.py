@@ -37,7 +37,14 @@ def read_payloads(paths: list[Path]) -> dict:
     classes: Counter = Counter()
     closes: dict[str, list[int]] = defaultdict(lambda: [0, 0])  # bin -> [stowed, cycles]
     steps: dict[str, list[int]] = defaultdict(list)  # end reason -> cycle steps
-    summary = {"draws": len(paths), "episodes": 0, "parts_total": 0, "parts_stowed": 0, "cycles": 0}
+    summary = {
+        "draws": len(paths),
+        "episodes": 0,
+        "parts_total": 0,
+        "parts_stowed": 0,
+        "cycles": 0,
+        "rakes": 0,
+    }
     target_stows = other_stows = unaligned = 0
     # MS7a desk boxes: parts stowed in their own box and parts in total, per class and per box.
     by_class: dict[str, list[int]] = defaultdict(lambda: [0, 0])
@@ -51,6 +58,7 @@ def read_payloads(paths: list[Path]) -> dict:
             summary["parts_total"] += int(ep["num_bricks"])
             summary["parts_stowed"] += int(ep["bricks_stowed"])
             summary["cycles"] += int(ep["cycles"])
+            summary["rakes"] += int(ep.get("rakes", 0))  # MS7a tray: they run between cycles
             classes.update(ep["cycle_classes"])
             for name, row in ep.get("stowed_by_class", {}).items():
                 by_class[name][0] += row["stowed"]

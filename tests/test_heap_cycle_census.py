@@ -42,6 +42,9 @@ def test_the_census_sums_classes_stows_closes_and_steps(tmp_path):
     ]
     s = census.read_payloads(paths)
     assert (s["draws"], s["episodes"], s["cycles"]) == (2, 2, 8)
+    assert s["rakes"] == 0  # payloads before the MS7a tray carry none
+    raked = census.read_payloads([_write(tmp_path, "eval_002.json", [_episode(rakes=3)])])
+    assert raked["rakes"] == 3
     assert (s["parts_total"], s["parts_stowed"], s["stowed_fraction"]) == (100, 5, 0.05)
     assert s["classes"]["stowed"] == {"cycles": 4, "share": 0.5}
     assert s["classes"]["no_close"]["cycles"] == 2 and s["classes"]["close_miss"]["cycles"] == 2

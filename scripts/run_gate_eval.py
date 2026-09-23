@@ -102,6 +102,7 @@ LOOP_SWITCHES = (
     "close_gate",
     "square_wrist",
     "scripted_place",
+    "scripted_rake",
 )
 """The heap loop's protocol switches (core.loop.rollout); the client records them in the
 payload's inference block under "loop", and the cache matches on them."""
@@ -696,6 +697,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--scripted_place; a pass is reported as 'PASS (scripted place)'",
     )
     parser.add_argument(
+        "--scripted_rake",
+        action="store_true",
+        help="MuJoCo heap only: forwarded to the heap client as --scripted_rake, which runs the "
+        "teacher's rake off a tray wall where the policy's loop finds no target",
+    )
+    parser.add_argument(
         "--client_flags",
         type=str,
         default="",
@@ -711,6 +718,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError("--gripper continuous needs --heap_k > 0 and --backend mujoco")
     if args.scripted_place and (args.heap_k <= 0 or args.backend != "mujoco"):
         raise ValueError("--scripted_place needs --heap_k > 0 and --backend mujoco")
+    if args.scripted_rake and (args.heap_k <= 0 or args.backend != "mujoco"):
+        raise ValueError("--scripted_rake needs --heap_k > 0 and --backend mujoco")
     if args.desk_boxes and (args.heap_k <= 0 or args.backend != "mujoco" or args.desk_boxes < 0):
         # Only the MuJoCo heap client builds desk boxes (MS7a design, desk boxes).
         raise ValueError("--desk_boxes needs a positive count, --heap_k > 0 and --backend mujoco")
@@ -755,7 +764,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         desk_boxes=args.desk_boxes,
         tray=args.tray,
         client_flags=tuple(shlex.split(args.client_flags))
-        + (("--scripted_place",) if args.scripted_place else ()),
+        + (("--scripted_place",) if args.scripted_place else ())
+        + (("--scripted_rake",) if args.scripted_rake else ()),
     )
 
 
