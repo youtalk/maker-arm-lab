@@ -45,6 +45,13 @@ EXTEND has no plan at all (the tool leans toward +x, ``core.global_ik``). The ba
 3 cm from every failed cell. Its lower |y| is the corridor's: a box yawed 45 degrees at |y|
 0.18 already comes within DESK_BOX_CLEARANCE of the tray's side wall.
 
+Certified by ``scripts/mj_release_envelope_check.py`` on Machine A, 2026-09-23: the band's
+four corners and its centre, both sides, box yaw -45 and +45 degrees, part yaw 0, 45, 90 and
+-45 degrees, continuous gripper, release at ``release_z()`` 0.10 m. brick_2x4, brick_1x2x5
+and brick_2x7 each landed 80 of 80 with EXTEND converged: EXTEND residual at most 1.19 mm,
+RETREAT's at most 0.78 mm, landing at most 21 mm from the box centre, no arm geom touching a
+box, tightest joint 0.039 rad from its stop at the release.
+
 Two boxes on one side fill it: 1.6 % of joint draws are clear (0.92 for one box), and the
 clear ones lean to small yaws, 19 % over 30 degrees against 33 % for a uniform yaw."""
 DESK_BOX_CLEARANCE = 0.015
