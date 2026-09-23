@@ -346,3 +346,80 @@ def test_a_part_carried_into_another_box_is_a_wrong_box_cycle_and_never_stowed()
     assert ep["stowed_by_box"][1] == {"stowed": 0, "total": 3}
     assert ep["stowed_by_class"]["wide"] == {"stowed": 0, "total": 2}
     assert payload["wrong_box_parts"] == 3 and payload["wrong_box_cycles"] == 3
+
+
+def _lift_until(rig, env, part, rise):
+    """Drive the teacher until ``part`` is held ``rise`` above where it lay."""
+    start = float(env.scene[f"brick_{part}"].data.root_pos_w[0, 2])
+    for _ in range(3000):
+        rig.step()
+        z = float(env.scene[f"brick_{part}"].data.root_pos_w[0, 2])
+        lifting = rig.goals[0] is not None and rig.goals[0].phase == oracle.Phase.LIFT
+        if lifting and z - start >= rise:
+            return start
+    raise AssertionError("the teacher never lifted the part")
+
+
+def test_the_rig_carries_on_a_part_the_policy_lifted_when_given_the_start_heights():
+    env, rig = _teacher_env_and_rig(4, FIXED, gripper_mode="continuous")
+    _place(env, [SPREAD[1], (0.6, 0.3, 0.006, 0.0), (0.6, -0.3, 0.006, 0.0)])
+    start = _lift_until(rig, env, 0, loop.SCRIPTED_PLACE_RISE)
+    rig._go_idle(0, None)
+    assert not rig.resume(0)  # RULING P32: a carry above LIFT_HEIGHT - LIFT_MIN_RISE
+    start_z = torch.tensor([start, 0.0, 0.0])
+    assert rig.resume(0, start_z=start_z) and rig.goals[0].phase == oracle.Phase.LIFT
+    for _ in range(1500):
+        rig.step()
+        if rig.idle[0]:
+            break
+    stowed = per_brick_stowed(env)[0].tolist()
+    env.close()
+    assert rig.takeover_result[0] is True and stowed[0]
+
+
+class _TeacherPolicy:
+    """A policy that is the teacher: a second rig on the same env, whose action is served."""
+
+    def __init__(self, env, factory):
+        self.context_dim = 0
+        self.policy_id = "fake:teacher"
+        self.n_action_steps = 1
+        self.inference = {}
+        self.action_space = "absolute"
+        self.gripper = env.gripper_mode
+        self.rig = OracleRig(
+            env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(2), oracle_factory=factory
+        )
+        self.stepped = False
+
+    def step(self, state, wrist, overhead, context=None, anchor=None):
+        if self.stepped:
+            self.rig.observe(torch.zeros(state.shape[0], dtype=torch.bool))
+        self.stepped = True
+        return self.rig.actions().numpy()
+
+
+@pytest.mark.parametrize("scripted", [False, True])
+def test_the_scripted_place_hands_a_lifted_part_to_the_teacher(scripted):
+    env, rig = _teacher_env_and_rig(
+        4, FIXED, gripper_mode="continuous", episode_length_s=loop.episode_length_s(4)
+    )
+    _place(env, [SPREAD[1], (0.6, 0.3, 0.006, 0.0), (0.6, -0.3, 0.006, 0.0)])
+    payload = loop.rollout(
+        env,
+        rig,
+        _TeacherPolicy(env, rig.oracle_factory),
+        run_seed=11,
+        layout_seed=5,
+        permutation=(0, 1, 2, 3),
+        cycle_budget=4,
+        max_wall_minutes=5.0,
+        scripted_place=scripted,
+    )
+    env.close()
+    ep = payload["episodes"][0]
+    assert payload["inference"]["loop"]["scripted_place"] is scripted
+    assert ep["takeovers"] == int(scripted)
+    # One part in reach, two out of it: one cycle, and the teacher's carry stows it.
+    assert ep["cycle_targets"] == [0] and ep["cycle_reasons"] == ["stowed"], ep
+    assert ep["bricks_stowed"] == 1

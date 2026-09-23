@@ -101,6 +101,7 @@ LOOP_SWITCHES = (
     "squeeze_floor",
     "close_gate",
     "square_wrist",
+    "scripted_place",
 )
 """The heap loop's protocol switches (core.loop.rollout); the client records them in the
 payload's inference block under "loop", and the cache matches on them."""
@@ -574,6 +575,12 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
         if results["gate"]["episodes"]
         else None
     )
+    # MS7a design, the fallback: a pass through the scripted place is its own outcome.
+    scripted = "--scripted_place" in cfg.client_flags
+    results["gate"]["scripted_place"] = scripted
+    results["gate"]["outcome"] = (
+        ("PASS (scripted place)" if scripted else "PASS") if results["gate"]["passed"] else "FAIL"
+    )
     (cfg.out_dir / "gate_results.json").write_text(json.dumps(results, indent=2))
     token = "GATE_OK" if results["gate"]["passed"] else "GATE_FAIL"
     print(
@@ -683,6 +690,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "tray (MS7a)",
     )
     parser.add_argument(
+        "--scripted_place",
+        action="store_true",
+        help="MuJoCo heap only: the MS7a fallback read, forwarded to the heap client as "
+        "--scripted_place; a pass is reported as 'PASS (scripted place)'",
+    )
+    parser.add_argument(
         "--client_flags",
         type=str,
         default="",
@@ -696,6 +709,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
     if args.gripper != "binary" and (args.heap_k <= 0 or args.backend != "mujoco"):
         # Only the MuJoCo heap client drives a continuous gripper (phase B design 5.4).
         raise ValueError("--gripper continuous needs --heap_k > 0 and --backend mujoco")
+    if args.scripted_place and (args.heap_k <= 0 or args.backend != "mujoco"):
+        raise ValueError("--scripted_place needs --heap_k > 0 and --backend mujoco")
     if args.desk_boxes and (args.heap_k <= 0 or args.backend != "mujoco" or args.desk_boxes < 0):
         # Only the MuJoCo heap client builds desk boxes (MS7a design, desk boxes).
         raise ValueError("--desk_boxes needs a positive count, --heap_k > 0 and --backend mujoco")
@@ -739,7 +754,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         gripper=args.gripper,
         desk_boxes=args.desk_boxes,
         tray=args.tray,
-        client_flags=tuple(shlex.split(args.client_flags)),
+        client_flags=tuple(shlex.split(args.client_flags))
+        + (("--scripted_place",) if args.scripted_place else ()),
     )
 
 

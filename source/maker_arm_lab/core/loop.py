@@ -28,8 +28,11 @@ teacher's REOPEN refresh; ``squeeze_floor`` caps a closing gap command at the te
 set point (``floored_gap``) and ``close_gate`` holds the jaws at the landing gap while the
 pick point is still descending onto the target (``gated_gap``), two serving-side gripper
 levers applied in that order, gate first; ``square_wrist`` turns the wrist roll command toward
-the served row's closing axis on the final approach (``squared_roll``). The payload's
-``inference`` block records all six.
+the served row's closing axis on the final approach (``squared_roll``). A seventh,
+``scripted_place`` (MS7a design, the fallback), hands the cycle to the teacher once the policy
+holds a part ``SCRIPTED_PLACE_RISE`` above where it lay: the rig resumes at LIFT and carries
+the part to its own box (``OracleRig.resume`` with ``start_z``). The payload's ``inference``
+block records all seven.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
@@ -93,6 +96,9 @@ points, while one fixed threshold cannot: across the catalog the landings span 1
 47.8 mm and the closes 1.8 to 33.8 mm. An env with no cycle has no w. Half the full gap
 keeps a fully open coast reading open and a zero command reading closed. Triggers and
 duty-cycle stats read the threshold; the metric never does."""
+SCRIPTED_PLACE_RISE = oracle.LIFT_MIN_RISE
+"""m: ``scripted_place`` hands the cycle over once a held part rose this far above where it lay
+when the cycle opened: the first hold plus a 5 cm lift (MS7a design, the fallback)."""
 HALF_BUDGET_NO_LIFT = "half_budget_no_lift"
 """The heap trigger of phase B design 5.5: the cycle is at half its step budget with no lift.
 No lift means the jaws hold nothing, or hold a part that has not risen ``oracle.LIFT_MIN_RISE``
@@ -792,12 +798,13 @@ def rollout(
     squeeze_floor: bool = False,
     close_gate: bool = False,
     square_wrist: bool = False,
+    scripted_place: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
     ``policy`` is a ``policy_client.ServerPolicy`` or None for the oracle driver.
     ``takeover`` is a ``TakeoverConfig`` (the DAgger mode, phase B design 5.5) or None.
-    The six switches are the module docstring's; ``replan_on_switch`` needs a policy whose
+    The seven switches are the module docstring's; ``replan_on_switch`` needs a policy whose
     ``step`` takes ``replan``, and the flag is left off the wire when the switch is off;
     ``squeeze_floor``, ``close_gate`` and ``square_wrist`` need the continuous gripper and a
     served target row.
@@ -833,6 +840,8 @@ def rollout(
             )
     if takeover is not None and policy is None:
         raise EvalFailure("takeover", "the takeover triggers need a policy to take over from")
+    if scripted_place and policy is None:
+        raise EvalFailure("scripted_place", "the scripted place takes over from a policy")
     ctx_target = getattr(env, "context_target", None)
     # MS7a desk boxes: one destination box per part, and the served box part follows the target.
     per_part = torch.as_tensor(env.destination_bins).dim() == 2
@@ -878,6 +887,7 @@ def rollout(
         "squeeze_floor": bool(squeeze_floor),
         "close_gate": bool(close_gate),
         "square_wrist": bool(square_wrist),
+        "scripted_place": bool(scripted_place),
     }
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
@@ -1023,6 +1033,23 @@ def rollout(
             if triggers is not None:
                 grip_open = grip_open_flags(policy_action[:, 6], gripper_mode, close_below)
                 triggers.offer(env, rig, states, tracker, grip_open, held, pos, ordinal, step)
+            if scripted_place:
+                for i, st in enumerate(states):
+                    c, h = st.cycle, int(held[i])
+                    if c is None or c.taken_over or not rig.idle[i] or bool(tracker.done[i]):
+                        continue
+                    if h >= 0 and float(pos[i, h, 2] - c.start_z[h]) >= SCRIPTED_PLACE_RISE:
+                        _take_over(
+                            rig,
+                            env,
+                            st,
+                            i,
+                            ordinal,
+                            reason="scripted_place",
+                            holding=True,
+                            start_z=c.start_z,
+                        )
+                        c.taken_over = True  # one scripted place a cycle, taken or declined
         # 3. Compose: the rig's row where it drives, the policy's where the rig is idle.
         rig_action = rig.actions().to("cpu")
         action_cpu = rig_action.clone()
@@ -1320,7 +1347,15 @@ def _close_cycle_unmarked(st: EnvState, step: int) -> None:
 
 
 def _take_over(
-    rig, env, st: EnvState, i: int, ordinal: list[int], *, reason: str, holding: bool = False
+    rig,
+    env,
+    st: EnvState,
+    i: int,
+    ordinal: list[int],
+    *,
+    reason: str,
+    holding: bool = False,
+    start_z=None,
 ) -> bool:
     """Hand env ``i`` to the rig on the loop's target; False when the rig declines.
 
@@ -1330,8 +1365,10 @@ def _take_over(
     six-brick behavior: the cycle runs on and the caller's cooldown spaces the next trigger.
     ``OracleRig.resume`` declines most of a correct carry (RULING P32: a part above
     ``LIFT_HEIGHT - LIFT_MIN_RISE``), and ending the cycle there would spend it and mark the
-    failure memory at a point in the air."""
-    if rig.resume(i, target=st.cycle.target):
+    failure memory at a point in the air. ``start_z`` is the scripted place's: the cycle's part
+    heights at its open, from which the rig's LIFT measures the held part's rise."""
+    lifted = {} if start_z is None else {"start_z": start_z}
+    if rig.resume(i, target=st.cycle.target, **lifted):
         st.cycle.taken_over = True
         ordinal[i] += 1
         st.takeovers += 1

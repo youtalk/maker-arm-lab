@@ -1596,7 +1596,7 @@ class OracleRig:
             if not idle:
                 self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE
 
-    def resume(self, i: int, target: int | None = None, push=None) -> bool:
+    def resume(self, i: int, target: int | None = None, push=None, start_z=None) -> bool:
         """Take idle env ``i`` over from the policy for one brick cycle (MS4 c2 design 6.2).
 
         Returns False, and leaves the env idle, when the oracle answers DONE or ABANDON at
@@ -1605,6 +1605,12 @@ class OracleRig:
         select; it is declined when no grasp ranks on the part any more. With ``push`` (a
         ``HeapOracle.Push``, MS7a tray) the takeover runs that one push or rake instead and
         hands the env back when it ends (``_push_takeover_over``).
+
+        ``start_z`` (K,), the part heights when the loop's cycle opened, is the scripted place
+        of MS7a: LIFT then measures a held part's rise from where it lay, not from its live
+        height, so a part the policy already lifted past RULING P32's line is carried on
+        instead of declined. The resumed LIFT holds it at LIFT_HEIGHT above the desk, and the
+        rise from the desk clears LIFT_MIN_RISE, so no reopen drops it.
         """
         if not self.idle[i]:
             raise RuntimeError(f"env {i} is not idle")
@@ -1632,7 +1638,12 @@ class OracleRig:
         right = self.right_brick.data.force_matrix_w[i, 0].norm(dim=-1)
         held = int(held_brick_from_forces(left[None], right[None], HELD_MIN_FORCE)[0])
         scene = self.snapshot(i)
-        if held >= 0 and float(scene.brick_pos[held, 2]) > oracle.LIFT_HEIGHT - LIFT_MIN_RISE:
+        lifted_from = None if start_z is None or held < 0 else float(start_z[held])
+        if (
+            held >= 0
+            and lifted_from is None
+            and float(scene.brick_pos[held, 2]) > oracle.LIFT_HEIGHT - LIFT_MIN_RISE
+        ):
             # RULING P32, tightened on re-review: decline a carry the clamped LIFT target
             # cannot clear LIFT_MIN_RISE from. A takeover may only enter LIFT from a carry low
             # enough that the clamped target still clears the rise gate -- the LIFT entry this
@@ -1661,6 +1672,8 @@ class OracleRig:
             self._go_idle(i, None)
             return False
         self.brick_start[i] = self._brick_pos(i, held) if held >= 0 else None
+        if lifted_from is not None:
+            self.brick_start[i][2] = lifted_from
         self.idle[i] = False
         self.single_cycle[i] = True
         self.takeover_result[i] = None

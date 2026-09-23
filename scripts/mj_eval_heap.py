@@ -135,6 +135,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         "approach, before the first hold (loop.squared_roll)",
     )
     parser.add_argument(
+        "--scripted_place",
+        action="store_true",
+        help="MS7a fallback: at the cycle's first hold plus a 5 cm lift the teacher resumes at "
+        "LIFT and carries the part to its own box (loop.SCRIPTED_PLACE_RISE); needs the server",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -232,6 +238,7 @@ def main(argv=None) -> int:
             squeeze_floor=args.squeeze_floor,
             close_gate=args.close_gate,
             square_wrist=args.square_wrist,
+            scripted_place=args.scripted_place,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
