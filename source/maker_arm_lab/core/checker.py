@@ -201,6 +201,44 @@ def all_bricks_stowed(
     ).all(dim=-1)
 
 
+def in_boxes(
+    brick_pos_w: torch.Tensor, boxes: torch.Tensor, half_extents: torch.Tensor
+) -> torch.Tensor:
+    """(N,B,M) bool: part b of env n lies inside box m of that env, in the box's own frame.
+
+    For the yawed MS7a desk boxes, where the axis-aligned bins above do not apply.
+
+    Args:
+        brick_pos_w: (N,B,3) part centres, world frame.
+        boxes: (N,M,4) box centre x, y, z and yaw (rad) per env.
+        half_extents: (3,) half extents along the box's own x and y and world z.
+    """
+    d = brick_pos_w.unsqueeze(2) - boxes[:, None, :, :3]  # (N,B,M,3)
+    c, s = torch.cos(boxes[:, None, :, 3]), torch.sin(boxes[:, None, :, 3])  # (N,1,M)
+    local = torch.stack(
+        (c * d[..., 0] + s * d[..., 1], c * d[..., 1] - s * d[..., 0], d[..., 2]), dim=-1
+    )
+    return (local.abs() <= half_extents).all(dim=-1)
+
+
+def parts_at_rest_in_own_boxes(
+    brick_pos_w: torch.Tensor,
+    brick_lin_vel_w: torch.Tensor,
+    boxes: torch.Tensor,
+    half_extents: torch.Tensor,
+    box_ids: torch.Tensor,
+    max_speed: float = 0.02,
+) -> torch.Tensor:
+    """(N,B) bool: part b of env n is at rest inside box ``box_ids[n, b]``, its own box.
+
+    A part at rest in another box is not stowed. ``boxes`` and ``half_extents`` are
+    ``in_boxes``'s; ``box_ids`` is (N,B) long.
+    """
+    inside = in_boxes(brick_pos_w, boxes, half_extents)
+    own = inside.gather(2, box_ids.long().unsqueeze(-1)).squeeze(-1)
+    return own & (brick_lin_vel_w.norm(dim=-1) <= max_speed)
+
+
 def containing_bin(
     brick_pos_w: torch.Tensor,
     brick_lin_vel_w: torch.Tensor,
