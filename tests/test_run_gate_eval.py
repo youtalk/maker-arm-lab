@@ -815,3 +815,37 @@ def test_client_flags_reach_the_mujoco_client_and_the_cache_matches_on_the_switc
     assert ge._cached_payload(cfg, draw) is None
     cfg.client_flags = ()
     assert ge._cached_payload(cfg, draw) is not None
+
+
+def test_desk_boxes_reach_the_heap_client_only_and_split_the_cache(tmp_path):
+    ledger = _fake_ledger(tmp_path)
+    cfg = _cfg(tmp_path, ledger, processes=1, backend="mujoco", heap_k=50)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    assert "--desk_boxes" not in ge._eval_command(cfg, draw)  # the MS6 command is unchanged
+    cfg.desk_boxes = 4
+    cmd = ge._eval_command(cfg, draw)
+    assert cmd[1] == "scripts/mj_eval_heap.py" and cmd[cmd.index("--desk_boxes") + 1] == "4"
+    cfg.out_dir.mkdir(parents=True)
+    path = cfg.out_dir / "eval_000.json"
+    for payload_boxes, hit in ((4, True), (1, False), (None, False)):
+        extra = {} if payload_boxes is None else {"desk_boxes": payload_boxes}
+        path.write_text(json.dumps(_heap_payload(draw, **extra)))
+        assert (ge._cached_payload(cfg, draw) is not None) is hit, payload_boxes
+    cfg.desk_boxes = 0
+    path.write_text(json.dumps(_heap_payload(draw)))  # an MS6 payload predates the key
+    assert ge._cached_payload(cfg, draw) is not None
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [["--backend", "mujoco"], ["--backend", "isaac", "--heap_k", "50"]],
+)
+def test_desk_boxes_refuse_anything_but_the_mujoco_heap(monkeypatch, capsys, tmp_path, extra):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path), "--ledger", "l"]
+    argv += ["--threshold", "0.85", "--seed", "1", "--desk_boxes", "1"]
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(argv + extra) == 2
+    out = capsys.readouterr()
+    assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--desk_boxes" in out.err
+    heap = ["--backend", "mujoco", "--heap_k", "50"]
+    assert ge._build_cfg(ge._parse_args(argv + heap)).desk_boxes == 1

@@ -284,6 +284,7 @@ def run(args: argparse.Namespace) -> dict:
         episode_draws=args.episode_draws,
         frame_jitter=args.frame_jitter,
         gripper_mode=args.gripper,
+        desk_boxes=args.desk_boxes,
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)
@@ -294,11 +295,12 @@ def run(args: argparse.Namespace) -> dict:
         orc = InspectHeapOracle(
             layout_i,
             env.parts,
-            int(env.destination_bins[i]),
+            env.destination_bins[i],
             episode_draw,
             induction=induction,
             rng=rig_rng,
             cycle_budget=args.cycle_budget,
+            boxes=env.desk_box_poses[i],
         )
         holder.append(orc)
         return orc

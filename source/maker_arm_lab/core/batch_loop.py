@@ -164,6 +164,8 @@ def run_meta(
         "parts_split": getattr(args, "parts_split", "train"),
         "cycle_budget": int(getattr(args, "cycle_budget", 0)),
         "gripper": getattr(args, "gripper", "binary"),
+        # MS7a design, desk boxes: 0 is the MS6 scene, the shelf's one heap bin.
+        "desk_boxes": int(getattr(args, "desk_boxes", 0)),
         "parts": None if parts is None else [p.name for p in parts],
         "episode_length_s": (
             episode_length_s
@@ -513,6 +515,14 @@ def add_batch_arguments(parser) -> None:
         default="binary",
         help="MuJoCo only: the gripper contract of the recorded action's seventh column "
         "(MS6 phase B design 5.4): binary is raw >= 0 opens, continuous is the jaw gap in m",
+    )
+    parser.add_argument(
+        "--desk_boxes",
+        type=int,
+        default=0,
+        help="MuJoCo heap only: N desk boxes beside the arm replace the shelf and its heap bin "
+        "(MS7a: 1 for rung 1, 4 for rung 2); the heap drops on the tray footprint. 0 is the MS6 "
+        "scene.",
     )
     parser.add_argument(
         "--episode_length_s",

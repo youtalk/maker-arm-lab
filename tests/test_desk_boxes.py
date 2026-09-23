@@ -1,7 +1,9 @@
 """MS7a desk boxes: the side-band draw, the yawed-box grader and the overhead coverage."""
 
+import argparse
 import itertools
 import math
+import pathlib
 import random
 import types
 
@@ -11,6 +13,7 @@ import pytest
 import torch
 
 from maker_arm_lab.core import (
+    batch_loop,
     cameras,
     checker,
     desk_boxes,
@@ -275,3 +278,39 @@ def test_the_ms6_constructor_path_is_unchanged():
     assert orc.destination == 1 and orc.part_boxes is None and orc.raises
     assert orc.release_tilt == oracle.RELEASE_TILT_RAD
     assert orc.retreat_point == oracle.RETREAT_POINT
+
+
+def test_desk_boxes_is_a_batch_argument_recorded_in_run_meta():
+    parser = argparse.ArgumentParser()
+    batch_loop.add_batch_arguments(parser)
+    args = parser.parse_args(["--out_dir", "/tmp/x"])
+    assert args.desk_boxes == 0
+    args = parser.parse_args(["--out_dir", "/tmp/x", "--desk_boxes", "4"])
+    draw = layout.sample_run_draw(random.Random(0))
+    meta = batch_loop.run_meta(
+        args,
+        draw,
+        oracle.OracleNoise(),
+        None,
+        num_bricks=6,
+        export_mode="EXPORT_ALL",
+        backend="mujoco",
+        task="t",
+    )
+    assert meta["desk_boxes"] == 4
+
+
+def test_the_heap_clients_take_the_desk_boxes_flag():
+    root = pathlib.Path(__file__).resolve().parents[1] / "scripts"
+    for name in ("mj_eval_heap.py", "mj_dagger_heap.py"):
+        text = (root / name).read_text()
+        assert '"--desk_boxes"' in text and "desk_boxes=args.desk_boxes" in text, name
+        assert 'payload["desk_boxes"] = args.desk_boxes' in text, name
+    for name in (
+        "mj_eval_heap.py",
+        "mj_dagger_heap.py",
+        "mj_generate_batch.py",
+        "mj_inspect_heap.py",
+    ):
+        text = (root / name).read_text()
+        assert "boxes=env.desk_box_poses[i]" in text and "int(env.destination_bins[i])" not in text

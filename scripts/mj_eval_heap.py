@@ -74,6 +74,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         default="binary",
         help="the env's gripper contract; must match the checkpoint's handshake",
     )
+    parser.add_argument(
+        "--desk_boxes",
+        type=int,
+        default=0,
+        help="N desk boxes beside the arm replace the shelf and its heap bin (MS7a: 1 for "
+        "rung 1, 4 for rung 2); 0 is the MS6 scene",
+    )
     parser.add_argument("--server", type=str, default="tcp://127.0.0.1:5555")
     parser.add_argument("--out", type=str, default="", help="write the EVAL_OK payload here too")
     parser.add_argument(
@@ -135,6 +142,8 @@ def parse_args(argv=None) -> argparse.Namespace:
             parser.error(f"--{name} is outside numpy's seed range (0 <= seed < 2**32)")
     if args.heap_k <= 0:
         parser.error("--heap_k must be positive: this client evaluates heap episodes only")
+    if args.desk_boxes < 0:
+        parser.error("--desk_boxes must be 0 or more")
     if args.cycle_budget is None:
         args.cycle_budget = cycle_budget(args.heap_k)
     if args.max_wall_minutes is None:
@@ -180,6 +189,7 @@ def main(argv=None) -> int:
             context=args.context,
             episode_length_s=episode_length_s(args.cycle_budget),
             gripper_mode=args.gripper,
+            desk_boxes=args.desk_boxes,
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
@@ -188,10 +198,11 @@ def main(argv=None) -> int:
             return HeapOracle(
                 bl,
                 env.parts,
-                int(env.destination_bins[i]),
+                env.destination_bins[i],
                 episode_draw,
                 rng=rig_rng,
                 cycle_budget=args.cycle_budget,
+                boxes=env.desk_box_poses[i],
             )
 
         rig = OracleRig(
@@ -217,6 +228,7 @@ def main(argv=None) -> int:
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
+        payload["desk_boxes"] = args.desk_boxes
     except EvalFailure as err:
         print("EVAL_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True)
         return 1

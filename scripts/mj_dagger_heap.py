@@ -84,6 +84,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help="pick cycles per episode; the default is ceil(1.3 * K) (phase B design 5.1)",
     )
+    parser.add_argument(
+        "--desk_boxes",
+        type=int,
+        default=0,
+        help="N desk boxes beside the arm replace the shelf and its heap bin (MS7a: 1 for "
+        "rung 1, 4 for rung 2); 0 is the MS6 scene",
+    )
     parser.add_argument("--server", type=str, default="tcp://127.0.0.1:5555")
     parser.add_argument(
         "--round", type=int, default=1, help="DAgger round: the random interval doubles per round"
@@ -135,6 +142,8 @@ def parse_args(argv=None) -> argparse.Namespace:
             parser.error(f"--{name} is outside numpy's seed range (0 <= seed < 2**32)")
     if args.heap_k <= 0:
         parser.error("--heap_k must be positive")
+    if args.desk_boxes < 0:
+        parser.error("--desk_boxes must be 0 or more")
     if args.round < 1:
         parser.error("--round starts at 1")
     if args.cycle_budget is None:
@@ -170,6 +179,7 @@ def main(argv=None) -> int:
             shard_name=args.shard_name,
             export_all=True,
             gripper_mode=args.gripper,
+            desk_boxes=args.desk_boxes,
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
@@ -178,10 +188,11 @@ def main(argv=None) -> int:
             return HeapOracle(
                 bl,
                 env.parts,
-                int(env.destination_bins[i]),
+                env.destination_bins[i],
                 episode_draw,
                 rng=rig_rng,
                 cycle_budget=args.cycle_budget,
+                boxes=env.desk_box_poses[i],
             )
 
         rig = OracleRig(
@@ -212,6 +223,7 @@ def main(argv=None) -> int:
         payload["round"] = args.round
         payload["trigger"] = args.trigger
         payload["parts_split"] = args.parts_split
+        payload["desk_boxes"] = args.desk_boxes
         payload["shard"] = str(Path(args.out_dir) / f"{args.shard_name}.hdf5")
     except EvalFailure as err:
         print("DAGGER_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True)
