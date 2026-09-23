@@ -32,7 +32,7 @@ from __future__ import annotations
 import math
 import random
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -124,7 +124,8 @@ class Push:
     start: tuple[float, float]
     end: tuple[float, float]
     part: int | None = None  # the raked part; None is the densest-cell push
-    heading: float | None = None  # a rake's closing axis, along its sweep; None holds the jaws
+    heading: float | None = None  # a rake's sweep direction
+    jaw: float | None = None  # the closing axis the legs square to; None holds the jaws
 
 
 @dataclass(frozen=True)
@@ -441,7 +442,7 @@ class HeapOracle(oracle.EnvOracle):
         Called only when no grasp ranks. A candidate within ``grasp.RAKE_BAND_M`` of a wall
         and under ``RAKE_PART_CAP`` rakes is swept off its nearest wall by one part length,
         its longest side (at least ``grasp.PUSH_HALF_LENGTH_M``), the nearest first; a part
-        with no room for the tips behind it is skipped (``grasp.rake_segment``).
+        whose every start lands the tips on a neighbor is skipped (``grasp.rake_segment``).
         """
         near = []
         for b in torch.nonzero(mask).flatten().tolist():
@@ -465,14 +466,29 @@ class HeapOracle(oracle.EnvOracle):
             segment = grasp.rake_segment(xy, prints[b], length, wall, self.walls, others)
             if segment is not None:
                 start, end, heading = segment
-                return Push(start, end, part=b, heading=heading)
+                return Push(start, end, part=b, heading=heading, jaw=heading)
         return None
 
     def _push_yaw(self) -> float | None:
-        """Goal.yaw of a push leg: a rake squares its closing axis to the sweep, a push holds."""
-        if self.push is None or self.push.heading is None:
+        """Goal.yaw of a push leg: a rake squares the jaws to ``Push.jaw``, a push holds."""
+        if self.push is None or self.push.jaw is None:
             return None
-        return self.push.heading - math.pi / 2
+        return self.push.jaw - math.pi / 2
+
+    def _turn_rake_jaw(self) -> bool:
+        """The rig could not plan the rake's hover at this jaw heading: take the next one.
+
+        The closing axis runs along the sweep first (the finger plates stand parallel to the
+        wall), then across it, then the jaws hold the heading they have. Driven on 2026-09-23:
+        the first fails to plan off the near and far walls, where it points the closing axis
+        along the arm's radius, and the second off the left wall. False when all three failed.
+        """
+        push = self.push
+        if push.jaw is None:
+            return False
+        along = abs(oracle.wrap_to_pi(push.jaw - push.heading)) < 1e-9
+        self.push = replace(push, jaw=push.heading + math.pi / 2 if along else None)
+        return True
 
     def _plan_tip(self, scene: oracle.SceneSnapshot, part: int) -> Tip | None:
         """A short stroke into the part's edge, from outside its footprint toward its centre.
@@ -594,7 +610,7 @@ class HeapOracle(oracle.EnvOracle):
                 0.01,
                 0,
                 oracle.DEFAULT_MAX_STEPS,
-                hold_xy=(self.push.start, self.push.end) if self.push.heading is not None else (),
+                hold_xy=(self.push.start, self.push.end) if self.push.jaw is not None else (),
                 half_height=PUSH_HALF_HEIGHT,
             )
         if self.phase == oracle.Phase.PUSH_DESCEND:
@@ -608,7 +624,7 @@ class HeapOracle(oracle.EnvOracle):
                 0.003,
                 oracle.DESCEND_STALL_STEPS,
                 oracle.DEFAULT_MAX_STEPS,
-                hold_xy=(self.push.start, self.push.end) if self.push.heading is not None else (),
+                hold_xy=(self.push.start, self.push.end) if self.push.jaw is not None else (),
                 half_height=PUSH_HALF_HEIGHT,
             )
         if self.phase == oracle.Phase.PUSH_SWEEP:
@@ -670,20 +686,17 @@ class HeapOracle(oracle.EnvOracle):
     def report(self, result: oracle.PhaseResult, scene: oracle.SceneSnapshot) -> None:
         phase = self.phase
         if phase == oracle.Phase.PUSH_HOVER:
+            if result.outcome == "unplanned" and self.push.part is not None:
+                if not self._turn_rake_jaw():
+                    self._end_push()  # no heading plans: spent, so the part is not retried forever
+                return  # PUSH_HOVER again, at the next jaw heading
             self.phase = oracle.Phase.PUSH_DESCEND
             return
         if phase == oracle.Phase.PUSH_DESCEND:
             self.phase = oracle.Phase.PUSH_SWEEP
             return
         if phase == oracle.Phase.PUSH_SWEEP:
-            if self.push.part is None:
-                self.pushes += 1
-                self.pushes_in_a_row += 1
-            else:
-                self.rakes += 1
-                self.raked[self.push.part] = self.raked.get(self.push.part, 0) + 1
-            self.push = None
-            self.phase = oracle.Phase.HOVER
+            self._end_push()
             return
         if phase == oracle.Phase.TIP_HOVER:
             self.phase = oracle.Phase.TIP_DESCEND
@@ -730,6 +743,17 @@ class HeapOracle(oracle.EnvOracle):
             self._regrasp(scene)
         if phase == oracle.Phase.RETREAT and brick is not None and brick not in self._sorted:
             self._mark_failure(scene, brick)
+
+    def _end_push(self) -> None:
+        """Count the push or rake that just ended and scan again at HOVER."""
+        if self.push.part is None:
+            self.pushes += 1
+            self.pushes_in_a_row += 1
+        else:
+            self.rakes += 1
+            self.raked[self.push.part] = self.raked.get(self.push.part, 0) + 1
+        self.push = None
+        self.phase = oracle.Phase.HOVER
 
     def _mark_failure(self, scene: oracle.SceneSnapshot, brick: int) -> None:
         cell = self.cell_of(scene.brick_pos[brick, :2].tolist())

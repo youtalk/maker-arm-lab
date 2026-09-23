@@ -437,8 +437,8 @@ def test_a_flush_part_leaves_no_room_behind_it_so_the_rake_wedges_in_at_the_wall
     left = _left_wall()
     start, end, heading = grasp.rake_segment(xy, part_print, 0.04, left, WALLS, [])
     assert heading == pytest.approx(math.pi / 2)  # straight off the wall
-    tips = grasp.rake_footprint(start, heading)
-    gap = grasp.polygon_distance(tips, list(left.footprint))
+    tips = grasp.rake_footprint(start)
+    gap = grasp.polygon_distance(tips, list(left.footprint))  # the tips at the wall face
     assert grasp.RAKE_WEDGE_GAP_M <= gap < grasp.RAKE_WEDGE_GAP_M + 0.001
     assert grasp.polygon_distance(tips, part_print) < 0.0  # on the part's wall-side edge
     assert end[1] == pytest.approx(xy[1] + 0.04)

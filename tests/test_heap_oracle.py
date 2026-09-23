@@ -730,16 +730,19 @@ def test_the_rake_fires_when_no_grasp_ranks_and_a_part_lies_in_a_wall_band():
     assert hover.phase is oracle.Phase.PUSH_HOVER and orc.target_brick is None
     push = orc.push
     assert push.part == 0 and hover.gripper == -1.0  # the jaws closed
-    # The blade: the closing axis runs along the sweep, which runs off the wall (+y).
-    assert hover.yaw == pytest.approx(push.heading - math.pi / 2)
-    assert math.sin(push.heading) > 0.8
+    # The blade first: the closing axis runs along the sweep, which runs off the wall (+y).
+    assert push.jaw == push.heading and hover.yaw == pytest.approx(push.heading - math.pi / 2)
+    assert math.sin(push.heading) >= math.cos(max(grasp.RAKE_SWINGS_RAD)) - 1e-9
     (_, _), (y0, _) = layout.tray_bounds()
     part_y = float(scene.brick_pos[0, 1])
     assert y0 < push.start[1] < part_y < push.end[1]
-    assert push.end[1] - part_y >= 0.5 * BRICK.size[0]  # about one part length past the centre
-    tips = grasp.rake_footprint(push.start, push.heading)
-    assert all(grasp.polygon_distance(tips, list(w.footprint)) >= 0.0 for w in orc.walls)
+    # The hull clears every wall at its top, and the tips land clear of the part.
+    assert all(
+        grasp.polygon_distance(grasp.rake_footprint(push.start, w.top), list(w.footprint)) >= 0
+        for w in orc.walls
+    )
     part = grasp.footprint(orc.sizes[0], scene.brick_pos[0], scene.brick_quat[0])
+    tips = grasp.rake_footprint(push.start)
     assert grasp.polygon_distance(tips, part) >= grasp.RAKE_START_GAP_M - 1e-6
     _push_phases_counted(orc, scene)
     assert orc.rakes == 1 and orc.pushes == 0 and orc.raked == {0: 1}
@@ -793,3 +796,23 @@ def test_the_rakes_are_capped_per_part_and_per_episode(monkeypatch):
     capped.rakes = heap_oracle.MAX_RAKES
     _to_hover(capped, _stuck_scene())
     assert capped.phase is oracle.Phase.DONE and capped.push is None
+
+
+def test_an_unplanned_rake_hover_turns_the_jaws_then_holds_them_then_gives_up():
+    """Driven 2026-09-23: the blade does not plan off the near and far walls, the knife not
+    off the left wall; the rake then tries the next jaw heading before it is spent."""
+    orc = _tray_oracle([BRICK])
+    scene = _stuck_scene()
+    _to_hover(orc, scene)
+    sweep = orc.push.heading
+    unplanned = oracle.PhaseResult(outcome="unplanned")
+    orc.report(unplanned, scene)
+    assert orc.phase is oracle.Phase.PUSH_HOVER and orc.push.jaw == pytest.approx(
+        sweep + math.pi / 2
+    )
+    assert orc.next_goal(scene).yaw == pytest.approx(sweep)  # the knife: yaw along the sweep
+    orc.report(unplanned, scene)
+    assert orc.push.jaw is None and orc.next_goal(scene).yaw is None  # hold the jaws
+    orc.report(unplanned, scene)
+    assert orc.phase is oracle.Phase.HOVER and orc.push is None
+    assert orc.rakes == 1 and orc.raked == {0: 1}  # spent, not retried forever
