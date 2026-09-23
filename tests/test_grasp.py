@@ -427,3 +427,21 @@ def test_along_a_wall_a_long_part_closes_end_to_end_and_nowhere_else():
     assert [round(g.width, 4) for g in inside] == [0.0158]  # away from a wall, only across
     too_long = parts.make_part("brick", 2, 8)  # 63.8 mm, past WALL_MAX_GRASP_WIDTH
     assert not grasp.candidate_grasps(0, _size(too_long), flush, IDENTITY, walls=WALLS)
+
+
+def test_a_flush_part_leaves_no_room_behind_it_so_the_rake_wedges_in_at_the_wall():
+    slope = parts.make_part("slope", 1, 3)  # upright, its 7.8 mm side against the left wall
+    xy = (TRAY_MID_X, TY0 + 0.0044)
+    pos = torch.tensor([*xy, 0.0048])
+    part_print = grasp.footprint(_size(slope), pos, IDENTITY)
+    left = _left_wall()
+    start, end, heading = grasp.rake_segment(xy, part_print, 0.04, left, WALLS, [])
+    assert heading == pytest.approx(math.pi / 2)  # straight off the wall
+    tips = grasp.rake_footprint(start, heading)
+    gap = grasp.polygon_distance(tips, list(left.footprint))
+    assert grasp.RAKE_WEDGE_GAP_M <= gap < grasp.RAKE_WEDGE_GAP_M + 0.001
+    assert grasp.polygon_distance(tips, part_print) < 0.0  # on the part's wall-side edge
+    assert end[1] == pytest.approx(xy[1] + 0.04)
+    # A neighbor under the wedge spot refuses the rake.
+    under = grasp.footprint(_size(BRICK), torch.tensor([start[0], start[1], 0.0048]), IDENTITY)
+    assert grasp.rake_segment(xy, part_print, 0.04, left, WALLS, [under]) is None

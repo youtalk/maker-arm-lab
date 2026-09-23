@@ -542,6 +542,8 @@ RAKE_BAND_M = 0.03
 wall is raked off it. # INITIAL: the tray teacher ladder reads it."""
 RAKE_START_GAP_M = 0.002
 """Gap (m) between the raked part's footprint and the closed tips where they land."""
+RAKE_WEDGE_GAP_M = 0.0005
+"""Gap (m) the wedged-in tips keep to the wall face (``rake_segment``'s last resort)."""
 RAKE_SWINGS_RAD = (0.0, 0.5, -0.5, 1.0, -1.0)
 """Sweep directions tried, off the wall's normal, when the straight one has no room behind
 the part: a swung sweep catches the part's end and turns it off the wall (the wall push of
@@ -580,8 +582,11 @@ def rake_segment(
     the part's centre to ``length`` past it, away from the wall. ``heading`` is the sweep
     direction, which is also the closing axis (``rake_footprint``). The straight sweep runs
     along the wall's normal; with no room behind the part the sweep swings off it
-    (``RAKE_SWINGS_RAD``). The end is pulled back until the tips clear every wall, and both
-    ends stay in reach.
+    (``RAKE_SWINGS_RAD``). With no room on any swing, the tips wedge in: they land on the
+    straight line against the wall face, on the part's wall-side edge (driven on 2026-09-23,
+    a flush 1x3 slope moved 14 mm off the wall in two rakes, a 1x2 slope at 30 degrees came
+    free and stowed). The end is pulled back until the tips clear every wall, and both ends
+    stay in reach.
     """
     cx = sum(x for x, _ in wall.footprint) / len(wall.footprint)
     cy = sum(y for _, y in wall.footprint) / len(wall.footprint)
@@ -606,15 +611,40 @@ def rake_segment(
             continue
         if any(polygon_distance(tips, b) < 0.0 for b in blocked):
             continue
-        reach = length
-        end = None
-        while reach >= 0.5 * length:
-            point = clamp_to_reach((part_xy[0] + reach * c, part_xy[1] + reach * s))
-            tips = rake_footprint(point, heading)
-            if all(polygon_distance(tips, list(w.footprint)) >= 0.0 for w in walls):
-                end = point
-                break
-            reach -= 0.002
+        end = _rake_end(part_xy, heading, length, walls)
         if end is not None:
             return start, end, heading
+    # No room behind the part on any swing: wedge in. The tips land on the straight line as
+    # close to the wall as they clear it, on the part's wall-side edge, and the sweep shoves
+    # the part off the wall.
+    c, s = math.cos(normal), math.sin(normal)
+    start = None
+    for k in range(61):
+        point = (part_xy[0] - 0.001 * k * c, part_xy[1] - 0.001 * k * s)
+        tips = rake_footprint(point, normal)
+        if any(polygon_distance(tips, list(w.footprint)) < RAKE_WEDGE_GAP_M for w in walls):
+            break
+        start = point
+    if start is None or clamp_to_reach(start) != start:
+        return None
+    tips = rake_footprint(start, normal)
+    if any(polygon_distance(tips, b) < 0.0 for b in blocked):
+        return None
+    end = _rake_end(part_xy, normal, length, walls)
+    return None if end is None else (start, end, normal)
+
+
+def _rake_end(
+    part_xy: tuple[float, float], heading: float, length: float, walls: Sequence[Wall]
+) -> tuple[float, float] | None:
+    """``length`` past the part's centre along ``heading``, pulled back until the tips clear
+    every wall, and in reach; None once that is under half of ``length``."""
+    c, s = math.cos(heading), math.sin(heading)
+    reach = length
+    while reach >= 0.5 * length:
+        point = clamp_to_reach((part_xy[0] + reach * c, part_xy[1] + reach * s))
+        tips = rake_footprint(point, heading)
+        if all(polygon_distance(tips, list(w.footprint)) >= 0.0 for w in walls):
+            return point
+        reach -= 0.002
     return None
