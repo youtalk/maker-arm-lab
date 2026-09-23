@@ -179,3 +179,18 @@ def test_optional_anchor_is_validated_when_present():
         validate_obs({**arrays, ANCHOR_KEY: np.zeros((2, 7), np.float32)}, 2)
     with pytest.raises(ValueError, match="anchor"):
         validate_obs({**arrays, ANCHOR_KEY: np.zeros((2, 6), np.float64)}, 2)
+
+
+def test_optional_replan_is_validated_when_present():
+    from policy_protocol import REPLAN_KEY, validate_obs
+
+    arrays = {
+        "state": np.zeros((2, 7), np.float32),
+        "wrist": np.zeros((2, 224, 224, 3), np.uint8),
+        "overhead": np.zeros((2, 224, 224, 3), np.uint8),
+    }
+    validate_obs({**arrays, REPLAN_KEY: np.zeros(2, dtype=bool)}, 2)
+    with pytest.raises(ValueError, match="replan"):
+        validate_obs({**arrays, REPLAN_KEY: np.zeros(3, dtype=bool)}, 2)
+    with pytest.raises(ValueError, match="replan"):
+        validate_obs({**arrays, REPLAN_KEY: np.zeros(2, dtype=np.uint8)}, 2)

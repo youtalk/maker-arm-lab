@@ -188,11 +188,36 @@ def test_the_target_channel_is_served_after_the_box_and_zeroed_by_a_reset():
     e._update_target_parts(torch.tensor([1, 0], dtype=torch.int16))
     assert e.context_target[0].tolist() == [0.5] * 7 and int(e.target_part[0]) == 1
     assert e.context_target[1].tolist() == list(range(7))
+    # The marker follows the rig's marker id when there is one (the next part through
+    # RETREAT); the cycle id stays the accounting id.
+    e.oracle_marker_part = torch.tensor([0, 1], dtype=torch.int8)
+    e._update_target_parts(torch.tensor([1, 0], dtype=torch.int16))
+    assert int(e.target_part[0]) == 0 and int(e.oracle_cycle_brick[0]) == 1
     e.reset(seed=2, env_ids=torch.tensor([0]))
     assert not e.obs_buf["context"].numpy()[0, 9:].any()
     e.close()
     with pytest.raises(ValueError, match="target"):
         MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, context="camera_box_target")
+
+
+def test_a_takeover_with_a_marked_part_and_no_grasp_keeps_the_loops_row():
+    e = MjLegoSortEnv(2, _draw(), parts=PARTS[:2], cameras=False, context="camera_box_target")
+    e.reset(seed=1)
+    loop_row = np.arange(1, 8, dtype=np.float32)
+    e.context_target[:] = loop_row
+    e.oracle_cycle_brick = torch.tensor([1, 1], dtype=torch.int8)
+    e.oracle_marker_part = torch.tensor([1, -1], dtype=torch.int8)
+    e.oracle_cycle_target = torch.zeros((2, 7))  # a resumed LIFT: a part, no grasp yet
+    e._update_target_parts(torch.tensor([1, 1], dtype=torch.int16))
+    assert e.context_target[0].tolist() == loop_row.tolist() and int(e.target_part[0]) == 1
+    assert not e.context_target[1].any()  # no marked part: the zero row is the rig's
+    e.oracle_cycle_target[0] = 0.5  # REOPEN's regrasp: the rig's row is copied again
+    e._update_target_parts(torch.tensor([1, 1], dtype=torch.int16))
+    assert e.context_target[0].tolist() == [0.5] * 7
+    e.oracle_cycle_target[0] = 0.0  # the teacher's own batch (actor None) copies zeros
+    e._update_target_parts(None)
+    assert not e.context_target[0].any()
+    e.close()
 
 
 def test_the_privileged_channel_is_refused_on_a_heap():

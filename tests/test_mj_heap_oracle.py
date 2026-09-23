@@ -4,6 +4,7 @@ import math
 import random
 
 import mujoco
+import numpy as np
 import pytest
 import torch
 
@@ -226,7 +227,6 @@ def test_a_lone_flat_part_survives_the_lift_instead_of_being_squeezed_out():
     section 5), which is why the flat families left the catalog on 2026-09-18.
     """
     from maker_arm_lab.core import grasp
-    from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import CLOSE_SQUEEZE_M
 
     plate = parts.make_part("plate", 2, 4)
     draw = sample_run_draw(random.Random(5))
@@ -256,7 +256,7 @@ def test_a_lone_flat_part_survives_the_lift_instead_of_being_squeezed_out():
         if bool(out["dones"][0]) or bool(out["abandoned"][0]):
             break
     env.close()
-    floor = 0.5 * min(plate.size[0], plate.size[1]) - CLOSE_SQUEEZE_M
+    floor = 0.5 * min(plate.size[0], plate.size[1]) - grasp.CLOSE_SQUEEZE_M
     assert tightest > floor - 0.002, (tightest, floor)
     assert any(lifts), lifts
 
@@ -322,8 +322,6 @@ def test_the_continuous_rig_commands_the_matched_gap_without_a_flip():
 def test_the_continuous_rig_closes_holds_and_releases_at_its_set_points():
     """Phase B design 5.8: the close and release gaps value by value, and a matched-gap hold
     that stays within JAW_HOLD_BAND of its set point for 100 steps with no command flip."""
-    from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import CLOSE_SQUEEZE_M
-
     env, rig = _env_and_rig(gripper_mode="continuous")
     _place(env, SPREAD)
     held_phases = (oracle.Phase.LIFT, oracle.Phase.RAISE, oracle.Phase.EXTEND)
@@ -350,7 +348,7 @@ def test_the_continuous_rig_closes_holds_and_releases_at_its_set_points():
     env.close()
     assert closes and releases and len(held) >= 100, (len(closes), len(releases), len(held))
     for command, w in closes:
-        assert command == pytest.approx(2.0 * max(0.0, 0.5 * w - CLOSE_SQUEEZE_M))
+        assert command == pytest.approx(2.0 * max(0.0, 0.5 * w - grasp.CLOSE_SQUEEZE_M))
     for command, w in releases:
         assert command == pytest.approx(2.0 * (grasp.landing_half_gap(w) - grasp.JAW_HOLD_BAND))
     hold = held[:100]
@@ -424,3 +422,44 @@ def test_the_continuous_rig_releases_on_a_level_jaw_plane_and_lets_go():
     assert min(release_wrist) >= lo + LEVEL_ROLL_MARGIN_RAD - 1e-9, (min(release_wrist), lo)
     assert max(release_wrist) <= hi - LEVEL_ROLL_MARGIN_RAD + 1e-9, (max(release_wrist), hi)
     assert wrist_steps and max(wrist_steps) <= ROLL_MAX_STEP_RAD, max(wrist_steps)
+
+
+def test_the_row_and_marker_name_the_next_part_from_the_frame_release_ends():
+    """The 2026-09-22 protocol lever on the rig: ``oracle_cycle_target`` and the marker switch
+    on the first RETREAT frame, while ``oracle_cycle_brick`` (the accounting id) still names
+    the part retreating, and the next HOVER carries that same target."""
+    env, rig = _env_and_rig()
+    _place(
+        env, [(0.195, -0.045, 0.006, 0.3), (0.195, 0.0, 0.006, -0.8), (0.195, 0.045, 0.006, 1.2)]
+    )
+    frames = []
+    for _ in range(9000):
+        action = rig.actions()
+        pre = (
+            int(env.oracle_cycle_phase[0]),
+            int(env.oracle_cycle_brick[0]),
+            int(env.oracle_marker_part[0]),
+            env.oracle_cycle_target[0].numpy().copy(),
+        )
+        _, _, terminated, truncated, _ = env.step(action)
+        frames.append((*pre, int(env.target_part[0]), env.context_target[0].copy()))
+        out = rig.observe((terminated | truncated).cpu())
+        if bool(out["dones"][0]) or bool(out["abandoned"][0]):
+            break
+    env.close()
+    hover = oracle.PHASE_TO_INT["HOVER"]
+    first_hover = next(t for t, f in enumerate(frames) if f[0] == hover)
+    first = frames[first_hover][1]
+    row = frames[first_hover][3]
+    switch = next(
+        t for t, f in enumerate(frames) if t > first_hover and not np.array_equal(f[3], row)
+    )
+    phase, brick, marker, row2, marked, served = frames[switch]
+    assert phase == oracle.PHASE_TO_INT["RETREAT"], phase
+    assert frames[switch - 1][0] == oracle.PHASE_TO_INT["RELEASE"]
+    assert brick == first and marker != first and marked == marker
+    assert np.array_equal(served, row2) and row2[5] > 0.0
+    next_hover = next(t for t, f in enumerate(frames) if t > switch and f[0] == hover)
+    assert frames[next_hover][1] == marker and frames[next_hover][2] == marker
+    assert np.allclose(frames[next_hover][3][:3], row2[:3], atol=0.01)
+    assert np.array_equal(frames[next_hover][3][3:], row2[3:])

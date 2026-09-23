@@ -31,6 +31,7 @@ import json
 import math
 import os
 import random
+import shlex
 import subprocess
 import sys
 import threading
@@ -86,6 +87,26 @@ class GateCfg:
     cycle_budget: int | None = None  # None: the client's default, ceil(1.3 * K)
     max_cycles_per_stowed: float | None = None  # the second gate rule, None: not applied
     gripper: str = "binary"  # MuJoCo only: the checkpoint's handshake (MS6 phase B design 5.4)
+    # MuJoCo only: extra flags handed to the eval client verbatim, e.g. the heap loop's
+    # protocol switches. A cached payload must have run with the same switches.
+    client_flags: tuple = ()
+
+
+LOOP_SWITCHES = (
+    "select_at_release",
+    "replan_on_switch",
+    "row_refresh",
+    "squeeze_floor",
+    "close_gate",
+    "square_wrist",
+)
+"""The heap loop's protocol switches (core.loop.rollout); the client records them in the
+payload's inference block under "loop", and the cache matches on them."""
+
+
+def loop_switches(client_flags) -> dict:
+    """Which of ``LOOP_SWITCHES`` the client flags turn on."""
+    return {name: f"--{name}" in client_flags for name in LOOP_SWITCHES}
 
 
 def make_eval_draws(processes: int, seed: int) -> list[EvalDraw]:
@@ -350,6 +371,7 @@ def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
             if cfg.cycle_budget is not None:
                 prefix += ["--cycle_budget", str(cfg.cycle_budget)]
             prefix += ["--gripper", cfg.gripper]
+        prefix += list(cfg.client_flags)
     else:
         prefix = [
             f"{cfg.isaaclab_path}/isaaclab.sh",
@@ -433,6 +455,12 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     same_inference = served.get("temporal_ensemble_coeff") == cfg.temporal_ensemble_coeff and (
         cfg.n_action_steps is None or served.get("n_action_steps") == cfg.n_action_steps
     )
+    # The loop's protocol switches are part of what a draw measured; a payload that predates
+    # them ran with every switch off.
+    recorded = served.get("loop") or {}
+    same_inference = same_inference and loop_switches(cfg.client_flags) == {
+        name: bool(recorded.get(name, False)) for name in LOOP_SWITCHES
+    }
     return payload if same_draw and same_policy and same_task and same_inference else None
 
 
@@ -613,6 +641,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default="binary",
         help="MuJoCo only: forwarded to the heap client; must match the checkpoint's handshake",
     )
+    parser.add_argument(
+        "--client_flags",
+        type=str,
+        default="",
+        help="MuJoCo only: extra flags handed to the eval client verbatim, e.g. "
+        "'--select_at_release --replan_on_switch' (the heap loop's protocol switches)",
+    )
     return parser.parse_args(argv)
 
 
@@ -656,6 +691,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         cycle_budget=args.cycle_budget,
         max_cycles_per_stowed=args.max_cycles_per_stowed,
         gripper=args.gripper,
+        client_flags=tuple(shlex.split(args.client_flags)),
     )
 
 

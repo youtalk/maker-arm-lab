@@ -15,7 +15,9 @@ What changes against the six-brick oracle, and nothing else:
   dropping it back into the heap (``adopt_held_part``, ``accepts_any_held_part``);
 * a part whose best grasp grips less than ``TIP_MIN_GRIP_HEIGHT`` of face is tipped onto an
   edge first, with a short stroke into it, and picked on a later scan (MS6 rework section 7);
-* the episode ends DONE, never ABANDON, at the cycle budget or with no candidate left.
+* the episode ends DONE, never ABANDON, at the cycle budget or with no candidate left;
+* the next target is chosen the moment RELEASE ends, so its row and marker show through
+  RETREAT, and HOVER adopts that choice (``preselects_next_target``, 2026-09-22).
 
 The phases, the correctives, the induction and the retry ladder are the base class's.
 """
@@ -79,6 +81,8 @@ TIP_Z = 0.004
 """Pick-point height of the tip stroke: the closed tips skim under a lying plate's edge."""
 TIP_SWEEP_STEPS = PUSH_SWEEP_STEPS
 PUSH_HEADING_MIN_HALF_ARC = math.pi / 2
+PRESELECT_MOVE_M = 0.01
+"""A pre-selected part that moved further than this (m) before HOVER is re-ranked live."""
 """Narrowest half-arc a push heading is drawn from, at the drop disc's edge (``_push_heading``)."""
 # Design H6: the bin footprint, and twice the interior height so a pile over the rim counts.
 STOW_HALF_EXTENTS = (
@@ -146,6 +150,14 @@ class HeapOracle(oracle.EnvOracle):
         # a non-target part 100-144 mm above the desk, and REOPEN dropped every one of them
         # back into the heap.
         self.accepts_any_held_part = True
+        # The protocol lever of 2026-09-22: the next target is chosen when RELEASE ends and
+        # held here, apart from the retreating cycle's ``target_brick``, ``grasp`` and
+        # ``_brick_start``, until HOVER adopts it (``_preselect``, ``_next_brick``).
+        self.preselects_next_target = True
+        self.next_brick: int | None = None
+        self.next_brick_start: torch.Tensor | None = None
+        self.next_grasp: grasp.Grasp | None = None
+        self._next_forced = False
         self.push: Push | None = None
         self.tip: Tip | None = None
         self.cycles = 0
@@ -259,36 +271,93 @@ class HeapOracle(oracle.EnvOracle):
         half_arc = math.pi - bias * (math.pi - PUSH_HEADING_MIN_HALF_ARC)
         return away + self._push_rng.uniform(-half_arc, half_arc)
 
-    def _next_brick(self, scene: oracle.SceneSnapshot) -> int | None:
-        """The highest clear grasp; schedules a push and returns None when nothing clears."""
-        if self.cycles >= self.cycle_budget:
-            return None
-        mask = self._candidates(scene)
-        if not bool(mask.any()):
-            return None
-        ranked = self._ranked(scene, mask)
+    def _choose(self, ranked: list[grasp.Grasp]) -> tuple[grasp.Grasp | None, bool]:
+        """HOVER's choice among the ranked grasps, and whether it is forced: the best clear
+        grasp, else the top-ranked one once the pushes are spent (fix F2), else None."""
         chosen = grasp.select_grasp(ranked)
-        forced_pick = False
+        if chosen is not None:
+            return chosen, False
+        if ranked and self.pushes_in_a_row >= MAX_PUSHES_IN_A_ROW:
+            return ranked[0], True
+        return None, False
+
+    def _preselect(self, scene: oracle.SceneSnapshot) -> None:
+        """RELEASE just ended: choose the next target now, so its row and marker show
+        through RETREAT (the same rule the eval loop applies, ``core.loop``).
+
+        The released part is in flight into the bin and not yet at rest, so it is excluded
+        by index, not by the stow grade. Nothing is committed: ``cycles``, ``cycle_parts``,
+        ``grasp`` and ``target_brick`` still describe the cycle that is retreating, and HOVER
+        adopts the choice through ``_next_brick``. A scan that would push or tip is left for
+        HOVER to plan, so no push or tip is ever scheduled twice.
+        """
+        self._clear_preselection()
+        if self.cycles >= self.cycle_budget:
+            return
+        mask = self._candidates(scene)
+        if self.target_brick is not None:
+            mask[self.target_brick] = False
+        if not bool(mask.any()):
+            return
+        chosen, forced = self._choose(self._ranked(scene, mask))
+        if chosen is None or 2.0 * chosen.half_height < TIP_MIN_GRIP_HEIGHT:
+            return
+        self.next_brick = chosen.part
+        self.next_brick_start = scene.brick_pos[chosen.part].clone()
+        self.next_grasp = chosen
+        self._next_forced = forced
+
+    def _clear_preselection(self) -> None:
+        self.next_brick = self.next_brick_start = self.next_grasp = None
+        self._next_forced = False
+
+    def _revalidated_preselection(
+        self, scene: oracle.SceneSnapshot
+    ) -> tuple[grasp.Grasp | None, bool]:
+        """The pre-selection at HOVER entry if it still holds: not stowed and still a
+        candidate, re-ranked on its live pose when it moved more than PRESELECT_MOVE_M."""
+        part = self.next_brick
+        if part is None or not bool(self._candidates(scene)[part]):
+            return None, False
+        if float((scene.brick_pos[part] - self.next_brick_start).norm()) <= PRESELECT_MOVE_M:
+            return self.next_grasp, self._next_forced
+        mask = torch.zeros(self.num_bricks, dtype=torch.bool)
+        mask[part] = True
+        chosen, forced = self._choose(self._ranked(scene, mask))
+        if chosen is None or 2.0 * chosen.half_height < TIP_MIN_GRIP_HEIGHT:
+            return None, False
+        return chosen, forced
+
+    def _next_brick(self, scene: oracle.SceneSnapshot) -> int | None:
+        """The highest clear grasp; schedules a push and returns None when nothing clears.
+
+        A pre-selection made when RELEASE ended is adopted when it still holds
+        (``_revalidated_preselection``); otherwise the selection runs on the live scene.
+        Either way the pre-selection is spent here, so it never outlives one HOVER entry.
+        """
+        if self.cycles >= self.cycle_budget:
+            self._clear_preselection()
+            return None
+        chosen, forced_pick = self._revalidated_preselection(scene)
+        self._clear_preselection()
         if chosen is None:
-            if not ranked:
+            mask = self._candidates(scene)
+            if not bool(mask.any()):
                 return None
-            # Fix F2: after the pushes, take the best grasp anyway.
-            if self.pushes_in_a_row >= MAX_PUSHES_IN_A_ROW:
-                chosen = ranked[0]
-                forced_pick = True
-            elif self.pushes < PUSH_BUDGET:
-                self.push = self._plan_push(scene, mask)
+            ranked = self._ranked(scene, mask)
+            chosen, forced_pick = self._choose(ranked)
+            if chosen is None:
+                if ranked and self.pushes < PUSH_BUDGET:
+                    self.push = self._plan_push(scene, mask)
                 return None
-            else:
-                return None
-        if 2.0 * chosen.half_height < TIP_MIN_GRIP_HEIGHT:
-            # MS6 rework section 7: a flat part offers only its in-plane axes, so the jaws
-            # would grip its thickness. Tip it up first and pick it on a later scan. A
-            # forced pick that gets tipped instead never happened, so `forced_pick` stays
-            # unrecorded until the part is actually picked (below).
-            self.tip = self._plan_tip(scene, chosen.part)
-            if self.tip is not None:
-                return None
+            if 2.0 * chosen.half_height < TIP_MIN_GRIP_HEIGHT:
+                # MS6 rework section 7: a flat part offers only its in-plane axes, so the
+                # jaws would grip its thickness. Tip it up first and pick it on a later
+                # scan. A forced pick that gets tipped instead never happened, so
+                # `forced_pick` stays unrecorded until the part is actually picked (below).
+                self.tip = self._plan_tip(scene, chosen.part)
+                if self.tip is not None:
+                    return None
         if forced_pick:
             self.forced_picks += 1
         self.grasp = chosen
@@ -360,9 +429,16 @@ class HeapOracle(oracle.EnvOracle):
         A returned part starts a cycle: ``cycles`` is bumped and the part joins
         ``cycle_parts``, so the loop and the teacher count cycles the same way. None means no
         candidate or a spent budget, and the loop ends the episode. The machine is not
-        entered: ``target_brick`` stays None, so the same oracle can select again.
+        entered: ``target_brick`` stays None, so the same oracle can select again. A
+        pre-selection a takeover's RELEASE left behind is dropped first: the loop's selector
+        always ranks the live scene.
         """
+        self._clear_preselection()
         return self._next_brick(scene)
+
+    def resume(self, scene: oracle.SceneSnapshot, held: int) -> None:
+        self._clear_preselection()  # a takeover's HOVER is aimed by the loop, not by RELEASE
+        super().resume(scene, held)
 
     def aim_hover_at(self, scene: oracle.SceneSnapshot, target: int) -> bool:
         """Point the HOVER that ``resume`` left pending at the loop's target.
@@ -541,6 +617,8 @@ class HeapOracle(oracle.EnvOracle):
             self.phase = oracle.Phase.HOVER
             return
         super().report(result, scene)
+        if phase == oracle.Phase.RELEASE:
+            self._preselect(scene)
         if phase == oracle.Phase.REOPEN:
             self._regrasp(scene)
         if phase == oracle.Phase.RETREAT and brick is not None and brick not in self._sorted:

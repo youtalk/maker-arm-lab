@@ -25,6 +25,13 @@ PROTOCOL_VERSION 4: an optional `anchor` array (batch, 6) float32 rides beside t
 observation. It is the client's previous clamped arm command (the measured joints before
 step 0), and a `delta_prev` checkpoint's server adds it to the six joint columns of the
 action. An absolute checkpoint's server ignores it.
+
+Still PROTOCOL_VERSION 4: an optional `replan` array (batch,) bool rides beside the
+observation (MS6 `--replan_on_switch`). A server keeps one action queue per env and refills
+env i's queue from a fresh forward when the flag is set, so a new target row reaches the policy
+on the step it is written and not 0 to n_action_steps - 1 steps later. Absent means all False
+and the queues drain in lockstep, which is the single-queue behaviour. A version-4 server that
+predates the key rejects it as bad_obs, so no version bump is needed to keep the mismatch loud.
 """
 
 import io
@@ -74,6 +81,9 @@ CONTEXT_DTYPE = "float32"
 ANCHOR_KEY = "anchor"
 ANCHOR_SHAPE = (6,)
 ANCHOR_DTYPE = "float32"
+
+REPLAN_KEY = "replan"
+REPLAN_DTYPE = "bool"
 
 
 def _pack(array: np.ndarray) -> bytes:
@@ -142,11 +152,17 @@ def validate_anchor(array: np.ndarray, batch_size: int) -> None:
     _check(ANCHOR_KEY, array, ANCHOR_SHAPE, ANCHOR_DTYPE, batch_size)
 
 
+def validate_replan(array: np.ndarray, batch_size: int) -> None:
+    """A (batch,) bool array: which envs replan from this observation."""
+    _check(REPLAN_KEY, array, (), REPLAN_DTYPE, batch_size)
+
+
 def validate_obs(arrays: dict, batch_size: int) -> None:
-    keys = set(arrays) - {CONTEXT_KEY, ANCHOR_KEY}
+    keys = set(arrays) - {CONTEXT_KEY, ANCHOR_KEY, REPLAN_KEY}
     if keys != set(OBS_SCHEMA):
         raise ValueError(
-            f"obs keys {sorted(arrays)}, want {sorted(OBS_SCHEMA)} (+ optional context, anchor)"
+            f"obs keys {sorted(arrays)}, want {sorted(OBS_SCHEMA)} "
+            "(+ optional context, anchor, replan)"
         )
     for name, (sample_shape, dtype) in OBS_SCHEMA.items():
         _check(name, arrays[name], sample_shape, dtype, batch_size)
@@ -155,6 +171,8 @@ def validate_obs(arrays: dict, batch_size: int) -> None:
         validate_context(arrays[CONTEXT_KEY], batch_size)
     if ANCHOR_KEY in arrays:
         validate_anchor(arrays[ANCHOR_KEY], batch_size)
+    if REPLAN_KEY in arrays:
+        validate_replan(arrays[REPLAN_KEY], batch_size)
 
 
 def validate_action(array: np.ndarray, batch_size: int) -> None:

@@ -24,7 +24,8 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
         frame as takeover k
     env.gripper_mode ("binary" | "continuous") and env.jaw_targets(raw)
     heap mode (MS6, ``parts`` given): env.parts, env.destination_bins (N,) long,
-        env.stow_half_extents, env.target_part (N,) int16 (the overhead marker), env.context_box,
+        env.stow_half_extents, env.target_part (N,) int16 (the overhead marker; from the rig's
+        env.oracle_marker_part, which names the next part through RETREAT), env.context_box,
         env.context_camera_box (N,9), env.context_target (N,7), env.context_camera_box_target
         (N,16), env.obs_buf["images"]["overhead_depth"] (N,224,224) uint16,
         env.stamp_markers() (the heap loop stamps the frame it hands the policy),
@@ -483,16 +484,33 @@ class MjLegoSortEnv:
         return per_jaw.numpy(), per_jaw / GRIPPER_OPEN_POS
 
     def _update_target_parts(self, actor) -> None:
-        """Heap mode: the rig's cycle stash names the marker's part on the envs it drives."""
+        """Heap mode: the rig's cycle stash names the marker's part on the envs it drives.
+
+        The marker follows ``oracle_marker_part``, which names the NEXT part through RETREAT
+        (the rig's ``_stash_cycle_state``); ``oracle_cycle_brick`` stays the accounting id the
+        recorder and the converter segment cycles by, and is the fallback for a stash that
+        has no marker id (a test stub).
+        """
         brick = getattr(self, "oracle_cycle_brick", None)
         if brick is None:
             return
+        marker = getattr(self, "oracle_marker_part", brick)
         target = getattr(self, "oracle_cycle_target", None)
         for i in range(self.num_envs):
             if actor is None or int(actor[i]) > 0:
-                self.target_part[i] = int(brick[i])
-                if target is not None:
-                    self.context_target[i] = target[i].numpy()
+                self.target_part[i] = int(marker[i])
+                if target is None:
+                    continue
+                row = target[i].numpy()
+                # A takeover that resumed at LIFT on a held part names the part but ranks no
+                # grasp until REOPEN's regrasp, so the rig's row is zeros; the corpus never
+                # shows a zero row on a marked part. Keep the loop's row, the one the policy
+                # pinched under (campaign n round 2, 2026-09-22). The teacher's own batches
+                # (actor None) and an unmarked stash (-1) copy the rig's row as before.
+                marked_no_grasp = int(marker[i]) >= 0 and not row.any()
+                if actor is not None and marked_no_grasp and self.context_target[i].any():
+                    continue
+                self.context_target[i] = row
 
     def stamp_markers(self) -> None:
         """Draw the target marker into the overhead frame about to be observed (design 9).

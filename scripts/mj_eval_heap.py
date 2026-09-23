@@ -86,6 +86,49 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="the wall-clock cap; the default allows a generous 0.15 s per step of the episode "
         "(every cycle of the budget at its full step budget)",
     )
+    parser.add_argument(
+        "--select_at_release",
+        action="store_true",
+        help="select the next target when the release opens the jaws after a stow "
+        "(loop.release_ready), not at the retreat point",
+    )
+    parser.add_argument(
+        "--replan_on_switch",
+        action="store_true",
+        help="send the per-env replan flag: the server refills that env's action queue on "
+        "the step a target row is written",
+    )
+    parser.add_argument(
+        "--row_refresh",
+        action="store_true",
+        help="rewrite the target row from the live scene at a re-open that lifted nothing "
+        "(the teacher's REOPEN refresh)",
+    )
+    parser.add_argument(
+        "--squeeze_floor",
+        action="store_true",
+        help="cap a closing gap command at the teacher's close set point, w - 6 mm on the "
+        "served target row's width (loop.floored_gap)",
+    )
+    parser.add_argument(
+        "--close_gate",
+        action="store_true",
+        help="hold the jaws at the teacher's landing gap while the pick point is still "
+        "descending onto the served target (loop.gated_gap); applied before --squeeze_floor",
+    )
+    parser.add_argument(
+        "--square_wrist",
+        action="store_true",
+        help="turn the wrist roll command toward the served row's closing axis on the final "
+        "approach, before the first hold (loop.squared_roll)",
+    )
+    parser.add_argument(
+        "--frames_dir",
+        type=str,
+        default="",
+        help="dump env 0's wrist and overhead policy frames as PNGs here, every "
+        "loop.FRAME_EVERY steps of each cycle (forensics; needs the policy server)",
+    )
     args = parser.parse_args(argv)
     for name in ("run_seed", "layout_seed"):
         if not (0 <= getattr(args, name) < 2**32):
@@ -97,6 +140,20 @@ def parse_args(argv=None) -> argparse.Namespace:
     if args.max_wall_minutes is None:
         args.max_wall_minutes = args.cycle_budget * CYCLE_STEP_BUDGET * 0.15 / 60.0
     return args
+
+
+def frame_writer(frames_dir: str):
+    """``loop.rollout``'s ``on_frame``: ``c<ordinal>_s<step>_<camera>.png`` under ``frames_dir``."""
+    from PIL import Image
+
+    root = Path(frames_dir)
+    root.mkdir(parents=True, exist_ok=True)
+
+    def write(ordinal: int, step: int, wrist, overhead) -> None:
+        for name, frame in (("wrist", wrist), ("overhead", overhead)):
+            Image.fromarray(frame).save(root / f"c{ordinal:03d}_s{step:04d}_{name}.png")
+
+    return write
 
 
 def main(argv=None) -> int:
@@ -150,6 +207,13 @@ def main(argv=None) -> int:
             permutation=perm,
             cycle_budget=args.cycle_budget,
             max_wall_minutes=args.max_wall_minutes,
+            on_frame=frame_writer(args.frames_dir) if args.frames_dir else None,
+            select_at_release=args.select_at_release,
+            replan_on_switch=args.replan_on_switch,
+            row_refresh=args.row_refresh,
+            squeeze_floor=args.squeeze_floor,
+            close_gate=args.close_gate,
+            square_wrist=args.square_wrist,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

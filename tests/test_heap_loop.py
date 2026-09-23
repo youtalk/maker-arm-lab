@@ -415,37 +415,37 @@ def test_a_still_policy_is_taken_over_on_no_close_and_only_takeovers_are_recorde
     assert set(marked.tolist()) <= set(ep["cycle_targets"]), (marked, ep["cycle_targets"])
 
 
-def test_a_takeover_keeps_the_marker_on_the_loops_target(monkeypatch):
-    # The rig's cycle part differs from the loop's target when it adopts a held part; force
-    # that on every takeover step and check the env still marks the loop's target, which is
-    # also the part the loop stamped into the frame before the step.
+def test_a_takeovers_retreat_frames_carry_the_rigs_preselected_part(monkeypatch):
+    """Phase B design 5.2 pinned the opposite (a takeover keeps the marker on the loop's
+    target); campaign n (2026-09-22) reverses it because the v2 corpora switch the row and the
+    marker when RELEASE ends (``HeapOracle._preselect``). So a takeover's RETREAT frames carry
+    the rig's pre-selected part, and at hand-back the loop adopts that pre-selection when it
+    still holds, else re-ranks (``loop._select``)."""
     monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 200)
     monkeypatch.setattr(dagger_loop, "NO_CLOSE_STEPS", 30)
-    env, rig = _env_and_rig(budget=1)
+    env, rig = _env_and_rig(budget=3)
     _place(env, SPREAD)
-    real_actions = rig.actions
-
-    def actions():
-        out = real_actions()
-        if not rig.idle[0]:
-            env.oracle_cycle_brick[0] = (int(env.target_part[0]) + 1) % 3
-        return out
-
-    monkeypatch.setattr(rig, "actions", actions)
-    pairs = []
+    retreats = []  # (the marker the frame recorded, the retreating cycle's part)
     stepped = env.step
 
     def env_step(action):
-        before = int(env.target_part[0])
         out = stepped(action)
-        if int(env.oracle_actor[0]) != 0:
-            pairs.append((before, int(env.target_part[0])))
+        retreating = int(env.oracle_cycle_phase[0]) == oracle.PHASE_TO_INT["RETREAT"]
+        if int(env.oracle_actor[0]) != 0 and retreating:
+            retreats.append((int(env.target_part[0]), int(env.oracle_cycle_brick[0])))
         return out
 
     env.step = env_step
-    _rollout(env, rig, _HoldPolicy(), budget=1, takeover=loop.TakeoverConfig(random_interval=None))
+    payload = _rollout(
+        env, rig, _HoldPolicy(), budget=3, takeover=loop.TakeoverConfig(random_interval=None)
+    )
     env.close()
-    assert pairs and all(a == b for a, b in pairs), pairs
+    ep = payload["episodes"][0]
+    switched = {(marker, brick) for marker, brick in retreats if marker != brick}
+    assert ep["takeovers"] >= 2 and switched, (payload["triggers"], retreats)
+    targets = ep["cycle_targets"]
+    for marker, brick in switched:  # the pre-selected part is the next cycle's target
+        assert targets[targets.index(brick) + 1] == marker, (targets, retreats)
 
 
 def _resume_then_fail(rig, monkeypatch):
@@ -544,6 +544,18 @@ def test_the_half_budget_trigger_fires_on_a_held_part_with_no_lift(monkeypatch):
 def test_the_half_budget_trigger_spares_a_held_part_lifted_past_the_rise(monkeypatch):
     triggers = _half_budget_triggers(monkeypatch, rise=oracle.LIFT_MIN_RISE + 0.01)
     assert "half_budget_no_lift" not in triggers, triggers
+
+
+def test_failure_reason_fires_on_a_held_part_that_does_not_rise():
+    n = loop.HELD_NO_RISE_STEPS
+    half = loop.CYCLE_STEP_BUDGET // 2
+    assert loop.failure_reason(n, n, False, 10) == loop.HELD_NO_RISE
+    assert loop.failure_reason(n - 1, n, False, 10) is None
+    assert loop.failure_reason(n, None, False, 10) is None  # off: the random round
+    assert loop.failure_reason(n, None, False, half) == loop.HALF_BUDGET_NO_LIFT
+    assert loop.failure_reason(0, n, False, half) == loop.HALF_BUDGET_NO_LIFT
+    assert loop.failure_reason(0, n, True, half) is None  # a lifted part is never trouble
+    assert loop.TakeoverConfig(random_interval=None).held_no_rise_steps is None
 
 
 class _CloseEveryNStepsPolicy:
@@ -743,6 +755,53 @@ def test_census_step_counts_the_duty_the_hold_and_the_first_close():
     assert cycle.holding is False
 
 
+def test_the_census_reads_the_first_close_geometry_and_the_hold_ids():
+    # The served closing axis points along +y; the part has yawed 90 degrees since, so its
+    # body x axis now lies along +y and is the live closing axis.
+    cycle = loop.Cycle(
+        ordinal=1,
+        target=2,
+        start_step=0,
+        stowed_before=set(),
+        close_below=0.016,
+        heading=math.pi / 2,
+    )
+    yaw90 = torch.tensor([math.cos(math.pi / 4), 0.0, 0.0, math.sin(math.pi / 4)])
+    loop.first_close_geometry(
+        cycle,
+        gap=0.020,
+        pick=torch.tensor([0.01, 0.02, 0.05]),
+        target_pos=torch.tensor([0.0, 0.0, 0.04]),
+        target_quat=yaw90,
+        ctx_pos=np.array([0.03, 0.0, 0.04, 0.0, 1.0, 0.016, 0.005], dtype=np.float32),
+    )
+    assert cycle.squeeze_margin == pytest.approx(0.004) and cycle.gap_close == 0.020
+    assert (cycle.off_x, cycle.off_y, cycle.off_z) == pytest.approx((0.01, 0.02, 0.01))
+    assert cycle.off_along == pytest.approx(0.02) and cycle.off_across == pytest.approx(-0.01)
+    assert cycle.ctx_stale == pytest.approx(0.03)
+    steps = [  # (grip_open, held, rise, pick_z)
+        (True, -1, 0.0, 0.10),
+        (False, -1, 0.0, 0.05),
+        (False, 2, 0.01, 0.06),
+        (False, 3, 0.02, 0.09),
+        (True, -1, 0.0, 0.12),
+        (False, -1, 0.0, 0.07),
+    ]
+    for grip_open, held, rise, pick_z in steps:
+        loop.census_step(
+            cycle, grip_open=grip_open, held=held, rise=rise, close_cm=1.0, pick_z=pick_z
+        )
+    assert (cycle.first_close_at, cycle.reopen_steps, cycle.close_edges) == (1, 3, 2)
+    assert (cycle.pick_z_close, cycle.pick_z_max) == (0.05, 0.12)
+    assert (cycle.first_held, cycle.last_held) == (2, 3)
+    st = loop.EnvState(selector=None)
+    loop._book_census(st, cycle, "budget")
+    row = st.census[0]
+    assert st.classes == ["close_miss"] and set(loop.CENSUS_EXPORT) < set(row)
+    assert row["first_held_is_target"] and not row["last_held_is_target"]
+    assert row["squeeze_margin"] == 0.004 and row["wait_steps"] == 0 and not row["wait_capped"]
+
+
 def _census(**fields):
     cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
     for name, value in fields.items():
@@ -777,6 +836,12 @@ def test_a_still_policy_is_classed_no_close_and_the_teacher_closes_on_its_target
     # The teacher's first close lands on the target: well inside the 2 cm close-far rule.
     closes = ep["cycle_first_close_cm"]
     assert all(cm is not None and cm < dagger_loop.CLOSE_FAR_CM for cm in closes), closes
+    # The teacher's first close commands a gap under the grasp width, pinches its own target
+    # and lifts the pick point past the rise; the first selection waits for no retreat.
+    for row in ep["cycle_census"]:
+        assert -0.02 < row["squeeze_margin"] < 0.0 and row["first_held_is_target"], row
+        assert row["pick_z_max"] - row["pick_z_close"] >= oracle.LIFT_MIN_RISE, row
+    assert ep["cycle_census"][0]["wait_steps"] == 0
 
     monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
     env, rig = _env_and_rig(budget=9)
@@ -812,3 +877,262 @@ def test_a_part_inside_the_bin_but_still_moving_ends_the_cycle_and_not_the_metri
     assert not bool(per_brick_stowed(env)[0, 0])
     assert bool(per_brick_stowed(env, max_speed=math.inf)[0, 0])
     env.close()
+
+
+def test_release_ready_selects_at_the_release_after_a_stow_and_at_once_otherwise():
+    cap = int(loop.SELECT_WAIT_FRACTION * loop.CYCLE_STEP_BUDGET)
+    assert loop.release_ready(1.0, 0, after_stow=True)
+    assert loop.release_ready(loop.SELECT_OPEN_FRACTION, 5, after_stow=True)
+    assert not loop.release_ready(0.3, cap - 1, after_stow=True)  # the jaws are still closing
+    assert loop.release_ready(0.3, cap, after_stow=True)  # the cap
+    assert loop.release_ready(0.0, 0, after_stow=False)  # a budget end selects at once
+
+
+def test_released_after_lift_is_the_open_jaw_after_a_lift_with_nothing_held():
+    cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
+    loop.census_step(cycle, grip_open=False, held=0, rise=0.0, close_cm=1.0)
+    assert not loop.released_after_lift(cycle, 1.0, -1)  # a re-open with no lift: chatter
+    loop.census_step(cycle, grip_open=False, held=0, rise=oracle.LIFT_MIN_RISE, close_cm=1.0)
+    assert not loop.released_after_lift(cycle, 0.3, -1)  # the jaws are still opening
+    assert not loop.released_after_lift(cycle, 1.0, 0)  # open, but the part is still held
+    assert loop.released_after_lift(cycle, loop.SELECT_OPEN_FRACTION, -1)  # the release
+
+
+def test_budget_ends_cycle_grants_a_held_part_the_carry_grace():
+    budget, grace = loop.CYCLE_STEP_BUDGET, loop.CARRY_GRACE_STEPS
+    assert not loop.budget_ends_cycle(budget - 1, True, 0)  # under the budget
+    assert loop.budget_ends_cycle(budget, False, 0)  # nothing held: the old end
+    assert not loop.budget_ends_cycle(budget, True, 0)  # held: the grace opens
+    assert not loop.budget_ends_cycle(budget + grace - 1, True, grace - 1)
+    assert loop.budget_ends_cycle(budget + grace, True, grace)  # the grace is spent
+    assert loop.budget_ends_cycle(budget + 10, False, 10)  # dropped in the grace: at once
+    cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
+    assert loop.cycle_end(cycle, set(), False, budget) == ("budget", [])  # the off-switch path
+    assert "grace_steps" in loop.CENSUS_EXPORT
+
+
+def test_reopen_edge_is_the_open_after_a_close_that_lifted_nothing():
+    cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
+    assert not loop.reopen_edge(cycle, True)  # a cycle's first step has no edge
+    loop.census_step(cycle, grip_open=True, held=-1, rise=0.0, close_cm=5.0)
+    assert not loop.reopen_edge(cycle, True)  # open after open
+    loop.census_step(cycle, grip_open=False, held=0, rise=0.0, close_cm=1.0)
+    assert not loop.reopen_edge(cycle, False)  # still closed
+    assert loop.reopen_edge(cycle, True)  # the re-open, and nothing rose
+    loop.census_step(cycle, grip_open=False, held=0, rise=oracle.LIFT_MIN_RISE, close_cm=1.0)
+    assert not loop.reopen_edge(cycle, True)  # the part rose: a lift, not a REOPEN
+
+
+def test_floored_gap_caps_a_closing_command_at_the_teachers_close_set_point():
+    import inspect
+
+    from maker_arm_lab.core import eval_loop, grasp
+
+    w = 0.0398  # the 2x4's grasp width: the teacher closes to w - 6 mm
+    assert loop.floored_gap(w - 0.0013, w) == pytest.approx(w - 0.006)
+    assert loop.floored_gap(w - 0.0013, w) == pytest.approx(grasp.close_gap(w))
+    assert loop.floored_gap(w - 0.010, w) == pytest.approx(w - 0.010)  # already under: kept
+    assert loop.floored_gap(w + 0.008, w) == w + 0.008  # the landing gap, untouched
+    assert loop.floored_gap(w, w) == w
+    assert loop.floored_gap(0.0018, 0.0) == 0.0018  # no live row: untouched
+    # The six-brick gate rollout has no target row and never floors anything.
+    assert "floored_gap" not in inspect.getsource(eval_loop)
+
+
+def test_gated_gap_holds_the_landing_gap_only_while_descending_above_the_top():
+    import inspect
+
+    from maker_arm_lab.core import eval_loop, grasp
+
+    w, h = 0.0398, 0.0057  # the 2x4's grasp width and half height
+    z_top = 0.010 + h
+    landing = 2.0 * (grasp.landing_half_gap(w) - grasp.JAW_HOLD_BAND)
+    closing = w - 0.0013  # the 400k policy's median first close, 1.3 mm under w
+    # Closing while still coming down 10 mm above the top: the landing gap instead.
+    assert loop.gated_gap(closing, w, z_top + 0.010, z_top, True) == pytest.approx(landing)
+    assert loop.gated_gap(closing, w, z_top + 0.010, z_top, True) == pytest.approx(w + 0.008)
+    # At the top, or below it: untouched, the endpoint is the policy's.
+    assert loop.gated_gap(closing, w, z_top, z_top, True) == closing
+    assert loop.gated_gap(closing, w, z_top - 0.004, z_top, True) == closing
+    assert loop.gated_gap(closing, w, z_top + loop.GATE_MARGIN, z_top, True) == closing
+    # Above the top but no longer descending: untouched.
+    assert loop.gated_gap(closing, w, z_top + 0.010, z_top, False) == closing
+    # A landing or a coast (at or above w) and a command with no row: untouched.
+    assert loop.gated_gap(w + 0.008, w, z_top + 0.010, z_top, True) == w + 0.008
+    assert loop.gated_gap(closing, 0.0, z_top + 0.010, z_top, True) == closing
+    # Once the cycle has held a part (the carry's descent onto the bin): untouched.
+    assert loop.gated_gap(closing, w, z_top + 0.010, z_top, True, held=True) == closing
+    assert "gated_gap" not in inspect.getsource(eval_loop)
+
+
+def _square_pose():
+    """A grasp pose, tool tilted the shipping 20 degrees, with the jaw at heading 0.2 rad."""
+    from maker_arm_lab.core.global_ik import GlobalIK, GraspTarget
+    from maker_arm_lab.robots.frames import GRASP_TILT_RAD
+
+    ik = GlobalIK()
+    target = GraspTarget(
+        position=(0.2, 0.0, 0.03), tilt=GRASP_TILT_RAD, jaw_heading=0.2, lean_azimuth=0.0
+    )
+    return ik, ik.solve(target).q
+
+
+def _jaw_heading(ik, q, roll):
+    from maker_arm_lab.robots.frames import JAW_AXIS_BODY
+
+    q = q.clone()
+    q[5] = roll
+    _, rot = ik.fk(q)
+    jaw = rot @ torch.tensor(JAW_AXIS_BODY, dtype=torch.float64)
+    return math.atan2(float(jaw[1]), float(jaw[0]))
+
+
+def _square_row(heading, width=0.0158):
+    return [0.2, 0.0, 0.01, math.cos(heading), math.sin(heading), width, 0.0057]
+
+
+def test_squared_roll_turns_the_jaw_onto_the_rows_axis_at_three_degrees_a_step():
+    ik, q = _square_pose()
+    roll, lim, step = float(q[5]), (-2.7, 2.7), loop.SQUARE_MAX_STEP
+    pick = (0.21, 0.01, 0.03)  # 14 mm off the centre in xy, 14 mm above the top
+    row = _square_row(0.2 + 0.3)  # the row's axis 0.3 rad round from the jaw
+    # The sign comes from FK: the first step turns the roll 3 degrees toward the row.
+    first = loop.squared_roll(ik, q, row, pick, roll, lim)
+    assert first == pytest.approx(roll + step)
+    assert _jaw_heading(ik, q, first) > _jaw_heading(ik, q, roll)
+    # Stepped with the served command as ``prev``, the jaw lands on the row's axis (to the
+    # 20 degree tilt's 5% roll-to-heading ratio) and stays there.
+    served = roll
+    for _ in range(12):
+        served = loop.squared_roll(ik, q, row, pick, served, lim)
+    assert served == pytest.approx(roll + 0.3)
+    assert _jaw_heading(ik, q, served) == pytest.approx(0.5, abs=0.03)
+    # The rate rule holds on the way back too: a command above the target comes down 3 degrees.
+    assert loop.squared_roll(ik, q, row, pick, roll + 1.0, lim) == pytest.approx(roll + 1.0 - step)
+    # The fold: the axis half a turn round is the same grasp, the one 0.1 rad the other way too.
+    row = _square_row(0.2 + math.pi + 0.1)
+    assert loop.squared_roll(ik, q, row, pick, roll + 0.1, lim) == pytest.approx(roll + 0.1)
+    row = _square_row(0.2 - 0.1)
+    assert loop.squared_roll(ik, q, row, pick, roll - 0.1, lim) == pytest.approx(roll - 0.1)
+
+
+def test_squared_roll_takes_the_other_half_turn_at_a_limit_and_else_leaves_the_roll():
+    ik, q = _square_pose()
+    roll = float(q[5])
+    pick, row = (0.2, 0.0, 0.03), _square_row(0.2 + 0.3)
+    other = roll + 0.3 - math.pi  # the same grasp half a turn round
+    assert loop.squared_roll(ik, q, row, pick, other, (roll - 3.0, roll + 0.2)) == pytest.approx(
+        other
+    )
+    assert loop.squared_roll(ik, q, row, pick, roll, (roll - 1.0, roll + 0.2)) == roll
+
+
+def test_squared_roll_leaves_the_roll_after_a_hold_with_no_row_and_off_the_approach():
+    import inspect
+
+    from maker_arm_lab.core import eval_loop
+
+    ik, q = _square_pose()
+    roll, lim = float(q[5]), (-2.7, 2.7)
+    row, pick = _square_row(0.5), (0.2, 0.0, 0.03)
+    assert loop.squared_roll(ik, q, row, pick, roll, lim) != roll  # the lever acts here
+    assert loop.squared_roll(ik, q, row, pick, roll, lim, held=True) == roll  # held or lifted
+    assert loop.squared_roll(ik, q, _square_row(0.5, width=0.0), pick, roll, lim) == roll
+    far = (0.2 + loop.SQUARE_RADIUS + 0.001, 0.0, 0.03)
+    assert loop.squared_roll(ik, q, row, far, roll, lim) == roll
+    high = (0.2, 0.0, 0.01 + 0.0057 + loop.SQUARE_ABOVE)
+    assert loop.squared_roll(ik, q, row, high, roll, lim) == roll
+    assert "squared_steps" in loop.CENSUS_EXPORT
+    assert "squared_roll" not in inspect.getsource(eval_loop)
+
+
+def test_refreshed_row_follows_the_live_centre_and_keeps_the_grasp_when_nothing_ranks(
+    monkeypatch,
+):
+    env, rig = _env_and_rig()
+    _place(env, SPREAD)
+    scene = rig.snapshot(0)
+    env.close()
+    selector = loop._selector(rig, 0)
+    target = selector.select_target(scene)
+    row = np.array(loop.target_context(scene.brick_pos[target], selector.grasp), dtype=np.float32)
+    scene.brick_pos[target, :2] += 0.02
+    fresh = loop.refreshed_row(row, selector, scene, target)
+    assert fresh[:3] == pytest.approx(scene.brick_pos[target].tolist())
+    assert fresh[3] ** 2 + fresh[4] ** 2 == pytest.approx(1.0) and fresh[5] > 0.0
+    monkeypatch.setattr(selector, "_ranked", lambda scene, mask: [])
+    kept = loop.refreshed_row(row, selector, scene, target)
+    assert kept[:3] == pytest.approx(scene.brick_pos[target].tolist())
+    assert kept[3:] == pytest.approx(row[3:].tolist())
+
+
+class _ReplanSpyPolicy(_HoldPolicy):
+    """Holds still with the jaws open, closes them on the steps in ``closes``, and records the
+    replan flags the loop sends (None when the switch is off)."""
+
+    def __init__(self, closes=()):
+        super().__init__()
+        self.flags = []
+        self.closes = set(closes)
+        self.steps = 0
+
+    def step(self, state, wrist, overhead, context=None, anchor=None, replan=None):
+        self.flags.append(None if replan is None else replan.tolist())
+        action = super().step(state, wrist, overhead, context, anchor)
+        if self.steps in self.closes:
+            action[:, 6] = -1.0
+        self.steps += 1
+        return action
+
+
+def test_the_switches_select_at_once_after_a_budget_end_refresh_at_a_reopen_and_flag_it(
+    monkeypatch,
+):
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
+    env, rig = _env_and_rig(budget=3)
+    _place(env, SPREAD)
+    policy = _ReplanSpyPolicy(closes={5})  # closed at step 5, open again at 6: a REOPEN
+    payload = _rollout(
+        env,
+        rig,
+        policy,
+        budget=3,
+        select_at_release=True,
+        replan_on_switch=True,
+        row_refresh=True,
+    )
+    env.close()
+    ep = payload["episodes"][0]
+    assert payload["inference"]["loop"] == {
+        "select_at_release": True,
+        "replan_on_switch": True,
+        "row_refresh": True,
+        "squeeze_floor": False,
+        "close_gate": False,
+        "square_wrist": False,
+    }
+    # Every cycle ended on its budget, so no selection waited for a retreat.
+    assert ep["cycle_reasons"] == ["budget"] * 3 and ep["select_wait_steps"] == 0
+    assert [r["wait_steps"] for r in ep["cycle_census"]] == [0, 0, 0]
+    assert [r["refreshes"] for r in ep["cycle_census"]] == [1, 0, 0]
+    # The flag rides on the request after a row is written: the selections at steps 0, 40 and
+    # 80, and the refresh read at step 6 reaches the policy on step 7.
+    assert [i for i, f in enumerate(policy.flags) if f == [True]] == [0, 7, 40, 80]
+    # Off, the flag stays off the wire (an older server would reject it).
+    env, rig = _env_and_rig(budget=1)
+    _place(env, SPREAD)
+    policy = _ReplanSpyPolicy()
+    _rollout(env, rig, policy, budget=1)
+    env.close()
+    assert set(policy.flags) == {None}
+
+
+def test_the_release_selection_waits_for_nothing_after_the_teachers_stow():
+    env, rig = _env_and_rig()
+    _place(env, SPREAD)
+    ep = _rollout(env, rig, None, select_at_release=True)["episodes"][0]
+    env.close()
+    # The rig hands back at RETREAT with the jaws at the full gap, so the release read holds
+    # on the step the cycle closes.
+    assert ep["cycle_reasons"] == ["stowed"] * 3
+    assert [r["wait_steps"] for r in ep["cycle_census"]] == [0, 0, 0]
