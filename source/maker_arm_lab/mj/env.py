@@ -33,8 +33,10 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
         takeover keeps the marker on the loop's target), env.tray (MS7a: the heap drops
         inside the four walls of layout.tray_static_boxes)
     desk boxes (MS7a, ``desk_boxes`` > 0, heap mode only): env.desk_boxes, env.desk_box_poses
-        (N, M, 3) float64 per-episode (x, y, yaw) of each box, env.destination_bins (N, K) long
-        (part b of env i goes to box destination_bins[i, b]), env.place_desk_boxes(i, poses),
+        (N, M, 3) float64 per-episode (x, y, yaw) of each box, env.class_to_box (N, 4) int64
+        (the box of each core.parts.PART_CLASSES class, drawn per episode),
+        env.destination_bins (N, K) long (part b of env i goes to box destination_bins[i, b],
+        its class's box), env.place_desk_boxes(i, poses),
         env.set_context_box(i, box) (the context row's box part, set per target)
 
 Semantics carried over from ``ManagerBasedRLEnv`` because the rig depends on them: a done
@@ -69,7 +71,7 @@ from maker_arm_lab.core import desk_boxes as _boxes
 from maker_arm_lab.core import profile as _profile
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.heap_oracle import STOW_HALF_EXTENTS
-from maker_arm_lab.core.parts import Part
+from maker_arm_lab.core.parts import PART_CLASSES, Part
 from maker_arm_lab.core.quat import compose_offset_rot, quat_apply, quat_mul, rpy_from_quat
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.core.target import target_brick
@@ -311,6 +313,8 @@ class MjLegoSortEnv:
         # MS7a design, desk boxes: N boxes on the desk replace the shelf and its heap bin.
         self.desk_boxes = desk_boxes
         self.desk_box_poses = np.zeros((num_envs, desk_boxes, 3))
+        # The episode's box per class, in core.parts.PART_CLASSES order (MS7a design, classes).
+        self.class_to_box = np.zeros((num_envs, len(PART_CLASSES)), dtype=np.int64)
         self.context_mode = context
         self.context_camera = np.zeros((num_envs, CONTEXT_DIMS["camera"]), dtype=np.float32)
         self.context_privileged = np.zeros((num_envs, CONTEXT_DIMS["privileged"]), dtype=np.float32)
@@ -699,7 +703,10 @@ class MjLegoSortEnv:
             # MS7a design, desk boxes: the boxes stand first, from the same per-reset rng, and
             # the heap drops on the tray footprint beside them, walls or not.
             self.place_desk_boxes(i, _boxes.sample_boxes(self._rng, self.desk_boxes))
-            self.destination_bins[i] = torch.tensor(_boxes.part_destinations(k, self.desk_boxes))
+            self.class_to_box[i] = _boxes.class_map(self._rng, self.desk_boxes)
+            self.destination_bins[i] = torch.tensor(
+                _boxes.part_destinations(self.parts, self.class_to_box[i])
+            )
             zone = layout.tray_bounds()
         else:
             # MS6 rework section 6: heap mode has one bin, at y = 0.0. The release target,
@@ -758,6 +765,7 @@ class MjLegoSortEnv:
             # One destination per part and every box pose, so forensics rebuild the scene.
             state["destination_bin"] = self.destination_bins[i].numpy().astype(np.int64)
             state["desk_box_poses"] = self.desk_box_poses[i].astype(np.float32)
+            state["class_to_box"] = self.class_to_box[i].copy()
         elif self.parts is not None:
             state["destination_bin"] = np.array([int(self.destination_bins[i])], dtype=np.int64)
         return state

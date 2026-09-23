@@ -21,6 +21,7 @@ from collections.abc import Sequence
 
 from maker_arm_lab.core import layout
 from maker_arm_lab.core.grasp import polygon_distance
+from maker_arm_lab.core.parts import PART_CLASSES, Part, part_class
 
 DESK_BOX_INTERIOR_ONE = (0.11, 0.11, 0.06)  # INITIAL: rung 1, one box takes all 50 parts
 """Interior (x, y, z) of the one desk box of rung 1, m. The six-brick bin's 0.09 x 0.09 x 0.04
@@ -246,11 +247,21 @@ def sample_boxes(rng: random.Random, n: int) -> list[tuple[float, float, float]]
     return poses
 
 
-def part_destinations(num_parts: int, num_boxes: int) -> list[int]:
-    """The box each part goes to, one entry per part.
+def class_map(rng: random.Random, n: int) -> tuple[int, ...]:
+    """The episode's class-to-box map: the box of each class, in ``parts.PART_CLASSES`` order.
 
-    One box takes every part. With more boxes, part b goes to box b modulo their number: the
-    heap's part order is already drawn at random, so this spreads the parts without a draw.
-    ``feat/ms7-classes`` replaces it with the episode's class-to-box map.
+    MS7a design, classes and the class map: with four boxes it is a random permutation of the
+    four classes over the four boxes, drawn from ``rng`` alone, so no shortcut from a part's
+    looks to a box position survives across episodes. One box takes every class and draws
+    nothing. Any other count folds a permutation onto its boxes.
     """
-    return [b % num_boxes for b in range(num_parts)]
+    if n == 1:
+        return (0,) * len(PART_CLASSES)
+    boxes = list(range(len(PART_CLASSES)))
+    rng.shuffle(boxes)
+    return tuple(b % n for b in boxes)
+
+
+def part_destinations(parts: Sequence[Part], class_to_box: Sequence[int]) -> list[int]:
+    """The box each part goes to, one entry per part: its class's box."""
+    return [int(class_to_box[PART_CLASSES.index(part_class(p))]) for p in parts]

@@ -1,6 +1,7 @@
 """MS7a desk boxes on the MuJoCo env: the scene, the per-part destination, the box context
 row, the recorded scene and the teacher's release into its own box."""
 
+import json
 import math
 import random
 
@@ -12,6 +13,7 @@ import torch
 from maker_arm_lab.core import desk_boxes, layout, loop, oracle
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
+from maker_arm_lab.core.parts import PART_CLASSES
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
@@ -46,7 +48,10 @@ def test_desk_boxes_replace_the_shelf_and_stand_at_the_drawn_poses(n):
     names = {m.geom(g).name for g in range(m.ngeom)}
     assert "shelf" not in names and "heap_bin_floor" not in names
     assert env.destination_bins.shape == (2, len(PARTS))
-    assert env.destination_bins.tolist() == [desk_boxes.part_destinations(len(PARTS), n)] * 2
+    for i in range(2):
+        expected = desk_boxes.part_destinations(PARTS, env.class_to_box[i])
+        assert env.destination_bins[i].tolist() == expected
+        assert sorted(env.class_to_box[i]) == ([0, 1, 2, 3] if n == 4 else [0, 0, 0, 0])
     assert env.desk_box_poses.shape == (2, n, 3)
     for i in range(2):
         assert desk_boxes.clear(env.desk_box_poses[i], n)
@@ -71,6 +76,7 @@ def test_a_seed_reproduces_the_boxes_and_the_heap():
     a.reset(seed=9)
     b.reset(seed=9)
     assert np.array_equal(a.desk_box_poses, b.desk_box_poses)
+    assert np.array_equal(a.class_to_box, b.class_to_box)
     for k in range(len(PARTS)):
         assert torch.equal(
             a.scene[f"brick_{k}"].data.root_pos_w, b.scene[f"brick_{k}"].data.root_pos_w
@@ -95,8 +101,9 @@ def test_a_part_in_its_own_box_is_stowed_and_one_in_another_box_is_not():
     env = _env(4)
     env.reset(seed=3)
     env.place_desk_boxes(0, FIXED)
+    env.destination_bins[0] = torch.tensor([0, 1, 2])
     floor = desk_boxes.DESK_BOX_WALL + 0.006
-    # Parts 0, 1, 2 go to boxes 0, 1, 2. Part 0 lies in box 0, part 1 in box 0 too.
+    # Part 0 lies in its own box 0, part 1 in box 0 too, not its own.
     _place(
         env,
         [
@@ -131,13 +138,17 @@ def test_the_recorded_initial_state_carries_the_boxes_and_each_parts_destination
     env = _env(4, export_dir=tmp_path, export_all=True, episode_length_s=0.2)
     env.reset(seed=3)
     poses = env.desk_box_poses[0].copy()
+    class_map = env.class_to_box[0].tolist()
+    destination = env.destination_bins[0].tolist()
     for _ in range(8):
         env.step(_hold(env))
     env.close()
     with h5py.File(tmp_path / "shard.hdf5") as f:
         init = f["data/demo_0/initial_state"]
         assert np.allclose(init["desk_box_poses"][0], poses, atol=1e-6)
-        assert init["destination_bin"][()].tolist() == [0, 1, 2]
+        assert init["destination_bin"][()].tolist() == destination
+        assert init["class_to_box"][()].tolist() == class_map
+        assert json.loads(init["class_to_box"].attrs["names"]) == list(PART_CLASSES)
         assert f["data/demo_0/obs/context_box"].shape[1] == 3
 
 
@@ -208,6 +219,7 @@ def test_the_loop_serves_the_box_of_every_target_it_selects(monkeypatch):
         4, FIXED, context="camera_box_target", episode_length_s=loop.episode_length_s(4)
     )
     _place(env, SPREAD)
+    destination = env.destination_bins[0].tolist()
     policy = _RecordingHold(env)
     payload = loop.rollout(
         env,
@@ -220,11 +232,10 @@ def test_the_loop_serves_the_box_of_every_target_it_selects(monkeypatch):
         max_wall_minutes=5.0,
     )
     env.close()
-    targets = {t for t, _ in policy.seen if t >= 0}
-    assert len(targets) >= 2, payload["episodes"][0]["cycle_targets"]
-    for target, box in policy.seen:
-        if target >= 0:
-            assert np.allclose(box, FIXED[target % 4], atol=1e-6)
+    served = [(t, box) for t, box in policy.seen if t >= 0]
+    for target, box in served:
+        assert np.allclose(box, FIXED[destination[target]], atol=1e-6)
+    assert len({t for t, _ in served}) >= 2, payload["episodes"][0]["cycle_targets"]
 
 
 def test_the_oracle_driver_stows_through_the_loop_into_one_box():

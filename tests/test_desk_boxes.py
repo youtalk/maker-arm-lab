@@ -78,9 +78,17 @@ def test_a_seed_reproduces_the_draw():
     assert a == b and desk_boxes.sample_boxes(random.Random(8), 4) != a
 
 
-def test_one_box_takes_every_part_and_the_placeholder_spreads_them_over_four():
-    assert desk_boxes.part_destinations(5, 1) == [0] * 5
-    assert desk_boxes.part_destinations(6, 4) == [0, 1, 2, 3, 0, 1]
+def test_four_boxes_draw_a_class_permutation_and_one_box_takes_every_class():
+    rng = random.Random(3)
+    maps = {desk_boxes.class_map(rng, 4) for _ in range(200)}
+    assert all(sorted(m) == [0, 1, 2, 3] for m in maps) and len(maps) == 24
+    state = rng.getstate()
+    assert desk_boxes.class_map(rng, 1) == (0, 0, 0, 0) and rng.getstate() == state
+    heap = [parts.make_part("slope", 1, 2), parts.make_part("brick", 1, 2, 5)]
+    heap += [parts.make_part("brick", 1, 6), parts.make_part("brick", 2, 3)]
+    # PART_CLASSES order: slope, tall, narrow, wide.
+    assert desk_boxes.part_destinations(heap, (2, 0, 3, 1)) == [2, 0, 3, 1]
+    assert desk_boxes.part_destinations(heap * 2, (0, 0, 0, 0)) == [0] * 8
 
 
 def test_a_box_footprint_on_the_corridor_is_refused():

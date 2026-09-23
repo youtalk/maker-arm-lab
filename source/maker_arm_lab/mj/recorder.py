@@ -26,6 +26,8 @@ consumers and are unchanged):
     initial_state/destination_bin (1,) i64      MS6 heap shards only; (K,) one box per part
         with desk boxes (MS7a)
     initial_state/desk_box_poses (1,M,3) f32    desk box shards only: each box's x, y, yaw
+    initial_state/class_to_box (4,) i64         desk box shards only: the box of each class,
+        in the order of its JSON `names` attr (core.parts.PART_CLASSES)
     attrs: parts (JSON list of part names, MS6 heap shards only)
     attrs (file level): gripper_mode ("binary" | "continuous", MS6 phase B design 5.4)
 
@@ -44,6 +46,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from maker_arm_lab.core.parts import PART_CLASSES
 from maker_arm_lab.mj.context_names import (
     CONTEXT_BOX_NAMES,
     CONTEXT_CAMERA_NAMES,
@@ -243,6 +246,9 @@ class ShardRecorder:
             init.create_dataset(
                 "desk_box_poses", data=state["desk_box_poses"][None].astype(np.float32)
             )
+        if "class_to_box" in state:
+            ds = init.create_dataset("class_to_box", data=state["class_to_box"].astype(np.int64))
+            ds.attrs["names"] = json.dumps(list(PART_CLASSES))
         if self._parts[env_index] is not None:
             group.attrs["parts"] = json.dumps(self._parts[env_index])
         rigid = init.create_group("rigid_object")

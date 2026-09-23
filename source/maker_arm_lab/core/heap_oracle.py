@@ -37,7 +37,7 @@ from dataclasses import dataclass, replace
 import torch
 
 from maker_arm_lab.core import checker, desk_boxes, grasp, layout, oracle
-from maker_arm_lab.core.parts import Part
+from maker_arm_lab.core.parts import Part, part_class
 
 CYCLE_BUDGET = 50
 CELL_FAILURE_CAP = 3
@@ -797,9 +797,13 @@ class HeapOracle(oracle.EnvOracle):
         cell = self.cell_of(scene.brick_pos[brick, :2].tolist())
         self.failures[cell] = self.failures.get(cell, 0) + 1
 
+    def class_to_box(self) -> dict[str, int]:
+        """The box of each class the heap holds, read off the per-part destinations."""
+        return {part_class(p): b for p, b in zip(self.parts, self.part_boxes)}
+
     def extra_stats(self) -> dict:
         """Merged into ``OracleRig.episode_stats`` beside the induction counters."""
-        return {
+        stats = {
             "cycles": self.cycles,
             "pushes": self.pushes,
             "rakes": self.rakes,
@@ -813,3 +817,8 @@ class HeapOracle(oracle.EnvOracle):
             "cells_excluded": sum(1 for v in self.failures.values() if v >= CELL_FAILURE_CAP),
             "parts_out_of_reach": self.out_of_reach,
         }
+        if self.boxes:
+            # The episode's class-to-box map and each part's box (MS7a design, classes).
+            stats["part_boxes"] = list(self.part_boxes)
+            stats["class_to_box"] = self.class_to_box()
+        return stats
