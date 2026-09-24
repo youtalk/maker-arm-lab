@@ -1276,6 +1276,8 @@ def test_the_switches_select_at_once_after_a_budget_end_refresh_at_a_reopen_and_
         "adopt_held": False,
         "rake_cap": 0,
         "rake_crowd": False,
+        "park_done": False,
+        "rake_turn": False,
     }
     # Every cycle ended on its budget, so no selection waited for a retreat.
     assert ep["cycle_reasons"] == ["budget"] * 3 and ep["select_wait_steps"] == 0
@@ -1402,3 +1404,87 @@ def test_part_failures_skip_the_failed_part_and_keep_its_cell_neighbour(monkeypa
     assert [row[0] for row in left] == [0, 1, 2] and all(row[4:] == [0, 3] for row in left)
     assert all(math.dist(row[1:3], spread[:2]) < 0.01 for row, spread in zip(left, SPREAD))
     assert payload["inference"]["loop"]["part_failures"] is True
+
+
+class _DriftPolicy(_HoldPolicy):
+    """Turns the base joint a little on every step: a policy that never holds still."""
+
+    def step(self, state, wrist, overhead, context=None, anchor=None):
+        action = super().step(state, wrist, overhead, context, anchor)
+        action[:, 0] += 0.02
+        return action
+
+
+def test_park_done_holds_a_finished_env_while_the_batch_runs(monkeypatch):
+    """Env 0 has nothing in reach and ends at once; env 1 runs two cycles. Without the switch
+    the policy keeps turning env 0's base for the whole batch; with it env 0 keeps the one
+    command it got on its last step."""
+    moved = {}
+    for park in (False, True):
+        # Built long enough that env 1 ends on its cycle budget, not on the env's time-out,
+        # whose reset would put env 0's arm back home.
+        monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 60)
+        draw = sample_run_draw(random.Random(5))
+        draw["slot_colors"] = (0, 1, 2, 3)
+        env = MjLegoSortEnv(
+            2, draw, parts=PARTS, cameras=False, episode_length_s=loop.episode_length_s(2)
+        )
+        monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
+        env.reset(seed=11)
+        rng = random.Random(1)
+
+        def factory(i, bl, episode_draw, env=env, rng=rng):
+            return HeapOracle(
+                bl, env.parts, int(env.destination_bins[i]), episode_draw, rng=rng, cycle_budget=2
+            )
+
+        rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)
+        h = env.handles
+        for i, poses in ((0, [(0.45, y, 0.006, 0.0) for y in (-0.05, 0.0, 0.05)]), (1, SPREAD)):
+            m, d = env.models[i], env.datas[i]
+            for b, (x, y, z, yaw) in enumerate(poses):
+                d.qpos[h.brick_qpos[b] : h.brick_qpos[b] + 3] = (x, y, z)
+                d.qpos[h.brick_qpos[b] + 3 : h.brick_qpos[b] + 7] = (1.0, 0.0, 0.0, 0.0)
+            mujoco.mj_forward(m, d)
+            mujoco.mj_step(m, d, nstep=120)
+        env._refresh([0, 1], images=False)
+        start = float(env.scene["robot"].data.joint_pos[0, 0])
+        payload = _rollout(env, rig, _DriftPolicy(), budget=2, park_done=park)
+        moved[park] = abs(float(env.scene["robot"].data.joint_pos[0, 0]) - start)
+        env.close()
+        first, second = payload["episodes"]
+        assert first["done_reason"] == "no_candidate" and first["cycles"] == 0
+        assert second["cycles"] == 2 and second["done_reason"] == "cycle_budget"
+        assert payload["steps_run"] > 60
+        assert payload["inference"]["loop"]["park_done"] is park
+    assert moved[False] > 0.3 and moved[True] < 0.05, moved
+
+
+def test_rake_turn_retries_a_declined_rake_at_the_teachers_next_jaw_heading(monkeypatch):
+    """The rig declines a rake whose first hover leg does not plan. Here every rake with the
+    jaws along the sweep is declined: without the switch both rakes of the part's cap are
+    spent on declines and the episode ends with no cycle; with it the rake runs at the jaw
+    across the sweep, frees the part and the policy gets its cycle."""
+    seen = {}
+    for turn in (False, True):
+        env, rig = _stuck_tray_env_and_rig(monkeypatch)
+        jaws = []
+        resume = rig.resume
+
+        def declining(i, target=None, push=None, resume=resume, jaws=jaws, **kw):
+            if push is not None:
+                jaws.append(push.jaw if push.jaw is None else push.jaw - push.heading)
+                if push.jaw is not None and abs(push.jaw - push.heading) < 1e-9:
+                    return False
+            return resume(i, target=target, push=push, **kw)
+
+        rig.resume = declining
+        payload = _rollout(env, rig, _HoldPolicy(), budget=3, scripted_rake=True, rake_turn=turn)
+        env.close()
+        seen[turn] = (payload["episodes"][0], jaws)
+        assert payload["inference"]["loop"]["rake_turn"] is turn
+    plain, jaws = seen[False]
+    assert plain["rakes"] == 2 and plain["cycles"] == 0 and jaws == [0.0, 0.0]
+    turned, jaws = seen[True]
+    assert turned["cycles"] >= 1 and turned["cycle_targets"][0] == 0
+    assert jaws[:2] == [0.0, pytest.approx(math.pi / 2)]

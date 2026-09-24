@@ -191,6 +191,18 @@ def parse_args(argv=None) -> argparse.Namespace:
         "to grasp.RAKE_CROWD_M into one",
     )
     parser.add_argument(
+        "--park_done",
+        action="store_true",
+        help="MS7a tail forensics: hold an env whose episode has ended at its last command "
+        "while the rest of the batch runs, instead of serving it the policy",
+    )
+    parser.add_argument(
+        "--rake_turn",
+        action="store_true",
+        help="MS7a tail forensics: retry a rake the rig declined at the teacher's next jaw "
+        "headings (across the sweep, then held) before it counts as spent",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -298,6 +310,8 @@ def main(argv=None) -> int:
             adopt_held=args.adopt_held,
             rake_cap=args.rake_cap,
             rake_crowd=args.rake_crowd,
+            park_done=args.park_done,
+            rake_turn=args.rake_turn,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

@@ -49,7 +49,14 @@ does when its LIFT comes up with another part (``HeapOracle.adopt_held_part``). 
 settings follow (MS7a rake prototype, 2026-09-24): ``rake_cap`` N lets the selector rake one
 part N times instead of ``RAKE_PART_CAP`` and scales the episode's rake cap with it, and
 ``rake_crowd`` lets a rake start land its tips up to ``grasp.RAKE_CROWD_M`` into a neighbour
-when no start is clear. The payload's ``inference`` block records all fourteen.
+when no start is clear. ``park_done`` (MS7a tail forensics, 2026-09-24) holds an env whose
+episode has ended at the last command it received: the batch runs in lockstep until its last
+episode ends, and without it the policy keeps driving the finished env on the stale row of its
+last cycle, a motion the grader never reads. ``rake_turn`` (the same forensics) retries a rake
+the rig declined at the teacher's next jaw headings: ``OracleRig.resume`` declines a rake whose
+first hover leg does not plan, which the teacher answers by turning the jaws
+(``HeapOracle._turn_rake_jaw``), while the loop booked the rake as spent. The payload's
+``inference`` block records all sixteen.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
@@ -67,7 +74,7 @@ import math
 import random
 import time
 from collections import Counter, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import torch
 
@@ -1005,12 +1012,14 @@ def rollout(
     adopt_held: bool = False,
     rake_cap: int = 0,
     rake_crowd: bool = False,
+    park_done: bool = False,
+    rake_turn: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
     ``policy`` is a ``policy_client.ServerPolicy`` or None for the oracle driver.
     ``takeover`` is a ``TakeoverConfig`` (the DAgger mode, phase B design 5.5) or None.
-    The fourteen settings are the module docstring's; ``replan_on_switch`` needs a policy whose
+    The sixteen settings are the module docstring's; ``replan_on_switch`` needs a policy whose
     ``step`` takes ``replan``, and the flag is left off the wire when the switch is off;
     ``squeeze_floor``, ``close_gate``, ``square_wrist`` and ``pick_snap`` need the continuous
     gripper and a served target row.
@@ -1116,12 +1125,15 @@ def rollout(
         "adopt_held": bool(adopt_held),
         "rake_cap": int(rake_cap),
         "rake_crowd": bool(rake_crowd),
+        "park_done": bool(park_done),
+        "rake_turn": bool(rake_turn),
     }
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
     pick_z_hist = [deque(maxlen=GATE_WINDOW + 1) for _ in range(num_envs)]
     # The roll command each env received on the last step, ``square_wrist``'s rate read.
     last_roll = robot.data.joint_pos[:, WRIST_ROLL_INDEX].to("cpu").clone()
+    parked = None  # ``park_done``: the command each env got on the step before
 
     started = time.monotonic()
     max_steps = int(env.max_episode_length)
@@ -1204,7 +1216,11 @@ def rollout(
                 # caps), then selects again.
                 st.selector._end_push()
                 st.rakes += 1
-                rig.resume(i, push=rake)
+                # The teacher's jaw headings in its order: along the sweep, across it, held.
+                jaws = (rake.jaw, rake.heading + math.pi / 2, None) if rake_turn else (rake.jaw,)
+                for jaw in jaws:
+                    if rig.resume(i, push=replace(rake, jaw=jaw)):
+                        break
                 continue
             if target is None:
                 loop_done[i] = True
@@ -1433,6 +1449,12 @@ def rollout(
         arm_clamped, overshoot = clamp_arm_actions(action_cpu[:, :6], limits)
         tracker.record_clamps(overshoot)
         clamped = torch.cat([arm_clamped, action_cpu[:, 6:7]], dim=-1)
+        if park_done:
+            # ``tracker.done`` is read before this step: an env keeps the command it got on
+            # the last step of its episode for as long as the batch runs.
+            if parked is not None:
+                clamped[tracker.done] = parked[tracker.done]
+            parked = clamped.clone()
         last_roll = clamped[:, WRIST_ROLL_INDEX].clone()
         if step == max_steps - 1 and recorder is not None:
             # The time-out cuts a running takeover short of RETREAT: negate before the env's
