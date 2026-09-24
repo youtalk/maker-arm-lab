@@ -74,6 +74,18 @@ class _Still:
         return action
 
 
+class _Home(_Still):
+    """Opens the jaws, then commands the joint pose of its first call: after a takeover it lets
+    go of what the jaws press and takes the arm back home."""
+
+    def step(self, state, wrist, overhead, context=None, anchor=None, replan=None):
+        self.home = getattr(self, "home", state[:, :6].copy())
+        action = super().step(state, wrist, overhead, context, anchor, replan)
+        opened = state[:, 6] > 0.95
+        action[opened, :6] = self.home[opened]
+        return action
+
+
 class _Teacher(_TeacherPolicy):
     """The teacher as the policy (a second rig on the same env), served the 16-wide row."""
 
@@ -182,6 +194,26 @@ def test_the_class_at_lift_serves_the_box_of_the_class_drawn_for_the_part_in_the
     assert draws == ["wide", "narrow", "tall"]
 
 
+def test_the_tool_is_clear_of_the_tray_40_mm_off_its_footprint_at_the_rim():
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    radius = perception.TOOL_OCCLUSION_RADIUS_M
+    rim = layout.TRAY_WALL_HEIGHT * math.tan(math.radians(30.0))
+    assert not loop.tool_clear_of_tray(((x0 + x1) / 2, 0.0), 0.0)  # over the tray
+    assert not loop.tool_clear_of_tray((x1 + radius - 1e-4, 0.0), 0.0)
+    assert loop.tool_clear_of_tray((x1 + radius + 1e-4, 0.0), 0.0)
+    # A 30 degree lean widens the rim by 11.5 mm: the same point is not clear any more.
+    assert not loop.tool_clear_of_tray((x1 + radius + 1e-4, 0.0), 30.0)
+    assert loop.tool_clear_of_tray((x1 + rim + radius + 1e-4, 0.0), 30.0)
+    corner = radius / math.sqrt(2.0)
+    assert not loop.tool_clear_of_tray((x0 - corner + 1e-4, y0 - corner + 1e-4), 0.0)
+    assert loop.tool_clear_of_tray((x0 - corner - 1e-4, y1 + corner + 1e-4), 0.0)
+    cap = int(loop.SELECT_WAIT_FRACTION * loop.CYCLE_STEP_BUDGET)
+    over = ((x0 + x1) / 2, 0.0)
+    assert loop.look_again(over, 0.0, 0) and loop.look_again(over, 0.0, cap - 1)
+    assert not loop.look_again(over, 0.0, cap)  # the streak reached the cap
+    assert not loop.look_again((x1 + radius + 0.01, 0.0), 0.0, 0)  # clear: end at once
+
+
 def test_the_selector_skips_the_destination_grade_when_it_knows_no_destination():
     bl = layout.DEFAULT_BIN_LAYOUT
     sel = HeapOracle(bl, PARTS, [0, 0, 0], oracle.nominal_draw(), boxes=FIXED)
@@ -274,6 +306,11 @@ def test_the_row_marker_and_box_are_the_detections_at_selection_and_stay_frozen(
         "lifts_classified": 0,
         "wrong_wrist_class": 0,
         "lifts_empty": 0,
+        # The still tool stands 15 mm off the tray footprint: the empty selection looks again
+        # for the retreat wait's cap, 15 steps at this budget, before it ends the episode.
+        "look_again_waits": 1,
+        "look_again_steps": int(loop.SELECT_WAIT_FRACTION * 40),
+        "look_again_found": 0,
     }
     recorded = payload["inference"]["loop"]
     assert (recorded["perceived"], recorded["contact_hold"]) == (True, False)
@@ -298,6 +335,64 @@ def test_a_part_missed_at_every_call_or_under_the_tool_is_never_selected(monkeyp
     ep = payload["episodes"][0]
     assert sorted(ep["cycle_targets"]) == [0, 0, 0, 2, 2, 2], ep
     assert ep["done_reason"] == "no_candidate"
+
+
+def _one_stuck_brick(monkeypatch):
+    """One 2x4 brick at yaw 45 degrees 25 mm off the tray's left wall: under a 20 degree band
+    it ranks no grasp, so the selector plans a rake."""
+    monkeypatch.setattr(grasp, "WALL_BAND_RAD", math.radians(20.0))
+    env, rig = _env_and_rig(part_list=[parts.make_part("brick", 2, 4)], budget=3, tray=True)
+    (_, _), (y0, _) = layout.tray_bounds()
+    _place(env, [(layout.TRAY_CENTER[0], y0 + 0.025, 0.0049, math.radians(45.0))])
+    return env, rig
+
+
+def test_a_rake_that_hands_back_over_its_part_looks_again_and_finds_it(monkeypatch):
+    """The rake hands the env back with the tool over the part it raked, which the tool hides.
+    Without the look-again the loop saw an empty tray and ended the episode; with it the loop
+    perceives again while the policy takes the arm home, finds the part and opens a cycle."""
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 200)
+    found = {}
+    for looks in (False, True):
+        env, rig = _one_stuck_brick(monkeypatch)
+        if not looks:
+            monkeypatch.setattr(loop, "look_again", lambda tool_xy, lean_deg, streak: False)
+        payload = _rollout(
+            env, rig, _Home(), budget=3, perceived=True, noise_scales=ZERO, scripted_rake=True
+        )
+        env.close()
+        monkeypatch.undo()
+        monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 200)
+        found[looks] = (payload["episodes"][0], payload["perception"])
+    old, _ = found[False]
+    assert old["rakes"] >= 1 and old["cycles"] == 0 and old["done_reason"] == "no_candidate"
+    ep, seen = found[True]
+    assert ep["rakes"] >= 1 and ep["cycles"] >= 1 and ep["cycle_targets"][0] == 0, ep
+    assert seen["look_again_waits"] >= 1 and seen["look_again_found"] >= 1, seen
+    assert 0 < seen["look_again_steps"] < int(loop.SELECT_WAIT_FRACTION * 200), seen
+
+
+def test_an_empty_tray_ends_at_once_with_the_tool_clear_and_after_the_cap_without(monkeypatch):
+    """Three parts out of reach, none in the tray. With the tool swung clear of the tray the
+    first empty selection ends the episode; at the home pose, 15 mm off the tray, the loop
+    looks again for the retreat wait's cap first."""
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
+    out_of_reach = [(0.45, y, 0.006, 0.0) for y in (-0.05, 0.0, 0.05)]
+    for swing, steps in ((1.0, 1), (0.0, int(loop.SELECT_WAIT_FRACTION * 40) + 1)):
+        env, rig = _env_and_rig(budget=3)
+        d, h = env.datas[0], env.handles
+        d.qpos[h.joint_qpos[0]] += swing  # the base turns the tool off the tray
+        d.ctrl[list(h.arm_actuators)] = d.qpos[list(h.joint_qpos[:6])]
+        _place(env, out_of_reach)
+        clear = loop.tool_clear_of_tray(rig.pick_point(0)[:2].tolist(), 0.0)
+        payload = _rollout(env, rig, _Still(), budget=3, perceived=True, noise_scales=ZERO)
+        env.close()
+        ep, seen = payload["episodes"][0], payload["perception"]
+        assert clear is bool(swing)
+        assert ep["cycles"] == 0 and ep["done_reason"] == "no_candidate", ep
+        assert payload["steps_run"] == steps
+        assert seen["look_again_steps"] == steps - 1 and seen["look_again_found"] == 0, seen
+        assert seen["look_again_waits"] == int(not swing)
 
 
 def test_at_zero_scales_the_loop_serves_the_truth_paths_rows_and_boxes(monkeypatch):

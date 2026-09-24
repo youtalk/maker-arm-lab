@@ -82,7 +82,12 @@ pre-registered fallback, reads the contacts again). A cycle ends when a lifted h
 (``perceived_cycle_end``), or on its budget. A failure is booked at the target's perceived
 position (``perception.PositionMemory``), and so is a rake. At the detector's lift the box
 follows the class drawn for the part between the jaws (``lift_class_box``), which replaces
-``adopt_held``. At the episode's end a placed cycle whose part is stowed counts as a stow.
+``adopt_held``. At the episode's end a placed cycle whose part is stowed counts as a stow. A
+selection that finds neither a target nor a rake ends the episode ``no_candidate`` only once
+the tool is clear of the tray or the look has waited the retreat wait's cap
+(``look_again``): the arm hides the parts under it from the overhead camera, and a real rig
+moves it away and looks again before it calls the heap empty. While it waits, the rows and the
+marker stay, the policy drives, and every step perceives again.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
@@ -766,6 +771,7 @@ class EnvState:
     fail_mem: perception.PositionMemory = field(default_factory=perception.PositionMemory)
     rake_mem: perception.PositionMemory = field(default_factory=perception.PositionMemory)
     counts: Counter = field(default_factory=Counter)
+    look_since: int | None = None  # the step a streak of empty selections began (look_again)
 
 
 def _layout_of(rig, i: int):
@@ -833,6 +839,29 @@ def perceived_cycle_end(cycle: Cycle, step: int, released: bool, over: bool) -> 
     if step - cycle.start_step >= CYCLE_STEP_BUDGET:
         return "budget"
     return None
+
+
+def tool_clear_of_tray(xy, lean_deg: float) -> bool:
+    """``perceived``: does the tool at ``xy`` hide no part in the tray? Its distance to the tray
+    interior footprint must be more than ``perception.TOOL_OCCLUSION_RADIUS_M``. The footprint
+    is the interior at the rim, the wider of floor and rim: an outward lean of ``lean_deg``
+    widens the rim by ``TRAY_WALL_HEIGHT * tan(lean)`` on every side (``layout.tray_lean_boxes``).
+    With the tray off it is the heap's drop zone. Known geometry and the FK tool point only.
+    Pure."""
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    grow = layout.TRAY_WALL_HEIGHT * math.tan(math.radians(max(lean_deg, 0.0)))
+    dx = max(x0 - grow - float(xy[0]), 0.0, float(xy[0]) - x1 - grow)
+    dy = max(y0 - grow - float(xy[1]), 0.0, float(xy[1]) - y1 - grow)
+    return math.hypot(dx, dy) > perception.TOOL_OCCLUSION_RADIUS_M
+
+
+def look_again(tool_xy, lean_deg: float, streak: int) -> bool:
+    """``perceived``: after a selection with neither a target nor a rake, wait and perceive
+    again instead of ending the episode ``no_candidate``? Yes while the tool may hide a part
+    in the tray (``tool_clear_of_tray``) and the streak of empty selections, ``streak`` steps
+    old (0 at its first), is under the retreat wait's cap. Pure."""
+    cap = int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET)
+    return not tool_clear_of_tray(tool_xy, lean_deg) and streak < cap
 
 
 def over_box(xy, boxes) -> bool:
@@ -1116,10 +1145,14 @@ PERCEPTION_COUNTS = (
     "lifts_classified",
     "wrong_wrist_class",
     "lifts_empty",
+    "look_again_waits",
+    "look_again_steps",
+    "look_again_found",
 )
 """The payload's ``perception`` counts: targets selected on a detection, the targets whose
-overhead class was wrong, the lifts classified, the wrong wrist classes, and the lifts with no
-part between the jaws."""
+overhead class was wrong, the lifts classified, the wrong wrist classes, the lifts with no
+part between the jaws, and ``look_again``'s streaks that waited, steps spent waiting and
+streaks that ended in a target or a rake."""
 
 
 def _perceived_scene(st: EnvState, env, rig, i: int, k: int):
@@ -1329,6 +1362,7 @@ def rollout(
         # the perceived ones replace them in the served row, the selector's any-box filter and
         # the cycle end. The selector books failures by position and reads no destination.
         true_classes = [part_class(p) for p in env.parts]  # the metric's wrong-class counts
+        lean = float(getattr(env, "tray_lean_deg", 0.0)) if getattr(env, "tray", False) else 0.0
         poses = env.desk_box_poses.copy()
         for i, st in enumerate(states):
             st.perceiver = perception.Perceiver(run_seed, i, scales)
@@ -1477,7 +1511,11 @@ def rollout(
             target = _select(st, scene)
             rake = getattr(st.selector, "push", None)
             raking = policy is None or scripted_rake
-            if target is None and raking and rake is not None and rake.part is not None:
+            rakes = target is None and raking and rake is not None and rake.part is not None
+            if st.look_since is not None and (target is not None or rakes):
+                st.counts["look_again_found"] += 1
+                st.look_since = None
+            if rakes:
                 # MS7a tray: no grasp ranks and the teacher planned a rake off a wall. The
                 # oracle driver (and a policy under ``scripted_rake``) runs it as a takeover of
                 # its own, not a cycle, and the selector books it (its per-part and per-episode
@@ -1498,6 +1536,14 @@ def rollout(
                             env.marker_points[i] = math.nan  # the truth path's rake unmarks too
                         break
                 continue
+            if target is None and perceived and st.selector.cycles < cycle_budget:
+                streak = 0 if st.look_since is None else step - st.look_since
+                if look_again(top_picks[i][:2], lean, streak):
+                    if st.look_since is None:
+                        st.look_since = step
+                        st.counts["look_again_waits"] += 1
+                    st.counts["look_again_steps"] += 1
+                    continue
             if target is None:
                 loop_done[i] = True
                 st.done_reason = (
