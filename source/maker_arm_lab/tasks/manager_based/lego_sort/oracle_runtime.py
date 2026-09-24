@@ -868,7 +868,9 @@ class OracleRig:
                 # EnvOracle.
                 self.stats[i]["sort_attempts"] += 1
             orc = self.oracles[i]
-            scene = self.snapshot(i)
+            scene = getattr(orc, "takeover_scene", None)  # MS7c: a perceived push takeover
+            if scene is None:
+                scene = self.snapshot(i)
             brick = orc.target_brick
             orc.report(result, scene)
             if self.single_cycle[i] and goal.phase == oracle.Phase.RETREAT:
@@ -1601,7 +1603,9 @@ class OracleRig:
             if not idle:
                 self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE
 
-    def resume(self, i: int, target: int | None = None, push=None, start_z=None) -> bool:
+    def resume(
+        self, i: int, target: int | None = None, push=None, start_z=None, held=None, scene=None
+    ) -> bool:
         """Take idle env ``i`` over from the policy for one brick cycle (MS4 c2 design 6.2).
 
         Returns False, and leaves the env idle, when the oracle answers DONE or ABANDON at
@@ -1616,6 +1620,13 @@ class OracleRig:
         height, so a part the policy already lifted past RULING P32's line is carried on
         instead of declined. The resumed LIFT holds it at LIFT_HEIGHT above the desk, and the
         rise from the desk clears LIFT_MIN_RISE, so no reopen drops it.
+
+        ``held`` and ``scene`` are the heap loop's ``--perceived`` (MS7c design section 6):
+        whether its hold detector holds a part, and the perceived scene, in place of the contact
+        read and ``snapshot``. A held part declines the takeover, since the detector names no
+        part to resume on and a push never runs held, and the takeover then reads that one
+        scene until it hands the env back (``takeover_scene``, which ``_advance_phases`` and
+        ``_run_watchdog`` read).
         """
         if not self.idle[i]:
             raise RuntimeError(f"env {i} is not idle")
@@ -1639,10 +1650,19 @@ class OracleRig:
         self.unplanned[i] = False
         self.abandoned[i] = False
         self.stats[i] = self._fresh_stats()
-        left = self.left_brick.data.force_matrix_w[i, 0].norm(dim=-1)
-        right = self.right_brick.data.force_matrix_w[i, 0].norm(dim=-1)
-        held = int(held_brick_from_forces(left[None], right[None], HELD_MIN_FORCE)[0])
-        scene = self.snapshot(i)
+        if scene is not None:
+            orc.takeover_scene = scene
+        if held is None:
+            left = self.left_brick.data.force_matrix_w[i, 0].norm(dim=-1)
+            right = self.right_brick.data.force_matrix_w[i, 0].norm(dim=-1)
+            held = int(held_brick_from_forces(left[None], right[None], HELD_MIN_FORCE)[0])
+        elif held:
+            self._go_idle(i, None)
+            return False
+        else:
+            held = -1
+        if scene is None:
+            scene = self.snapshot(i)
         lifted_from = None if start_z is None or held < 0 else float(start_z[held])
         if (
             held >= 0
@@ -1841,10 +1861,11 @@ class OracleRig:
                 # MS7a tray: an oracle that can give up the jammed leg instead of the episode
                 # says so (HeapOracle.recover_from_jam); every other oracle abandons as before.
                 recover = getattr(self.oracles[i], "recover_from_jam", None)
-                if recover is not None and recover(self.snapshot(i)):
+                fixed = getattr(self.oracles[i], "takeover_scene", None)  # MS7c: perceived
+                if recover is not None and recover(self.snapshot(i) if fixed is None else fixed):
                     self.watchdog_strikes[i] = 0
                     if not self._push_takeover_over(i):
-                        self._enter_phase(i, self.snapshot(i))
+                        self._enter_phase(i, self.snapshot(i) if fixed is None else fixed)
                     continue
                 self.abandoned[i] = True
                 self.goals[i] = None
