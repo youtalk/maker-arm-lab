@@ -1,7 +1,7 @@
 # MS7a: a tray heap sorted into desk boxes (draft)
 
-Date: 2026-09-24. Status: draft. The campaign still runs. Each `TBD` marks a result that did
-not exist at the time of this draft.
+Date: 2026-09-24. Status: draft. The campaign still runs. Each `TBD` marks a result or a
+number that this draft does not give.
 
 The design is `2026-09-23-ms7a-sorting-design.md` in the claude-memory repository. The owner
 approved it section by section. The campaign ledger is `~/data/maker-arm-ms7/README.md`, and
@@ -18,26 +18,33 @@ MS7a moves the MS6 heap policy toward the sorting task of roadmap decision R1. I
 rungs. In rung 1, a heap of 50 parts lies in a walled tray, and every part goes into one desk
 box. In rung 2, the same tray heap goes into four desk boxes by four part classes.
 
-Neither rung passes its checked read so far. The rung 2 checked read stows 2482 of 3000 parts
-in their own class's box, 0.827 (Wilson 95 % 0.813 to 0.840). It uses 1.192 cycles per correct
-stow. The gate needs at least 2550 parts and at most 1.3 cycles. The cycle bar passes, and the
-read is 68 parts short.
+The rung 2 checked read passes on the leaned tray. Checkpoint r2 A2 100k stows 2610 of 3000
+parts in their own class's box, 0.870 (Wilson 95 % 0.857 to 0.882). It uses 1.138 cycles per
+correct stow. The gate needs at least 2550 parts and at most 1.3 cycles. The official read of
+rung 2 is the milestone's number: TBD.
 
-The rung 1 checked read stows 2466 of 3000, 0.822 (0.808 to 0.835), at 1.352 cycles per stowed
-part. That read ran before the last two serving rules entered the ledger. A re-read under the
-full protocol runs now: TBD. The official read of rung 2 is the milestone's number: TBD.
+The leaned tray is a deviation from the design (section 3.5). The H1 tray of the design has
+vertical walls. The lean tilts each wall 30 degrees outward about its interior edge on the
+desk, and the rim stays 20 mm high. On vertical walls, the same checkpoint stows 2513 of 3000,
+0.838, on the same draws. That read is 37 parts short. On the lean, it stows 97 more parts, and
+63 of them are slopes.
 
-Slopes are the largest loss. On the rung 2 checked read, 609 of 910 slopes stow, 0.67. Slopes
-are 301 of the 518 lost parts. A slope one stud wide that lies flush on a vertical tray wall has
-no grasp, and the scripted rake cannot get behind it. The teacher loses slopes the same way. It
-stows 0.81 of the slopes on its rung 2 read.
+Rung 1 fails. Its checked read under the snap protocol stows 2466 of 3000, 0.822, at 1.352
+cycles per stowed part. The re-read under the full protocol stows 2533, 0.844 (0.831 to 0.857),
+at 1.241. It is 17 parts short. Rung 1 has no read on the leaned tray.
+
+Slopes are the largest loss. On the vertical rung 2 checked read of r2 B 300k, 609 of 910
+slopes stow, 0.67. A forensic of that read finds 413 lost parts that the policy never targeted.
+Most of them start near a wall. A driven test shows that the refusal matches the physics. Two
+rake levers and a snap floor lever measured null. On the passing read, 675 of 910 slopes stow,
+0.74.
 
 The reads come from a learned policy plus serving rules. A serving rule changes the policy's
 command, or gives the env to the teacher for a few steps, before the env receives the command.
-The rung 2 checked read serves nine switches. Four come from MS6: `--select_at_release
+The rung 2 reads serve nine switches. Four come from MS6: `--select_at_release
 --replan_on_switch --squeeze_floor --square_wrist`. Five are new in MS7a: `--scripted_rake
 --part_failures --pick_snap --dwell_close --adopt_held`. Section 7 gives each rule and the
-forensic that found it.
+forensic that found it. The passing read also sets the scene switch `--tray_lean 30`.
 
 Some rules read simulator state. `--square_wrist`, `--dwell_close` and `--adopt_held` read the
 held part and the jaw state from the simulator. `--pick_snap` uses the stop flag of
@@ -45,8 +52,9 @@ held part and the jaw state from the simulator. `--pick_snap` uses the stop flag
 `--scripted_rake` runs the teacher's rake, and the teacher plans on the simulator's part poses.
 
 The teachers pass every bar. On 600 held-out parts each, the rung 1 teacher stows 0.920, the
-sorting teacher on the bare desk 0.963 and the rung 2 teacher 0.905. The base refresh failed. T5
-read 777 and T6 853 of 1000 against T0's 900, so T0 400k stayed the base.
+sorting teacher on the bare desk 0.963 and the rung 2 teacher 0.905. On 12 paired heaps, the
+rung 2 teacher stows 0.905 on the leaned tray and 0.875 on vertical walls. The base refresh
+failed. T5 read 777 and T6 853 of 1000 against T0's 900, so T0 400k stayed the base.
 
 ## 1. The goal, the rungs and the gates
 
@@ -113,7 +121,7 @@ round-1 DAgger frames, no 25-action horizon and no close gate.
 
 The design gave MS7a one week, from 2026-09-24 to 2026-09-30. The campaign started on
 2026-09-23 at 09:58 with the launch of T5. Stop rule 1 cleared at 13:27 the same day, and rung 2
-training started at 19:45.
+training started at 19:45. The rung 2 checked read passed at 09:35 on 2026-09-24.
 
 ## 2. The hosts and fleet.py
 
@@ -121,12 +129,13 @@ training started at 19:45.
 
 | host | GPU | role | read lanes |
 | --- | --- | --- | --- |
-| Machine A | RTX 5090 32 GB | the controller session and the ledger, T6, arm A of each round, screens, selection and checked reads | 8 |
-| Machine B | RTX 5080 16 GB | T5, arm B of each round, screens, selection and checked reads | 6 in `hosts.json`, 4 on the checked reads |
-| Machine C | RTX A2000 12 GB, 128 cores | teacher reads, corpus recording and conversion | 12, on CPU policy servers |
+| Machine A | RTX 5090 32 GB | the controller session and the ledger, T6, arm A of rounds 1 and 2, screens, selection, checked and official reads | 8 |
+| Machine B | RTX 5080 16 GB | T5, arm B of rounds 1 and 2, round 3, the lean corpus wave, screens, selection, checked and official reads | 6 in `hosts.json`, 4 on the checked and official reads |
+| Machine C | RTX A2000 12 GB, 128 cores | teacher reads, corpus recording and conversion, one lean checked read | 12, on CPU policy servers |
 
-The trainers never recorded a corpus. Campaign n showed that recording, reads and training on
-one host drove training down to 5 step/s.
+The trainers never recorded a corpus while they trained, except Machine B for the lean wave.
+Campaign n showed that recording, reads and training on one host drove training down to 5
+step/s.
 
 ### 2.2 fleet.py
 
@@ -202,7 +211,16 @@ needed no approval.
   crashed in the image flush, with no finished episode in any shard. A finished rung 2 shard is
   4.4 GB, so 40 processes needed about 176 GB, but about 134 GB was free.
 - The disk rule: before a wave, free space must exceed 4.5 GB per process plus 40 GB for its
-  conversion.
+  conversion. Wave 4 kept it. Its 28 processes needed 166 GB, and 173 GB was free.
+- Machine B ran out of GPU memory at 08:04. B2 training, the 12 camera sims of the lean wave, 4
+  checked-read lanes and 2 screens used 14.6 of 16.3 GB. The r2 B2 350k screen then failed three
+  times in `policy_server` predict (GATE_ERROR). The B2 screens stopped, to protect the r2 A2
+  100k checked read.
+- `bin/run_corpus.sh` and `bin/convert.sh` source `~/opt/env.sh` only where it exists. So the
+  same scripts record and convert the lean wave on Machine B.
+- At 08:49, the controller sent SIGTERM to the owner's paused MS6 T1 run in place of arm A2. T1
+  ends on SIGCONT and can resume only from its 300000 checkpoint, so read a PID's output
+  directory before a kill.
 
 ## 3. The scene
 
@@ -319,10 +337,9 @@ desk_boxes: 4`, and an overhead frame shows the tray. But the heap spans only ab
 of the 224 px frame, because the overhead camera still frames the old shelf region.
 
 A motion trace on held-out heaps of K = 20 at be86bc8 found no stop inside any leg in 232
-cycles.
-Every rest is at a leg end, as the MS3 minimum-jerk walk intends. The owner saw the level-release
-roll of MS6. The tool stands still over the box for 37 to 50 steps per cycle while only the
-wrist turns. In MS6 and in both rungs, the tool is at rest about 46 % of each cycle.
+cycles. Every rest is at a leg end, as the MS3 minimum-jerk walk intends. The owner saw the
+level-release roll of MS6. The tool stands still over the box for 37 to 50 steps per cycle while
+only the wrist turns. In MS6 and in both rungs, the tool is at rest about 46 % of each cycle.
 
 The prototype 25f1dcf, 48bc50c on the stack, spreads the roll along the carry and the unroll
 along RETREAT. On rung 2 over 12 seeds, the teacher stowed 224 of 240 with and without it. The
@@ -330,9 +347,73 @@ median steps per cycle fell from 392 to 373. Wrist-only frames fell from 37 to 5
 acceleration from 13.8 to 8.1.
 
 A later timing of 48bc50c against be86bc8 read equal steps per second on both hosts. For
-example, it read 11.8 against 12.1 with cameras, and 10.9 against 11.1 on Machine C. No MS7a corpus uses the
-roll yet. The r2s re-record with it failed on host load, and wave 3 recorded at 9bcb2ed without
-it.
+example, it read 11.8 against 12.1 with cameras, and 10.9 against 11.1 on Machine C.
+The r2s re-record with the roll failed on host load, and wave 3 recorded at 9bcb2ed without it.
+Wave 4 at 2b87de2 is the first MS7a corpus with the roll along the carry. The lean wave r2L1 at
+751e3dd also has it (section 6.1).
+
+### 3.5 The tray lean
+
+Most slopes that the vertical rung 2 reads lose start within 20 mm of a wall. The rake levers
+did not free them (sections 8.4 and 9.1). MS6's round dish leaned its rim outward for the same
+kind of blocking. So the tray agent built `--tray_lean DEG` (59ccf5f), off by default.
+
+The switch builds each of the four walls as a slab that leans outward about the interior's edge
+on the desk. The interior footprint on the desk stays the H1 footprint. The rim stands 20 mm
+high and 20 mm times tan(DEG) further out, 11.5 mm at 30 degrees. Each slab runs past the
+corners to meet its neighbour. The grasp model follows the lean. A finger clears a leaning wall
+where the wall stands at the foot of the part's grip band. The rake checks its hull at the desk
+and at the rim. 751e3dd forwards the lean through the gate supervisor, and the cache refuses a
+payload read at another lean.
+
+The teacher reads, with the oracle driver on rung 2 and held-out parts:
+
+| heaps | walls | correct stows | cycles per stow | rakes | slopes | parts left at a wall | spills |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 3, run seeds 20267580 to 20267582 | vertical | 141 of 150 | 1.000 | 31 | 33 of 39 | 8 | 1 |
+| the same 3 | 30 degrees | 144 of 150 | 0.979 | 18 | 37 of 39 | 4 | 2 |
+| the same 3 | 45 degrees | 141 of 150 | 1.000 | 21 | 36 of 39 | 7 | 2 |
+| the same 3 | 60 degrees | 143 of 150 | 0.986 | 19 | 35 of 39 | 6 | 0 |
+| 12 fresh, run seeds 20267600 to 20267611 | vertical | 525 of 600, 0.875 | 1.006 | 128 | 130 of 177 | 58 | 16 |
+| the same 12 | 30 degrees | 543 of 600, 0.905 | 1.033 | 94 | 141 of 177 | 35 | 20 |
+
+The lean rows ran at 59ccf5f. The vertical row on the three heaps is the base run of the rake
+prototype (section 9.1). A part left at a wall lies inside the rim and within 30 mm of the
+interior edge. A spill lies beyond the rim.
+
+On the three heaps, the three leans read 141 to 144 against 141 on vertical walls. The ledger
+calls the gain of 30 degrees inside the noise. On the 12 paired
+heaps, the lean adds 18 parts, and 11 of them are slopes. The lean reads higher on 8 heaps,
+lower on 3 and equal on 1. The other classes stow 395 of 423 on vertical walls and 402 of 423
+on the lean.
+
+The campaign set a resource bar for a re-record with a new tray. The teacher needed 0.95 or more
+on 600 parts, with slopes near the other classes. The lean did not meet that bar, so the ledger
+closed the lean at 07:13 with no re-record.
+
+At 07:49, the ledger changed that resource bar and nothing else. The gate stayed the same. The
+0.95 bar assumed that the policy was the limit. But the teacher reads 0.875 on vertical heaps,
+and the gate needs 0.85. So a paired gain of 0.030 is material. The refusal forensic (section
+8.4) also showed that only the rake and the lean reach the wall-stuck parts. A speculative lean
+corpus wave started on Machine B at once (section 6.1).
+
+At 08:34, the policy read the lean with no retraining. r2 B 300k read draw 2 of seed 20261700
+under the full protocol plus `--tray_lean 30`, one rollout each:
+
+| walls | correct stows of 250 | cycles per stow | per episode | slope | tall | narrow | wide |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| vertical (section 7.4) | 210 | 1.181 | 43, 40, 43, 40, 44 | 48 of 75 | 82 of 90 | 22 of 25 | 58 of 60 |
+| 30 degrees | 221 | 1.204 | 42, 44, 46, 45, 44 | 58 of 75 | 83 of 90 | 22 of 25 | 58 of 60 |
+
+The whole gain is slopes, as on the teacher. The close heights do not move. The gain comes
+from fewer parts stuck at a wall.
+
+The decision came at 08:34. The rung 2 scene of the remaining reads adds `--tray_lean 30`. The
+ledger gives three reasons. The teacher gains 0.030 on 600 paired parts. The policy gains 11 of
+250 with no retraining. In a driven test, the jaws never lift a 1-wide slope flush on a vertical
+wall (section 8.4). The vertical-wall results stay in this report beside the lean results. The
+ledger does not say why it chose 30 degrees. On the three heaps, 30 degrees read best of the
+three leans. Rung 1 keeps vertical walls.
 
 ## 4. The teacher reads
 
@@ -363,6 +444,9 @@ stowed cycles took a median 336 steps. The per-class rows:
 
 Rung 2 per box: 154 of 164, 119 of 145, 142 of 155 and 128 of 136. The rung 2 loss is again the
 wall-stuck slopes.
+
+Section 3.5 gives the teacher reads on the leaned tray. Section 8.4 gives the teacher on the
+heaps of a policy read.
 
 ## 5. The base refresh
 
@@ -397,7 +481,8 @@ recipe does not help a warm start of T0.
 
 ### 6.1 The corpora
 
-Every corpus records train-split heaps on Machine C, with the teacher driving.
+Every corpus records train-split heaps with the teacher driving. Every wave except r2L1
+records on Machine C. r2L1 records on Machine B.
 
 | corpus | commit | processes | heaps | stowed | cycles per stow | rakes | out of reach |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -406,9 +491,16 @@ Every corpus records train-split heaps on Machine C, with the teacher driving.
 | rung 2, waves 1 and 2 | a6b631e | 100 to 139 | 120 | 5217 of 6000 in the correct box, 0.870 | 1.098 | 803 | 107 |
 | rung 2, re-record r2s | 25f1dcf | 200 to 239 | 120 planned | 0 episodes in the 300-minute cap | | | |
 | rung 2, wave 3 | 9bcb2ed | 240 to 279 | 120 planned | no finished episode | | | |
+| rung 2, wave 4 | 2b87de2 | 280 to 307 | 84 | 3642 of 4200 in the correct box, 0.867 | 1.103 | 545 | |
+| rung 2, lean wave r2L1 | 751e3dd, `--tray_lean 30` | 308 to 319 | 36 | 1565 of 1800 in the correct box, 0.869 | | | |
 
 The r2s wave failed on host load (section 2.4). Wave 3 was lost to a full disk. The wave 3
 shards (134 GB) and four merged lane work directories (41 GB) were deleted.
+
+Wave 4 launched at 06:37, alone on Machine C. It is the first wave with the release
+roll along the carry. It finished in about 80 minutes, with 28 shards and 114 GB, and converted
+on 14 lanes. The lean wave r2L1 launched at 07:49 and converted on Machine B on 12 lanes. Its 0.869
+is level with the 0.867 of wave 4, but the heaps differ, so the two reads are not paired.
 
 Two converter fixes landed during the campaign:
 
@@ -428,26 +520,36 @@ The datasets:
 | r2/dataset_mixB | 9373 | r2/dataset_all (5540) + r1 w1 (2553) + r1 w2a (1280) | CHECK_OK, 165 videos |
 | r2/dataset_v2c | 5193 | rung 2 waves 1 and 2, converted again with the REOPEN fix | |
 | r2/dataset_mixB2 | 9026 | r2/dataset_v2c (5193) + r1 w1 + r1 w2a | |
+| r2w4/dataset | 3620 | rung 2 wave 4, vertical walls, the roll along the carry | |
+| r2L1/dataset | 1548 | the lean wave, 30 degrees | |
+| r2/dataset_r3L | 10361 | r2/dataset_v2c (5193) + wave 4 (3620) + r2L1 (1548) | MERGE_OK, CHECK_OK 177 videos |
 
 ### 6.2 The training runs
 
 Every run uses LeRobot ACT with the 16-wide `camera_box_target` context and the continuous
-gripper. It saves a checkpoint every 50k steps and runs 400k steps. It serves open loop at 50
-actions per forward.
+gripper. It saves a checkpoint every 50k steps. It serves open loop at 50 actions per forward.
 
-| run | host | start | data | ledger entry |
-| --- | --- | --- | --- | --- |
-| r1 A | Machine A | T0 400k | r1/dataset_w1 (2553) | 16:22 |
-| r1 B | Machine B | T0 400k | r1/dataset_w1_mix (5296) | 16:00, 38 step/s |
-| r2 B | Machine B | r1 B 300k | r2/dataset_mixB (9373) | 19:45, 35 step/s |
-| r2 A | Machine A | r1 B 300k | r2/dataset_all (5540) | 20:30 |
-| r2 B2, round 2 | Machine B | r2 B 300k | r2/dataset_mixB2 (9026) | 05:35, training at 37.8 step/s |
-| r2 A2, round 2 | Machine A | r2 A 350k | r2/dataset_all (5540) | 05:15 |
-| round 3 | TBD | TBD | TBD | TBD |
+| run | host | start | data | steps | ledger entry |
+| --- | --- | --- | --- | --- | --- |
+| r1 A | Machine A | T0 400k | r1/dataset_w1 (2553) | 400k | 16:22 |
+| r1 B | Machine B | T0 400k | r1/dataset_w1_mix (5296) | 400k | 16:00, 38 step/s |
+| r2 B | Machine B | r1 B 300k | r2/dataset_mixB (9373) | 400k | 19:45, 35 step/s |
+| r2 A | Machine A | r1 B 300k | r2/dataset_all (5540) | 400k | 20:30 |
+| r2 B2, round 2 | Machine B | r2 B 300k | r2/dataset_mixB2 (9026) | 400k, TRAIN_OK at 08:46 | 05:35, 37.8 step/s |
+| r2 A2, round 2 | Machine A | r2 A 350k | r2/dataset_all (5540) | stopped at 363k at 08:49 | 05:15 |
+| r3L, round 3 | Machine B | r2 B 300k | r2/dataset_r3L (10361) | 300k, runs now | 08:46, 38 step/s |
 
 At the launch of rung 2, r1 B 300k was the best rung 1 screen (173 of 250). Round 2 was planned on
-the r2s re-record. That wave failed, so round 2 trains on the data already in place. The round
-2 results are TBD.
+the r2s re-record. That wave failed, so round 2 trains on the data already in place.
+
+The B2 screens stopped after 250k (section 8.1). Arm A2 stopped at 363k of 400k. Its screens
+from 50k to 300k read 202, 218, 195, 208, 208 and 207, a plateau. The stop freed Machine A GPU
+for the lean reads.
+
+Round 3 trains on `r2/dataset_r3L`, which adds wave 4 and the lean wave to `r2/dataset_v2c`. It
+warm-starts from r2 B 300k, which read 221 of 250 on the lean with no retraining. The ledger
+gives its end at about 11:15. The gate does not need round 3, because a round 2 checkpoint
+passed the checked read.
 
 ## 7. The serving rules
 
@@ -461,9 +563,11 @@ Every rule is a loop switch of `scripts/mj_eval_heap.py`, off by default. The pa
 | part | cell + `--part_failures` |
 | snap | part + `--pick_snap` |
 | full | snap + `--dwell_close --adopt_held` |
+| full + lean | full + the scene switch `--tray_lean 30` (section 3.5) |
 
 Every MS7a policy read also passes `--tray --desk_boxes 1` for rung 1 or `--tray --desk_boxes 4`
-for rung 2. It serves 50 actions per forward on held-out parts.
+for rung 2. It serves 50 actions per forward on held-out parts. The payload records the lean as
+`tray_lean`, outside the `inference.loop` block.
 
 ### 7.1 The scripted rake
 
@@ -514,7 +618,8 @@ rescue those heaps.
 `--pick_snap` edits the commanded pick point in the window of `--square_wrist`, within 40 mm of
 the row centre in xy. It moves the xy toward the row centre by at most 3 mm per step. The height
 comes down only within 1 cm of the centre, with the jaws open wider than the row's width. There
-the snap lowers the point by at most 2 mm per step. The floor is the row centre plus 3 mm, and the snap never goes lower.
+the snap lowers the point by at most 2 mm per step. The floor is the row centre plus 3 mm, and
+the snap never goes lower.
 
 While the snap lowers the point, the jaws stay at the landing gap. An earlier hold of the jaws
 without the lowering turned 40 of 44 `close_miss` cycles into `no_close`. The policy commands
@@ -572,8 +677,8 @@ Both measured on draw 2, rung 2 arm B 300k, one rollout each:
 
 The rule entered the ledger at 05:05: every later MS7 read also serves `--dwell_close` and
 `--adopt_held`. The rung 1 checked read ran before this rule, and it stays the rung 1 number
-under the snap protocol. A re-read of r1 A 350k under the full protocol runs in a fresh TAG. The
-report gives it beside the first read, not in its place.
+under the snap protocol. A re-read of r1 A 350k under the full protocol ran in a fresh TAG
+(section 8.3). The report gives it beside the first read, not in its place.
 
 ### 7.5 What the rules read
 
@@ -631,19 +736,31 @@ The census of rung 2 arm B 50k: `close_miss` 92, `held_no_lift` 46, `no_close` 3
 17 and `lifted_lost` 9, with 13 `wrong_box` cycles of 324. The box row is mostly followed. The
 pick is the bottleneck in both rungs.
 
-Round 2, full protocol, stowed in the correct box:
+Round 2, full protocol, vertical walls, stowed in the correct box:
 
 | run | step | stowed | cycles per stow | rakes | wrong-box parts |
 | --- | --- | --- | --- | --- | --- |
-| r2 B (start of B2) | 300k | 204 | | | |
+| r2 B (start of B2) | 300k | 204 | 1.167 | 72 | 7 |
 | r2 A2 | 50k | 202 | 1.139 | 74 | 9 |
+| r2 A2 | 100k | 218 | 1.124 | 58 | 0 |
+| r2 A2 | 150k | 195 | 1.082 | 63 | 13 |
+| r2 A2 | 200k | 208 | 1.120 | 62 | 7 |
+| r2 A2 | 250k | 208 | 1.144 | 70 | 9 |
+| r2 A2 | 300k | 207 | 1.174 | 70 | 7 |
 | r2 B2 | 50k | 212 | 1.264 | 69 | 8 |
 | r2 B2 | 100k | 200 | 1.155 | 70 | 7 |
-| r2 A2 | 100k to 400k | TBD | TBD | TBD | TBD |
-| r2 B2 | 150k to 400k | TBD | TBD | TBD | TBD |
+| r2 B2 | 150k | 199 | 1.201 | 70 | 9 |
+| r2 B2 | 200k | 208 | 1.096 | 65 | 3 |
+| r2 B2 | 250k | 202 | 1.134 | 63 | 9 |
 
-The start row is draw 0 of the rung 2 checked read. The two r2 B2 screens and their start lie
-within about 2 standard deviations of one another.
+The start row is draw 0 of the rung 2 checked read. r2 A2 100k read 218, 0.872, the best screen
+of the campaign. The next screen of the same arm read 195, so the checkpoint swings stay large.
+The B2 300k screen lane was stopped, and the B2 350k screen failed three times on Machine B GPU
+memory (section 2.4). A2 stopped at 363k, so its 350k and 400k screens were dropped.
+
+Round 3, full + lean, stowed in the correct box: r3L 50k read 210 at 1.110 cycles per stow, with
+61 rakes and 5 wrong-box parts. Its per-episode counts are 43, 42, 40, 41 and 44. The 100k
+screen runs now. On the same draw and the same lean, r2 A2 100k reads 218 (section 8.3).
 
 ### 8.2 The selection reads
 
@@ -652,8 +769,8 @@ It read r1 B 300k (screen 173), r1 B 150k (164) and r1 A 350k (161). A 350k join
 screen was within the noise of B 150k. Draws 1 to 3 hit the client's wall cap, and no read
 counted.
 
-Every counted selection read uses seed 20261700, draws 0 to 3, 1000 parts, the snap protocol and
-commit 944cdc1:
+Every counted selection read uses seed 20261700, draws 0 to 3 and 1000 parts. The first six
+rows use the snap protocol and commit 944cdc1:
 
 | checkpoint | host | stowed of 1000 | Wilson 95 % | cycles per stow | per draw | rakes | wrong-box parts |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -663,7 +780,7 @@ commit 944cdc1:
 | r2 B 300k | Machine A, 4 lanes | 765 | 0.738 to 0.790 | 1.387 | 189, 185, 195, 196 | 261 | 50 |
 | r2 A 350k | Machine A, 4 lanes | 765 | | 1.416 | 196, 190, 186, 193 | 274 | 42 |
 | r2 B 400k | Machine B, 4 lanes | 704 | | 1.639 | 168, 171, 191, 174 | 248 | 56 |
-| round 2 | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| r2 A2 100k, draws 0 to 3 of its checked read | Machine A | 847 | 0.823 to 0.868 | 1.168 | 209, 213, 215, 210 | 281 | 25 |
 
 The rung 1 rerun at 02:30 read r1 B 350k in place of r1 B 150k. The ledger gives no reason. The
 snap run of r1 B 350k read 205 on draw 0. r1 A 350k won rung 1 selection.
@@ -679,6 +796,12 @@ means that the gripper command never read open. Per class: slope 197 of 320, tal
 narrow 132 of 155, wide 243 of 275. Episodes ended `no_candidate` with 31 to 45 parts stowed.
 `wrong_box` is not the largest failure class, so the scripted-place rule does not fire.
 
+Round 2 had no separate selection read. At 06:37, the ledger added a rule. A screen at 215 of
+250 or more goes straight to a checked read, and its draws 0 to 3 stand as the selection read.
+The checked read only filters, and the official read stays one-shot. r2 A2 100k (218) was the
+only screen at that bar. The last row of the table above is its draws 0 to 3, under the full
+protocol at 2b87de2.
+
 ### 8.3 The checked reads
 
 Each checked read uses seed 20261700, draws 0 to 11, 3000 held-out parts and a fresh TAG.
@@ -687,65 +810,181 @@ Machine A runs draws 0 to 7 on 8 lanes, and Machine B runs draws 8 to 11 on 4 la
 | read | TAG | commit | protocol | stowed of 3000 | fraction | Wilson 95 % | cycles | cycles per stow | rakes | wrong-box parts | outcome |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | rung 1, r1 A 350k | r1A_350000_chk | 944cdc1 | snap | 2466 | 0.822 | 0.808 to 0.835 | 3334 | 1.352 | 802 | 0 | GATE_FAIL |
-| rung 1 re-read, r1 A 350k | r1A_350000_chk2 | TBD | full | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| rung 1 re-read, r1 A 350k | r1A_350000_chk2 | 2b87de2 | full | 2533 | 0.844 | 0.831 to 0.857 | 3144 | 1.241 | 781 | 0 | GATE_FAIL |
 | rung 2, r2 B 300k | r2B_300000_chk | 2b87de2 | full | 2482 | 0.827 | 0.813 to 0.840 | 2959 | 1.192 | 758 | 66 | GATE_FAIL |
-| rung 2, round 2 winner | TBD | TBD | full | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| rung 2, r2 A2 100k | r2A2_100000_chk | 2b87de2 | full | 2513 | 0.838 | 0.824 to 0.850 | 2987 | 1.189 | 790 | 70 | GATE_FAIL |
+| rung 2 on the leaned tray, r2 A2 100k | r2A2_100000_L30_chk | 751e3dd | full + lean | 2610 | 0.870 | 0.857 to 0.882 | 2971 | 1.138 | 669 | 57 | GATE_OK |
 
-The policy ids are
-`act:~/data/maker-arm-ms7/r1/train_A/checkpoints/350000/pretrained_model+nas50+ctx16+gap`
-and
-`act:~/data/maker-arm-ms7/r2/train_B/checkpoints/300000/pretrained_model+nas50+ctx16+gap`.
+The lean read's payload gives the outcome `PASS`. The policy ids are:
+
+- `act:~/data/maker-arm-ms7/r1/train_A/checkpoints/350000/pretrained_model+nas50+ctx16+gap`
+- `act:~/data/maker-arm-ms7/r2/train_B/checkpoints/300000/pretrained_model+nas50+ctx16+gap`
+- `act:~/data/maker-arm-ms7/r2/train_A2/checkpoints/100000/pretrained_model+nas50+ctx16+gap`
+
+The rung 1 re-read launched at 06:33 as pre-registered and ended at 07:55. It is 17 parts short
+of 2550, and it stands beside the first rung 1 read, not in its place. The r2 A2 100k read is 37
+parts short, the best vertical-wall read. The lean read launched at 08:51 on the same checkpoint
+and the same draws, and it passed at 09:35.
 
 Per draw, 250 parts each:
 
 | read | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | rung 1 | 202 | 218 | 194 | 208 | 215 | 207 | 188 | 203 | 211 | 212 | 198 | 210 |
-| rung 1 re-read | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| rung 2 | 204 | 187 | 208 | 215 | 218 | 198 | 209 | 217 | 206 | 209 | 209 | 202 |
+| rung 1 re-read | 202 | 215 | 207 | 211 | 206 | 212 | 202 | 214 | 225 | 214 | 213 | 212 |
+| rung 2, r2 B 300k | 204 | 187 | 208 | 215 | 218 | 198 | 209 | 217 | 206 | 209 | 209 | 202 |
+| rung 2, r2 A2 100k | 209 | 213 | 215 | 210 | 201 | 198 | 207 | 225 | 213 | 210 | 210 | 202 |
+| rung 2 lean, r2 A2 100k | 218 | 219 | 219 | 225 | 208 | 224 | 217 | 216 | 219 | 220 | 211 | 214 |
 
-On rung 1, Machine A draws read 1635 of 2000 and the Machine B draws 831 of 1000.
+Machine A draws and the Machine B draws, of 2000 and 1000 parts:
 
-The census of the two reads, as counts and as a share of all cycles:
+| read | Machine A | Machine B |
+| --- | --- | --- |
+| rung 1 | 1635 | 831 |
+| rung 1 re-read | 1669 | 864 |
+| rung 2, r2 B 300k | 1656 | 826 |
+| rung 2, r2 A2 100k | 1678 | 835 |
+| rung 2 lean, r2 A2 100k | 1746 | 864 |
+
+The census of the reads, as counts and as a share of all cycles:
 
 | read | cycles | stowed | close_miss | held_no_lift | no_close | carrying | lifted_lost | no_open | wrong_box |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | rung 1 | 3334 | 2364 (0.709) | 354 (0.106) | 246 (0.074) | 229 (0.069) | 74 (0.022) | 55 (0.016) | 12 (0.004) | 0 |
-| rung 2 | 2959 | 2451 (0.828) | 278 (0.094) | 121 (0.041) | 41 (0.014) | 29 (0.010) | 21 (0.007) | 17 (0.006) | 1 |
+| rung 1 re-read | 3144 | 2426 (0.772) | 323 (0.103) | 229 (0.073) | 46 (0.015) | 53 (0.017) | 58 (0.018) | 9 (0.003) | 0 |
+| rung 2, r2 B 300k | 2959 | 2451 (0.828) | 278 (0.094) | 121 (0.041) | 41 (0.014) | 29 (0.010) | 21 (0.007) | 17 (0.006) | 1 |
+| rung 2, r2 A2 100k | 2987 | 2495 (0.835) | 266 (0.089) | 149 (0.050) | 26 (0.009) | 26 (0.009) | 21 (0.007) | 4 (0.001) | 0 |
+| rung 2 lean, r2 A2 100k | 2971 | 2581 (0.869) | 189 (0.064) | 125 (0.042) | 15 (0.005) | 35 (0.012) | 23 (0.008) | 0 | 3 (0.001) |
 
-On rung 1, 925 cycles ran to their 800-step budget. On rung 2, 481 did. The rung 1 read ran
-without `--dwell_close`. The census counts cycles, and the grader counts parts at rest at the
-episode end, so the two stowed counts differ.
+On rung 1, 925 cycles of the first read ran to their 800-step budget. On the r2 B 300k read,
+481 did. The first rung 1 read ran without `--dwell_close`. On the same heaps, the re-read with
+`--dwell_close` cut `no_close` from 229 to 46 cycles. The census counts cycles, and the grader
+counts parts at rest at the episode end, so the two stowed counts differ.
 
 The census books a `wrong_box` cycle only for a part that a `lifted_lost` cycle held last. On
-rung 2, one cycle is `wrong_box`, but the grader finds 66 parts at rest in a wrong box.
+the r2 B 300k read, one cycle is `wrong_box`, but the grader finds 66 parts at rest in a wrong
+box.
 
-Per class, over the same heaps:
+Per class, over the same heaps, as stowed parts and fractions:
 
-| class | parts | rung 1 stowed | fraction | rung 2 correct | fraction | rung 2 teacher |
-| --- | --- | --- | --- | --- | --- | --- |
-| slope | 910 | 602 | 0.66 | 609 | 0.67 | 133 of 165, 0.81 |
-| tall | 900 | 776 | 0.86 | 787 | 0.87 | 167 of 175, 0.95 |
-| narrow | 415 | 370 | 0.89 | 363 | 0.87 | 74 of 77, 0.96 |
-| wide | 775 | 718 | 0.93 | 723 | 0.93 | 169 of 183, 0.92 |
+| class | parts | rung 1 | rung 1 re-read | r2 B 300k | r2 A2 100k | r2 A2 100k, lean | rung 2 teacher |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| slope | 910 | 602 (0.66) | 634 (0.70) | 609 (0.67) | 612 (0.67) | 675 (0.74) | 133 of 165 (0.81) |
+| tall | 900 | 776 (0.86) | 806 (0.90) | 787 (0.87) | 811 (0.90) | 824 (0.92) | 167 of 175 (0.95) |
+| narrow | 415 | 370 (0.89) | 382 (0.92) | 363 (0.87) | 379 (0.91) | 377 (0.91) | 74 of 77 (0.96) |
+| wide | 775 | 718 (0.93) | 711 (0.92) | 723 (0.93) | 711 (0.92) | 734 (0.95) | 169 of 183 (0.92) |
 
-Slopes are 301 of the 518 parts that rung 2 loses and 308 of the 534 that rung 1 loses. A slope
-one stud wide that lies flush on a vertical tray wall has no grasp. The rake cannot get behind
-it. The teacher also stows slopes at only 0.81 on rung 2.
+On r2 B 300k, slopes are 301 of the 518 lost parts. On the first rung 1 read, slopes are 308 of
+the 534 lost parts. A slope one stud wide that lies flush on a vertical tray wall has no grasp.
+The rake cannot get behind it. The teacher also stows slopes at only 0.81 on rung 2.
 
-Rung 2 per box index: 588 of 740, 625 of 747, 605 of 727 and 664 of 786. The class map is drawn
-per episode, so a box index holds a different class in each episode.
+Per box index, of 740, 747, 727 and 786 parts:
 
-### 8.4 The official read
+| read | box 0 | box 1 | box 2 | box 3 |
+| --- | --- | --- | --- | --- |
+| r2 B 300k | 588 | 625 | 605 | 664 |
+| r2 A2 100k | 606 | 636 | 619 | 652 |
+| r2 A2 100k, lean | 648 | 641 | 638 | 683 |
 
-The official read runs the rung 2 checked winner on seed 20261800, draws 0 to 23, 6000 parts.
-The design splits it with `fleet.py read` across Machine C (12 lanes), Machine A (8
-lanes) and Machine B (4 lanes). The actual split is TBD. It passes at 5100 of 6000 and at most 1.3 cycles per correct stow.
+The class map is drawn per episode, so a box index holds a different class in each episode.
+
+The paired comparison of the lean. Both r2 A2 100k reads use the same run seeds, layout seeds,
+parts and class maps. Only `--tray_lean 30` and the commit differ. The lean adds 97 parts:
+
+| item | vertical walls | 30 degree lean | difference |
+| --- | --- | --- | --- |
+| stowed of 3000 | 2513 | 2610 | +97 |
+| slopes | 612 | 675 | +63 |
+| tall | 811 | 824 | +13 |
+| narrow | 379 | 377 | -2 |
+| wide | 711 | 734 | +23 |
+| cycles per stow | 1.189 | 1.138 | -0.051 |
+| rakes | 790 | 669 | -121 |
+| wrong-box parts | 70 | 57 | -13 |
+| `close_miss` cycles | 266 | 189 | -77 |
+
+The lean reads higher on 11 of the 12 draws and lower on draw 7. Over the 60 episodes, it reads
+higher on 38, lower on 15 and equal on 7. The mean gain is 1.6 parts per episode, with a
+standard error of 0.44.
+
+The lean read reuses the draws of the vertical read of the same checkpoint. So the checked read
+is a filter here, and the one-shot official read on a fresh seed decides (section 8.5).
+
+### 8.4 The lost parts
+
+At 07:33 and 07:49, the tray agent traced the vertical rung 2 checked read of r2 B 300k
+(r2B_300000_chk). It rebuilt the 60 initial heaps from their seeds. The scripts and their
+outputs are in `~/data/maker-arm-ms7/fx/`.
+
+A part that no stowed cycle credits counts as lost in the forensic. The grader counts 2482 parts
+at rest in their own box, and the payloads credit 2459 of them to a stowed cycle. So the
+forensic finds 541 lost parts, not 518.
+
+Of the 541, the policy never targeted 413. The selector found no grasp for them, and 59 of the
+60 episodes ended `no_candidate` at a median of 49 cycles. Of the 413, 264 start within 20 mm of
+a wall, and 253 are slopes. The other 128 parts were targeted and failed. 70 failed once, 10
+twice and 48 three times.
+
+The loss by the initial distance from the nearest wall:
+
+| distance of the part centre from the wall | parts | lost | fraction lost | slopes | slopes lost |
+| --- | --- | --- | --- | --- | --- |
+| past the interior edge | 5 | 2 | 0.40 | 3 | 2 |
+| 0 to 10 mm | 186 | 111 | 0.60 | 116 | 82 |
+| 10 to 20 mm | 572 | 204 | 0.36 | 233 | 126 |
+| 20 to 30 mm | 708 | 137 | 0.19 | 243 | 70 |
+| 30 mm or more | 1529 | 87 | 0.06 | 315 | 32 |
+
+The refusal check ran the selector's rules of 2b87de2, with the tray walls, on each part at its
+initial pose. It gives the reason for each of the 413 never-targeted parts:
+
+| reason at the initial pose | parts |
+| --- | --- |
+| each closing axis is tilted out of the jaw plane or strokes a finger into a wall | 167 |
+| graspable at the start, stuck later | 112 |
+| tilted, with a wall in the grip band | 60 |
+| tilted only | 55 |
+| a finger stroke into a wall, not tilted | 11 |
+| other: tilted and too wide 5, out of reach 2, the wall band only 1 | 8 |
+
+The refusal matches the physics. In a driven test, the jaws closed along the wall on a 1-wide
+slope flush on that wall, with x closing forced on. Every LIFT failed. Only the rake and the lean
+reach these parts, and the rake levers are null (section 9.1).
+
+The teacher read the same heaps. The oracle driver ran draw 0 of the read and stowed 215 of 250
+at 217 cycles, with 74 rakes, against the policy's 204. The teacher lost 35 parts there, and the
+policy lost 20 of the same 35. So the grasp ceiling at the walls binds as much as the policy.
+
+The close heights. `close_miss` is the largest failure class of the read, with 278 cycles. A
+first close high above the part centre stows much less often. 2620 of the 2959 cycles had a
+first real close with a measured height:
+
+| first close above the part centre | cycles | stowed | fraction stowed |
+| --- | --- | --- | --- |
+| 0 mm or lower | 1231 | 1193 | 0.97 |
+| 0 to 2 mm | 506 | 482 | 0.95 |
+| 2 to 4 mm | 421 | 349 | 0.83 |
+| 4 to 6 mm | 93 | 42 | 0.45 |
+| 6 to 15 mm | 92 | 21 | 0.23 |
+| over 15 mm | 277 | 199 | 0.72 |
+
+606 first closes land 2 to 15 mm high. `--pick_snap` stops its lowering at the row centre plus
+3 mm, so the snap floor was the next lever (section 9.2). The ledger does not explain the row
+over 15 mm.
+
+### 8.5 The official read
+
+The ledger pre-registered the official read at 09:35. The controller runs it before it looks at
+any other result. It reads r2 A2 100k with the protocol of the passing checked read.
 
 | item | value |
 | --- | --- |
-| checkpoint | TBD |
-| TAG, commit, protocol | TBD |
+| checkpoint | r2 A2 100k |
+| TAG, commit | r2_official, 751e3dd |
+| protocol | full + lean: `--tray --desk_boxes 4 --tray_lean 30`, the nine switches, held-out parts, N_STEPS 50, the client flags of `bin/read.sh` |
+| seed, draws | 20261800, draws 0 to 23, 6000 parts, 120 episodes |
+| split | Machine A 8 lanes, Machine B 4 lanes |
+| pass | at least 5100 correct stows and at most 1.3 cycles per correct stow |
 | stowed of 6000 | TBD |
 | fraction, Wilson 95 % | TBD |
 | cycles per correct stow | TBD |
@@ -753,28 +992,56 @@ lanes) and Machine B (4 lanes). The actual split is TBD. It passes at 5100 of 60
 | per draw | TBD |
 | outcome (`PASS`, `PASS (scripted place)` or `FAIL`) | TBD |
 
+The result is the milestone's number, whatever it is. A READ_FAIL is an orchestration error
+with no gate token. It reruns once in a fresh TAG with the same settings. The best vertical-wall
+checked read, 0.838, stands beside the official read.
+
 ## 9. Rejected levers
 
 ### 9.1 More rakes and the crowd start
 
 The rake prototype `feat/ms7-rake-more` (3cda4c4) adds `--rake_cap N`, a larger rake cap per
-part. It also adds `--rake_crowd`, a rake start between neighbours, and the census class
-`left_at_wall`.
+part. It also adds `--rake_crowd`. When a neighbour blocks every rake start, the crowd start
+lands the closed tips up to 3 mm into it. Each payload episode gains `left_parts`, the parts
+that it leaves, with their rakes and failures. The census gains `left_at_wall`, and the gate
+supervisor forwards both settings.
 
-On the teacher (oracle driver, rung 2, three heaps of draw 2): the base read 141 of 150, the
-crowd start 141, a cap of 4 143, and both together 143.
+On the teacher (oracle driver, rung 2, three held-out heaps, run seeds 20267580 to 20267582):
+the base read 141 of 150, the crowd start 141, a cap of 4 143, and both together 143.
 
 On the policy (r2 B 300k, draw 2, full protocol), against the reference of 210 of 250 at 1.181:
 
-| serving | stowed of 250 | cycles per stow | note |
-| --- | --- | --- | --- |
-| `--rake_cap 4` | 209 | 1.244 | 108 rakes, 30 parts left at a wall, 20 of them after 4 rakes |
-| `--rake_cap 4 --rake_crowd` | 202 | 1.371 | the cycle bar fails. 25 parts left at a wall. 4 parts that were never raked before were reached, and none was freed. |
+| serving | stowed of 250 | cycles per stow | rakes | parts left at a wall | note |
+| --- | --- | --- | --- | --- | --- |
+| `--rake_cap 4` | 209 | 1.244 | 108 | 30, 20 of them after 4 rakes | |
+| `--rake_crowd` | 205 | 1.259 | 65 | 34, 26 of them after 2 rakes | |
+| `--rake_cap 4 --rake_crowd` | 202 | 1.371 | 104 | 25, 18 of them after 4 rakes | the cycle bar fails. 4 parts that were never raked before were reached, and none was freed. |
 
-The ledger records no policy number for the crowd start alone. Neither lever beats the
-reference, so both were dropped at 06:20. The branch stays unpushed.
+A part left at a wall lies in the tray, within 30 mm of a wall, and not at the failure cap.
+Neither lever beats the reference. The ledger dropped the cap and the combination at 06:20, and
+it closed the crowd start at 07:13. The branch went up with the lean branch at 07:49, and its
+switches stay off by default.
 
-### 9.2 The base refresh
+### 9.2 The snap floor
+
+The close heights of section 8.4 led to `--snap_floor MM` (0c37b51 on `feat/ms7-snap-floor`,
+not pushed). It moves the floor of `--pick_snap` from the row centre plus 3 mm. The same floor
+applies to the jaw hold of the snap and to the grasp height of `--dwell_close`. `--snap_floor
+0` puts the floor at the row centre.
+
+On r2 B 300k, draw 2, full protocol, vertical walls:
+
+| serving | stowed of 250 | cycles per stow |
+| --- | --- | --- |
+| the reference, two rollouts | 210 and 208 | 1.181 and 1.202 |
+| `--snap_floor 0`, first rollout | 212 | 1.269 |
+| `--snap_floor 0`, second rollout | 205 | 1.200 |
+
+First closes in the band of 2 to 15 mm fell from 38 to 24 and 26. But lateral `close_miss` rose
+from 25 to 43 in one rollout. In the other, tall parts fell from 82 to 74. The ledger closed the
+lever at 09:10.
+
+### 9.3 The base refresh
 
 T5 (777) and T6 (853) both read under T0's 900 (section 5). Neither replaced the base.
 
@@ -787,7 +1054,8 @@ T5 (777) and T6 (853) both read under T0's 900 (section 5). Neither replaced the
 | Selection, checked and official reads serve `--part_failures`. | The cell memory closed every tray cell before the cycle budget (section 7.2). |
 | Every read from 01:20 serves `--pick_snap`. | The pick forensic found an imprecise approach and a height fault (section 7.3). |
 | Every read from 05:05 serves `--dwell_close` and `--adopt_held`. | The second forensic found the freeze at grasp height and the carry of a non-target part (section 7.4). |
-| The rung 1 checked read is under the snap protocol. A full-protocol re-read is reported beside it. | The read ran before the 05:05 rule. |
+| The rung 2 scene of the passing checked read and of the official read leans the tray walls (`--tray_lean 30`). The H1 tray of the design has vertical walls. The lean is a 30 degree outward draft about the interior edge, and the rim stays 20 mm high. | 413 of 541 lost parts were never targeted, and most start near a wall. The refusal matches a driven test of a flush slope, and the rake levers are null (section 8.4). On 12 paired heaps, the teacher reads 0.905 on the lean and 0.875 on vertical walls. With no retraining, the policy reads 221 of 250 on the lean against 210 (section 3.5). The vertical-wall reads stay in this report beside the lean read. The best is r2 A2 100k at 2513 of 3000, 0.838, on the same draws. |
+| The rung 1 checked read is under the snap protocol. A full-protocol re-read is reported beside it. | The read ran before the 05:05 rule. The re-read reads 0.844 against 0.822. |
 | The owner wired Machine B and Machine C into one LAN. | The design allowed no network change except the end of the Tailscale SSH check. The owner changed the network at 13:40, and corpora then moved to Machine B at LAN speed. |
 | Rung 1 arm B mixes the wave with dataset_v2, not dataset_v5. | The ledger gives no reason. T5, the warm start on dataset_v5, read 777 at 12:55, before the pipeline was armed. |
 | The first rung 2 round trains on both waves, 120 heaps, not on wave 1 alone. | Both waves finished before rung 1's best checkpoint existed. |
@@ -795,49 +1063,55 @@ T5 (777) and T6 (853) both read under T0's 900 (section 5). Neither replaced the
 | Rung 1 selection read three checkpoints, not two. | r1 A 350k's screen (161) was within the noise of r1 B 150k (164). |
 | Rung 2 selection did not read the two best screens. | The ledger gives no reason (section 8.2). |
 | Round 2 trains on data already in place. | The r2s re-record failed on host load, and wave 3 was lost to a full disk. |
-| Selection and checked reads run on Machine A and Machine B, not on aarch64 CPU policy servers. | The first selection reads on aarch64 CPU lanes hit the 130-minute wall cap at 5.8 steps/s per lane. |
+| Round 2 has no separate selection read. A screen at 215 of 250 or more goes straight to a checked read, and its draws 0 to 3 stand as the selection read. | The rule of 06:37, after r2 A2 100k screened 218. The checked read only filters, and the official read stays one-shot. |
+| Not every saved round 2 checkpoint got a screen. The B2 screens stop at 250k, and the A2 screens at 300k. | Machine B ran out of GPU memory at 08:04. A2 reached a plateau, and Machine A GPU went to the lean reads. |
+| The lean wave r2L1 records on Machine B, not on Machine C. | It is a speculative wave, so that a lean decision does not cost two hours. Machine C ran wave 4 at the same time. |
+| Selection, checked and official reads run on Machine A and Machine B, not on aarch64 CPU policy servers. | The first selection reads on aarch64 CPU lanes hit the 130-minute wall cap at 5.8 steps/s per lane. |
 | The sorting teacher had a 100-part smoke before its 600-part read, not a 150-part first read. | The ledger gives no reason. |
 | The wall band reaches the grasp's own finger reach plus 5 mm, not `OPEN_HALF_GAP`. | On the 0.13 x 0.20 m tray, `OPEN_HALF_GAP` bands every part within 57 mm of two walls, half the tray, where no heading survives. |
 | The teacher turns the release roll along the carry (48bc50c). | The owner's review of a teaching episode. The tool stood still over the box for 37 to 50 steps per cycle. |
 
 ## 11. The code
 
-The code is one stack of one-concern branches on main, all pushed:
+The code is one stack of one-concern branches on main. All code branches are on GitHub. The
+stack, bottom to top:
 
-| order | branch | tip | what it adds |
-| --- | --- | --- | --- |
-| 1 | `feat/fleet` | b843d3d | `scripts/fleet.py` and its tests, the bundle fetch, `--hosts` and the sync guard |
-| 2 | `feat/ms7-desk-boxes` | 0602635 | the H1 tray footprint constants and the desk boxes in the grader and the scene. The release over each part's own box, `--desk_boxes`, the certified side band and the box sizes. |
-| 3 | `feat/ms7-tray` | 13bd798 | `--tray`, the wall-ranked grasps, the rake, the end-to-end grasps and the wedge. The 45 degree band, the jam recovery and the rake as its own takeover. |
-| 4 | `feat/ms7-classes` | 22153d5 | `part_class`, the class-to-box map, the target's box on the context row, the `wrong_box` census, the rows per class and per box, `--scripted_place` |
-| 5 | `feat/ms7-rake-serving` | a6b631e | the converter without the rake frames, `--scripted_rake` |
-| 6 | `feat/ms7-part-failures` | be86bc8 | `--part_failures` |
-| 7 | `feat/ms7-pick-snap` | 9bcb2ed | `--pick_snap` |
-| 8 | `feat/ms7-smooth-carry` | 48bc50c | the release roll along the carry |
-| 9 | `fix/convert-reopen-fragments` | 944cdc1 | the converter without the REOPEN fragments |
-| 10 | `feat/ms7-serving-2` | 2b87de2 | `--dwell_close` and `--adopt_held` |
-| 11 | `docs/ms7-sorting` | | this report |
+| order | branch | tip | what it adds | PR |
+| --- | --- | --- | --- | --- |
+| 1 | `feat/fleet` | b843d3d | `scripts/fleet.py` and its tests, the bundle fetch, `--hosts` and the sync guard | TBD |
+| 2 | `feat/ms7-desk-boxes` | 0602635 | the H1 tray footprint constants and the desk boxes in the grader and the scene. The release over each part's own box, `--desk_boxes`, the certified side band and the box sizes. | TBD |
+| 3 | `feat/ms7-tray` | 13bd798 | `--tray`, the wall-ranked grasps, the rake, the end-to-end grasps and the wedge. The 45 degree band, the jam recovery and the rake as its own takeover. | TBD |
+| 4 | `feat/ms7-classes` | 22153d5 | `part_class`, the class-to-box map, the target's box on the context row, the `wrong_box` census, the rows per class and per box, `--scripted_place` | TBD |
+| 5 | `feat/ms7-rake-serving` | a6b631e | the converter without the rake frames, `--scripted_rake` | TBD |
+| 6 | `feat/ms7-part-failures` | be86bc8 | `--part_failures` | TBD |
+| 7 | `feat/ms7-pick-snap` | 9bcb2ed | `--pick_snap` | TBD |
+| 8 | `feat/ms7-smooth-carry` | 48bc50c | the release roll along the carry | TBD |
+| 9 | `fix/convert-reopen-fragments` | 944cdc1 | the converter without the REOPEN fragments | TBD |
+| 10 | `feat/ms7-serving-2` | 2b87de2 | `--dwell_close` and `--adopt_held` | TBD |
+| 11 | `feat/ms7-rake-more` | 3cda4c4 | `--rake_cap` and `--rake_crowd`, `left_parts` in the payload, the census `left_at_wall` and the gate forwarding. Off by default and measured null. | TBD |
+| 12 | `feat/ms7-tray-lean` | 751e3dd | `--tray_lean DEG`, the leaning walls in the scene and the grasp model, the gate forwarding and the cache key. Off by default. | TBD |
+| 13 | `docs/ms7-sorting` | | this report | TBD |
 
-Every new switch is off by default, so the MS6 protocol stays reproducible. At 2b87de2 the CPU
-suite read 1073 tests. Two prototypes stay off the stack: `feat/ms7-rake-more` (3cda4c4,
-rejected) and `feat/ms7-tray-lean` (59ccf5f, TBD). No PR is open yet. The stack goes up with
-`GH_REPO=youtalk/maker-arm-lab gh stack`. The PR numbers are TBD.
+Every new switch is off by default, so the MS6 protocol stays reproducible. At 751e3dd the CPU
+suite collects 1081 tests. Two prototypes stay off the stack and unpushed:
+`feat/ms7-snap-floor` (0c37b51, null) and `feat/ms7-refresh-on-miss` (78f2c7d). No PR is open
+yet. The stack goes up with `GH_REPO=youtalk/maker-arm-lab gh stack`.
 
 ## 12. What is still open
 
-- The rung 1 re-read under the full protocol, TAG r1A_350000_chk2: TBD.
-- Round 2: the remaining screens, the selection reads and a checked read: TBD.
-- Round 3 and later rounds: TBD. Wave 3 was lost, so round 3 needs a new corpus wave.
-- The tray-wall lever: TBD. `--tray_lean DEG` (59ccf5f, off by default) leans the H1 walls out
-  about the interior edge, with a 20 mm rim. Teacher reads at 30, 45 and 60 degrees on the three
-  heaps of draw 2 run now. The base reads 141 of 150 there, with slopes at 33 of 39.
-- The bar for a re-record with the new tray: the teacher at 0.95 or more on 600 parts, with
-  slopes near the other classes. The re-record and its round: TBD.
-- The official read of rung 2 and the milestone outcome: TBD.
+- The official read of rung 2 (TAG r2_official) and the milestone outcome: TBD.
+- The PR stack and its numbers: TBD.
+- A lean checked read of r2 B 300k (TAG r2B_300000_L30_chk) runs on 12 aarch64 CPU lanes. The
+  gate does not need it.
+- Round 3 (`r2/train_r3L`) trains on Machine B. Its 50k screen reads 210 of 250 on the lean, and the
+  later screens are TBD. The gate does not need it.
+- `--refresh_on_miss` (78f2c7d) runs on draw 2. After an empty close, it rebuilds the target row
+  from the live scene. The ledger expects 30 to 60 more parts per 3000.
+- The real tray. The passing read uses walls that lean out 30 degrees. The vertical-wall reads
+  stay the reference for a tray with vertical walls.
 - The real arm. `--square_wrist`, `--dwell_close` and `--adopt_held` read the held part and the
   jaw state from the simulator. The real arm needs a hold signal and a held-part detector.
 - The scripted rake. It plans on the simulator's part poses, and the policy does not rake.
 - The overhead camera still frames the old shelf region. The tray heap spans about 30 x 20 px of
   the 224 px frame.
-- The release roll along the carry is on the stack, but no MS7a corpus uses it.
 - The MS6 debts move on: the learned heading and a noise model on the target row.
