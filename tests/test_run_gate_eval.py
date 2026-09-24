@@ -1001,3 +1001,27 @@ def test_pick_snap_reaches_the_heap_client_only_and_keys_the_cache(tmp_path, mon
     monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
     assert ge.main(argv + ["--backend", "isaac", "--pick_snap"]) == 2
     assert "--pick_snap" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", ["dwell_close", "adopt_held"])
+def test_the_serving_2_switches_reach_the_heap_client_only_and_key_the_cache(
+    name, tmp_path, monkeypatch, capsys
+):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
+    argv += ["--threshold", "0.7", "--seed", "1"]
+    heap = ["--backend", "mujoco", "--heap_k", "50"]
+    cfg = ge._build_cfg(ge._parse_args(argv + heap + [f"--{name}"]))
+    draw = ge.make_eval_draws(1, 1)[0]
+    assert f"--{name}" in ge._eval_command(cfg, draw)
+    assert ge.loop_switches(cfg.client_flags)[name] is True
+    assert f"--{name}" not in ge._eval_command(ge._build_cfg(ge._parse_args(argv + heap)), draw)
+    cfg.out_dir.mkdir()
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    for on, hit in ((True, True), (False, False)):
+        loop = {n: False for n in ge.LOOP_SWITCHES} | {name: on}
+        payload = _heap_payload(draw, inference={**served, "loop": loop})
+        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        assert (ge._cached_payload(cfg, draw) is not None) is hit
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(argv + ["--backend", "isaac", f"--{name}"]) == 2
+    assert f"--{name}" in capsys.readouterr().err

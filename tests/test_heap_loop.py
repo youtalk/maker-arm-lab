@@ -1174,6 +1174,36 @@ def test_pick_snap_needs_the_continuous_gripper_and_a_served_row():
     assert err.value.reason == "pick_snap"
 
 
+def test_dwell_count_grows_only_at_grasp_height_with_open_jaws():
+    row, open_gap = _snap_row(), 0.02
+    floor = row[2] + loop.SNAP_Z_MARGIN
+    at = (0.2, 0.004, floor + loop.DWELL_Z_TOL)
+    count = 0
+    for k in range(1, loop.DWELL_STEPS + 1):
+        count = loop.dwell_count(count, at, row, open_gap, open_gap)
+        assert count == k
+    # Any step off the grasp pose resets it: high, off the centre, jaws or command closing.
+    high = (0.2, 0.0, floor + loop.DWELL_Z_TOL + 0.001)
+    side = (0.2 + loop.SNAP_Z_RADIUS + 0.001, 0.0, floor)
+    assert loop.dwell_count(count, high, row, open_gap, open_gap) == 0
+    assert loop.dwell_count(count, side, row, open_gap, open_gap) == 0
+    assert loop.dwell_count(count, at, row, row[5] - 0.001, open_gap) == 0
+    assert loop.dwell_count(count, at, row, open_gap, row[5] - 0.001) == 0
+    # The stop flag and a missing row reset it too.
+    assert loop.dwell_count(count, at, row, open_gap, open_gap, held=True) == 0
+    assert loop.dwell_count(count, at, _snap_row(width=0.0), open_gap, open_gap) == 0
+    assert {"dwell_closes", "adopted"} <= set(loop.CENSUS_EXPORT)
+
+
+def test_dwell_close_needs_the_continuous_gripper_and_adopt_held_needs_desk_boxes():
+    for switch in ("dwell_close", "adopt_held"):
+        env, rig = _env_and_rig()
+        with pytest.raises(loop.EvalFailure) as err:
+            _rollout(env, rig, _HoldPolicy(), **{switch: True})
+        env.close()
+        assert err.value.reason == switch
+
+
 def test_refreshed_row_follows_the_live_centre_and_keeps_the_grasp_when_nothing_ranks(
     monkeypatch,
 ):
@@ -1242,6 +1272,8 @@ def test_the_switches_select_at_once_after_a_budget_end_refresh_at_a_reopen_and_
         "scripted_rake": False,
         "part_failures": False,
         "pick_snap": False,
+        "dwell_close": False,
+        "adopt_held": False,
     }
     # Every cycle ended on its budget, so no selection waited for a retreat.
     assert ep["cycle_reasons"] == ["budget"] * 3 and ep["select_wait_steps"] == 0

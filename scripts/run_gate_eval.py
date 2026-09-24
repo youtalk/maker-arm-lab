@@ -105,6 +105,8 @@ LOOP_SWITCHES = (
     "scripted_rake",
     "part_failures",
     "pick_snap",
+    "dwell_close",
+    "adopt_held",
 )
 """The heap loop's protocol switches (core.loop.rollout); the client records them in the
 payload's inference block under "loop", and the cache matches on them."""
@@ -717,6 +719,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "commanded pick point onto the served row on the final approach",
     )
     parser.add_argument(
+        "--dwell_close",
+        action="store_true",
+        help="MuJoCo heap only: forwarded to the heap client as --dwell_close, which closes the "
+        "jaws for a policy that waits at grasp height",
+    )
+    parser.add_argument(
+        "--adopt_held",
+        action="store_true",
+        help="MuJoCo heap only: forwarded to the heap client as --adopt_held, which serves the "
+        "box of a lifted part that is not the target",
+    )
+    parser.add_argument(
         "--client_flags",
         type=str,
         default="",
@@ -738,6 +752,9 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError("--part_failures needs --heap_k > 0 and --backend mujoco")
     if args.pick_snap and (args.heap_k <= 0 or args.backend != "mujoco"):
         raise ValueError("--pick_snap needs --heap_k > 0 and --backend mujoco")
+    for name in ("dwell_close", "adopt_held"):
+        if getattr(args, name) and (args.heap_k <= 0 or args.backend != "mujoco"):
+            raise ValueError(f"--{name} needs --heap_k > 0 and --backend mujoco")
     if args.desk_boxes and (args.heap_k <= 0 or args.backend != "mujoco" or args.desk_boxes < 0):
         # Only the MuJoCo heap client builds desk boxes (MS7a design, desk boxes).
         raise ValueError("--desk_boxes needs a positive count, --heap_k > 0 and --backend mujoco")
@@ -785,7 +802,9 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         + (("--scripted_place",) if args.scripted_place else ())
         + (("--scripted_rake",) if args.scripted_rake else ())
         + (("--part_failures",) if args.part_failures else ())
-        + (("--pick_snap",) if args.pick_snap else ()),
+        + (("--pick_snap",) if args.pick_snap else ())
+        + (("--dwell_close",) if args.dwell_close else ())
+        + (("--adopt_held",) if args.adopt_held else ()),
     )
 
 

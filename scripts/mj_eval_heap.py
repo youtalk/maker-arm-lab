@@ -160,6 +160,18 @@ def parse_args(argv=None) -> argparse.Namespace:
         "(loop.snap_shift)",
     )
     parser.add_argument(
+        "--dwell_close",
+        action="store_true",
+        help="MS7a: command the teacher's close when the policy waits at grasp height with the "
+        "jaws open for loop.DWELL_STEPS (loop.dwell_count)",
+    )
+    parser.add_argument(
+        "--adopt_held",
+        action="store_true",
+        help="MS7a desk boxes: serve the box and marker of a lifted part that is not the target, "
+        "as the teacher's adopt_held_part does",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -261,6 +273,8 @@ def main(argv=None) -> int:
             scripted_rake=args.scripted_rake,
             part_failures=args.part_failures,
             pick_snap=args.pick_snap,
+            dwell_close=args.dwell_close,
+            adopt_held=args.adopt_held,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

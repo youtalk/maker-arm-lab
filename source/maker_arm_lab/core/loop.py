@@ -41,8 +41,12 @@ every cell of the 13 x 20 cm tray before its cycle budget, and the episode ended
 ``no_candidate`` with parts in reach. A tenth, ``pick_snap`` (MS7a), moves the commanded pick
 point onto the served row on the final approach: its xy toward the row centre and, with the
 jaws open over the part, its height down to the teacher's grasp height (``snap_shift``), the
-jaws held at the landing gap while it comes down (``snap_hold``). The payload's ``inference``
-block records all ten.
+jaws held at the landing gap while it comes down (``snap_hold``). An eleventh,
+``dwell_close`` (MS7a), commands the teacher's close when the policy waits at grasp height
+with the jaws open for ``DWELL_STEPS`` (``dwell_count``). A twelfth, ``adopt_held``
+(MS7a), serves the box and marker of a lifted part that is not the target, as the teacher
+does when its LIFT comes up with another part (``HeapOracle.adopt_held_part``). The payload's
+``inference`` block records all twelve.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
@@ -516,6 +520,42 @@ def snap_hold(cmd, pick, row, shift, descending: bool, held: bool = False) -> bo
     return descending and float(pick[2]) > floor + SNAP_Z_TOL
 
 
+DWELL_STEPS = 150
+"""Control steps the pick point may wait at grasp height with the jaws open before
+``dwell_close`` closes them. The rung 2 arm B 300k traces of 2026-09-24 (draws 1 and 3 of
+seed 20261700, ``--pick_snap``): a stowed cycle spends a median 38 steps there before its own
+close (p95 134); every no_close cycle sits there 400 to 800 steps with its own command at the
+grasp pose and its gap command at the landing gap, and the 800-step budget ends it."""
+DWELL_Z_TOL = 0.003
+"""m: ``dwell_count``'s grasp height: the ``pick_snap`` floor (row centre plus
+``SNAP_Z_MARGIN``) plus this."""
+CLOSE_LATCH_STEPS = 150
+"""Control steps ``dwell_close`` keeps the close command at most, unless the policy's own gap
+command closes first."""
+
+
+def dwell_count(count: int, pick, row, jaw_gap: float, gap_cmd: float, held: bool = False) -> int:
+    """``dwell_close``: consecutive steps the arm has waited at grasp height with open jaws. Pure.
+
+    ``pick`` is the measured pick point, ``row`` the served target row, ``jaw_gap`` the
+    measured gap between the jaws, ``gap_cmd`` the gap command about to be served and
+    ``held`` the stop flag of ``square_wrist``. The count grows while the pick point is within
+    ``SNAP_Z_RADIUS`` of the row centre in xy and at most ``DWELL_Z_TOL`` above the
+    ``pick_snap`` floor, and the jaws are open and commanded open wider than the row's width;
+    any other step resets it, and so do the stop flag and a missing row.
+    """
+    if held or float(row[5]) <= 0.0:
+        return 0
+    near = math.hypot(float(pick[0]) - float(row[0]), float(pick[1]) - float(row[1]))
+    at = (
+        near <= SNAP_Z_RADIUS
+        and float(pick[2]) <= float(row[2]) + SNAP_Z_MARGIN + DWELL_Z_TOL
+        and jaw_gap >= float(row[5])
+        and gap_cmd >= float(row[5])
+    )
+    return count + 1 if at else 0
+
+
 def commanded_pick(ik, q) -> torch.Tensor:
     """The pick point of the arm command ``q`` (6,): FK plus the measured pick offset."""
     pos, rot = ik.fk(torch.as_tensor(q, dtype=torch.float64))
@@ -636,6 +676,10 @@ class Cycle:
     snap: tuple = (0.0, 0.0, 0.0)  # m, the pick point offset ``pick_snap`` served last step
     snapped_steps: int = 0  # steps ``pick_snap`` changed the arm command
     snap_held_steps: int = 0  # steps ``pick_snap`` held the jaws at the landing gap
+    dwell: int = 0  # consecutive steps at grasp height with open jaws (``dwell_count``)
+    latched: int = 0  # ``dwell_close``: 0 not fired, > 0 steps the close has run, -1 spent
+    dwell_closes: int = 0  # times ``dwell_close`` fired in the cycle (at most one)
+    adopted: int = -1  # the lifted non-target part ``adopt_held`` served the box of, else -1
     grace_steps: int = 0  # steps ``budget_ends_cycle``'s carry grace kept the cycle open
 
 
@@ -810,6 +854,8 @@ CENSUS_EXPORT = (
     "squared_steps",
     "snapped_steps",
     "snap_held_steps",
+    "dwell_closes",
+    "adopted",
     "grace_steps",
 )
 """The ``Cycle`` fields each episode's ``cycle_census`` row exports, plus the two is_target
@@ -933,6 +979,8 @@ def rollout(
     scripted_rake: bool = False,
     part_failures: bool = False,
     pick_snap: bool = False,
+    dwell_close: bool = False,
+    adopt_held: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -986,11 +1034,14 @@ def rollout(
         destination = torch.as_tensor(env.destination_bins).clone().to("cpu")
         class_to_box = [dict(zip(PART_CLASSES, map(int, row))) for row in env.class_to_box]
         final_box = torch.full((num_envs, k), -1, dtype=torch.long)
+    if adopt_held and not per_part:
+        raise EvalFailure("adopt_held", "needs desk boxes: a part's own box is the one it adopts")
     for name, on in (
         ("squeeze_floor", squeeze_floor),
         ("close_gate", close_gate),
         ("square_wrist", square_wrist),
         ("pick_snap", pick_snap),
+        ("dwell_close", dwell_close),
     ):
         if on and (gripper_mode != "continuous" or ctx_target is None):
             raise EvalFailure(name, "needs the continuous gripper and a served target row")
@@ -1031,6 +1082,8 @@ def rollout(
         "scripted_rake": bool(scripted_rake),
         "part_failures": bool(part_failures),
         "pick_snap": bool(pick_snap),
+        "dwell_close": bool(dwell_close),
+        "adopt_held": bool(adopt_held),
     }
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
@@ -1204,7 +1257,7 @@ def rollout(
         if policy_action is not None:
             idle = torch.tensor(rig.idle)
             action_cpu[idle] = policy_action[idle]
-            if close_gate or squeeze_floor or square_wrist or pick_snap:
+            if close_gate or squeeze_floor or square_wrist or pick_snap or dwell_close:
                 for i, st in enumerate(states):
                     if st.cycle is None or not rig.idle[i] or bool(tracker.done[i]):
                         continue
@@ -1268,6 +1321,27 @@ def rollout(
                         if gap < landing:
                             gap = landing
                             c.snap_held_steps += 1
+                    if dwell_close and c.latched > 0:
+                        # The close runs until the policy's own gap command closes or the cap.
+                        if float(policy_action[i, 6]) < width or c.latched >= CLOSE_LATCH_STEPS:
+                            c.latched = -1
+                        else:
+                            c.latched += 1
+                            gap = min(gap, grasp.close_gap(width))
+                    elif dwell_close and c.latched == 0:
+                        c.dwell = dwell_count(
+                            c.dwell,
+                            picks[i],
+                            row,
+                            2.0 * GRIPPER_OPEN_POS * float(openings[i]),
+                            gap,
+                            held=held_so_far,
+                        )
+                        if c.dwell >= DWELL_STEPS:
+                            c.latched = 1
+                            c.dwell_closes += 1
+                            gap = min(gap, grasp.close_gap(width))
+                            replan[i] = True
                     if squeeze_floor:
                         floored = floored_gap(gap, width)
                         if floored != gap:
@@ -1309,6 +1383,20 @@ def rollout(
                 close_cm=close_cm,
                 pick_z=float(pick[2]),
             )
+            if (
+                adopt_held
+                and per_part
+                and rig.idle[i]
+                and h >= 0
+                and h not in (c.target, c.adopted)
+                and float(pos[i, h, 2] - c.start_z[h]) >= oracle.LIFT_MIN_RISE
+            ):
+                # The teacher's LIFT that comes up with another part carries that part to its
+                # own box, and its marker and box row follow the part (adopt_held_part).
+                c.adopted = h
+                env.target_part[i] = h
+                env.set_context_box(i, int(destination[i, h]))
+                replan[i] = True
         arm_clamped, overshoot = clamp_arm_actions(action_cpu[:, :6], limits)
         tracker.record_clamps(overshoot)
         clamped = torch.cat([arm_clamped, action_cpu[:, 6:7]], dim=-1)
