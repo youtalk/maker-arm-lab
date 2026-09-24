@@ -1063,6 +1063,117 @@ def test_squared_roll_leaves_the_roll_after_a_hold_with_no_row_and_off_the_appro
     assert "squared_roll" not in inspect.getsource(eval_loop)
 
 
+def _snap_row(width=0.0096, half_height=0.0048):
+    return [0.2, 0.0, 0.01, 1.0, 0.0, width, half_height]
+
+
+def test_snap_shift_moves_the_pick_point_3_mm_a_step_toward_the_row():
+    row, open_gap = _snap_row(), 0.02
+    cmd = (0.23, 0.0, 0.012)  # 3 cm off the row centre in x, 2 mm above it
+    shift = (0.0, 0.0, 0.0)
+    for k in range(1, 11):
+        shift = loop.snap_shift(cmd, cmd, row, shift, open_gap)
+        assert shift[0] == pytest.approx(-loop.SNAP_XY_STEP * k) and shift[1] == 0.0
+    assert shift[0] == pytest.approx(-0.03)
+    # On the row: the offset holds, the served point stays at the centre.
+    assert loop.snap_shift(cmd, cmd, row, shift, open_gap)[0] == pytest.approx(-0.03)
+    # A diagonal error moves 3 mm along the diagonal.
+    dx, dy, _ = loop.snap_shift((0.22, 0.02, 0.01), (0.22, 0.02, 0.01), row, (0, 0, 0), open_gap)
+    assert math.hypot(dx, dy) == pytest.approx(loop.SNAP_XY_STEP)
+    assert dx == pytest.approx(dy) and dx < 0.0
+
+
+def test_snap_shift_lowers_a_hover_to_the_teachers_grasp_height_and_never_below():
+    row, open_gap = _snap_row(), 0.02
+    floor = row[2] + loop.SNAP_Z_MARGIN
+    cmd = (0.2, 0.0, row[2] + 0.020)  # the 350k hover: 20 mm above the part centre
+    shift, served = (0.0, 0.0, 0.0), []
+    for _ in range(15):
+        shift = loop.snap_shift(cmd, cmd, row, shift, open_gap)
+        served.append(cmd[2] + shift[2])
+    assert served[0] == pytest.approx(cmd[2] - loop.SNAP_Z_STEP)
+    assert all(a - b <= loop.SNAP_Z_STEP + 1e-12 for a, b in zip([cmd[2]] + served, served))
+    assert min(served) == pytest.approx(floor) and served[-1] == pytest.approx(floor)
+    # The policy comes down by itself: the offset shrinks and the point stays at the floor.
+    low = (0.2, 0.0, floor + 0.001)
+    assert low[2] + loop.snap_shift(low, low, row, shift, open_gap)[2] == pytest.approx(floor)
+    # A command already under the floor is left alone.
+    deep = (0.2, 0.0, row[2] - 0.004)
+    assert loop.snap_shift(deep, deep, row, shift, open_gap)[2] == 0.0
+    # Closed jaws (gap under the width): the offset is kept, never grown.
+    half = (0.0, 0.0, -0.006)
+    assert loop.snap_shift(cmd, cmd, row, half, row[5] - 0.001)[2] == pytest.approx(-0.006)
+    # Outside SNAP_Z_RADIUS the height is not lowered, the xy still moves.
+    side = (0.2 + loop.SNAP_Z_RADIUS + 0.002, 0.0, cmd[2])
+    moved = loop.snap_shift(side, side, row, (0.0, 0.0, 0.0), open_gap)
+    assert moved[2] == 0.0 and moved[0] == pytest.approx(-loop.SNAP_XY_STEP)
+
+
+def test_snap_shift_stops_at_the_hold_with_no_row_and_off_the_approach():
+    import inspect
+
+    from maker_arm_lab.core import eval_loop
+
+    row, open_gap, shift = _snap_row(), 0.02, (-0.01, 0.0, -0.01)
+    cmd = (0.21, 0.0, 0.025)
+    assert loop.snap_shift(cmd, cmd, row, shift, open_gap) != (0.0, 0.0, 0.0)  # it acts here
+    assert loop.snap_shift(cmd, cmd, row, shift, open_gap, held=True) == (0.0, 0.0, 0.0)
+    assert loop.snap_shift(cmd, cmd, _snap_row(width=0.0), shift, open_gap) == (0.0, 0.0, 0.0)
+    far = (0.2 + loop.SNAP_RADIUS + 0.001, 0.0, 0.02)
+    assert loop.snap_shift(far, far, row, shift, open_gap) == (0.0, 0.0, 0.0)
+    high = (0.2, 0.0, row[2] + row[6] + loop.SQUARE_ABOVE)
+    assert loop.snap_shift(high, high, row, shift, open_gap) == (0.0, 0.0, 0.0)
+    assert "snapped_steps" in loop.CENSUS_EXPORT
+    assert "snap_shift" not in inspect.getsource(eval_loop)
+
+
+def test_snap_hold_keeps_the_jaws_open_while_a_hover_comes_down_and_then_lets_go():
+    row, open_gap = _snap_row(), 0.02
+    floor = row[2] + loop.SNAP_Z_MARGIN
+    cmd = (0.2, 0.0, row[2] + 0.020)  # the hover, commanded 20 mm above the part centre
+    shift, pick, holds = (0.0, 0.0, 0.0), cmd, []
+    for _ in range(12):
+        shift = loop.snap_shift(cmd, pick, row, shift, open_gap)
+        holds.append(loop.snap_hold(cmd, pick, row, shift, descending=True))
+        pick = (0.2, 0.0, cmd[2] + shift[2])  # the arm tracks the served point
+    # Held while the served point comes down 2 mm a step, let go once the arm is at the floor.
+    assert cmd[2] + shift[2] == pytest.approx(floor)
+    steps = math.ceil((cmd[2] - floor) / loop.SNAP_Z_STEP - 1e-9)
+    assert holds == [True] * (steps - 1) + [False] * (13 - steps)
+    # At the floor the arm still coming down above it keeps the hold; stopped short, it goes.
+    above = (0.2, 0.0, floor + 0.004)
+    assert loop.snap_hold(cmd, above, row, shift, descending=True)
+    assert not loop.snap_hold(cmd, above, row, shift, descending=False)
+    assert not loop.snap_hold(cmd, (0.2, 0.0, floor), row, shift, descending=True)
+    # The policy's own command at grasp height, the stop flag, no row, off the centre: no hold.
+    low = (0.2, 0.0, floor)
+    assert not loop.snap_hold(low, low, row, (0.0, 0.0, 0.0), descending=True)
+    assert not loop.snap_hold(cmd, cmd, row, (0.0, 0.0, 0.0), True, held=True)
+    assert not loop.snap_hold(cmd, cmd, _snap_row(width=0.0), (0.0, 0.0, 0.0), True)
+    side = (0.2 + loop.SNAP_Z_RADIUS + 0.001, 0.0, cmd[2])
+    assert not loop.snap_hold(side, side, row, (0.0, 0.0, 0.0), True)
+    assert "snap_held_steps" in loop.CENSUS_EXPORT
+
+
+def test_snapped_arm_moves_the_commanded_pick_point_by_the_shift():
+    ik, q = _square_pose()
+    before = loop.commanded_pick(ik, q)
+    moved = loop.snapped_arm(ik, q, (-0.003, 0.002, -0.004))
+    after = loop.commanded_pick(ik, moved)
+    assert (after - before).tolist() == pytest.approx([-0.003, 0.002, -0.004], abs=1e-6)
+    # The jaw heading and the tilt stay the policy's.
+    assert ik.pose_of(moved).jaw_heading == pytest.approx(ik.pose_of(q).jaw_heading, abs=1e-6)
+    assert ik.pose_of(moved).tilt == pytest.approx(ik.pose_of(q).tilt, abs=1e-6)
+
+
+def test_pick_snap_needs_the_continuous_gripper_and_a_served_row():
+    env, rig = _env_and_rig()
+    with pytest.raises(loop.EvalFailure) as err:
+        _rollout(env, rig, _HoldPolicy(), pick_snap=True)
+    env.close()
+    assert err.value.reason == "pick_snap"
+
+
 def test_refreshed_row_follows_the_live_centre_and_keeps_the_grasp_when_nothing_ranks(
     monkeypatch,
 ):
@@ -1130,6 +1241,7 @@ def test_the_switches_select_at_once_after_a_budget_end_refresh_at_a_reopen_and_
         "scripted_place": False,
         "scripted_rake": False,
         "part_failures": False,
+        "pick_snap": False,
     }
     # Every cycle ended on its budget, so no selection waited for a retreat.
     assert ep["cycle_reasons"] == ["budget"] * 3 and ep["select_wait_steps"] == 0

@@ -38,7 +38,11 @@ never learned to rake, so without it a read ends at the first wall-stuck state. 
 ``part_failures`` (MS7a), books a failed cycle against its target part instead of the part's
 5 cm cell (``HeapOracle.failure_scope``): a policy that fails a third of its picks closed
 every cell of the 13 x 20 cm tray before its cycle budget, and the episode ended
-``no_candidate`` with parts in reach. The payload's ``inference`` block records all nine.
+``no_candidate`` with parts in reach. A tenth, ``pick_snap`` (MS7a), moves the commanded pick
+point onto the served row on the final approach: its xy toward the row centre and, with the
+jaws open over the part, its height down to the teacher's grasp height (``snap_shift``), the
+jaws held at the landing gap while it comes down (``snap_hold``). The payload's ``inference``
+block records all ten.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
@@ -77,7 +81,9 @@ from maker_arm_lab.core.stowed import (
 )
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_REGEX,
+    GRIPPER_OPEN_POS,
     JAW_AXIS_BODY,
+    PICK_OFFSET_MEASURED,
     TOOL_BODY,
     WRIST_ROLL_INDEX,
 )
@@ -416,6 +422,120 @@ def squared_roll(ik, q, row, pick, prev: float, limits, held: bool = False) -> f
     return roll
 
 
+SNAP_RADIUS = SQUARE_RADIUS
+"""m: ``pick_snap`` acts while the pick point is this close in xy to the row centre (and below
+the row's top plus ``SQUARE_ABOVE``), the window ``square_wrist`` uses."""
+SNAP_XY_STEP = 0.003
+"""m: the most ``pick_snap`` moves the served pick point in xy in one control step."""
+SNAP_Z_RADIUS = 0.010
+"""m: ``pick_snap`` lowers the pick point only while it is this close in xy to the row centre."""
+SNAP_Z_STEP = 0.002
+"""m: the most ``pick_snap`` lowers the served pick point in one control step."""
+SNAP_Z_MARGIN = GATE_MARGIN
+"""m: ``pick_snap`` lowers a commanded pick point to the row centre plus this, never further.
+
+The teacher's DESCEND commands the pick point to the part centre (``EnvOracle.descend_goal``,
+``DESCEND_CLEARANCE_MEASURED`` 0), and the rung 1 corpus closes a median 0.2 mm under the row
+centre. The forensics of 2026-09-23 (arm B, screen draw 0 of seed 20261700): stows close a
+median 0 to 5 mm above the centre; the collapsed episodes of the 350k checkpoint command the
+pick point 15 to 25 mm above it, over a part whose top is 4 to 8 mm above it, and close on
+air there. The margin is ``close_gate``'s, the stows' upper quartile on run m."""
+SNAP_Z_TOL = 0.001
+"""m: ``snap_hold`` lets the jaws go once the served pick point is this close to its floor."""
+
+
+def snap_shift(cmd, pick, row, shift, jaw_gap: float, held: bool = False) -> tuple:
+    """``pick_snap``: the offset (m, world x y z) the loop adds to the commanded pick point. Pure.
+
+    ``cmd`` is the commanded pick point (FK of the served arm command plus the pick offset),
+    ``pick`` the measured one, ``row`` the served target row (``target_context``), ``shift``
+    the offset served on the step before, ``jaw_gap`` the measured gap between the jaws and
+    ``held`` the stop flag ``square_wrist`` reads (the cycle has held a part or lifted one).
+    The offset is zero with no live row (width 0), after the stop flag, and while the pick
+    point is more than ``SNAP_RADIUS`` from the row centre in xy or ``SQUARE_ABOVE`` above its
+    top. Inside that window:
+
+    * xy: the served point moves toward the row centre by at most ``SNAP_XY_STEP``. The
+      forensics of 2026-09-23 (arm B 100k): the teacher closes on the row centre, the policy
+      a median 9 mm and a p90 45 mm off it on a cycle that follows a stow, and 1 to 3 cm off
+      closes stow one cycle in three.
+    * z: while the pick point is within ``SNAP_Z_RADIUS`` of the row centre and the jaws are
+      open wider than the row's width, the offset goes down by at most ``SNAP_Z_STEP`` a step.
+      It never takes the served point under ``row z + SNAP_Z_MARGIN`` (a command already under
+      that height is left alone) and is kept, not grown, while the jaws are closed, so closed
+      tips are never driven into the part or the pile.
+    """
+    if held or float(row[5]) <= 0.0:
+        return (0.0, 0.0, 0.0)
+    near = math.hypot(float(pick[0]) - float(row[0]), float(pick[1]) - float(row[1]))
+    top = float(row[2]) + float(row[6])
+    if near > SNAP_RADIUS or float(pick[2]) >= top + SQUARE_ABOVE:
+        return (0.0, 0.0, 0.0)
+    dx, dy, dz = (float(v) for v in shift)
+    ex = float(row[0]) - float(cmd[0]) - dx
+    ey = float(row[1]) - float(cmd[1]) - dy
+    n = math.hypot(ex, ey)
+    if n > SNAP_XY_STEP:
+        ex, ey = ex * SNAP_XY_STEP / n, ey * SNAP_XY_STEP / n
+    if near <= SNAP_Z_RADIUS and jaw_gap >= float(row[5]):
+        dz -= SNAP_Z_STEP
+    floor = min(0.0, float(row[2]) + SNAP_Z_MARGIN - float(cmd[2]))
+    return (dx + ex, dy + ey, min(0.0, max(dz, floor)))
+
+
+def snap_hold(cmd, pick, row, shift, descending: bool, held: bool = False) -> bool:
+    """``pick_snap``: hold the jaws at the landing gap now? Pure.
+
+    ``cmd``, ``pick``, ``row`` and ``held`` as in ``snap_shift``, ``shift`` the offset
+    ``snap_shift`` returned for this step and ``descending`` whether the measured pick point
+    came down ``GATE_DESCENT`` over the last ``GATE_WINDOW`` steps. True inside the lowering
+    window (``SNAP_Z_RADIUS`` of the row centre, under the row's top plus ``SQUARE_ABOVE``,
+    before the stop flag) while the policy's own command hovers above the floor (row centre
+    plus ``SNAP_Z_MARGIN``) and the lowering is not done: the served point is still more than
+    ``SNAP_Z_TOL`` above the floor, or it is there and the arm is still coming down after it
+    and above it. A pick point that stops short (a neighbour under the tips) lets go at once,
+    so the hold never outlasts the descent.
+
+    The hover of the 350k checkpoint closes on air 15 to 25 mm above the part centre, and
+    holding the jaws open there alone turned each close_miss into a no_close (40 of 44
+    cycles, 2026-09-23): the policy commands the close it believes is at grasp height. So
+    the jaws stay open only while ``snap_shift`` brings the point down, and the policy's own
+    close then acts at the grasp height.
+    """
+    if held or float(row[5]) <= 0.0:
+        return False
+    near = math.hypot(float(pick[0]) - float(row[0]), float(pick[1]) - float(row[1]))
+    top = float(row[2]) + float(row[6])
+    if near > SNAP_Z_RADIUS or float(pick[2]) >= top + SQUARE_ABOVE:
+        return False
+    floor = float(row[2]) + SNAP_Z_MARGIN
+    if float(cmd[2]) <= floor:
+        return False
+    if float(cmd[2]) + float(shift[2]) > floor + SNAP_Z_TOL:
+        return True
+    return descending and float(pick[2]) > floor + SNAP_Z_TOL
+
+
+def commanded_pick(ik, q) -> torch.Tensor:
+    """The pick point of the arm command ``q`` (6,): FK plus the measured pick offset."""
+    pos, rot = ik.fk(torch.as_tensor(q, dtype=torch.float64))
+    return pos + rot @ torch.tensor(PICK_OFFSET_MEASURED, dtype=torch.float64)
+
+
+def snapped_arm(ik, q, shift):
+    """The arm command ``q`` (6,) with its pick point moved by ``shift`` at the same tilt, jaw
+    heading and lean (the pick offset is rigid in the tool frame), or None with no IK
+    solution."""
+    from maker_arm_lab.core.global_ik import GraspTarget
+
+    q = torch.as_tensor(q, dtype=torch.float64)
+    pose = ik.pose_of(q)
+    position = tuple(float(p) + float(d) for p, d in zip(pose.position, shift))
+    target = GraspTarget(position, pose.tilt, pose.jaw_heading, pose.lean_azimuth)
+    sol = ik.solve(target, seed=q, restarts=0)
+    return None if sol is None else sol.q
+
+
 def failure_reason(
     held_no_rise: int, min_no_rise: int | None, lifted: bool, steps_in_cycle: int
 ) -> str | None:
@@ -513,6 +633,9 @@ class Cycle:
     floored_steps: int = 0  # steps ``squeeze_floor`` changed the gap command
     gated_steps: int = 0  # steps ``close_gate`` changed the gap command
     squared_steps: int = 0  # steps ``square_wrist`` changed the roll command
+    snap: tuple = (0.0, 0.0, 0.0)  # m, the pick point offset ``pick_snap`` served last step
+    snapped_steps: int = 0  # steps ``pick_snap`` changed the arm command
+    snap_held_steps: int = 0  # steps ``pick_snap`` held the jaws at the landing gap
     grace_steps: int = 0  # steps ``budget_ends_cycle``'s carry grace kept the cycle open
 
 
@@ -685,6 +808,8 @@ CENSUS_EXPORT = (
     "floored_steps",
     "gated_steps",
     "squared_steps",
+    "snapped_steps",
+    "snap_held_steps",
     "grace_steps",
 )
 """The ``Cycle`` fields each episode's ``cycle_census`` row exports, plus the two is_target
@@ -807,15 +932,16 @@ def rollout(
     scripted_place: bool = False,
     scripted_rake: bool = False,
     part_failures: bool = False,
+    pick_snap: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
     ``policy`` is a ``policy_client.ServerPolicy`` or None for the oracle driver.
     ``takeover`` is a ``TakeoverConfig`` (the DAgger mode, phase B design 5.5) or None.
-    The nine switches are the module docstring's; ``replan_on_switch`` needs a policy whose
+    The ten switches are the module docstring's; ``replan_on_switch`` needs a policy whose
     ``step`` takes ``replan``, and the flag is left off the wire when the switch is off;
-    ``squeeze_floor``, ``close_gate`` and ``square_wrist`` need the continuous gripper and a
-    served target row.
+    ``squeeze_floor``, ``close_gate``, ``square_wrist`` and ``pick_snap`` need the continuous
+    gripper and a served target row.
     ``on_frame(ordinal, step_in_cycle, wrist, overhead)`` is called with env 0's two policy
     frames every ``FRAME_EVERY`` steps of each of its cycles, for a forensics dump.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
@@ -864,6 +990,7 @@ def rollout(
         ("squeeze_floor", squeeze_floor),
         ("close_gate", close_gate),
         ("square_wrist", square_wrist),
+        ("pick_snap", pick_snap),
     ):
         if on and (gripper_mode != "continuous" or ctx_target is None):
             raise EvalFailure(name, "needs the continuous gripper and a served target row")
@@ -903,6 +1030,7 @@ def rollout(
         "scripted_place": bool(scripted_place),
         "scripted_rake": bool(scripted_rake),
         "part_failures": bool(part_failures),
+        "pick_snap": bool(pick_snap),
     }
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
@@ -1076,7 +1204,7 @@ def rollout(
         if policy_action is not None:
             idle = torch.tensor(rig.idle)
             action_cpu[idle] = policy_action[idle]
-            if close_gate or squeeze_floor or square_wrist:
+            if close_gate or squeeze_floor or square_wrist or pick_snap:
                 for i, st in enumerate(states):
                     if st.cycle is None or not rig.idle[i] or bool(tracker.done[i]):
                         continue
@@ -1100,6 +1228,27 @@ def rollout(
                         if roll != float(action_cpu[i, WRIST_ROLL_INDEX]):
                             action_cpu[i, WRIST_ROLL_INDEX] = roll
                             c.squared_steps += 1
+                    hold_open = False
+                    if pick_snap:
+                        cmd = commanded_pick(rig.ik, action_cpu[i, :6])
+                        c.snap = snap_shift(
+                            cmd,
+                            picks[i],
+                            row,
+                            c.snap,
+                            2.0 * GRIPPER_OPEN_POS * float(openings[i]),
+                            held=held_so_far,
+                        )
+                        hist = pick_z_hist[i]
+                        descending = len(hist) > GATE_WINDOW and hist[0] - hist[-1] > GATE_DESCENT
+                        hold_open = snap_hold(
+                            cmd, picks[i], row, c.snap, descending, held=held_so_far
+                        )
+                        if any(c.snap):
+                            snapped = snapped_arm(rig.ik, action_cpu[i, :6], c.snap)
+                            if snapped is not None:
+                                action_cpu[i, :6] = snapped.to(action_cpu.dtype)
+                                c.snapped_steps += 1
                     if close_gate:
                         hist = pick_z_hist[i]
                         descending = len(hist) > GATE_WINDOW and hist[0] - hist[-1] > GATE_DESCENT
@@ -1114,6 +1263,11 @@ def rollout(
                         if gated != gap:
                             gap = gated
                             st.cycle.gated_steps += 1
+                    if hold_open:
+                        landing = 2.0 * (grasp.landing_half_gap(width) - grasp.JAW_HOLD_BAND)
+                        if gap < landing:
+                            gap = landing
+                            c.snap_held_steps += 1
                     if squeeze_floor:
                         floored = floored_gap(gap, width)
                         if floored != gap:

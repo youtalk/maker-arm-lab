@@ -153,6 +153,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         "a part after three failed cycles and its neighbours stay candidates",
     )
     parser.add_argument(
+        "--pick_snap",
+        action="store_true",
+        help="MS7a: on the final approach move the commanded pick point onto the served row, xy "
+        "toward its centre and, with the jaws open over it, down to the teacher's grasp height "
+        "(loop.snap_shift)",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -253,6 +260,7 @@ def main(argv=None) -> int:
             scripted_place=args.scripted_place,
             scripted_rake=args.scripted_rake,
             part_failures=args.part_failures,
+            pick_snap=args.pick_snap,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
