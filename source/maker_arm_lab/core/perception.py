@@ -206,6 +206,12 @@ class Perceiver:
         """The episode's perceived (x, y, yaw) per desk box, fixed until ``reset_episode``."""
         return self._box_poses
 
+    @property
+    def bias(self) -> tuple[float, float, float]:
+        """The episode's position bias (x, y, z) on every detection, fixed until
+        ``reset_episode``."""
+        return self._bias
+
     def _gauss(self) -> float:
         return self.rng.gauss(0.0, 1.0)
 

@@ -40,7 +40,8 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
         env.set_context_box(i, box) (the context row's box part, set per target)
     perceived state (MS7c design section 6, heap mode): env.marker_points (N, 3) float32, NaN
         by default and after the env's reset; a finite row is the frozen marker that
-        stamp_markers() draws in place of target_part's live centre.
+        stamp_markers() draws in place of target_part's live centre; the recording rig's
+        env.oracle_marker_point (N, 3) sets it where it sets target_part.
         env.perceived_box_poses, None by default, or (N, M, 3) perceived (x, y, yaw) per desk
         box that set_context_box() serves in place of desk_box_poses; its owner writes row i
         at each episode start and then calls set_context_box(i, ...) again, because the
@@ -534,16 +535,20 @@ class MjLegoSortEnv:
         The marker follows ``oracle_marker_part``, which names the NEXT part through RETREAT
         (the rig's ``_stash_cycle_state``); ``oracle_cycle_brick`` stays the accounting id the
         recorder and the converter segment cycles by, and is the fallback for a stash that
-        has no marker id (a test stub).
+        has no marker id (a test stub). A rig that records the perceived state (MS7c) also
+        stashes ``oracle_marker_point``, the frozen marker, copied into ``marker_points``.
         """
         brick = getattr(self, "oracle_cycle_brick", None)
         if brick is None:
             return
         marker = getattr(self, "oracle_marker_part", brick)
         target = getattr(self, "oracle_cycle_target", None)
+        point = getattr(self, "oracle_marker_point", None)
         for i in range(self.num_envs):
             if actor is None or int(actor[i]) > 0:
                 self.target_part[i] = int(marker[i])
+                if point is not None:
+                    self.marker_points[i] = point[i]  # NaN clears it
                 if self.desk_boxes and int(marker[i]) >= 0:
                     self.set_context_box(i, int(self.destination_bins[i, int(marker[i])]))
                 if target is None:

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import torch
 
-from maker_arm_lab.core import layout, oracle, trajectory
+from maker_arm_lab.core import layout, oracle, perception, trajectory
 from maker_arm_lab.core import parts as _parts
 from maker_arm_lab.core.layout import sample_run_draw
 
@@ -168,6 +168,13 @@ def run_meta(
         "gripper": getattr(args, "gripper", "binary"),
         # MS7a design, desk boxes: 0 is the MS6 scene, the shelf's one heap bin.
         "desk_boxes": int(getattr(args, "desk_boxes", 0)),
+        # MS7c design section 7.1: the rows, the marker and the box row as recorded from the
+        # perceived state at these knob scales; each episode counts its perceived selections
+        # and its fallbacks (a target part the perception missed).
+        "perceived": bool(getattr(args, "perceived", False)),
+        "noise_scales": perception.format_scales(args.noise_scales)
+        if getattr(args, "perceived", False)
+        else None,
         "parts": None if parts is None else [p.name for p in parts],
         "episode_length_s": (
             episode_length_s

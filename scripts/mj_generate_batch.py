@@ -17,6 +17,9 @@ of the six-brick oracle:
 
     uv run python scripts/mj_generate_batch.py --out_dir /tmp/h0 --attempts 12 --num_envs 12 \\
         --heap_k 50 --parts_split heldout --probe
+
+``--perceived`` (MS7c, a heap with desk boxes) records the target row, the frozen marker and
+the box row from ``core.perception`` at ``--noise_scales``; the teacher still acts on the truth.
 """
 
 import argparse
@@ -28,6 +31,7 @@ import traceback
 
 os.environ.setdefault("MUJOCO_GL", "egl")
 
+from maker_arm_lab.core import perception
 from maker_arm_lab.core.batch_loop import (
     add_batch_arguments,
     build_run,
@@ -59,9 +63,33 @@ def exported_count(counters: dict, heap: bool) -> int:
     return counters["exported_written"] if heap else counters["exported"]
 
 
+class _TokenEmittingParser(argparse.ArgumentParser):
+    """A parser whose usage errors still print the BATCH_FAIL token."""
+
+    def error(self, message: str):
+        self.print_usage(sys.stderr)
+        print(f"{self.prog}: error: {message}", file=sys.stderr, flush=True)
+        print(f"BATCH_FAIL usage: {message}", flush=True)
+        raise SystemExit(2)
+
+
 def parse_args(argv=None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _TokenEmittingParser(description=__doc__)
     add_batch_arguments(parser)
+    parser.add_argument(
+        "--perceived",
+        action="store_true",
+        help="MS7c: record the target row, the marker and the box row as core.perception "
+        "reports them at --noise_scales; the teacher still acts on the truth. Needs --heap_k "
+        "> 0 and --desk_boxes > 0",
+    )
+    parser.add_argument(
+        "--noise_scales",
+        type=perception.parse_scales,
+        default="",
+        help='the perception knob scales under --perceived, e.g. "pos=2,miss=0" or "all=0"; '
+        "a knob not named stays at 1 (nominal)",
+    )
     parser.add_argument(
         "--headless", action="store_true", help="accepted for Isaac-command parity; no effect"
     )
@@ -74,6 +102,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     for name in ("run_seed", "layout_seed"):
         if not (0 <= getattr(args, name) < 2**32):
             parser.error(f"--{name} is outside numpy's seed range (0 <= seed < 2**32)")
+    if args.perceived and (args.heap_k <= 0 or args.desk_boxes <= 0):
+        parser.error(
+            "--perceived records a heap sorted into desk boxes: it needs --heap_k > 0 "
+            "and --desk_boxes > 0"
+        )
     return args
 
 
@@ -128,6 +161,11 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
                 tray_lean_deg=env.tray_lean_deg,
             )
 
+    perceivers = None
+    if args.perceived:  # MS7c design section 7.1: the teacher acts on the truth
+        perceivers = [
+            perception.Perceiver(args.run_seed, i, args.noise_scales) for i in range(args.num_envs)
+        ]
     rig = OracleRig(
         env,
         bl,
@@ -136,6 +174,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         induction=induction,
         transport_speed=args.transport_speed,
         oracle_factory=factory,
+        perceivers=perceivers,
     )
     meta = run_meta(
         args,
