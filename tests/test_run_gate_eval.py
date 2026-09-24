@@ -1052,3 +1052,21 @@ def test_the_rake_settings_reach_the_heap_client_only_and_key_the_cache(tmp_path
     for bad in (["--rake_cap", "4"], ["--rake_crowd"]):
         with pytest.raises(ValueError, match="--rake_c"):
             ge._build_cfg(ge._parse_args(argv + ["--backend", "isaac"] + bad))
+
+
+def test_the_tray_lean_reaches_the_heap_client_and_keys_the_cache(tmp_path):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
+    argv += ["--threshold", "0.7", "--seed", "1", "--backend", "mujoco", "--heap_k", "50"]
+    cfg = ge._build_cfg(ge._parse_args(argv + ["--tray", "--tray_lean", "45"]))
+    cmd = ge._eval_command(cfg, ge.make_eval_draws(1, 1)[0])
+    assert cmd[cmd.index("--tray_lean") + 1] == "45.0" and "--tray" in cmd
+    with pytest.raises(ValueError, match="--tray_lean"):
+        ge._build_cfg(ge._parse_args(argv + ["--tray_lean", "45"]))
+    cached = _cfg(tmp_path, _fake_ledger(tmp_path), processes=1, backend="mujoco", heap_k=50)
+    cached.tray, cached.tray_lean = True, 45.0
+    cached.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    path = cached.out_dir / "eval_000.json"
+    for lean, hit in ((45.0, True), (30.0, False), (0.0, False)):
+        path.write_text(json.dumps(_heap_payload(draw, tray=True, tray_lean=lean)))
+        assert (ge._cached_payload(cached, draw) is not None) is hit, lean
