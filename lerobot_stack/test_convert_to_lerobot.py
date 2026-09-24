@@ -207,6 +207,21 @@ def test_cycle_segments_drop_the_tray_rake_between_two_picks():
     assert [s.tolist() for s in c2l.cycle_segments(tip, np.zeros(5, np.int8))] == [[0, 4]]
 
 
+def test_cycle_segments_drop_the_reopen_left_positive_by_a_failed_teacher_cycle():
+    """The shape of a failed tray pick in MS7a's rung 1 corpus (proc_0, 2026-09-23): cycle 1
+    on part 49 gives up at LIFT, the batch loop negates its frames there, and the give-up
+    REOPEN (phase 5) is recorded after the negation under the positive ordinal 1. Then cycle 2
+    picks part 44. The REOPEN used to become a 20-frame training episode of its own."""
+    phase = np.array([1, 2, 3, 4, 5, 5, 5, 1, 2, 3], np.int8)
+    brick = np.array([49, 49, 49, 49, 49, 49, 49, 44, 44, 44], np.int8)
+    actor = np.array([-1, -1, -1, -1, 1, 1, 1, 2, 2, 2], np.int16)
+    segs = c2l.cycle_segments(phase, brick, actor=actor)
+    assert [s.tolist() for s in segs] == [[7, 8, 9]]
+    # A stowed cycle with the same shape keeps every frame.
+    segs = c2l.cycle_segments(phase, brick, actor=np.abs(actor))
+    assert [s.tolist() for s in segs] == [list(range(7)), [7, 8, 9]]
+
+
 def test_dagger_conversion_keeps_takeover_cycles_only(tmp_path):
     shard = _shard(tmp_path / "s.hdf5", actor=[1, 1, 1, 0, 0, -2, -2, -2])
     converted, total, *_ = c2l.convert(

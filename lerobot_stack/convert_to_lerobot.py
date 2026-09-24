@@ -225,11 +225,15 @@ def cycle_segments(
     ``actor`` (MS4 c2 design 6.5, ``--dagger``) is the recorder's ``obs/actor``: frames whose
     actor is not positive are dropped, and a segment is cut wherever the actor changes, so
     two takeovers on the same brick never share a chunk horizon across the policy's missing
-    frames.
+    frames. A positive actor that also appears negated is dropped too: the batch loop negates
+    a failed cycle's frames when the teacher gives up at LIFT (``negate_new_failures``), and
+    the give-up REOPEN recorded after that keeps the positive ordinal. Kept, those 20 frames
+    (jaws opening over the failed part at lift height) became a training episode of their
+    own, 187 of the 2553 in MS7a's r1/dataset_w1.
     """
     keep = ~np.isin(phase, (SETTLE_INT, DONE_INT, ABANDON_INT, *CORRECTIVE_INTS))
     if actor is not None:
-        keep &= actor > 0
+        keep &= (actor > 0) & ~np.isin(actor, -actor[actor < 0])
     segments: list[list[int]] = []
     current: list[int] = []
     last_brick: int | None = None
