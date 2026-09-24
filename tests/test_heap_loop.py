@@ -1129,6 +1129,7 @@ def test_the_switches_select_at_once_after_a_budget_end_refresh_at_a_reopen_and_
         "square_wrist": False,
         "scripted_place": False,
         "scripted_rake": False,
+        "part_failures": False,
     }
     # Every cycle ended on its budget, so no selection waited for a retreat.
     assert ep["cycle_reasons"] == ["budget"] * 3 and ep["select_wait_steps"] == 0
@@ -1234,3 +1235,20 @@ def test_the_scripted_rake_frees_a_wall_stuck_part_for_the_policy(monkeypatch):
             _rollout(env, rig, None, budget=3, scripted_rake=True)
         finally:
             env.close()
+
+
+def test_part_failures_skip_the_failed_part_and_keep_its_cell_neighbour(monkeypatch):
+    """Parts 1 and 2 share a 5 cm cell. A still policy fails every cycle: by cell, three
+    failures on part 2 close the cell for part 1 too (the test above); with --part_failures
+    each part takes its own three failures and the budget, not the memory, ends the episode."""
+    # The env is built long enough for every cycle to finish, then each cycle gets 40 steps.
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 60)
+    env, rig = _env_and_rig(budget=9)
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
+    _place(env, SPREAD)
+    payload = _rollout(env, rig, _HoldPolicy(), budget=9, part_failures=True)
+    env.close()
+    ep = payload["episodes"][0]
+    assert ep["cycle_targets"] == [0, 0, 0, 2, 2, 2, 1, 1, 1]
+    assert ep["done_reason"] == "cycle_budget"
+    assert payload["inference"]["loop"]["part_failures"] is True

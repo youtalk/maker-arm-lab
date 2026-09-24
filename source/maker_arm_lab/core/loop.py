@@ -34,8 +34,11 @@ holds a part ``SCRIPTED_PLACE_RISE`` above where it lay: the rig resumes at LIFT
 the part to its own box (``OracleRig.resume`` with ``start_z``). An eighth, ``scripted_rake``
 (MS7a tray), runs the teacher's rake when the selector finds no target but plans a rake off a
 tray wall, as the oracle driver always does, and hands the env back to the policy: the policy
-never learned to rake, so without it a read ends at the first wall-stuck state. The payload's
-``inference`` block records all eight.
+never learned to rake, so without it a read ends at the first wall-stuck state. A ninth,
+``part_failures`` (MS7a), books a failed cycle against its target part instead of the part's
+5 cm cell (``HeapOracle.failure_scope``): a policy that fails a third of its picks closed
+every cell of the 13 x 20 cm tray before its cycle budget, and the episode ended
+``no_candidate`` with parts in reach. The payload's ``inference`` block records all nine.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
@@ -803,12 +806,13 @@ def rollout(
     square_wrist: bool = False,
     scripted_place: bool = False,
     scripted_rake: bool = False,
+    part_failures: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
     ``policy`` is a ``policy_client.ServerPolicy`` or None for the oracle driver.
     ``takeover`` is a ``TakeoverConfig`` (the DAgger mode, phase B design 5.5) or None.
-    The eight switches are the module docstring's; ``replan_on_switch`` needs a policy whose
+    The nine switches are the module docstring's; ``replan_on_switch`` needs a policy whose
     ``step`` takes ``replan``, and the flag is left off the wire when the switch is off;
     ``squeeze_floor``, ``close_gate`` and ``square_wrist`` need the continuous gripper and a
     served target row.
@@ -875,6 +879,9 @@ def rollout(
     # pre-selection at hand-back (``_select``). Phase B design 5.2 pinned the loop's target on
     # those frames; campaign n (2026-09-22) reverses it.
     states = [EnvState(selector=_selector(rig, i)) for i in range(num_envs)]
+    if part_failures:
+        for st in states:
+            st.selector.failure_scope = "part"
     for st in states:
         if st.selector.cycle_budget != cycle_budget:
             raise EvalFailure(
@@ -895,6 +902,7 @@ def rollout(
         "square_wrist": bool(square_wrist),
         "scripted_place": bool(scripted_place),
         "scripted_rake": bool(scripted_rake),
+        "part_failures": bool(part_failures),
     }
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.

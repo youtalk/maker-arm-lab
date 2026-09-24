@@ -147,6 +147,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         "wall, the rig runs that rake and hands the env back to the policy; needs the server",
     )
     parser.add_argument(
+        "--part_failures",
+        action="store_true",
+        help="MS7a: book a failed cycle against its part, not its 5 cm cell, so the loop skips "
+        "a part after three failed cycles and its neighbours stay candidates",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -246,6 +252,7 @@ def main(argv=None) -> int:
             square_wrist=args.square_wrist,
             scripted_place=args.scripted_place,
             scripted_rake=args.scripted_rake,
+            part_failures=args.part_failures,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

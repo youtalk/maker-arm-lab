@@ -852,3 +852,17 @@ def test_a_jammed_rake_is_spent(narrow_band):
     orc.report(oracle.PhaseResult(outcome="converged"), scene)  # PUSH_HOVER -> PUSH_DESCEND
     assert orc.recover_from_jam(scene) is True
     assert orc.phase is oracle.Phase.HOVER and orc.push is None and orc.rakes == 1
+
+
+def test_the_failure_scope_decides_whether_a_cell_neighbour_stays_a_candidate():
+    """Two bricks 2 cm apart in one 5 cm cell; the first fails three cycles."""
+    x, y = 0.16, 0.01
+    assert heap_oracle.HeapOracle.cell_of((x, y)) == heap_oracle.HeapOracle.cell_of((x + 0.02, y))
+    scene = _snapshot([[x, y, 0.0048], [x + 0.02, y, 0.0048]])
+    for scope, first, second in (("cell", False, False), ("part", False, True)):
+        orc = _oracle([BRICK, BRICK])
+        orc.failure_scope = scope
+        for _ in range(heap_oracle.CELL_FAILURE_CAP):
+            orc._mark_failure(scene, 0)
+        assert orc._candidates(scene).tolist() == [first, second], scope
+    assert _oracle([BRICK]).failure_scope == "cell"  # the teacher's rule by default

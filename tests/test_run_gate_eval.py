@@ -957,3 +957,26 @@ def test_the_scripted_rake_reaches_the_heap_client_only_and_keys_the_cache(
     monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
     assert ge.main(argv + ["--backend", "isaac", "--scripted_rake"]) == 2
     assert "--scripted_rake" in capsys.readouterr().err
+
+
+def test_part_failures_reach_the_heap_client_only_and_key_the_cache(tmp_path, monkeypatch, capsys):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
+    argv += ["--threshold", "0.7", "--seed", "1"]
+    heap = ["--backend", "mujoco", "--heap_k", "50"]
+    cfg = ge._build_cfg(ge._parse_args(argv + heap + ["--part_failures"]))
+    draw = ge.make_eval_draws(1, 1)[0]
+    assert "--part_failures" in ge._eval_command(cfg, draw)
+    assert ge.loop_switches(cfg.client_flags)["part_failures"] is True
+    assert "--part_failures" not in ge._eval_command(
+        ge._build_cfg(ge._parse_args(argv + heap)), draw
+    )
+    cfg.out_dir.mkdir()
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    for on, hit in ((True, True), (False, False)):
+        loop = {name: False for name in ge.LOOP_SWITCHES} | {"part_failures": on}
+        payload = _heap_payload(draw, inference={**served, "loop": loop})
+        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        assert (ge._cached_payload(cfg, draw) is not None) is hit
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(argv + ["--backend", "isaac", "--part_failures"]) == 2
+    assert "--part_failures" in capsys.readouterr().err

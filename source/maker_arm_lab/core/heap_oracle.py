@@ -204,7 +204,11 @@ class HeapOracle(oracle.EnvOracle):
         self.held_swaps = 0
         self._give_up = False
         self.pushes_in_a_row = 0
-        self.failures: dict[tuple[int, int], int] = {}
+        self.failures: dict = {}
+        # "cell": failures count per 5 cm cell (design 7.2), the teacher's rule. "part": per
+        # part, so a failing policy excludes the part it keeps missing and not its neighbours
+        # (the heap loop's --part_failures switch, MS7a).
+        self.failure_scope = "cell"
         self.cycle_parts: list[int] = []
         self.out_of_reach = 0
         self._push_rng = rng if rng is not None else random.Random(0)
@@ -297,7 +301,7 @@ class HeapOracle(oracle.EnvOracle):
             if not layout.in_reach(x, y, self.bl):
                 self.out_of_reach += 1
                 continue
-            if self.failures.get(self.cell_of((x, y)), 0) >= CELL_FAILURE_CAP:
+            if self.failures.get(self._failure_key(b, (x, y)), 0) >= CELL_FAILURE_CAP:
                 continue
             mask[b] = True
         return mask
@@ -793,9 +797,13 @@ class HeapOracle(oracle.EnvOracle):
         self.push = None
         self.phase = oracle.Phase.HOVER
 
+    def _failure_key(self, brick: int, xy) -> tuple[int, int] | int:
+        """Where a failure is booked: the part's 5 cm cell, or the part (``failure_scope``)."""
+        return brick if self.failure_scope == "part" else self.cell_of(xy)
+
     def _mark_failure(self, scene: oracle.SceneSnapshot, brick: int) -> None:
-        cell = self.cell_of(scene.brick_pos[brick, :2].tolist())
-        self.failures[cell] = self.failures.get(cell, 0) + 1
+        key = self._failure_key(brick, scene.brick_pos[brick, :2].tolist())
+        self.failures[key] = self.failures.get(key, 0) + 1
 
     def class_to_box(self) -> dict[str, int]:
         """The box of each class the heap holds, read off the per-part destinations."""
