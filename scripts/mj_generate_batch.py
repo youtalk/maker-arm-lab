@@ -106,6 +106,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         gripper_mode=args.gripper,
         desk_boxes=args.desk_boxes,
         tray=args.tray,
+        tray_lean_deg=args.tray_lean,
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)
@@ -124,6 +125,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
                 cycle_budget=args.cycle_budget,
                 boxes=env.desk_box_poses[i],
                 tray=env.tray,
+                tray_lean_deg=env.tray_lean_deg,
             )
 
     rig = OracleRig(

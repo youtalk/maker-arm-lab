@@ -65,6 +65,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         action="store_true",
         help="MuJoCo heap only: drop the heap into the walled tray (MS7a); off is the bare desk",
     )
+    parser.add_argument(
+        "--tray_lean",
+        type=float,
+        default=0.0,
+        help="MS7a: lean the tray's walls outward by this many degrees (0 is vertical)",
+    )
     parser.add_argument("--parts_seed", type=int, default=20260915)
     parser.add_argument("--parts_split", choices=PARTS_SPLITS, default="heldout")
     parser.add_argument(
@@ -246,6 +252,7 @@ def main(argv=None) -> int:
             gripper_mode=args.gripper,
             desk_boxes=args.desk_boxes,
             tray=args.tray,
+            tray_lean_deg=args.tray_lean,
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
@@ -260,6 +267,7 @@ def main(argv=None) -> int:
                 cycle_budget=args.cycle_budget,
                 boxes=env.desk_box_poses[i],
                 tray=env.tray,
+                tray_lean_deg=env.tray_lean_deg,
             )
 
         rig = OracleRig(
@@ -295,6 +303,7 @@ def main(argv=None) -> int:
         payload["parts_seed"] = args.parts_seed
         payload["desk_boxes"] = args.desk_boxes
         payload["tray"] = args.tray
+        payload["tray_lean"] = args.tray_lean
     except EvalFailure as err:
         print("EVAL_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True)
         return 1

@@ -472,3 +472,22 @@ def test_a_crowded_rake_start_lands_at_most_rake_crowd_deep_into_a_neighbour():
     depth = -grasp.polygon_distance(grasp.rake_footprint(got[0]), shallow)
     assert 0.0 < depth <= crowd + 1e-9
     assert grasp.rake_segment(xy, part_print, 0.04, left, WALLS, [deep], crowd) is None
+
+
+def test_a_leaning_wall_lets_the_finger_down_beside_a_part_it_stands_back_from():
+    """A 1x2 brick 19 mm from the left wall, closing across it (at the wall): the finger's
+    band reaches 22.9 mm. A vertical wall refuses it; a 45 degree wall stands 4.6 mm further
+    back at the grip band's foot (9.6 mm top less the 5 mm band), 23.6 mm, and allows it."""
+    small = parts.make_part("brick", 1, 2)
+    pos = torch.tensor([TRAY_MID_X, TY0 + 0.019, 0.0048])
+    across = math.pi / 2
+    width = small.size[1]
+    assert not grasp.wall_allows(pos, across, width, 0.0048, grasp.tray_walls())
+    assert grasp.wall_allows(pos, across, width, 0.0048, grasp.tray_walls(45.0))
+    # Closer in, the leaning wall refuses it too: the finger would meet its face above the band.
+    near = torch.tensor([TRAY_MID_X, TY0 + 0.012, 0.0048])
+    assert not grasp.wall_allows(near, across, width, 0.0048, grasp.tray_walls(45.0))
+    lean = next(w for w in grasp.tray_walls(45.0) if w.outward == (0.0, -1.0))
+    assert lean.lean == pytest.approx(1.0)
+    shifted = grasp.wall_at(lean, 0.004)
+    assert max(y for _, y in shifted) == pytest.approx(TY0 - 0.004)

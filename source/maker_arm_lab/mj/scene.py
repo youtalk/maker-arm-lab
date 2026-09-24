@@ -271,12 +271,14 @@ def build_spec(
     parts: Sequence[_parts.Part] | None = None,
     num_desk_boxes: int = 0,
     tray: bool = False,
+    tray_lean_deg: float = 0.0,
 ) -> mujoco.MjSpec:
     """The MjSpec for one run draw; ``compile_model`` turns it into a model and handles.
 
     ``parts`` (MS6) replaces the ``num_bricks`` identical box bricks with one body per part.
     A heap lies on the bare desk: there is no dish (owner decision 2026-09-18). ``tray``
-    (MS7a design, the tray) adds the four walls of ``layout.tray_static_boxes``.
+    (MS7a design, the tray) adds the four walls of ``layout.tray_static_boxes``, or with
+    ``tray_lean_deg`` > 0 the leaning walls of ``layout.tray_lean_boxes``.
 
     ``num_desk_boxes`` (MS7a design, desk boxes) removes the shelf and its bins and adds that
     many open boxes on the desk, each a mocap body (``desk_box_<j>``) the env moves per
@@ -388,13 +390,21 @@ def build_spec(
                 rgba=rgba,
             )
         )
-    for name, center, size in layout.tray_static_boxes() if tray else ():
+    walls = []
+    if tray:
+        walls = (
+            layout.tray_lean_boxes(tray_lean_deg)
+            if tray_lean_deg > 0.0
+            else [(*box, (1.0, 0.0, 0.0, 0.0)) for box in layout.tray_static_boxes()]
+        )
+    for name, center, size, quat in walls:
         scene_geoms.append(
             spec.worldbody.add_geom(
                 name=name,
                 type=mujoco.mjtGeom.mjGEOM_BOX,
                 size=_half(size),
                 pos=list(center),
+                quat=list(quat),
                 rgba=[0.35, 0.35, 0.35, 1.0],
             )
         )
@@ -534,11 +544,12 @@ def build_model(
     parts: Sequence[_parts.Part] | None = None,
     num_desk_boxes: int = 0,
     tray: bool = False,
+    tray_lean_deg: float = 0.0,
 ) -> tuple[mujoco.MjModel, SceneHandles]:
     """One call for callers that do not need to edit the spec."""
     if parts is not None:
         num_bricks = len(parts)
-    spec = build_spec(draw, num_bricks, cameras_on, parts, num_desk_boxes, tray)
+    spec = build_spec(draw, num_bricks, cameras_on, parts, num_desk_boxes, tray, tray_lean_deg)
     return compile_model(spec, num_bricks)
 
 

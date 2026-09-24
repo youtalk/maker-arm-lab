@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import torch
 
+from maker_arm_lab.core.quat import quat_from_rpy_deg, quat_mul
+
 BRICK_SIZE = (0.0318, 0.0158, 0.0096)
 BRICK_MASS = 0.003  # kg; real brick ~2.3 g, slightly rounded up for solver health
 BRICK_COLOR_ORDER = ("red", "blue", "yellow", "green")
@@ -223,6 +225,43 @@ def tray_static_boxes() -> list[tuple[str, tuple[float, float, float], tuple[flo
             (TRAY_INTERIOR[0], w, TRAY_WALL_HEIGHT),
         ),
     ]
+
+
+TRAY_WALL_OUTWARD_DEG = {"near": 180.0, "far": 0.0, "left": -90.0, "right": 90.0}
+"""The world heading each tray wall faces outward, degrees (``tray_lean_boxes``)."""
+
+
+def tray_lean_boxes(
+    lean_deg: float,
+) -> list[tuple[str, tuple[float, float, float], tuple[float, float, float], tuple]]:
+    """(name, center, size, quat) of the four tray walls leaning outward by ``lean_deg``.
+
+    Each wall is a slab TRAY_WALL thick whose inner bottom edge lies on the interior edge on
+    the desk, tilted outward about that edge so its rim stands TRAY_WALL_HEIGHT high, as the
+    MS6 round dish's rim leaned (git c15f8f8). The interior footprint at the desk is the H1
+    one; at the rim it is ``TRAY_WALL_HEIGHT * tan(lean)`` wider on every side. Each slab runs
+    long enough past the corners to meet its neighbours at the rim. ``lean_deg`` 0 builds
+    vertical slabs; the scene builds ``tray_static_boxes`` then instead.
+    """
+    tilt = math.radians(lean_deg)
+    span = TRAY_WALL_HEIGHT / math.cos(tilt)
+    out = 0.5 * span * math.sin(tilt) + 0.5 * TRAY_WALL * math.cos(tilt)
+    z = 0.5 * span * math.cos(tilt) - 0.5 * TRAY_WALL * math.sin(tilt)
+    grow = TRAY_WALL_HEIGHT * math.tan(tilt) + TRAY_WALL
+    (x0, x1), (y0, y1) = tray_bounds()
+    cx, cy = TRAY_CENTER
+    edges = {"near": (x0, cy), "far": (x1, cy), "left": (cx, y0), "right": (cx, y1)}
+    sides = {"near": y1 - y0, "far": y1 - y0, "left": x1 - x0, "right": x1 - x0}
+    boxes = []
+    for name, heading in TRAY_WALL_OUTWARD_DEG.items():
+        ux, uy = math.cos(math.radians(heading)), math.sin(math.radians(heading))
+        ex, ey = edges[name]
+        quat = quat_mul(
+            quat_from_rpy_deg((0.0, 0.0, heading)), quat_from_rpy_deg((0.0, lean_deg, 0.0))
+        )
+        size = (TRAY_WALL, sides[name] + 2.0 * grow, span)
+        boxes.append((f"tray_wall_{name}", (ex + out * ux, ey + out * uy, z), size, quat))
+    return boxes
 
 
 def sample_tray_point(rng: random.Random, inset: float) -> tuple[float, float]:

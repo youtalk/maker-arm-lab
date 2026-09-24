@@ -147,13 +147,14 @@ class HeapOracle(oracle.EnvOracle):
         cycle_budget: int = CYCLE_BUDGET,
         boxes: Sequence[Sequence[float]] = (),
         tray: bool = False,
+        tray_lean_deg: float = 0.0,
     ):
         """``destination`` is the MS6 bin index, or with ``boxes`` (one (x, y, yaw) per desk
         box) the box index of every part, (K,), or one index for them all."""
         super().__init__(bl, len(parts), draw, induction=induction, rng=rng)
         # MS7a design, the tray: the heap lies inside four walls that ``core.grasp`` ranks
         # against (``grasp.wall_allows``). Off, the heap lies on the bare desk as in MS6.
-        self.walls = grasp.tray_walls() if tray else ()
+        self.walls = grasp.tray_walls(tray_lean_deg) if tray else ()
         self.parts = tuple(parts)
         self.boxes = tuple(tuple(float(v) for v in box) for box in boxes)
         if self.boxes:

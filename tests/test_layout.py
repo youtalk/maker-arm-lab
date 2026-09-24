@@ -519,3 +519,34 @@ def test_the_tray_walls_hide_no_part_top_from_the_overhead_camera():
     for i, j in itertools.product(range(14), range(21)):
         p = (x0 + 0.001 + (x1 - x0 - 0.002) * i / 13, y0 + 0.001 + (y1 - y0 - 0.002) * j / 20, top)
         assert not any(_segment_hits_box(p, camera, c, s) for _, c, s in walls), p
+
+
+@pytest.mark.parametrize("lean", [30.0, 45.0])
+def test_a_leaning_tray_wall_stands_on_the_interior_edge_and_rises_to_the_rim(lean):
+    from maker_arm_lab.core.quat import quat_apply
+
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    feet = {"near": (0, x0, -1), "far": (0, x1, 1), "left": (1, y0, -1), "right": (1, y1, 1)}
+    for name, center, size, quat in layout.tray_lean_boxes(lean):
+        axis, edge, sign = feet[name.removeprefix("tray_wall_")]
+        corners = torch.tensor(
+            [
+                [sx * size[0] / 2, sy * size[1] / 2, sz * size[2] / 2]
+                for sx in (-1, 1)
+                for sy in (-1, 1)
+                for sz in (-1, 1)
+            ],
+            dtype=torch.float64,
+        )
+        world = quat_apply(torch.tensor([quat], dtype=torch.float64), corners)
+        world += torch.tensor(center, dtype=torch.float64)
+        inner = world[corners[:, 0] < 0]  # the slab's local -x face looks into the tray
+        foot = inner[inner[:, 2].abs() < 1e-9]
+        rim = inner[inner[:, 2] > layout.TRAY_WALL_HEIGHT - 1e-9]
+        assert len(foot) == 2 and torch.allclose(
+            foot[:, axis], torch.tensor(edge, dtype=torch.float64)
+        )
+        grow = layout.TRAY_WALL_HEIGHT * math.tan(math.radians(lean))
+        assert len(rim) == 2 and torch.allclose(
+            (rim[:, axis] - edge) * sign, torch.tensor(grow, dtype=torch.float64)
+        )

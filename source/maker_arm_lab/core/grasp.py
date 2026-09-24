@@ -105,17 +105,24 @@ gap of a 60 mm grasp is 42 mm, inside OPEN_HALF_GAP. # INITIAL"""
 
 @dataclass(frozen=True)
 class Wall:
-    """A static wall the jaws must not land on: its top-down footprint, its direction of
-    length (rad, a line, so ``heading`` and ``heading + pi`` are the same wall) and its top."""
+    """A static wall the jaws must not land on: its top-down footprint at the desk, its
+    direction of length (rad, a line, so ``heading`` and ``heading + pi`` are the same wall)
+    and its top. A leaning wall (``lean`` = tan of its tilt off vertical) stands
+    ``lean * h`` further along ``outward`` at height h than its footprint at the desk."""
 
     footprint: tuple[tuple[float, float], ...]
     heading: float
     top: float
+    outward: tuple[float, float] = (0.0, 0.0)
+    lean: float = 0.0
 
 
-def tray_walls() -> tuple[Wall, ...]:
-    """The four walls of ``layout.tray_static_boxes`` for the grasp model."""
+def tray_walls(lean_deg: float = 0.0) -> tuple[Wall, ...]:
+    """The four walls of ``layout.tray_static_boxes`` for the grasp model, leaning outward by
+    ``lean_deg`` when the scene builds ``layout.tray_lean_boxes``: the footprint is the
+    vertical wall's, whose inner face is the leaning wall's foot."""
     walls = []
+    cx, cy = layout.TRAY_CENTER
     for _, center, size in layout.tray_static_boxes():
         corners = [
             (center[0] + sx * size[0] / 2, center[1] + sy * size[1] / 2)
@@ -123,8 +130,24 @@ def tray_walls() -> tuple[Wall, ...]:
             for sy in (-1.0, 1.0)
         ]
         heading = 0.0 if size[0] >= size[1] else math.pi / 2
-        walls.append(Wall(tuple(convex_hull(corners)), heading, center[2] + size[2] / 2))
+        dx, dy = center[0] - cx, center[1] - cy
+        outward = (math.copysign(1.0, dx), 0.0) if heading else (0.0, math.copysign(1.0, dy))
+        walls.append(
+            Wall(
+                tuple(convex_hull(corners)),
+                heading,
+                center[2] + size[2] / 2,
+                outward,
+                math.tan(math.radians(lean_deg)),
+            )
+        )
     return tuple(walls)
+
+
+def wall_at(wall: Wall, height: float) -> list[tuple[float, float]]:
+    """The wall's footprint moved to where its face stands at ``height`` above the desk."""
+    d = wall.lean * max(0.0, height)
+    return [(x + d * wall.outward[0], y + d * wall.outward[1]) for x, y in wall.footprint]
 
 
 def wall_distance(xy: tuple[float, float], wall: Wall) -> float:
@@ -147,7 +170,9 @@ def hugs_wall(
     xy = (float(pos[0]), float(pos[1]))
     near = landing_half_gap(width) + TIP_THICKNESS + WALL_BAND_MARGIN
     return any(
-        wall.top > band and wall_distance(xy, wall) < near and along_wall(heading, wall)
+        wall.top > band
+        and polygon_distance([xy], wall_at(wall, band)) < near
+        and along_wall(heading, wall)
         for wall in walls
     )
 
@@ -177,9 +202,14 @@ def wall_allows(
     for wall in walls:
         if wall.top <= band:
             continue
-        if wall_distance(xy, wall) < reach + WALL_BAND_MARGIN and not along_wall(heading, wall):
+        # A leaning wall stands back at the grip band's foot: the finger may come down beside
+        # the part until it meets the wall's face there and still grips the band above.
+        face = wall_at(wall, band)
+        if polygon_distance([xy], face) < reach + WALL_BAND_MARGIN and not along_wall(
+            heading, wall
+        ):
             return False
-        if any(polygon_distance(s, list(wall.footprint)) < CLEARANCE_MIN for s in strokes):
+        if any(polygon_distance(s, face) < CLEARANCE_MIN for s in strokes):
             return False
     return True
 
@@ -580,9 +610,14 @@ def rake_footprint(point: tuple[float, float], height: float = 0.0) -> list[tupl
 
 
 def _clear_of_walls(point: tuple[float, float], walls: Sequence[Wall], gap: float = 0.0) -> bool:
-    """Does the rake's hull, at each wall's top, clear that wall by ``gap``?"""
+    """Does the rake's hull clear every wall by ``gap``, at the desk and at the wall's top?
+
+    Both the hull's width and a leaning wall's setback grow linearly with height, so the two
+    ends of the wall bound it; a vertical wall binds at its top."""
     return all(
-        polygon_distance(rake_footprint(point, w.top), list(w.footprint)) >= gap for w in walls
+        polygon_distance(rake_footprint(point, h), wall_at(w, h)) >= gap
+        for w in walls
+        for h in (0.0, w.top)
     )
 
 

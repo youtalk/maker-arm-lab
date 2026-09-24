@@ -359,3 +359,25 @@ def test_the_tray_is_off_by_default_and_needs_a_heap():
     env.close()
     with pytest.raises(ValueError, match="tray"):
         MjLegoSortEnv(1, draw, cameras=False, tray=True)
+
+
+def test_a_leaning_tray_builds_tilted_walls_and_keeps_the_heap_inside():
+    draw = layout.sample_run_draw(random.Random(4))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    _, heldout = parts.split(parts.catalog(), 20260915)
+    parts_list = parts.sample_parts(random.Random(9), heldout, 30)
+    env = MjLegoSortEnv(
+        1, draw, num_bricks=30, parts=parts_list, cameras=False, tray=True, tray_lean_deg=45.0
+    )
+    env.reset(seed=2)
+    m = env.models[0]
+    quat = m.geom_quat[m.geom("tray_wall_left").id]
+    assert abs(quat[0]) < 0.99  # tilted, not the identity
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    grow = layout.TRAY_WALL_HEIGHT  # tan 45
+    for b in range(30):
+        x, y, _ = env.scene[f"brick_{b}"].data.root_pos_w[0].tolist()
+        assert x0 - grow <= x <= x1 + grow and y0 - grow <= y <= y1 + grow, (b, x, y)
+    env.close()
+    with pytest.raises(ValueError, match="tray_lean_deg"):
+        MjLegoSortEnv(1, draw, num_bricks=2, parts=PARTS[:2], cameras=False, tray_lean_deg=30.0)

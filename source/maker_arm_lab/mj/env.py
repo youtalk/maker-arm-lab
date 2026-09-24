@@ -259,6 +259,7 @@ class MjLegoSortEnv:
         gripper_mode: str = "binary",
         desk_boxes: int = 0,
         tray: bool = False,
+        tray_lean_deg: float = 0.0,
     ):
         # MS6 phase B design 5.4: "binary" is the raw >= 0 opens contract every corpus before
         # phase B was recorded with; "continuous" reads action[:, 6] as the jaw gap in meters.
@@ -291,6 +292,9 @@ class MjLegoSortEnv:
         if tray and self.parts is None:
             raise ValueError("the tray holds a heap; the six-brick task has none")
         self.tray = tray
+        if tray_lean_deg and not tray:
+            raise ValueError("tray_lean_deg leans the tray's walls; it needs tray=True")
+        self.tray_lean_deg = float(tray_lean_deg)
         if self.parts is not None:
             # MS6 rework section 6: heap mode has one bin, at y = 0.0. Flatten the layout
             # this env starts with so self.bin_layouts, the built box, the release target and
@@ -340,7 +344,13 @@ class MjLegoSortEnv:
         self.episode_draws = [self.run_draw] * num_envs
         self.bin_layouts: list[layout.BinLayout] = [bl] * num_envs
         base_model, self.handles = scene.build_model(
-            draw, num_bricks, cameras, parts=self.parts, num_desk_boxes=desk_boxes, tray=tray
+            draw,
+            num_bricks,
+            cameras,
+            parts=self.parts,
+            num_desk_boxes=desk_boxes,
+            tray=tray,
+            tray_lean_deg=self.tray_lean_deg,
         )
         self.models = [base_model] + [copy.copy(base_model) for _ in range(num_envs - 1)]
         self.datas = [mujoco.MjData(m) for m in self.models]
