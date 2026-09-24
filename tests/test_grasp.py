@@ -445,3 +445,30 @@ def test_a_flush_part_leaves_no_room_behind_it_so_the_rake_wedges_in_at_the_wall
     # A neighbor under the wedge spot refuses the rake.
     under = grasp.footprint(_size(BRICK), torch.tensor([start[0], start[1], 0.0048]), IDENTITY)
     assert grasp.rake_segment(xy, part_print, 0.04, left, WALLS, [under]) is None
+
+
+def test_a_crowded_rake_start_lands_at_most_rake_crowd_deep_into_a_neighbour():
+    """The flush slope of the wedge test with a brick beside the wedge spot: refused while
+    the tips must clear it, taken with --rake_crowd once they land no deeper than
+    RAKE_CROWD_M into it, and refused again when the brick sits deeper."""
+    slope = parts.make_part("slope", 1, 3)
+    xy = (TRAY_MID_X, TY0 + 0.0044)
+    part_print = grasp.footprint(_size(slope), torch.tensor([*xy, 0.0048]), IDENTITY)
+    left = _left_wall()
+    wedge, _, _ = grasp.rake_segment(xy, part_print, 0.04, left, WALLS, [])
+    tip_edge = wedge[0] + grasp.TIP_HALF_FACE  # the wedge tips' +x edge
+    half = BRICK.size[0] / 2  # the brick lies along x at the identity
+
+    def brick_at(depth):
+        """A 2x4 brick whose -x face sits ``depth`` inside the wedge tips' +x edge."""
+        pos = torch.tensor([tip_edge - depth + half, wedge[1], 0.0048])
+        return grasp.footprint(_size(BRICK), pos, IDENTITY)
+
+    shallow, deep = brick_at(0.002), brick_at(0.006)
+    assert grasp.rake_segment(xy, part_print, 0.04, left, WALLS, [shallow]) is None
+    crowd = grasp.RAKE_CROWD_M
+    got = grasp.rake_segment(xy, part_print, 0.04, left, WALLS, [shallow], crowd)
+    assert got is not None
+    depth = -grasp.polygon_distance(grasp.rake_footprint(got[0]), shallow)
+    assert 0.0 < depth <= crowd + 1e-9
+    assert grasp.rake_segment(xy, part_print, 0.04, left, WALLS, [deep], crowd) is None

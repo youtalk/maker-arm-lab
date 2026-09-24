@@ -45,8 +45,11 @@ jaws held at the landing gap while it comes down (``snap_hold``). An eleventh,
 ``dwell_close`` (MS7a), commands the teacher's close when the policy waits at grasp height
 with the jaws open for ``DWELL_STEPS`` (``dwell_count``). A twelfth, ``adopt_held``
 (MS7a), serves the box and marker of a lifted part that is not the target, as the teacher
-does when its LIFT comes up with another part (``HeapOracle.adopt_held_part``). The payload's
-``inference`` block records all twelve.
+does when its LIFT comes up with another part (``HeapOracle.adopt_held_part``). Two rake
+settings follow (MS7a rake prototype, 2026-09-24): ``rake_cap`` N lets the selector rake one
+part N times instead of ``RAKE_PART_CAP`` and scales the episode's rake cap with it, and
+``rake_crowd`` lets a rake start land its tips up to ``grasp.RAKE_CROWD_M`` into a neighbour
+when no start is clear. The payload's ``inference`` block records all fourteen.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
@@ -74,7 +77,12 @@ from maker_arm_lab.core.dagger_loop import DECLINE_COOLDOWN, trigger_reason
 from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _nearest_brick_cm
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
 from maker_arm_lab.core.global_ik import fold_to_half_turn
-from maker_arm_lab.core.heap_oracle import CANDIDATE_MAX_Z, target_context
+from maker_arm_lab.core.heap_oracle import (
+    CANDIDATE_MAX_Z,
+    MAX_RAKES,
+    RAKE_PART_CAP,
+    target_context,
+)
 from maker_arm_lab.core.parts import PART_CLASSES, part_class
 from maker_arm_lab.core.stowed import (
     _brick_states,
@@ -981,12 +989,14 @@ def rollout(
     pick_snap: bool = False,
     dwell_close: bool = False,
     adopt_held: bool = False,
+    rake_cap: int = 0,
+    rake_crowd: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
     ``policy`` is a ``policy_client.ServerPolicy`` or None for the oracle driver.
     ``takeover`` is a ``TakeoverConfig`` (the DAgger mode, phase B design 5.5) or None.
-    The ten switches are the module docstring's; ``replan_on_switch`` needs a policy whose
+    The fourteen settings are the module docstring's; ``replan_on_switch`` needs a policy whose
     ``step`` takes ``replan``, and the flag is left off the wire when the switch is off;
     ``squeeze_floor``, ``close_gate``, ``square_wrist`` and ``pick_snap`` need the continuous
     gripper and a served target row.
@@ -1061,6 +1071,12 @@ def rollout(
         for st in states:
             st.selector.failure_scope = "part"
     for st in states:
+        if rake_cap:
+            st.selector.rake_part_cap = rake_cap
+            st.selector.max_rakes = max(MAX_RAKES, MAX_RAKES * rake_cap // RAKE_PART_CAP)
+        if rake_crowd:
+            st.selector.rake_crowd = grasp.RAKE_CROWD_M
+    for st in states:
         if st.selector.cycle_budget != cycle_budget:
             raise EvalFailure(
                 "cycle_budget",
@@ -1084,6 +1100,8 @@ def rollout(
         "pick_snap": bool(pick_snap),
         "dwell_close": bool(dwell_close),
         "adopt_held": bool(adopt_held),
+        "rake_cap": int(rake_cap),
+        "rake_crowd": bool(rake_crowd),
     }
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.

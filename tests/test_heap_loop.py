@@ -1274,6 +1274,8 @@ def test_the_switches_select_at_once_after_a_budget_end_refresh_at_a_reopen_and_
         "pick_snap": False,
         "dwell_close": False,
         "adopt_held": False,
+        "rake_cap": 0,
+        "rake_crowd": False,
     }
     # Every cycle ended on its budget, so no selection waited for a retreat.
     assert ep["cycle_reasons"] == ["budget"] * 3 and ep["select_wait_steps"] == 0

@@ -209,6 +209,11 @@ class HeapOracle(oracle.EnvOracle):
         # part, so a failing policy excludes the part it keeps missing and not its neighbours
         # (the heap loop's --part_failures switch, MS7a).
         self.failure_scope = "cell"
+        # The rake's caps and its start rule; the heap loop's --rake_cap and --rake_crowd
+        # raise them on its selectors (MS7a rake prototype), the teacher keeps these.
+        self.rake_part_cap = RAKE_PART_CAP
+        self.max_rakes = MAX_RAKES
+        self.rake_crowd = 0.0
         self.cycle_parts: list[int] = []
         self.out_of_reach = 0
         self._push_rng = rng if rng is not None else random.Random(0)
@@ -416,7 +421,7 @@ class HeapOracle(oracle.EnvOracle):
             if chosen is None:
                 if ranked and self.pushes < PUSH_BUDGET:
                     self.push = self._plan_push(scene, mask)
-                elif not ranked and self.walls and self.rakes < MAX_RAKES:
+                elif not ranked and self.walls and self.rakes < self.max_rakes:
                     self.push = self._plan_rake(scene, mask)
                 return None
             if 2.0 * chosen.half_height < TIP_MIN_GRIP_HEIGHT:
@@ -452,7 +457,7 @@ class HeapOracle(oracle.EnvOracle):
         """
         near = []
         for b in torch.nonzero(mask).flatten().tolist():
-            if self.raked.get(b, 0) >= RAKE_PART_CAP:
+            if self.raked.get(b, 0) >= self.rake_part_cap:
                 continue
             xy = tuple(scene.brick_pos[b, :2].tolist())
             dist, wall = min((grasp.wall_distance(xy, w), k) for k, w in enumerate(self.walls))
@@ -469,7 +474,9 @@ class HeapOracle(oracle.EnvOracle):
             length = max(max(self.parts[b].size), grasp.PUSH_HALF_LENGTH_M)
             others = [f for k, f in prints.items() if k != b]
             xy = tuple(scene.brick_pos[b, :2].tolist())
-            segment = grasp.rake_segment(xy, prints[b], length, wall, self.walls, others)
+            segment = grasp.rake_segment(
+                xy, prints[b], length, wall, self.walls, others, self.rake_crowd
+            )
             if segment is not None:
                 start, end, heading = segment
                 return Push(start, end, part=b, heading=heading, jaw=heading)

@@ -172,6 +172,19 @@ def parse_args(argv=None) -> argparse.Namespace:
         "as the teacher's adopt_held_part does",
     )
     parser.add_argument(
+        "--rake_cap",
+        type=int,
+        default=0,
+        help="MS7a rake prototype: rake one part up to N times (the teacher's cap is "
+        "heap_oracle.RAKE_PART_CAP) and scale the episode's rake cap with it; 0 keeps both",
+    )
+    parser.add_argument(
+        "--rake_crowd",
+        action="store_true",
+        help="MS7a rake prototype: when no rake start clears every neighbour, land the tips up "
+        "to grasp.RAKE_CROWD_M into one",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -275,6 +288,8 @@ def main(argv=None) -> int:
             pick_snap=args.pick_snap,
             dwell_close=args.dwell_close,
             adopt_held=args.adopt_held,
+            rake_cap=args.rake_cap,
+            rake_crowd=args.rake_crowd,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

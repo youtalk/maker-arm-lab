@@ -549,6 +549,10 @@ RAKE_START_GAP_M = 0.002
 """Gap (m) between the raked part's footprint and the closed tips where they land."""
 RAKE_WEDGE_GAP_M = 0.0005
 """Gap (m) the wedged-in tips keep to the wall face (``rake_segment``'s last resort)."""
+RAKE_CROWD_M = 0.003
+"""With the heap loop's ``--rake_crowd``: how deep (m) the closed tips may land into a
+neighbour's footprint when no rake start clears every neighbour. # INITIAL: the rake prototype
+of 2026-09-24 reads it."""
 RAKE_SWINGS_RAD = (0.0, 0.5, -0.5, 1.0, -1.0)
 """Sweep directions tried, off the wall's normal, when the straight one has no room behind
 the part: a swung sweep catches the part's end and turns it off the wall (the wall push of
@@ -589,6 +593,7 @@ def rake_segment(
     wall: Wall,
     walls: Sequence[Wall],
     blocked: Sequence[list[tuple[float, float]]],
+    crowd: float = 0.0,
 ) -> tuple[tuple[float, float], tuple[float, float], float] | None:
     """``(start, end, heading)`` of a rake that sweeps a part off ``wall``, or None.
 
@@ -604,6 +609,11 @@ def rake_segment(
     2026-09-23, that moved a flush 1x3 slope 5 and 8 mm in two rakes, and freed a 1x2 slope
     lying at 30 degrees, which then stowed. The end is pulled back until the hull clears
     every wall, and both ends stay in reach.
+
+    ``crowd`` > 0 (the heap loop's ``--rake_crowd``) is the last resort after those: when
+    every start is refused by a neighbour alone, the start whose tips land least deep into a
+    neighbour, at most ``crowd`` deep, wins; the tips then come down on that neighbour's edge
+    and shove it aside, as a closing stroke sweeps one. 0 keeps every start clear.
     """
     cx = sum(x for x, _ in wall.footprint) / len(wall.footprint)
     cy = sum(y for _, y in wall.footprint) / len(wall.footprint)
@@ -612,6 +622,7 @@ def rake_segment(
         nx, ny = -nx, -ny
     normal = math.atan2(ny, nx)
     found = []
+    crowded = []  # (depth into the deepest neighbour, start, end, heading)
     for swing in RAKE_SWINGS_RAD:
         heading = normal + swing
         c, s = math.cos(heading), math.sin(heading)
@@ -623,10 +634,13 @@ def rake_segment(
                 break
         if start is None or clamp_to_reach(start) != start or not _clear_of_walls(start, walls):
             continue
-        if any(polygon_distance(rake_footprint(start), b) < 0.0 for b in blocked):
+        depth = _neighbour_depth(start, blocked)
+        end = _rake_end(part_xy, heading, length, walls) if depth <= crowd else None
+        if end is None:
             continue
-        end = _rake_end(part_xy, heading, length, walls)
-        if end is not None:
+        if depth > 0.0:
+            crowded.append((depth, start, end, heading))
+        else:
             found.append((start, end, heading))
     if found:
         # The swing that leaves the part farthest from every wall, the straight one at a tie:
@@ -640,12 +654,26 @@ def rake_segment(
         if any(polygon_distance(tips, list(w.footprint)) < RAKE_WEDGE_GAP_M for w in walls):
             break
         start = point
-    if start is None or clamp_to_reach(start) != start:
-        return None
-    if any(polygon_distance(rake_footprint(start), b) < 0.0 for b in blocked):
-        return None
-    end = _rake_end(part_xy, normal, length, walls)
-    return None if end is None else (start, end, normal)
+    wedge = None
+    if start is not None and clamp_to_reach(start) == start:
+        depth = _neighbour_depth(start, blocked)
+        end = _rake_end(part_xy, normal, length, walls) if depth <= crowd else None
+        if end is not None:
+            if depth == 0.0:
+                return start, end, normal
+            wedge = (depth, start, end, normal)
+    if wedge is not None:
+        crowded.append(wedge)
+    if crowded:
+        _, start, end, heading = min(crowded, key=lambda c: c[0])
+        return start, end, heading
+    return None
+
+
+def _neighbour_depth(point: tuple[float, float], blocked) -> float:
+    """How deep (m) the closed tips at ``point`` land into the deepest neighbour, 0 if clear."""
+    tips = rake_footprint(point)
+    return max([0.0] + [-polygon_distance(tips, b) for b in blocked])
 
 
 def _rake_end(

@@ -804,6 +804,14 @@ def test_the_rakes_are_capped_per_part_and_per_episode(narrow_band):
     capped.rakes = heap_oracle.MAX_RAKES
     _to_hover(capped, _stuck_scene())
     assert capped.phase is oracle.Phase.DONE and capped.push is None
+    # The heap loop's --rake_cap raises both caps on its selector.
+    more = _tray_oracle([BRICK])
+    more.rake_part_cap, more.max_rakes = 4, 40
+    _to_hover(more, scene)
+    for _ in range(4):
+        _push_phases_counted(more, scene)
+        more.next_goal(scene)
+    assert more.rakes == 4 and more.phase is oracle.Phase.DONE
 
 
 def test_an_unplanned_rake_hover_turns_the_jaws_then_holds_them_then_gives_up(narrow_band):
