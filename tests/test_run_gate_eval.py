@@ -1070,3 +1070,27 @@ def test_the_tray_lean_reaches_the_heap_client_and_keys_the_cache(tmp_path):
     for lean, hit in ((45.0, True), (30.0, False), (0.0, False)):
         path.write_text(json.dumps(_heap_payload(draw, tray=True, tray_lean=lean)))
         assert (ge._cached_payload(cached, draw) is not None) is hit, lean
+
+
+def test_the_tail_switches_reach_the_heap_client_only_and_key_the_cache(tmp_path):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
+    argv += ["--threshold", "0.7", "--seed", "1"]
+    heap = ["--backend", "mujoco", "--heap_k", "50", "--tray", "--desk_boxes", "4"]
+    draw = ge.make_eval_draws(1, 1)[0]
+    plain = ge._eval_command(ge._build_cfg(ge._parse_args(argv + heap)), draw)
+    assert "--park_done" not in plain and "--rake_turn" not in plain
+    cfg = ge._build_cfg(ge._parse_args(argv + heap + ["--park_done", "--rake_turn"]))
+    cmd = ge._eval_command(cfg, draw)
+    assert "--park_done" in cmd and "--rake_turn" in cmd
+    found = ge.loop_switches(cfg.client_flags)
+    assert found["park_done"] is True and found["rake_turn"] is True
+    cfg.out_dir.mkdir()
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    both = {name: False for name in ge.LOOP_SWITCHES} | {"park_done": True, "rake_turn": True}
+    for loop, hit in ((both, True), (both | {"rake_turn": False}, False), ({}, False)):
+        payload = _heap_payload(draw, tray=True, desk_boxes=4, inference={**served, "loop": loop})
+        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        assert (ge._cached_payload(cfg, draw) is not None) is hit, loop
+    for flag in ("--park_done", "--rake_turn"):
+        with pytest.raises(ValueError, match=flag):
+            ge._build_cfg(ge._parse_args(argv + ["--backend", "isaac", flag]))
