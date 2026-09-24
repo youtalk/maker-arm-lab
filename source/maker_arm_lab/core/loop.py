@@ -56,15 +56,33 @@ last cycle, a motion the grader never reads. ``rake_turn`` (the same forensics) 
 the rig declined at the teacher's next jaw headings: ``OracleRig.resume`` declines a rake whose
 first hover leg does not plan, which the teacher answers by turning the jaws
 (``HeapOracle._turn_rake_jaw``), while the loop booked the rake as spent. The payload's
-``inference`` block records all sixteen.
+``inference`` block records all sixteen, and ``perceived``, ``noise_scales`` and
+``contact_hold`` beside them.
 
 The MS7c hold census rides along, observation only: a ``hold.HoldDetector`` per env reads
 the hold and the lift from proprioception alone (the measured jaw gap, the gap the previous
 step's command asked for, the FK pick point) on every live step, whoever drives, and each
 cycle's census row records what it saw beside the contact truth (``hold_detected``,
 ``lift_detected``, ``first_hold_at``, ``first_held_at``). The payload's ``hold_agreement`` is
-``hold.agreement`` over every cycle (MS7c design section 5). Nothing reads the detector to
-decide anything, so every switch and every read is what it was without it.
+``hold.agreement`` over every cycle (MS7c design section 5). With ``perceived`` off nothing
+reads the detector to decide anything, so every switch and every read is what it was without
+it.
+
+``perceived`` (MS7c design section 6, off by default) puts one boundary between the simulator
+and the loop's decisions: they read a perceived state (``core.perception``) and the hold
+detector, never the truth. Three accessors are the only truth reads left: the perception input
+at each selection (``perception_truth``), the class of the part between the jaws at a lift
+(``wrist_class``, the stand-in for the MS7b wrist classifier) and the metric reads
+(``truth_reads``: the grader, the tracker and the census, which stay on the truth so every
+number compares with MS7a). A selection ranks the detections; the row, the frozen marker
+(``env.marker_points``) and the box of the class perceived overhead come from the target's
+detection. The serving rules' stop flag is the detector's hold or lift (``contact_hold``, the
+pre-registered fallback, reads the contacts again). A cycle ends when a lifted hold ends, as
+``placed`` over a perceived box footprint and ``dropped`` anywhere else
+(``perceived_cycle_end``), or on its budget. A failure is booked at the target's perceived
+position (``perception.PositionMemory``), and so is a rake. At the detector's lift the box
+follows the class drawn for the part between the jaws (``lift_class_box``), which replaces
+``adopt_held``. At the episode's end a placed cycle whose part is stowed counts as a stow.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
@@ -86,7 +104,7 @@ from dataclasses import dataclass, field, replace
 
 import torch
 
-from maker_arm_lab.core import desk_boxes, grasp, layout, oracle
+from maker_arm_lab.core import checker, desk_boxes, grasp, layout, oracle, perception
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.dagger_loop import DECLINE_COOLDOWN, trigger_reason
 from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _nearest_brick_cm
@@ -213,8 +231,9 @@ def release_ready(open_fraction: float, waited: int, after_stow: bool) -> bool:
     return open_fraction >= SELECT_OPEN_FRACTION
 
 
-RELEASE_ENDS = ("stowed", "released")
-"""The cycle ends a release makes; ``release_ready`` waits for the jaws' full gap after them."""
+RELEASE_ENDS = ("stowed", "released", "placed", "dropped")
+"""The cycle ends a release makes; ``release_ready`` waits for the jaws' full gap after them.
+``placed`` and ``dropped`` are ``perceived``'s (``perceived_cycle_end``)."""
 
 
 def released_after_lift(cycle: Cycle, open_fraction: float, held: int) -> bool:
@@ -712,6 +731,10 @@ class Cycle:
     lift_detected: bool = False  # and read a lift on at least one
     first_hold_at: int | None = None  # steps into the cycle at its first detected hold
     first_held_at: int | None = None  # steps into the cycle at the first contact-held step
+    # ``perceived``: the target's detection at selection, the failure memory's position.
+    target_xy: tuple | None = None  # m, its perceived centre xy
+    seen_class: str | None = None  # its class perceived overhead
+    box: int = -1  # the box served now: the overhead class's, then the class drawn at a lift
 
 
 @dataclass
@@ -737,6 +760,12 @@ class EnvState:
     # read of what the episode left behind, at a wall or elsewhere.
     left: list = field(default_factory=list)
     preselected: tuple | None = None  # the rig's RELEASE pre-selection a takeover handed back
+    # ``perceived``: this env's perception, its failure memory and rake counter by position,
+    # and the ``PERCEPTION_COUNTS``.
+    perceiver: perception.Perceiver | None = None
+    fail_mem: perception.PositionMemory = field(default_factory=perception.PositionMemory)
+    rake_mem: perception.PositionMemory = field(default_factory=perception.PositionMemory)
+    counts: Counter = field(default_factory=Counter)
 
 
 def _layout_of(rig, i: int):
@@ -786,6 +815,49 @@ def cycle_end(
     if resting_out_of_reach:
         return "out_of_reach", []
     return None
+
+
+def perceived_cycle_end(cycle: Cycle, step: int, released: bool, over: bool) -> str | None:
+    """``perceived``: why the cycle ends now, or None while it runs (MS7c design section 6).
+
+    ``released`` is the hold detector's lifted hold ending on this step (``ended and lost``)
+    and ``over`` whether the FK pick point then lies over a perceived box (``over_box``): a
+    release over a box ends the cycle ``placed``, anywhere else ``dropped``. Then the rig's
+    answer on a takeover and the step budget, as in ``cycle_end``. No truth in-box test ends a
+    cycle, and there is no out-of-reach end: the budget ends a cycle whose part left reach.
+    Pure."""
+    if released:
+        return "placed" if over else "dropped"
+    if cycle.takeover_end is not None:
+        return cycle.takeover_end
+    if step - cycle.start_step >= CYCLE_STEP_BUDGET:
+        return "budget"
+    return None
+
+
+def over_box(xy, boxes) -> bool:
+    """Does the point ``xy`` lie over a desk box? Each box is an (x, y, yaw), the perceived
+    pose under ``perceived``, with the grader's footprint (``desk_boxes.stow_region``). Pure."""
+    z, half = desk_boxes.stow_region(len(boxes))
+    frames = torch.tensor([[(float(x), float(y), z, float(yaw)) for x, y, yaw in boxes]])
+    point = torch.tensor([[[float(xy[0]), float(xy[1]), z]]])
+    return bool(checker.in_boxes(point, frames, torch.tensor(half)).any())
+
+
+def lift_class_box(wrist_cls, classify, class_to_box: dict, served: int):
+    """``perceived``: the class-at-lift rule (MS7c design section 6), the stand-in for the
+    MS7b wrist classifier, which replaces ``adopt_held``.
+
+    Read on the hold detector's lift in a policy-driven cycle. ``wrist_cls`` is the class of
+    the part between the jaws (``wrist_class``; None with nothing there, a false lift),
+    ``classify`` draws the perceived class from it (``Perceiver.classify``), ``class_to_box``
+    maps a class to its box and ``served`` is the box served now. Returns the drawn class
+    (None: nothing drawn) and the box to serve (None: keep ``served``)."""
+    if wrist_cls is None:
+        return None, None
+    drawn = classify(wrist_cls)
+    box = class_to_box[drawn]
+    return drawn, None if box == served else box
 
 
 def census_step(
@@ -981,6 +1053,103 @@ def resting_out_of_reach(pos, speed: float, held: bool, bl, stow_half_xy, in_box
     return not in_bin and not layout.in_reach(x, y, bl)
 
 
+@dataclass
+class TruthReads:
+    """One step's simulator truth, read at its top. The metrics (the tracker, the grader, the
+    census and the box census) read it; the truth path's decisions read the same values, and
+    under ``perceived`` no decision does (MS7c design section 6)."""
+
+    per_brick: torch.Tensor  # (N,K) bool: at rest in the own bin or box, the grader's mask
+    in_bin: torch.Tensor  # (N,K) bool: in the own bin or box, moving or not
+    pos: torch.Tensor  # (N,K,3) part centres
+    speed: torch.Tensor  # (N,K) m/s
+    quat: torch.Tensor  # (N,K,4) part orientations (w, x, y, z)
+    held: torch.Tensor  # (N,) the part both jaws press at HELD_MIN_FORCE, -1 for none
+    resting_box: torch.Tensor | None  # (N,K) with desk boxes: the box each part rests in, or -1
+
+
+def truth_reads(env, per_part: bool) -> TruthReads:
+    """The metric reads of one step, every one the loop makes (``TruthReads``)."""
+    pos, vel = _brick_states(env)
+    left = env.scene["finger_left_brick"].data.force_matrix_w.norm(dim=-1).squeeze(1)
+    right = env.scene["finger_right_brick"].data.force_matrix_w.norm(dim=-1).squeeze(1)
+    return TruthReads(
+        per_brick=per_brick_stowed(env).to("cpu"),
+        in_bin=per_brick_stowed(env, max_speed=math.inf).to("cpu"),
+        pos=pos.to("cpu"),
+        speed=vel.norm(dim=-1).to("cpu"),
+        quat=torch.stack(
+            [env.scene[f"brick_{b}"].data.root_quat_w for b in range(env.cfg.num_bricks)], dim=1
+        ).to("cpu"),
+        held=held_brick_from_forces(left, right, min_force=HELD_MIN_FORCE).to("cpu"),
+        resting_box=parts_resting_box(env).to("cpu") if per_part else None,
+    )
+
+
+def perception_truth(env, rig, i: int) -> perception.Truth:
+    """``perceived``: the one truth read of a selection, what ``Perceiver.perceive`` turns into
+    what the overhead camera reports. Every part's live centre and orientation, the catalog
+    sizes and classes, and the tool point the arm hides parts around (the FK pick point)."""
+    data = [env.scene[f"brick_{b}"].data for b in range(env.cfg.num_bricks)]
+    origin = env.scene.env_origins[i]
+    return perception.Truth(
+        pos=torch.stack([d.root_pos_w[i] - origin for d in data]).to("cpu"),
+        quat=torch.stack([d.root_quat_w[i] for d in data]).to("cpu"),
+        sizes=torch.tensor([p.size for p in env.parts]),
+        classes=tuple(part_class(p) for p in env.parts),
+        tool_xy=tuple(rig.pick_point(i)[:2].tolist()),
+    )
+
+
+def wrist_class(env, i: int) -> str | None:
+    """``perceived``: the one truth read a decision makes after a lift, the stand-in for the
+    MS7b wrist camera. The class of the part both jaws press (the contacts), or None."""
+    left = env.scene["finger_left_brick"].data.force_matrix_w[i : i + 1].norm(dim=-1).squeeze(1)
+    right = env.scene["finger_right_brick"].data.force_matrix_w[i : i + 1].norm(dim=-1).squeeze(1)
+    b = int(checker.held_brick_from_forces(left, right, min_force=HELD_MIN_FORCE)[0])
+    return None if b < 0 else part_class(env.parts[b])
+
+
+PERCEPTION_COUNTS = (
+    "selections",
+    "wrong_overhead_class",
+    "lifts_classified",
+    "wrong_wrist_class",
+    "lifts_empty",
+)
+"""The payload's ``perception`` counts: targets selected on a detection, the targets whose
+overhead class was wrong, the lifts classified, the wrong wrist classes, and the lifts with no
+part between the jaws."""
+
+
+def _perceived_scene(st: EnvState, env, rig, i: int, k: int):
+    """``perceived``: perceive env ``i`` and hand the selector the detections: the scene with
+    one slot per part (``PerceivedState.scene``), the perceived sizes and closing axes, and the
+    failure and rake counts by position. Returns the state and the scene."""
+    state = st.perceiver.perceive(perception_truth(env, rig, i))
+    sel = st.selector
+    sel.parts = state.parts(k)
+    sel.sizes = torch.tensor([p.size for p in sel.parts], dtype=torch.float32)
+    sel.failures = st.fail_mem.assign(state.detections)
+    sel.raked = st.rake_mem.assign(state.detections)
+    return state, state.scene(k, rig.pick_point(i).to("cpu"))
+
+
+def _credit_placed(st: EnvState, final) -> None:
+    """``perceived``: a ``placed`` cycle whose last contact-held part is stowed in the final
+    mask is a stow, its outcome and ``stowed_parts`` with it. A part is credited once, to its
+    last placed cycle, and not when the env's success already credited it."""
+    last = {}
+    for j, (reason, row) in enumerate(zip(st.reasons, st.census)):
+        b = row["last_held"]
+        if reason == "placed" and b >= 0 and bool(final[b]) and b not in st.stowed_parts:
+            last[b] = j
+    for j in sorted(last.values()):
+        st.outcomes[j] = True
+        st.classes[j] = "stowed"
+        st.stowed_parts.append(st.census[j]["last_held"])
+
+
 def _left_parts(selector, pos: torch.Tensor, in_bin: torch.Tensor) -> list:
     """(part, x, y, z, rakes, failed cycles) of every part not in a box, rounded to 0.1 mm."""
     failures = getattr(selector, "failures", {})
@@ -1036,6 +1205,9 @@ def rollout(
     park_done: bool = False,
     rake_turn: bool = False,
     hold_trace: list | None = None,
+    perceived: bool = False,
+    noise_scales: dict | None = None,
+    contact_hold: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1049,6 +1221,11 @@ def rollout(
     frames every ``FRAME_EVERY`` steps of each of its cycles, for a forensics dump.
     ``hold_trace``, when a list, receives one ``hold.TRACE_FIELDS`` row per live env per step,
     the input of ``hold.cycle_rows``'s threshold replay.
+    ``perceived`` is the MS7c boundary of the module docstring, with ``noise_scales`` the
+    ``perception.parse_scales`` knob scales (None: nominal) and ``contact_hold`` the stop
+    flag's contact fallback. It needs a policy, desk boxes, the continuous gripper and a served
+    target row, and refuses the switches that read the truth (``takeover``,
+    ``scripted_place``, ``row_refresh``).
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1103,6 +1280,22 @@ def rollout(
     ):
         if on and (gripper_mode != "continuous" or ctx_target is None):
             raise EvalFailure(name, "needs the continuous gripper and a served target row")
+    if contact_hold and not perceived:
+        raise EvalFailure("contact_hold", "the stop flag's contact fallback needs perceived")
+    if perceived:
+        if policy is None:
+            raise EvalFailure("perceived", "serves a policy; the oracle driver reads the truth")
+        if not per_part or gripper_mode != "continuous" or ctx_target is None:
+            raise EvalFailure(
+                "perceived", "needs desk boxes, the continuous gripper and a served target row"
+            )
+        for name, on in (
+            ("takeover", takeover is not None),
+            ("scripted_place", scripted_place),
+            ("row_refresh", row_refresh),
+        ):
+            if on:
+                raise EvalFailure("perceived", f"{name} reads the truth")
     limits = robot.data.joint_pos_limits[:, arm_ids, :].to("cpu")
     tracker = RolloutTracker(num_envs, k)
     recorder = getattr(env, "recorder", None)
@@ -1130,6 +1323,23 @@ def rollout(
                 "cycle_budget",
                 f"the selector spends {st.selector.cycle_budget} cycles, the loop {cycle_budget}",
             )
+    scales = {**perception.parse_scales(""), **(noise_scales or {})}  # a knob not named is 1
+    if perceived:
+        # The episode's perception per env. The box poses are the last truth the setup reads:
+        # the perceived ones replace them in the served row, the selector's any-box filter and
+        # the cycle end. The selector books failures by position and reads no destination.
+        true_classes = [part_class(p) for p in env.parts]  # the metric's wrong-class counts
+        poses = env.desk_box_poses.copy()
+        for i, st in enumerate(states):
+            st.perceiver = perception.Perceiver(run_seed, i, scales)
+            st.perceiver.reset_episode(poses[i])
+            poses[i] = st.perceiver.box_poses
+            st.selector.boxes = st.perceiver.box_poses
+            st.selector.failure_scope = "part"
+            st.selector.knows_destinations = False
+        env.perceived_box_poses = poses
+        for i in range(num_envs):
+            env.set_context_box(i, 0)  # the reset served box 0's true pose
     ordinal = [0] * num_envs  # the recorder's takeover ordinal per env
     loop_done = torch.zeros(num_envs, dtype=torch.bool)
     triggers = (
@@ -1152,6 +1362,9 @@ def rollout(
         "rake_crowd": bool(rake_crowd),
         "park_done": bool(park_done),
         "rake_turn": bool(rake_turn),
+        "perceived": bool(perceived),
+        "noise_scales": perception.format_scales(scales) if perceived else "",
+        "contact_hold": bool(contact_hold),
     }
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
@@ -1169,28 +1382,51 @@ def rollout(
     while step < max_steps and not tracker.all_done:
         if (time.monotonic() - started) / 60.0 > max_wall_minutes:
             raise EvalFailure("wall_clock", f"exceeded {max_wall_minutes} min at step {step}")
-        per_brick = per_brick_stowed(env).to("cpu")
+        truth = truth_reads(env, per_part)
+        per_brick, in_bin, pos, speed, held = (
+            truth.per_brick,
+            truth.in_bin,
+            truth.pos,
+            truth.speed,
+            truth.held,
+        )
         tracker.latch_pre_step(per_brick)
         if per_part:
             # Latched like the tracker's mask: the step that ends an episode also resets it.
             live = ~tracker.done
-            final_box[live] = parts_resting_box(env).to("cpu")[live]
-        in_bin = per_brick_stowed(env, max_speed=math.inf).to("cpu")
-        pos, vel = _brick_states(env)
-        pos, speed = pos.to("cpu"), vel.norm(dim=-1).to("cpu")
-        left_mag = env.scene["finger_left_brick"].data.force_matrix_w.norm(dim=-1).squeeze(1)
-        right_mag = env.scene["finger_right_brick"].data.force_matrix_w.norm(dim=-1).squeeze(1)
-        held = held_brick_from_forces(left_mag, right_mag, min_force=HELD_MIN_FORCE).to("cpu")
+            final_box[live] = truth.resting_box[live]
         openings = policy_state(robot.data.joint_pos)[:, 6].to("cpu")
         gaps = robot.data.joint_pos[:, jaw_ids].sum(dim=-1).to("cpu")  # m, measured jaw gap
-        boxed = parts_in_desk_boxes(env).to("cpu") if per_part else None
+        boxed = parts_in_desk_boxes(env).to("cpu") if per_part and not perceived else None
+        # The hold detector reads this step's proprioception first: the jaw gap measured now,
+        # the gap the last step's command asked for and the FK pick point. ``perceived``
+        # decides on its state and events below; otherwise only the census reads it.
+        top_picks = [rig.pick_point(i).to("cpu") for i in range(num_envs)]
+        for i, d in enumerate(detectors):
+            if not bool(tracker.done[i]):
+                d.update(float(gaps[i]), gap_cmd[i], float(top_picks[i][2]))
         # 1. Grade and select on the envs the loop holds: episode live, rig idle.
         for i in range(num_envs):
             if bool(tracker.done[i]) or not rig.idle[i]:
                 continue
             st = states[i]
             stowed_now = {b for b in range(k) if bool(in_bin[i, b])}
-            if st.cycle is not None:
+            if st.cycle is not None and perceived:
+                c, d = st.cycle, detectors[i]
+                released = d.ended and d.lost  # a lifted hold ended on this step
+                over = released and over_box(top_picks[i][:2], st.perceiver.box_poses)
+                reason = perceived_cycle_end(c, step, released, over)
+                # The carry grace keeps a cycle open while the detector holds.
+                grace = not budget_ends_cycle(step - c.start_step, d.holding, c.grace_steps)
+                if select_at_release and reason == "budget" and grace:
+                    c.grace_steps += 1
+                    reason = None
+                if reason is not None:
+                    if reason != "placed":
+                        st.fail_mem.book(c.target_xy)  # never the selector's _mark_failure
+                    _close_cycle(st, reason, [], step, None)
+                    st.idle_since = step
+            elif st.cycle is not None:
                 b = st.cycle.target
                 out = resting_out_of_reach(
                     pos[i, b],
@@ -1214,7 +1450,7 @@ def rollout(
                     st.idle_since = step
             if st.cycle is not None:
                 continue
-            if bool(per_brick[i].all()):
+            if not perceived and bool(per_brick[i].all()):
                 loop_done[i] = True
                 st.done_reason = "all_stowed"
                 continue
@@ -1234,7 +1470,10 @@ def rollout(
                 if not ready:
                     st.select_wait_steps += 1
                     continue
-            scene = rig.snapshot(i)
+            if perceived:
+                state, scene = _perceived_scene(st, env, rig, i, k)
+            else:
+                scene = rig.snapshot(i)
             target = _select(st, scene)
             rake = getattr(st.selector, "push", None)
             raking = policy is None or scripted_rake
@@ -1245,10 +1484,18 @@ def rollout(
                 # caps), then selects again.
                 st.selector._end_push()
                 st.rakes += 1
+                overrides = {}
+                if perceived:
+                    # Booked where the part was perceived; the rig's takeover reads the hold
+                    # detector and this scene, never the truth.
+                    st.rake_mem.book(scene.brick_pos[rake.part, :2].tolist())
+                    overrides = {"held": detectors[i].holding, "scene": scene}
                 # The teacher's jaw headings in its order: along the sweep, across it, held.
                 jaws = (rake.jaw, rake.heading + math.pi / 2, None) if rake_turn else (rake.jaw,)
                 for jaw in jaws:
-                    if rig.resume(i, push=replace(rake, jaw=jaw)):
+                    if rig.resume(i, push=replace(rake, jaw=jaw), **overrides):
+                        if perceived:
+                            env.marker_points[i] = math.nan  # the truth path's rake unmarks too
                         break
                 continue
             if target is None:
@@ -1271,9 +1518,21 @@ def rollout(
                 wait_steps=waited,
                 wait_capped=waited >= int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET),
             )
-            env.target_part[i] = target
-            if per_part:
-                env.set_context_box(i, int(env.destination_bins[i, target]))
+            if perceived:
+                # The row, the frozen marker and the box of the class perceived overhead all
+                # come from the target's detection; ``env.target_part`` stays -1.
+                seen = next(d for d in state.detections if d.sim_index == target)
+                st.cycle.target_xy = seen.centre[:2]
+                st.cycle.seen_class = seen.cls
+                st.cycle.box = class_to_box[i][seen.cls]
+                env.marker_points[i] = torch.tensor(seen.centre)
+                env.set_context_box(i, st.cycle.box)
+                st.counts["selections"] += 1
+                st.counts["wrong_overhead_class"] += seen.cls != true_classes[target]
+            else:
+                env.target_part[i] = target
+                if per_part:
+                    env.set_context_box(i, int(env.destination_bins[i, target]))
             if ctx_target is not None:
                 ctx_target[i] = target_context(scene.brick_pos[target], st.selector.grasp)
             replan[i] = True
@@ -1342,10 +1601,13 @@ def rollout(
                     row = ctx_target[i]  # CONTEXT_TARGET_NAMES: z at 2, width at 5, half height 6
                     width = float(row[5])
                     gap = float(action_cpu[i, 6])
-                    # ``census_step`` runs after this block, so both fields read the steps
-                    # before this one: no hold and no lift so far in the cycle.
+                    # ``census_step`` and the hold census run after this block, so the fields
+                    # read the steps before this one: no hold and no lift so far in the cycle.
                     c = st.cycle
-                    held_so_far = c.held_steps > 0 or c.max_rise >= oracle.LIFT_MIN_RISE
+                    if perceived and not contact_hold:
+                        held_so_far = c.hold_detected or c.lift_detected  # the detector's
+                    else:
+                        held_so_far = c.held_steps > 0 or c.max_rise >= oracle.LIFT_MIN_RISE
                     if square_wrist:
                         roll = squared_roll(
                             rig.ik,
@@ -1450,7 +1712,7 @@ def rollout(
                         gap=float(action_cpu[i, 6]),
                         pick=pick,
                         target_pos=pos[i, c.target],
-                        target_quat=env.scene[f"brick_{c.target}"].data.root_quat_w[i].to("cpu"),
+                        target_quat=truth.quat[i, c.target],
                         ctx_pos=None if ctx_target is None else ctx_target[i],
                     )
             census_step(
@@ -1461,7 +1723,24 @@ def rollout(
                 close_cm=close_cm,
                 pick_z=float(pick[2]),
             )
-            if (
+            if perceived:
+                if rig.idle[i] and detectors[i].lift_started:
+                    # The class at lift: the box follows the class drawn for the part between
+                    # the jaws, the target or not; nothing between them keeps the row.
+                    true_cls = wrist_class(env, i)
+                    drawn, box = lift_class_box(
+                        true_cls, st.perceiver.classify, class_to_box[i], c.box
+                    )
+                    if drawn is None:
+                        st.counts["lifts_empty"] += 1
+                    else:
+                        st.counts["lifts_classified"] += 1
+                        st.counts["wrong_wrist_class"] += drawn != true_cls
+                    if box is not None:
+                        c.box = box
+                        env.set_context_box(i, box)
+                        replan[i] = True
+            elif (
                 adopt_held
                 and per_part
                 and rig.idle[i]
@@ -1475,14 +1754,14 @@ def rollout(
                 env.target_part[i] = h
                 env.set_context_box(i, int(destination[i, h]))
                 replan[i] = True
-        # The MS7c hold census, observation only: the detector reads the jaw gap measured at
-        # the top of this step against the command the last step sent, whoever drives.
+        # The MS7c hold census: what the detector read at the top of this step (the jaw gap
+        # measured then against the command the last step sent, whoever drives) on the cycle
+        # open now.
         for i, st in enumerate(states):
             if bool(tracker.done[i]):
                 continue
             d, c, h = detectors[i], st.cycle, int(held[i])
-            gap, pick_z = float(gaps[i]), float(picks[i][2])
-            d.update(gap, gap_cmd[i], pick_z)
+            gap, pick_z = float(gaps[i]), float(top_picks[i][2])
             if c is not None:
                 if d.holding and c.first_hold_at is None:
                     c.first_hold_at = step - c.start_step
@@ -1590,6 +1869,8 @@ def rollout(
     for i, result in enumerate(tracker.results):
         st = states[i]
         final = tracker.stowed_mask(i)
+        if perceived:
+            _credit_placed(st, final)
         boxes = {}
         if per_part:
             boxes = box_census(
@@ -1664,6 +1945,12 @@ def rollout(
         "wall_sec": round(wall, 1),
         "wall_sec_per_episode": round(wall / num_envs, 1),
         "hold_agreement": agreement(row for e in episodes for row in e["cycle_census"]),
+        "perception": {
+            "perceived": switches["perceived"],
+            "noise_scales": switches["noise_scales"],
+            "contact_hold": switches["contact_hold"],
+            **{name: sum(st.counts[name] for st in states) for name in PERCEPTION_COUNTS},
+        },
     }
     return payload
 
