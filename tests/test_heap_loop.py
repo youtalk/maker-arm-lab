@@ -1397,4 +1397,8 @@ def test_part_failures_skip_the_failed_part_and_keep_its_cell_neighbour(monkeypa
     ep = payload["episodes"][0]
     assert ep["cycle_targets"] == [0, 0, 0, 2, 2, 2, 1, 1, 1]
     assert ep["done_reason"] == "cycle_budget"
+    # What the episode left: every part, where it lies, no rake and three failed cycles each.
+    left = ep["left_parts"]
+    assert [row[0] for row in left] == [0, 1, 2] and all(row[4:] == [0, 3] for row in left)
+    assert all(math.dist(row[1:3], spread[:2]) < 0.01 for row, spread in zip(left, SPREAD))
     assert payload["inference"]["loop"]["part_failures"] is True

@@ -710,6 +710,9 @@ class EnvState:
     idle_since: int | None = None  # the step the last cycle closed at, None before the first
     select_wait_steps: int = 0  # steps spent waiting for the retreat before a selection
     rakes: int = 0  # MS7a tray: rakes the oracle driver ran between cycles
+    # Parts not in a box when the episode ended, (part, x, y, z, rakes, failed cycles): the
+    # read of what the episode left behind, at a wall or elsewhere.
+    left: list = field(default_factory=list)
     preselected: tuple | None = None  # the rig's RELEASE pre-selection a takeover handed back
 
 
@@ -948,6 +951,17 @@ def resting_out_of_reach(pos, speed: float, held: bool, bl, stow_half_xy, in_box
     cx, cy, _ = layout.heap_bin_center(bl)
     in_bin = abs(x - cx) <= float(stow_half_xy[0]) and abs(y - cy) <= float(stow_half_xy[1])
     return not in_bin and not layout.in_reach(x, y, bl)
+
+
+def _left_parts(selector, pos: torch.Tensor, in_bin: torch.Tensor) -> list:
+    """(part, x, y, z, rakes, failed cycles) of every part not in a box, rounded to 0.1 mm."""
+    failures = getattr(selector, "failures", {})
+    raked = getattr(selector, "raked", {})
+    return [
+        [b, *(round(float(v), 4) for v in pos[b].tolist()), raked.get(b, 0), failures.get(b, 0)]
+        for b in range(pos.shape[0])
+        if not bool(in_bin[b])
+    ]
 
 
 def _close_cycle(st: EnvState, reason: str, stowed: list[int], step: int, scene) -> None:
@@ -1197,6 +1211,7 @@ def rollout(
                 st.done_reason = (
                     "cycle_budget" if st.selector.cycles >= cycle_budget else "no_candidate"
                 )
+                st.left = _left_parts(st.selector, pos[i], in_bin[i])
                 continue
             waited = 0 if st.idle_since is None else step - st.idle_since
             chosen = getattr(st.selector, "grasp", None)
@@ -1464,6 +1479,7 @@ def rollout(
         tracker.record_step(step, dones | loop_done, truncated.cpu(), success)
         for i in torch.nonzero(newly_env).flatten().tolist():
             st = states[i]
+            st.left = _left_parts(st.selector, pos[i], in_bin[i])  # pre-step: the reset ran
             if int(env.oracle_actor[i]) > 0:
                 # A takeover the episode's end cut short: its part is in on success (the
                 # six-brick DAgger loop's rule), and its frames are already exported.
@@ -1536,6 +1552,7 @@ def rollout(
                 "takeovers_failed": st.takeovers_failed,
                 "select_wait_steps": st.select_wait_steps,
                 "rakes": st.rakes,
+                "left_parts": st.left,
                 **boxes,
             }
         )
