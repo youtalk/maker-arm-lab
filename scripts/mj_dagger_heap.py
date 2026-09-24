@@ -76,6 +76,17 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="the env's gripper contract; must match the checkpoint's handshake",
     )
     parser.add_argument("--heap_k", type=int, default=50, help="parts in the heap (> 0)")
+    parser.add_argument(
+        "--tray",
+        action="store_true",
+        help="MuJoCo heap only: drop the heap into the walled tray (MS7a); off is the bare desk",
+    )
+    parser.add_argument(
+        "--tray_lean",
+        type=float,
+        default=0.0,
+        help="MS7a: lean the tray's walls outward by this many degrees (0 is vertical)",
+    )
     parser.add_argument("--parts_seed", type=int, default=20260915)
     parser.add_argument("--parts_split", choices=PARTS_SPLITS, default="train")
     parser.add_argument(
@@ -83,6 +94,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         type=int,
         default=None,
         help="pick cycles per episode; the default is ceil(1.3 * K) (phase B design 5.1)",
+    )
+    parser.add_argument(
+        "--desk_boxes",
+        type=int,
+        default=0,
+        help="N desk boxes beside the arm replace the shelf and its heap bin (MS7a: 1 for "
+        "rung 1, 4 for rung 2); 0 is the MS6 scene",
     )
     parser.add_argument("--server", type=str, default="tcp://127.0.0.1:5555")
     parser.add_argument(
@@ -135,6 +153,8 @@ def parse_args(argv=None) -> argparse.Namespace:
             parser.error(f"--{name} is outside numpy's seed range (0 <= seed < 2**32)")
     if args.heap_k <= 0:
         parser.error("--heap_k must be positive")
+    if args.desk_boxes < 0:
+        parser.error("--desk_boxes must be 0 or more")
     if args.round < 1:
         parser.error("--round starts at 1")
     if args.cycle_budget is None:
@@ -170,6 +190,9 @@ def main(argv=None) -> int:
             shard_name=args.shard_name,
             export_all=True,
             gripper_mode=args.gripper,
+            desk_boxes=args.desk_boxes,
+            tray=args.tray,
+            tray_lean_deg=args.tray_lean,
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
@@ -178,10 +201,13 @@ def main(argv=None) -> int:
             return HeapOracle(
                 bl,
                 env.parts,
-                int(env.destination_bins[i]),
+                env.destination_bins[i],
                 episode_draw,
                 rng=rig_rng,
                 cycle_budget=args.cycle_budget,
+                boxes=env.desk_box_poses[i],
+                tray=env.tray,
+                tray_lean_deg=env.tray_lean_deg,
             )
 
         rig = OracleRig(
@@ -212,6 +238,9 @@ def main(argv=None) -> int:
         payload["round"] = args.round
         payload["trigger"] = args.trigger
         payload["parts_split"] = args.parts_split
+        payload["desk_boxes"] = args.desk_boxes
+        payload["tray"] = args.tray
+        payload["tray_lean"] = args.tray_lean
         payload["shard"] = str(Path(args.out_dir) / f"{args.shard_name}.hdf5")
     except EvalFailure as err:
         print("DAGGER_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True)

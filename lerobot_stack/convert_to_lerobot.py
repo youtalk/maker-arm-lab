@@ -194,6 +194,12 @@ def read_context_names(shard: Path, context: str) -> list[str]:
 
 # PHASE_TO_INT pins (recorders.py): dropped outright when splitting.
 SETTLE_INT, DONE_INT, ABANDON_INT = 0, 10, 11
+CORRECTIVE_INTS = (12, 13, 14, 15, 16, 17)
+"""PUSH_HOVER..PUSH_SWEEP and TIP_HOVER..TIP_SWEEP, also dropped when splitting. The only
+correctives a shard holds since 2026-09-18 are the MS7a tray rakes (the densest-cell push and
+the tip-up are off), recorded under the next pick's actor with no target: cycle_brick -1,
+target_part -1 and an all-zero target row. Kept, each rake became a training episode of its
+own; the policy never rakes (the serving side runs it, --scripted_rake), so they go."""
 
 
 def cycle_segments(
@@ -205,7 +211,8 @@ def cycle_segments(
     ``--lead_keep 60``, MS3 recipe design 5.3): a short hold at the start state stays in the
     corpus, the 240-frame fixed point does not. 0 keeps none.
 
-    Drops SETTLE/DONE/ABANDON frames, then cuts each time a NEW non-negative
+    Drops SETTLE/DONE/ABANDON and the corrective (CORRECTIVE_INTS) frames, then cuts each
+    time a NEW non-negative
     brick value appears (differs from the last non-negative value seen).
     Retries never change the brick, so they stay inside their cycle; -1 frames
     (goals[i] and oracles[i] both None -- see recorders.py's CyclePhaseRecorder;
@@ -218,11 +225,15 @@ def cycle_segments(
     ``actor`` (MS4 c2 design 6.5, ``--dagger``) is the recorder's ``obs/actor``: frames whose
     actor is not positive are dropped, and a segment is cut wherever the actor changes, so
     two takeovers on the same brick never share a chunk horizon across the policy's missing
-    frames.
+    frames. A positive actor that also appears negated is dropped too: the batch loop negates
+    a failed cycle's frames when the teacher gives up at LIFT (``negate_new_failures``), and
+    the give-up REOPEN recorded after that keeps the positive ordinal. Kept, those 20 frames
+    (jaws opening over the failed part at lift height) became a training episode of their
+    own, 187 of the 2553 in MS7a's r1/dataset_w1.
     """
-    keep = ~np.isin(phase, (SETTLE_INT, DONE_INT, ABANDON_INT))
+    keep = ~np.isin(phase, (SETTLE_INT, DONE_INT, ABANDON_INT, *CORRECTIVE_INTS))
     if actor is not None:
-        keep &= actor > 0
+        keep &= (actor > 0) & ~np.isin(actor, -actor[actor < 0])
     segments: list[list[int]] = []
     current: list[int] = []
     last_brick: int | None = None

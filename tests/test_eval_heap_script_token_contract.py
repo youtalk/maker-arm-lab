@@ -51,5 +51,11 @@ def test_the_heap_client_takes_the_protocol_switches():
         "squeeze_floor",
         "close_gate",
         "square_wrist",
+        "scripted_place",
+        "scripted_rake",
+        "part_failures",
+        "pick_snap",
+        "dwell_close",
+        "adopt_held",
     ):
         assert f'"--{name}"' in text and f"{name}=args.{name}" in text

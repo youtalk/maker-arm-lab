@@ -163,7 +163,11 @@ def run_meta(
         "parts_seed": int(getattr(args, "parts_seed", 0)),
         "parts_split": getattr(args, "parts_split", "train"),
         "cycle_budget": int(getattr(args, "cycle_budget", 0)),
+        "tray": bool(getattr(args, "tray", False)),
+        "tray_lean": float(getattr(args, "tray_lean", 0.0)),
         "gripper": getattr(args, "gripper", "binary"),
+        # MS7a design, desk boxes: 0 is the MS6 scene, the shelf's one heap bin.
+        "desk_boxes": int(getattr(args, "desk_boxes", 0)),
         "parts": None if parts is None else [p.name for p in parts],
         "episode_length_s": (
             episode_length_s
@@ -378,6 +382,7 @@ def run_stats(
         stats["parts_out_of_reach"] = sum(int(e.get("parts_out_of_reach", 0)) for e in episodes)
         stats["cycles"] = sum(int(e.get("cycles", 0)) for e in episodes)
         stats["pushes"] = sum(int(e.get("pushes", 0)) for e in episodes)
+        stats["rakes"] = sum(int(e.get("rakes", 0)) for e in episodes)
         stats["cycles_per_stowed"] = stats["cycles"] / stowed if stowed else None
     if probe:
         # A heap probe grades on every episode the recorder wrote, not the fully-stowed
@@ -508,11 +513,30 @@ def add_batch_arguments(parser) -> None:
         "--cycle_budget", type=int, default=50, help="pick cycles a heap episode may spend"
     )
     parser.add_argument(
+        "--tray",
+        action="store_true",
+        help="MuJoCo heap only: drop the heap into the walled tray (MS7a); off is the bare desk",
+    )
+    parser.add_argument(
+        "--tray_lean",
+        type=float,
+        default=0.0,
+        help="MS7a: lean the tray's walls outward by this many degrees (0 is vertical)",
+    )
+    parser.add_argument(
         "--gripper",
         choices=("binary", "continuous"),
         default="binary",
         help="MuJoCo only: the gripper contract of the recorded action's seventh column "
         "(MS6 phase B design 5.4): binary is raw >= 0 opens, continuous is the jaw gap in m",
+    )
+    parser.add_argument(
+        "--desk_boxes",
+        type=int,
+        default=0,
+        help="MuJoCo heap only: N desk boxes beside the arm replace the shelf and its heap bin "
+        "(MS7a: 1 for rung 1, 4 for rung 2); the heap drops on the tray footprint. 0 is the MS6 "
+        "scene.",
     )
     parser.add_argument(
         "--episode_length_s",

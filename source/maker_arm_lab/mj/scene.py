@@ -47,7 +47,7 @@ from maker_arm_lab.assets.urdf_prep import (
     MOUNT_RPY,
     VENDORED_URDF,
 )
-from maker_arm_lab.core import cameras, layout
+from maker_arm_lab.core import cameras, desk_boxes, layout
 from maker_arm_lab.core import parts as _parts
 from maker_arm_lab.core import profile as _profile
 from maker_arm_lab.core.global_ik import _rpy_matrix
@@ -153,6 +153,7 @@ class SceneHandles:
     finger_geoms: tuple[frozenset[int], frozenset[int]]
     desk_geom: int
     cameras: tuple[str, ...]
+    desk_box_mocap: tuple[int, ...] = ()  # mocap ids of the MS7a desk boxes, in box order
 
 
 def kelvin_rgb(temperature_k: float) -> tuple[float, float, float]:
@@ -268,11 +269,21 @@ def build_spec(
     num_bricks: int = 6,
     cameras_on: bool = True,
     parts: Sequence[_parts.Part] | None = None,
+    num_desk_boxes: int = 0,
+    tray: bool = False,
+    tray_lean_deg: float = 0.0,
 ) -> mujoco.MjSpec:
     """The MjSpec for one run draw; ``compile_model`` turns it into a model and handles.
 
     ``parts`` (MS6) replaces the ``num_bricks`` identical box bricks with one body per part.
-    A heap lies on the bare desk: there is no dish (owner decision 2026-09-18).
+    A heap lies on the bare desk: there is no dish (owner decision 2026-09-18). ``tray``
+    (MS7a design, the tray) adds the four walls of ``layout.tray_static_boxes``, or with
+    ``tray_lean_deg`` > 0 the leaning walls of ``layout.tray_lean_boxes``.
+
+    ``num_desk_boxes`` (MS7a design, desk boxes) removes the shelf and its bins and adds that
+    many open boxes on the desk, each a mocap body (``desk_box_<j>``) the env moves per
+    episode. A static world geom cannot move: its collision bounds are compiled once, and a
+    part dropped on a world geom moved by ``geom_pos`` fell through it (measured 2026-09-23).
     """
     if parts is not None:
         num_bricks = len(parts)
@@ -335,18 +346,34 @@ def build_spec(
     desk.solref = list(CONTACT_SOLREF)
     desk.solimp = list(DESK_SOLIMP)
     scene_geoms.append(desk)
-    scene_geoms.append(
-        spec.worldbody.add_geom(
-            name="shelf",
-            type=mujoco.mjtGeom.mjGEOM_BOX,
-            size=_half(layout.SHELF_SIZE),
-            pos=list(layout.SHELF_POS),
-            rgba=[0.6, 0.6, 0.6, 1.0],
+    if num_desk_boxes == 0:
+        scene_geoms.append(
+            spec.worldbody.add_geom(
+                name="shelf",
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=_half(layout.SHELF_SIZE),
+                pos=list(layout.SHELF_POS),
+                rgba=[0.6, 0.6, 0.6, 1.0],
+            )
         )
-    )
-    bin_boxes = (
-        layout.heap_bin_static_boxes(bl) if parts is not None else layout.bin_static_boxes(bl)
-    )
+        bin_boxes = (
+            layout.heap_bin_static_boxes(bl) if parts is not None else layout.bin_static_boxes(bl)
+        )
+    else:
+        bin_boxes = []
+    for j in range(num_desk_boxes):
+        # Parked off the desk until the first reset draws the episode's poses.
+        body = spec.worldbody.add_body(name=f"desk_box_{j}", mocap=True, pos=[-1.0, 0.2 * j, 0])
+        for name, center, size in desk_boxes.box_geoms(num_desk_boxes):
+            scene_geoms.append(
+                body.add_geom(
+                    name=f"desk_box_{j}_{name}",
+                    type=mujoco.mjtGeom.mjGEOM_BOX,
+                    size=_half(size),
+                    pos=list(center),
+                    rgba=list(desk_boxes.DESK_BOX_RGBA),
+                )
+            )
     for name, center, size in bin_boxes:
         color = name.split("_")[1]
         rgba = (
@@ -361,6 +388,24 @@ def build_spec(
                 size=_half(size),
                 pos=list(center),
                 rgba=rgba,
+            )
+        )
+    walls = []
+    if tray:
+        walls = (
+            layout.tray_lean_boxes(tray_lean_deg)
+            if tray_lean_deg > 0.0
+            else [(*box, (1.0, 0.0, 0.0, 0.0)) for box in layout.tray_static_boxes()]
+        )
+    for name, center, size, quat in walls:
+        scene_geoms.append(
+            spec.worldbody.add_geom(
+                name=name,
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=_half(size),
+                pos=list(center),
+                quat=list(quat),
+                rgba=[0.35, 0.35, 0.35, 1.0],
             )
         )
 
@@ -484,6 +529,10 @@ def compile_model(spec: mujoco.MjSpec, num_bricks: int) -> tuple[mujoco.MjModel,
         finger_geoms=(finger_geoms[0], finger_geoms[1]),
         desk_geom=model.geom("desk").id,
         cameras=tuple(model.camera(c).name for c in range(model.ncam)),
+        desk_box_mocap=tuple(
+            int(model.body_mocapid[model.body(f"desk_box_{j}").id])
+            for j in range(model.nmocap)  # the desk boxes are the only mocap bodies
+        ),
     )
     return model, handles
 
@@ -493,11 +542,15 @@ def build_model(
     num_bricks: int = 6,
     cameras_on: bool = True,
     parts: Sequence[_parts.Part] | None = None,
+    num_desk_boxes: int = 0,
+    tray: bool = False,
+    tray_lean_deg: float = 0.0,
 ) -> tuple[mujoco.MjModel, SceneHandles]:
     """One call for callers that do not need to edit the spec."""
     if parts is not None:
         num_bricks = len(parts)
-    return compile_model(build_spec(draw, num_bricks, cameras_on, parts), num_bricks)
+    spec = build_spec(draw, num_bricks, cameras_on, parts, num_desk_boxes, tray, tray_lean_deg)
+    return compile_model(spec, num_bricks)
 
 
 # -- per-episode draws: the same numbers as build_spec, written into a compiled model ----------

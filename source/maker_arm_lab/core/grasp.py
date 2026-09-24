@@ -13,7 +13,8 @@ the physics tolerates (a brick target is stowed with a brick or a plate in the s
 lone-part reads 2026-09-16). A standing neighbor under a landing spot stalls the descend
 early. Grasps rank by height band, then by how many standing neighbors the stroke sweeps,
 then by clearance. The heap lies on the bare desk since 2026-09-18, so the only obstacles
-are other parts; the dish rim this module once modeled as a hard stop is gone.
+are other parts, unless the MS7a tray is on: its walls enter through ``wall_allows``, which
+keeps a finger off a wall and, near one, the closing axis along it.
 """
 
 from __future__ import annotations
@@ -72,12 +73,151 @@ HEIGHT_BAND = 0.005
 PUSH_CELL_M = 0.05
 """Grid cell of the failure memory and of the densest-cell push (design 7.2)."""
 PUSH_HALF_LENGTH_M = 0.04
+WALL_BAND_RAD = math.radians(45.0)
+"""MS7a design, the tray: near a wall, a closing axis must run within this of the wall's
+direction, so no finger lands straight between the part and the wall.
+
+Read on the tray ladder of 2026-09-23 (six held-out K = 50 heaps, seeds 20267500 + n, wall
+term, rake and wedge on): 20 degrees stowed 252 of 300, 30 degrees 259, 45 degrees 267. A
+box part keeps two horizontal axes a quarter turn apart, so at 45 degrees one of them always
+survives the band and the finger stroke decides (``wall_allows``); a narrower band left a
+part lying at a slant 12 to 25 mm off a wall with no grasp, where the stroke clears."""
+WALL_BAND_MARGIN = 0.005
+"""How far (m) past a grasp's own finger reach a wall still bands its heading.
+
+A grasp is near a wall when the part centre is closer to the wall than the outer face of a
+finger pointed at it, ``landing_half_gap(width) + TIP_THICKNESS``, plus this margin. The
+design wrote ``OPEN_HALF_GAP`` for that reach, the fully open jaw of MS6 phase A. On the
+0.13 x 0.20 m tray that bands the headings of every part within 57 mm of two walls both
+ways, half the tray, where no heading can then survive. # INITIAL"""
+
+
+WALL_MAX_GRASP_WIDTH = 0.060
+"""Along a wall the jaws may close end to end on a part up to this long (m), past
+MAX_GRASP_WIDTH.
+
+A 1x6 (47.8 mm) or 2x7 (55.8 mm) brick flush along a wall has no grasp under
+MAX_GRASP_WIDTH, because its short axis points a finger into the wall, and no room behind it
+for the rake's tips. Driven on 2026-09-23 (MS7a tray ladder), both flush against the left
+wall at yaw 0 and 5 degrees closed end to end along the wall, lifted and stowed. The landing
+gap of a 60 mm grasp is 42 mm, inside OPEN_HALF_GAP. # INITIAL"""
+
+
+@dataclass(frozen=True)
+class Wall:
+    """A static wall the jaws must not land on: its top-down footprint at the desk, its
+    direction of length (rad, a line, so ``heading`` and ``heading + pi`` are the same wall)
+    and its top. A leaning wall (``lean`` = tan of its tilt off vertical) stands
+    ``lean * h`` further along ``outward`` at height h than its footprint at the desk."""
+
+    footprint: tuple[tuple[float, float], ...]
+    heading: float
+    top: float
+    outward: tuple[float, float] = (0.0, 0.0)
+    lean: float = 0.0
+
+
+def tray_walls(lean_deg: float = 0.0) -> tuple[Wall, ...]:
+    """The four walls of ``layout.tray_static_boxes`` for the grasp model, leaning outward by
+    ``lean_deg`` when the scene builds ``layout.tray_lean_boxes``: the footprint is the
+    vertical wall's, whose inner face is the leaning wall's foot."""
+    walls = []
+    cx, cy = layout.TRAY_CENTER
+    for _, center, size in layout.tray_static_boxes():
+        corners = [
+            (center[0] + sx * size[0] / 2, center[1] + sy * size[1] / 2)
+            for sx in (-1.0, 1.0)
+            for sy in (-1.0, 1.0)
+        ]
+        heading = 0.0 if size[0] >= size[1] else math.pi / 2
+        dx, dy = center[0] - cx, center[1] - cy
+        outward = (math.copysign(1.0, dx), 0.0) if heading else (0.0, math.copysign(1.0, dy))
+        walls.append(
+            Wall(
+                tuple(convex_hull(corners)),
+                heading,
+                center[2] + size[2] / 2,
+                outward,
+                math.tan(math.radians(lean_deg)),
+            )
+        )
+    return tuple(walls)
+
+
+def wall_at(wall: Wall, height: float) -> list[tuple[float, float]]:
+    """The wall's footprint moved to where its face stands at ``height`` above the desk."""
+    d = wall.lean * max(0.0, height)
+    return [(x + d * wall.outward[0], y + d * wall.outward[1]) for x, y in wall.footprint]
+
+
+def wall_distance(xy: tuple[float, float], wall: Wall) -> float:
+    """Distance (m) from a point to the wall's footprint, negative inside it."""
+    return polygon_distance([xy], list(wall.footprint))
+
+
+def along_wall(heading: float, wall: Wall) -> bool:
+    """Is a closing axis at ``heading`` within WALL_BAND_RAD of the wall's direction?"""
+    off = abs((heading - wall.heading + math.pi / 2) % math.pi - math.pi / 2)
+    return off <= WALL_BAND_RAD
+
+
+def hugs_wall(
+    pos: torch.Tensor, heading: float, width: float, half_height: float, walls: Sequence[Wall]
+) -> bool:
+    """Is this grasp within its finger reach of a wall that stands in its grip band, with
+    its closing axis along that wall (``wall_allows``'s band, from the passing side)?"""
+    band = float(pos[2]) + half_height - MIN_GRIP_OVERLAP
+    xy = (float(pos[0]), float(pos[1]))
+    near = landing_half_gap(width) + TIP_THICKNESS + WALL_BAND_MARGIN
+    return any(
+        wall.top > band
+        and polygon_distance([xy], wall_at(wall, band)) < near
+        and along_wall(heading, wall)
+        for wall in walls
+    )
+
+
+def wall_allows(
+    pos: torch.Tensor, heading: float, width: float, half_height: float, walls: Sequence[Wall]
+) -> bool:
+    """Can the jaws close along ``heading`` on a part at ``pos`` beside these walls?
+
+    A wall counts only where it stands in the part's grip band, the same rule a neighbor
+    obeys in ``jaw_clearance``: a part resting higher than the wall top is gripped above it.
+    Two tests then, per standing wall:
+
+    * the band: within its finger reach of the wall (``WALL_BAND_MARGIN``), the closing axis
+      runs along the wall (``along_wall``);
+    * the stroke: each finger's path from the part face out to the tip's OUTER face, the
+      tip's own 8 mm face across, stays off the wall. Only the tip counts, not the hull above
+      it: a tip that lands inside the wall face picks with the hull resting on the wall top,
+      one whose outer face lands past it does not (the MS6 wall reads of 2026-09-16,
+      docs/ms6-teacher-inspection.md). So a wall is a neighbor of unbounded length that the
+      finger clears by its thickness.
+    """
+    band = float(pos[2]) + half_height - MIN_GRIP_OVERLAP
+    xy = (float(pos[0]), float(pos[1]))
+    reach = landing_half_gap(width) + TIP_THICKNESS
+    strokes = sweep_footprints(pos, heading, width, reach)
+    for wall in walls:
+        if wall.top <= band:
+            continue
+        # A leaning wall stands back at the grip band's foot: the finger may come down beside
+        # the part until it meets the wall's face there and still grips the band above.
+        face = wall_at(wall, band)
+        if polygon_distance([xy], face) < reach + WALL_BAND_MARGIN and not along_wall(
+            heading, wall
+        ):
+            return False
+        if any(polygon_distance(s, face) < CLEARANCE_MIN for s in strokes):
+            return False
+    return True
 
 
 @dataclass(frozen=True)
 class Grasp:
     part: int
-    heading: float  # world heading of the closing axis, rad
+    heading: float  # world heading of the CLOSING axis (the jaw travel), rad
     width: float  # part size along the closing axis, m
     half_height: float  # half the part size along its most vertical axis, m
     clearance: float  # m from the landing tips to the nearest standing neighbor
@@ -146,8 +286,11 @@ def candidate_grasps(
     quat: torch.Tensor,
     tilt_rad: float = 0.0,
     closing_axes: tuple[int, ...] = (0, 1, 2),
+    walls: Sequence[Wall] = (),
 ) -> list[Grasp]:
-    """Every closing axis within AXIS_MAX_TILT_RAD of the jaw plane, under MAX_GRASP_WIDTH.
+    """Every closing axis within AXIS_MAX_TILT_RAD of the jaw plane, under MAX_GRASP_WIDTH,
+    that the ``walls`` allow (``wall_allows``; none on the bare desk). Beside a wall an axis
+    along it may reach WALL_MAX_GRASP_WIDTH (``hugs_wall``).
 
     The jaw plane is horizontal at ``tilt_rad = 0.0``. ``closing_axes`` are the body axes the
     part's shape allows (``parts.Part.closing_axes``): a slope offers only its y axis.
@@ -160,9 +303,14 @@ def candidate_grasps(
         if float(off_plane[k]) > math.sin(AXIS_MAX_TILT_RAD):
             continue
         width = float(size[k])
-        if width > MAX_GRASP_WIDTH:
+        wide = width > MAX_GRASP_WIDTH
+        if wide and not (walls and width <= WALL_MAX_GRASP_WIDTH):
             continue
         heading = math.atan2(float(axes[k, 1]), float(axes[k, 0]))
+        if walls and not wall_allows(pos, heading, width, half_height, walls):
+            continue
+        if wide and not hugs_wall(pos, heading, width, half_height, walls):
+            continue
         found.append(Grasp(part, heading, width, half_height, float("nan"), float(pos[2])))
     return found
 
@@ -333,12 +481,14 @@ def rank_grasps(
     candidates: torch.Tensor,
     tilt_rad: float = 0.0,
     closing_axes: Sequence[tuple[int, ...]] | None = None,
+    walls: Sequence[Wall] = (),
 ) -> list[Grasp]:
     """Every grasp of every candidate part with its clearance, best first.
 
     Other parts enter through ``neighbor_extents`` and ``footprint``. ``closing_axes`` is
     one axis tuple per part (``parts.Part.closing_axes``); None lets every part offer all
-    three. The order is the height band (highest first), then the swept count, then the
+    three. A grasp the ``walls`` refuse never ranks, so no forced pick lands a finger on a
+    wall. The order is the height band (highest first), then the swept count, then the
     clearance, then the narrower width: a wide grasp closes on one side first and slides the
     part away (docs/ms6-matched-jaw-opening.md section 5), so it is the last resort at a tie.
     """
@@ -351,7 +501,7 @@ def rank_grasps(
         other_pos, other_hz = pos[others], hz[others]
         other_prints = [prints[k] for k in torch.nonzero(others).flatten().tolist()]
         axes_b = (0, 1, 2) if closing_axes is None else closing_axes[b]
-        for g in candidate_grasps(b, sizes[b], pos[b], quat[b], tilt_rad, axes_b):
+        for g in candidate_grasps(b, sizes[b], pos[b], quat[b], tilt_rad, axes_b, walls):
             clearance, swept = jaw_clearance(
                 pos[b], g.heading, g.width, g.half_height, other_pos, other_hz, other_prints
             )
@@ -420,3 +570,157 @@ def push_segment(
     return clamp_to_reach((center[0] - dx, center[1] - dy)), clamp_to_reach(
         (center[0] + dx, center[1] + dy)
     )
+
+
+RAKE_BAND_M = 0.03
+"""MS7a design, the rake: a candidate with no grasp whose centre lies this close (m) to a
+wall is raked off it. # INITIAL: the tray teacher ladder reads it."""
+RAKE_START_GAP_M = 0.002
+"""Gap (m) between the raked part's footprint and the closed tips where they land."""
+RAKE_WEDGE_GAP_M = 0.0005
+"""Gap (m) the wedged-in tips keep to the wall face (``rake_segment``'s last resort)."""
+RAKE_CROWD_M = 0.003
+"""With the heap loop's ``--rake_crowd``: how deep (m) the closed tips may land into a
+neighbour's footprint when no rake start clears every neighbour. # INITIAL: the rake prototype
+of 2026-09-24 reads it."""
+RAKE_SWINGS_RAD = (0.0, 0.5, -0.5, 1.0, -1.0)
+"""Sweep directions tried, off the wall's normal, when the straight one has no room behind
+the part: a swung sweep catches the part's end and turns it off the wall (the wall push of
+MS6 phase A swung the same way, git f93e010^:core/grasp.py)."""
+
+
+def rake_footprint(point: tuple[float, float], height: float = 0.0) -> list[tuple[float, float]]:
+    """The closed tips' footprint at ``height`` above them, as a square that holds them at
+    any jaw heading.
+
+    The two closed tips are 4 mm along the closing axis and 8 mm across at the tips, and
+    the hull widens above them (TIP_THICKNESS_PER_M per tip, TIP_HALF_FACE_PER_M per side).
+    The rake tries more than one jaw heading (``HeapOracle.report``), so its footprint is
+    the square of the larger half extent. At the 20 mm tray wall top that is 11.2 mm: tips
+    that land closer to a wall rest the hull on the wall top and stop 20 mm up, over the
+    parts (driven on 2026-09-23 at the near wall: the pick point stalled at 21.8 mm).
+    """
+    half = max(
+        TIP_THICKNESS + TIP_THICKNESS_PER_M * height,
+        TIP_HALF_FACE + TIP_HALF_FACE_PER_M * height,
+    )
+    return convex_hull(
+        [(point[0] + sx * half, point[1] + sy * half) for sx in (-1.0, 1.0) for sy in (-1.0, 1.0)]
+    )
+
+
+def _clear_of_walls(point: tuple[float, float], walls: Sequence[Wall], gap: float = 0.0) -> bool:
+    """Does the rake's hull clear every wall by ``gap``, at the desk and at the wall's top?
+
+    Both the hull's width and a leaning wall's setback grow linearly with height, so the two
+    ends of the wall bound it; a vertical wall binds at its top."""
+    return all(
+        polygon_distance(rake_footprint(point, h), wall_at(w, h)) >= gap
+        for w in walls
+        for h in (0.0, w.top)
+    )
+
+
+def rake_segment(
+    part_xy: tuple[float, float],
+    part_print: list[tuple[float, float]],
+    length: float,
+    wall: Wall,
+    walls: Sequence[Wall],
+    blocked: Sequence[list[tuple[float, float]]],
+    crowd: float = 0.0,
+) -> tuple[tuple[float, float], tuple[float, float], float] | None:
+    """``(start, end, heading)`` of a rake that sweeps a part off ``wall``, or None.
+
+    The closed tips land behind the part, on the wall side, ``RAKE_START_GAP_M`` off its
+    footprint, with their hull clear of every wall at its top (``rake_footprint``) and
+    their tips clear of every footprint in ``blocked``, and sweep along ``heading`` through
+    the part's centre to ``length`` past it, away from the wall. The straight sweep runs
+    along the wall's normal; with no room behind the part the sweep swings off it
+    (``RAKE_SWINGS_RAD``), and of the sweeps that fit the one that ends farthest from every
+    wall wins. With no room on any swing, the tips wedge in: they land on the
+    straight line at the wall face, on the part's wall-side edge. Their hull then rests on
+    the wall top, and the sweep comes down onto the part on its way off the wall: driven on
+    2026-09-23, that moved a flush 1x3 slope 5 and 8 mm in two rakes, and freed a 1x2 slope
+    lying at 30 degrees, which then stowed. The end is pulled back until the hull clears
+    every wall, and both ends stay in reach.
+
+    ``crowd`` > 0 (the heap loop's ``--rake_crowd``) is the last resort after those: when
+    every start is refused by a neighbour alone, the start whose tips land least deep into a
+    neighbour, at most ``crowd`` deep, wins; the tips then come down on that neighbour's edge
+    and shove it aside, as a closing stroke sweeps one. 0 keeps every start clear.
+    """
+    cx = sum(x for x, _ in wall.footprint) / len(wall.footprint)
+    cy = sum(y for _, y in wall.footprint) / len(wall.footprint)
+    nx, ny = -math.sin(wall.heading), math.cos(wall.heading)
+    if (part_xy[0] - cx) * nx + (part_xy[1] - cy) * ny < 0.0:
+        nx, ny = -nx, -ny
+    normal = math.atan2(ny, nx)
+    found = []
+    crowded = []  # (depth into the deepest neighbour, start, end, heading)
+    for swing in RAKE_SWINGS_RAD:
+        heading = normal + swing
+        c, s = math.cos(heading), math.sin(heading)
+        start = None
+        for k in range(1, 61):  # back off from the centre, 1 mm at a time
+            point = (part_xy[0] - 0.001 * k * c, part_xy[1] - 0.001 * k * s)
+            if polygon_distance(rake_footprint(point), part_print) >= RAKE_START_GAP_M:
+                start = point
+                break
+        if start is None or clamp_to_reach(start) != start or not _clear_of_walls(start, walls):
+            continue
+        depth = _neighbour_depth(start, blocked)
+        end = _rake_end(part_xy, heading, length, walls) if depth <= crowd else None
+        if end is None:
+            continue
+        if depth > 0.0:
+            crowded.append((depth, start, end, heading))
+        else:
+            found.append((start, end, heading))
+    if found:
+        # The swing that leaves the part farthest from every wall, the straight one at a tie:
+        # a swing toward a corner only hands the part to the next wall.
+        return max(found, key=lambda f: min(wall_distance(f[1], w) for w in walls))
+    c, s = math.cos(normal), math.sin(normal)
+    start = None
+    for k in range(-10, 61):  # from 10 mm inside the centre toward the wall
+        point = (part_xy[0] - 0.001 * k * c, part_xy[1] - 0.001 * k * s)
+        tips = rake_footprint(point)
+        if any(polygon_distance(tips, list(w.footprint)) < RAKE_WEDGE_GAP_M for w in walls):
+            break
+        start = point
+    wedge = None
+    if start is not None and clamp_to_reach(start) == start:
+        depth = _neighbour_depth(start, blocked)
+        end = _rake_end(part_xy, normal, length, walls) if depth <= crowd else None
+        if end is not None:
+            if depth == 0.0:
+                return start, end, normal
+            wedge = (depth, start, end, normal)
+    if wedge is not None:
+        crowded.append(wedge)
+    if crowded:
+        _, start, end, heading = min(crowded, key=lambda c: c[0])
+        return start, end, heading
+    return None
+
+
+def _neighbour_depth(point: tuple[float, float], blocked) -> float:
+    """How deep (m) the closed tips at ``point`` land into the deepest neighbour, 0 if clear."""
+    tips = rake_footprint(point)
+    return max([0.0] + [-polygon_distance(tips, b) for b in blocked])
+
+
+def _rake_end(
+    part_xy: tuple[float, float], heading: float, length: float, walls: Sequence[Wall]
+) -> tuple[float, float] | None:
+    """``length`` past the part's centre along ``heading``, pulled back until the hull clears
+    every wall, and in reach; None once that is under half of ``length``."""
+    c, s = math.cos(heading), math.sin(heading)
+    reach = length
+    while reach >= 0.5 * length:
+        point = clamp_to_reach((part_xy[0] + reach * c, part_xy[1] + reach * s))
+        if _clear_of_walls(point, walls):
+            return point
+        reach -= 0.002
+    return None

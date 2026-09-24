@@ -111,6 +111,7 @@ def test_run_stats_sums_the_heap_counters():
             "bricks_delivered": 4,
             "cycles": 5,
             "pushes": 1,
+            "rakes": 3,
             "parts_out_of_reach": 1,
         },
         {
@@ -136,6 +137,7 @@ def test_run_stats_sums_the_heap_counters():
     assert stats["parts_total"] == 10 and stats["parts_stowed"] == 9
     assert stats["parts_out_of_reach"] == 1 and stats["cycles"] == 10 and stats["pushes"] == 1
     assert stats["cycles_per_stowed"] == pytest.approx(10 / 9)
+    assert stats["rakes"] == 3
 
 
 def test_run_stats_probe_uses_the_written_count_on_a_heap_run():

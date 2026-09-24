@@ -395,14 +395,22 @@ def test_the_continuous_rig_releases_on_a_level_jaw_plane_and_lets_go():
     )
 
     lo, hi = rig.wrist_roll_limits
-    slopes, heights, wrist_steps, release_wrist = [], [], [], []
+    slopes, heights, wrist_steps, release_wrist, tool_moves = [], [], [], [], []
     for _ in range(9000):
         goal = rig.goals[0]
         target = rig.oracles[0].target_brick
-        before = float(rig.q_cmd[0][WRIST_ROLL_INDEX])
+        q_before = rig.q_cmd[0].clone()
+        before = float(q_before[WRIST_ROLL_INDEX])
         out = rig.step()
         if goal is not None and goal.phase is oracle.Phase.RETREAT:
             wrist_steps.append(abs(float(rig.q_cmd[0][WRIST_ROLL_INDEX]) - before))
+        turned = abs(float(rig.q_cmd[0][WRIST_ROLL_INDEX]) - before) > 0.01
+        if (
+            goal is not None
+            and goal.phase in (oracle.Phase.EXTEND, oracle.Phase.RETREAT)
+            and turned
+        ):
+            tool_moves.append(float((rig.ik.fk(rig.q_cmd[0])[0] - rig.ik.fk(q_before)[0]).norm()))
         if goal is not None and goal.phase is oracle.Phase.RELEASE:
             release_wrist.append(float(rig.q_cmd[0][WRIST_ROLL_INDEX]))
             axis = d.xpos[left] - d.xpos[right]
@@ -422,6 +430,8 @@ def test_the_continuous_rig_releases_on_a_level_jaw_plane_and_lets_go():
     assert min(release_wrist) >= lo + LEVEL_ROLL_MARGIN_RAD - 1e-9, (min(release_wrist), lo)
     assert max(release_wrist) <= hi - LEVEL_ROLL_MARGIN_RAD + 1e-9, (max(release_wrist), hi)
     assert wrist_steps and max(wrist_steps) <= ROLL_MAX_STEP_RAD, max(wrist_steps)
+    # The roll rides the carry: the tool never stands still over the bin while the wrist turns.
+    assert tool_moves and min(tool_moves) > 1e-4, min(tool_moves)
 
 
 def test_the_row_and_marker_name_the_next_part_from_the_frame_release_ends():

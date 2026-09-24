@@ -10,14 +10,16 @@ The mdp modules re-export them so the Isaac cfgs are unchanged.
 and ``env.stow_half_extents`` (MuJoCo heap mode, MS6). Both are read with ``getattr(env, name,
 None)``, so a backend without them keeps grading by color, as before. ``destination_bins``
 grades against the one heap bin (``layout.heap_bin_center``), not the six-brick per-color
-array; ``HeapOracle._stowed`` in ``core/heap_oracle.py`` reads the same function.
+array; ``HeapOracle._stowed`` in ``core/heap_oracle.py`` reads the same function. A (N, K)
+``destination_bins`` is one box per part among the MS7a desk boxes, read from
+``env.desk_box_poses`` (``env_desk_boxes``).
 """
 
 from functools import cache
 
 import torch
 
-from maker_arm_lab.core import checker, layout
+from maker_arm_lab.core import checker, desk_boxes, layout
 
 
 def brick_color_ids(num_bricks: int) -> torch.Tensor:
@@ -104,6 +106,31 @@ def _brick_states(env) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.stack(pos, dim=1), torch.stack(vel, dim=1)
 
 
+def env_desk_boxes(env, device: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """(N,M,4) grader boxes (x, y, centre z, yaw) and their (3,) half extents, from
+    ``env.desk_box_poses`` (N,M,3) and ``desk_boxes.stow_region``."""
+    poses = torch.as_tensor(env.desk_box_poses, dtype=torch.float32)
+    z, half = desk_boxes.stow_region(poses.shape[1])
+    boxes = torch.cat((poses[..., :2], torch.full_like(poses[..., :1], z), poses[..., 2:]), -1)
+    return boxes.to(device), torch.tensor(half).to(device)
+
+
+def parts_in_desk_boxes(env) -> torch.Tensor:
+    """(N,K) bool: the part lies inside a desk box, any box, moving or not."""
+    pos, _ = _brick_states(env)
+    boxes, half = env_desk_boxes(env, str(env.device))
+    return checker.in_boxes(pos, boxes, half).any(dim=-1)
+
+
+def parts_resting_box(env, max_speed: float = 0.02) -> torch.Tensor:
+    """(N,K) long: the desk box each part lies at rest in, its own or not, or -1."""
+    pos, vel = _brick_states(env)
+    boxes, half = env_desk_boxes(env, str(env.device))
+    inside = checker.in_boxes(pos, boxes, half) & (vel.norm(dim=-1) <= max_speed).unsqueeze(-1)
+    index = inside.long().argmax(dim=-1)
+    return torch.where(inside.any(dim=-1), index, torch.full_like(index, -1))
+
+
 def per_brick_stowed(env, max_speed: float = 0.02) -> torch.Tensor:
     """(N,B) bool: which bricks are at rest inside their target bin right now.
 
@@ -114,11 +141,16 @@ def per_brick_stowed(env, max_speed: float = 0.02) -> torch.Tensor:
     (MuJoCo heap mode, MS6), the one heap bin (``layout.heap_bin_center``, the MS6 z-centre
     fix) for every part of the env. ``stow_half_extents`` (3,) on the env replaces the bin
     interior half extents; the heap's box is taller than the rim so a pile over it still
-    counts (design H6).
+    counts (design H6). A (N, K) ``destination_bins`` grades part b of env i against its own
+    desk box ``destination_bins[i, b]``, in that box's yawed frame (MS7a design, desk boxes).
     """
     pos, vel = _brick_states(env)
     device = str(env.device)
     destination = getattr(env, "destination_bins", None)
+    if destination is not None and torch.as_tensor(destination).dim() == 2:
+        boxes, half = env_desk_boxes(env, device)
+        ids = torch.as_tensor(destination).to(device)
+        return checker.parts_at_rest_in_own_boxes(pos, vel, boxes, half, ids, max_speed)
     if destination is None:
         centers = env_bin_centers(env, device)
         ids = _brick_color_ids_cached(env.cfg.num_bricks, device)

@@ -104,6 +104,9 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         episode_draws=args.episode_draws,
         frame_jitter=args.frame_jitter,
         gripper_mode=args.gripper,
+        desk_boxes=args.desk_boxes,
+        tray=args.tray,
+        tray_lean_deg=args.tray_lean,
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)
@@ -115,11 +118,14 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
             return HeapOracle(
                 layout_i,
                 env.parts,
-                int(env.destination_bins[i]),
+                env.destination_bins[i],
                 episode_draw,
                 induction=induction,
                 rng=rig_rng,
                 cycle_budget=args.cycle_budget,
+                boxes=env.desk_box_poses[i],
+                tray=env.tray,
+                tray_lean_deg=env.tray_lean_deg,
             )
 
     rig = OracleRig(

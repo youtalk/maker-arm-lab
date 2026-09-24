@@ -28,8 +28,28 @@ teacher's REOPEN refresh; ``squeeze_floor`` caps a closing gap command at the te
 set point (``floored_gap``) and ``close_gate`` holds the jaws at the landing gap while the
 pick point is still descending onto the target (``gated_gap``), two serving-side gripper
 levers applied in that order, gate first; ``square_wrist`` turns the wrist roll command toward
-the served row's closing axis on the final approach (``squared_roll``). The payload's
-``inference`` block records all six.
+the served row's closing axis on the final approach (``squared_roll``). A seventh,
+``scripted_place`` (MS7a design, the fallback), hands the cycle to the teacher once the policy
+holds a part ``SCRIPTED_PLACE_RISE`` above where it lay: the rig resumes at LIFT and carries
+the part to its own box (``OracleRig.resume`` with ``start_z``). An eighth, ``scripted_rake``
+(MS7a tray), runs the teacher's rake when the selector finds no target but plans a rake off a
+tray wall, as the oracle driver always does, and hands the env back to the policy: the policy
+never learned to rake, so without it a read ends at the first wall-stuck state. A ninth,
+``part_failures`` (MS7a), books a failed cycle against its target part instead of the part's
+5 cm cell (``HeapOracle.failure_scope``): a policy that fails a third of its picks closed
+every cell of the 13 x 20 cm tray before its cycle budget, and the episode ended
+``no_candidate`` with parts in reach. A tenth, ``pick_snap`` (MS7a), moves the commanded pick
+point onto the served row on the final approach: its xy toward the row centre and, with the
+jaws open over the part, its height down to the teacher's grasp height (``snap_shift``), the
+jaws held at the landing gap while it comes down (``snap_hold``). An eleventh,
+``dwell_close`` (MS7a), commands the teacher's close when the policy waits at grasp height
+with the jaws open for ``DWELL_STEPS`` (``dwell_count``). A twelfth, ``adopt_held``
+(MS7a), serves the box and marker of a lifted part that is not the target, as the teacher
+does when its LIFT comes up with another part (``HeapOracle.adopt_held_part``). Two rake
+settings follow (MS7a rake prototype, 2026-09-24): ``rake_cap`` N lets the selector rake one
+part N times instead of ``RAKE_PART_CAP`` and scales the episode's rake cap with it, and
+``rake_crowd`` lets a rake start land its tips up to ``grasp.RAKE_CROWD_M`` into a neighbour
+when no start is clear. The payload's ``inference`` block records all fourteen.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
@@ -51,17 +71,31 @@ from dataclasses import dataclass, field
 
 import torch
 
-from maker_arm_lab.core import grasp, layout, oracle
+from maker_arm_lab.core import desk_boxes, grasp, layout, oracle
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.dagger_loop import DECLINE_COOLDOWN, trigger_reason
 from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _nearest_brick_cm
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
 from maker_arm_lab.core.global_ik import fold_to_half_turn
-from maker_arm_lab.core.heap_oracle import CANDIDATE_MAX_Z, target_context
-from maker_arm_lab.core.stowed import _brick_states, env_heap_bin_centers, per_brick_stowed
+from maker_arm_lab.core.heap_oracle import (
+    CANDIDATE_MAX_Z,
+    MAX_RAKES,
+    RAKE_PART_CAP,
+    target_context,
+)
+from maker_arm_lab.core.parts import PART_CLASSES, part_class
+from maker_arm_lab.core.stowed import (
+    _brick_states,
+    env_heap_bin_centers,
+    parts_in_desk_boxes,
+    parts_resting_box,
+    per_brick_stowed,
+)
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_REGEX,
+    GRIPPER_OPEN_POS,
     JAW_AXIS_BODY,
+    PICK_OFFSET_MEASURED,
     TOOL_BODY,
     WRIST_ROLL_INDEX,
 )
@@ -86,6 +120,9 @@ points, while one fixed threshold cannot: across the catalog the landings span 1
 47.8 mm and the closes 1.8 to 33.8 mm. An env with no cycle has no w. Half the full gap
 keeps a fully open coast reading open and a zero command reading closed. Triggers and
 duty-cycle stats read the threshold; the metric never does."""
+SCRIPTED_PLACE_RISE = oracle.LIFT_MIN_RISE
+"""m: ``scripted_place`` hands the cycle over once a held part rose this far above where it lay
+when the cycle opened: the first hold plus a 5 cm lift (MS7a design, the fallback)."""
 HALF_BUDGET_NO_LIFT = "half_budget_no_lift"
 """The heap trigger of phase B design 5.5: the cycle is at half its step budget with no lift.
 No lift means the jaws hold nothing, or hold a part that has not risen ``oracle.LIFT_MIN_RISE``
@@ -118,6 +155,10 @@ held_no_lift cycles followed a stow and their first close was a median 13 cm fro
 at the bin."""
 SELECT_OPEN_FRACTION = 0.8
 """The measured jaw opening fraction that reads as the retreat's full gap."""
+DESK_REST_MAX_Z = desk_boxes.DESK_BOX_RELEASE_Z - oracle.LIFT_MIN_RISE
+"""m: with desk boxes, the highest a part off every box may lie to count as knocked out of
+reach, a lift's rise under the release. A teacher-driven policy's cycle ended out_of_reach at
+its own release, the part in the opening jaws at z 0.098 m over its box (2026-09-23)."""
 FRAME_EVERY = 10
 """Steps between two frames ``rollout``'s ``on_frame`` dump receives."""
 SELECT_WAIT_FRACTION = 0.375
@@ -126,13 +167,16 @@ anyway: 300 steps at the 800-step budget, and the teacher's RETREAT converges in
 its 300 steps. A fraction, so a test that shrinks the budget shrinks the wait with it."""
 
 
-def select_ready(pick_point, open_fraction: float, waited: int) -> bool:
+def select_ready(
+    pick_point, open_fraction: float, waited: int, retreat=oracle.RETREAT_POINT
+) -> bool:
     """May the loop hand the policy its next target now? Pure. ``pick_point`` is the rig's
     (3,) pick point, ``open_fraction`` the measured jaw opening in [0, 1], ``waited`` the steps
-    since the last cycle closed."""
+    since the last cycle closed, ``retreat`` the selector's retreat point (desk boxes have
+    their own, ``desk_boxes.DESK_BOX_RETREAT_POINT``)."""
     if waited >= int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET):
         return True
-    near = float((torch.as_tensor(pick_point) - torch.tensor(oracle.RETREAT_POINT)).norm())
+    near = float((torch.as_tensor(pick_point) - torch.tensor(retreat)).norm())
     return near <= SELECT_RETREAT_RADIUS and open_fraction >= SELECT_OPEN_FRACTION
 
 
@@ -390,6 +434,156 @@ def squared_roll(ik, q, row, pick, prev: float, limits, held: bool = False) -> f
     return roll
 
 
+SNAP_RADIUS = SQUARE_RADIUS
+"""m: ``pick_snap`` acts while the pick point is this close in xy to the row centre (and below
+the row's top plus ``SQUARE_ABOVE``), the window ``square_wrist`` uses."""
+SNAP_XY_STEP = 0.003
+"""m: the most ``pick_snap`` moves the served pick point in xy in one control step."""
+SNAP_Z_RADIUS = 0.010
+"""m: ``pick_snap`` lowers the pick point only while it is this close in xy to the row centre."""
+SNAP_Z_STEP = 0.002
+"""m: the most ``pick_snap`` lowers the served pick point in one control step."""
+SNAP_Z_MARGIN = GATE_MARGIN
+"""m: ``pick_snap`` lowers a commanded pick point to the row centre plus this, never further.
+
+The teacher's DESCEND commands the pick point to the part centre (``EnvOracle.descend_goal``,
+``DESCEND_CLEARANCE_MEASURED`` 0), and the rung 1 corpus closes a median 0.2 mm under the row
+centre. The forensics of 2026-09-23 (arm B, screen draw 0 of seed 20261700): stows close a
+median 0 to 5 mm above the centre; the collapsed episodes of the 350k checkpoint command the
+pick point 15 to 25 mm above it, over a part whose top is 4 to 8 mm above it, and close on
+air there. The margin is ``close_gate``'s, the stows' upper quartile on run m."""
+SNAP_Z_TOL = 0.001
+"""m: ``snap_hold`` lets the jaws go once the served pick point is this close to its floor."""
+
+
+def snap_shift(cmd, pick, row, shift, jaw_gap: float, held: bool = False) -> tuple:
+    """``pick_snap``: the offset (m, world x y z) the loop adds to the commanded pick point. Pure.
+
+    ``cmd`` is the commanded pick point (FK of the served arm command plus the pick offset),
+    ``pick`` the measured one, ``row`` the served target row (``target_context``), ``shift``
+    the offset served on the step before, ``jaw_gap`` the measured gap between the jaws and
+    ``held`` the stop flag ``square_wrist`` reads (the cycle has held a part or lifted one).
+    The offset is zero with no live row (width 0), after the stop flag, and while the pick
+    point is more than ``SNAP_RADIUS`` from the row centre in xy or ``SQUARE_ABOVE`` above its
+    top. Inside that window:
+
+    * xy: the served point moves toward the row centre by at most ``SNAP_XY_STEP``. The
+      forensics of 2026-09-23 (arm B 100k): the teacher closes on the row centre, the policy
+      a median 9 mm and a p90 45 mm off it on a cycle that follows a stow, and 1 to 3 cm off
+      closes stow one cycle in three.
+    * z: while the pick point is within ``SNAP_Z_RADIUS`` of the row centre and the jaws are
+      open wider than the row's width, the offset goes down by at most ``SNAP_Z_STEP`` a step.
+      It never takes the served point under ``row z + SNAP_Z_MARGIN`` (a command already under
+      that height is left alone) and is kept, not grown, while the jaws are closed, so closed
+      tips are never driven into the part or the pile.
+    """
+    if held or float(row[5]) <= 0.0:
+        return (0.0, 0.0, 0.0)
+    near = math.hypot(float(pick[0]) - float(row[0]), float(pick[1]) - float(row[1]))
+    top = float(row[2]) + float(row[6])
+    if near > SNAP_RADIUS or float(pick[2]) >= top + SQUARE_ABOVE:
+        return (0.0, 0.0, 0.0)
+    dx, dy, dz = (float(v) for v in shift)
+    ex = float(row[0]) - float(cmd[0]) - dx
+    ey = float(row[1]) - float(cmd[1]) - dy
+    n = math.hypot(ex, ey)
+    if n > SNAP_XY_STEP:
+        ex, ey = ex * SNAP_XY_STEP / n, ey * SNAP_XY_STEP / n
+    if near <= SNAP_Z_RADIUS and jaw_gap >= float(row[5]):
+        dz -= SNAP_Z_STEP
+    floor = min(0.0, float(row[2]) + SNAP_Z_MARGIN - float(cmd[2]))
+    return (dx + ex, dy + ey, min(0.0, max(dz, floor)))
+
+
+def snap_hold(cmd, pick, row, shift, descending: bool, held: bool = False) -> bool:
+    """``pick_snap``: hold the jaws at the landing gap now? Pure.
+
+    ``cmd``, ``pick``, ``row`` and ``held`` as in ``snap_shift``, ``shift`` the offset
+    ``snap_shift`` returned for this step and ``descending`` whether the measured pick point
+    came down ``GATE_DESCENT`` over the last ``GATE_WINDOW`` steps. True inside the lowering
+    window (``SNAP_Z_RADIUS`` of the row centre, under the row's top plus ``SQUARE_ABOVE``,
+    before the stop flag) while the policy's own command hovers above the floor (row centre
+    plus ``SNAP_Z_MARGIN``) and the lowering is not done: the served point is still more than
+    ``SNAP_Z_TOL`` above the floor, or it is there and the arm is still coming down after it
+    and above it. A pick point that stops short (a neighbour under the tips) lets go at once,
+    so the hold never outlasts the descent.
+
+    The hover of the 350k checkpoint closes on air 15 to 25 mm above the part centre, and
+    holding the jaws open there alone turned each close_miss into a no_close (40 of 44
+    cycles, 2026-09-23): the policy commands the close it believes is at grasp height. So
+    the jaws stay open only while ``snap_shift`` brings the point down, and the policy's own
+    close then acts at the grasp height.
+    """
+    if held or float(row[5]) <= 0.0:
+        return False
+    near = math.hypot(float(pick[0]) - float(row[0]), float(pick[1]) - float(row[1]))
+    top = float(row[2]) + float(row[6])
+    if near > SNAP_Z_RADIUS or float(pick[2]) >= top + SQUARE_ABOVE:
+        return False
+    floor = float(row[2]) + SNAP_Z_MARGIN
+    if float(cmd[2]) <= floor:
+        return False
+    if float(cmd[2]) + float(shift[2]) > floor + SNAP_Z_TOL:
+        return True
+    return descending and float(pick[2]) > floor + SNAP_Z_TOL
+
+
+DWELL_STEPS = 150
+"""Control steps the pick point may wait at grasp height with the jaws open before
+``dwell_close`` closes them. The rung 2 arm B 300k traces of 2026-09-24 (draws 1 and 3 of
+seed 20261700, ``--pick_snap``): a stowed cycle spends a median 38 steps there before its own
+close (p95 134); every no_close cycle sits there 400 to 800 steps with its own command at the
+grasp pose and its gap command at the landing gap, and the 800-step budget ends it."""
+DWELL_Z_TOL = 0.003
+"""m: ``dwell_count``'s grasp height: the ``pick_snap`` floor (row centre plus
+``SNAP_Z_MARGIN``) plus this."""
+CLOSE_LATCH_STEPS = 150
+"""Control steps ``dwell_close`` keeps the close command at most, unless the policy's own gap
+command closes first."""
+
+
+def dwell_count(count: int, pick, row, jaw_gap: float, gap_cmd: float, held: bool = False) -> int:
+    """``dwell_close``: consecutive steps the arm has waited at grasp height with open jaws. Pure.
+
+    ``pick`` is the measured pick point, ``row`` the served target row, ``jaw_gap`` the
+    measured gap between the jaws, ``gap_cmd`` the gap command about to be served and
+    ``held`` the stop flag of ``square_wrist``. The count grows while the pick point is within
+    ``SNAP_Z_RADIUS`` of the row centre in xy and at most ``DWELL_Z_TOL`` above the
+    ``pick_snap`` floor, and the jaws are open and commanded open wider than the row's width;
+    any other step resets it, and so do the stop flag and a missing row.
+    """
+    if held or float(row[5]) <= 0.0:
+        return 0
+    near = math.hypot(float(pick[0]) - float(row[0]), float(pick[1]) - float(row[1]))
+    at = (
+        near <= SNAP_Z_RADIUS
+        and float(pick[2]) <= float(row[2]) + SNAP_Z_MARGIN + DWELL_Z_TOL
+        and jaw_gap >= float(row[5])
+        and gap_cmd >= float(row[5])
+    )
+    return count + 1 if at else 0
+
+
+def commanded_pick(ik, q) -> torch.Tensor:
+    """The pick point of the arm command ``q`` (6,): FK plus the measured pick offset."""
+    pos, rot = ik.fk(torch.as_tensor(q, dtype=torch.float64))
+    return pos + rot @ torch.tensor(PICK_OFFSET_MEASURED, dtype=torch.float64)
+
+
+def snapped_arm(ik, q, shift):
+    """The arm command ``q`` (6,) with its pick point moved by ``shift`` at the same tilt, jaw
+    heading and lean (the pick offset is rigid in the tool frame), or None with no IK
+    solution."""
+    from maker_arm_lab.core.global_ik import GraspTarget
+
+    q = torch.as_tensor(q, dtype=torch.float64)
+    pose = ik.pose_of(q)
+    position = tuple(float(p) + float(d) for p, d in zip(pose.position, shift))
+    target = GraspTarget(position, pose.tilt, pose.jaw_heading, pose.lean_azimuth)
+    sol = ik.solve(target, seed=q, restarts=0)
+    return None if sol is None else sol.q
+
+
 def failure_reason(
     held_no_rise: int, min_no_rise: int | None, lifted: bool, steps_in_cycle: int
 ) -> str | None:
@@ -487,6 +681,13 @@ class Cycle:
     floored_steps: int = 0  # steps ``squeeze_floor`` changed the gap command
     gated_steps: int = 0  # steps ``close_gate`` changed the gap command
     squared_steps: int = 0  # steps ``square_wrist`` changed the roll command
+    snap: tuple = (0.0, 0.0, 0.0)  # m, the pick point offset ``pick_snap`` served last step
+    snapped_steps: int = 0  # steps ``pick_snap`` changed the arm command
+    snap_held_steps: int = 0  # steps ``pick_snap`` held the jaws at the landing gap
+    dwell: int = 0  # consecutive steps at grasp height with open jaws (``dwell_count``)
+    latched: int = 0  # ``dwell_close``: 0 not fired, > 0 steps the close has run, -1 spent
+    dwell_closes: int = 0  # times ``dwell_close`` fired in the cycle (at most one)
+    adopted: int = -1  # the lifted non-target part ``adopt_held`` served the box of, else -1
     grace_steps: int = 0  # steps ``budget_ends_cycle``'s carry grace kept the cycle open
 
 
@@ -508,6 +709,10 @@ class EnvState:
     done_reason: str | None = None
     idle_since: int | None = None  # the step the last cycle closed at, None before the first
     select_wait_steps: int = 0  # steps spent waiting for the retreat before a selection
+    rakes: int = 0  # MS7a tray: rakes the oracle driver ran between cycles
+    # Parts not in a box when the episode ended, (part, x, y, z, rakes, failed cycles): the
+    # read of what the episode left behind, at a wall or elsewhere.
+    left: list = field(default_factory=list)
     preselected: tuple | None = None  # the rig's RELEASE pre-selection a takeover handed back
 
 
@@ -658,6 +863,10 @@ CENSUS_EXPORT = (
     "floored_steps",
     "gated_steps",
     "squared_steps",
+    "snapped_steps",
+    "snap_held_steps",
+    "dwell_closes",
+    "adopted",
     "grace_steps",
 )
 """The ``Cycle`` fields each episode's ``cycle_census`` row exports, plus the two is_target
@@ -672,7 +881,9 @@ def cycle_class(cycle: Cycle, reason: str) -> str:
     ``held_no_lift``: a part was held and never rose ``oracle.LIFT_MIN_RISE``. ``carrying``: a
     lifted part was still between the jaws when the cycle ended. ``lifted_lost``: a lifted part
     left the jaws and did not come to rest in the bin. Pure. The grader's ``reason`` stays the
-    outcome, and the class only says how far the cycle got."""
+    outcome, and the class only says how far the cycle got. With desk boxes a ``lifted_lost``
+    cycle becomes ``wrong_box`` at the episode's end when its part rests in another class's box
+    (``box_census``): the part is still falling when a release ends the cycle."""
     if reason == "stowed":
         return "stowed"
     if cycle.held_steps < CENSUS_MIN_HELD_STEPS:
@@ -684,16 +895,73 @@ def cycle_class(cycle: Cycle, reason: str) -> str:
     return "carrying" if cycle.holding else "lifted_lost"
 
 
-def resting_out_of_reach(pos, speed: float, held: bool, bl, stow_half_xy) -> bool:
+def box_census(
+    parts,
+    destination,
+    stowed,
+    resting_box,
+    classes: list[str],
+    census: list[dict],
+    num_boxes: int,
+) -> dict:
+    """The desk-box rows of one episode's end (MS7a design, the census). Pure.
+
+    ``destination`` is each part's own box, ``stowed`` the grader's final mask (at rest in its
+    own box) and ``resting_box`` the box each part rests in at the end, or -1. A part at rest in
+    a box that is not its own is a wrong-box part, and the last ``lifted_lost`` cycle that held
+    it becomes ``wrong_box`` in ``classes``, in place (``census`` rows hold ``last_held``).
+    Returns the rows: parts stowed and parts in total per class and per box, and the wrong-box
+    parts.
+    """
+    wrong = [
+        b
+        for b in range(len(parts))
+        if int(resting_box[b]) >= 0 and int(resting_box[b]) != int(destination[b])
+    ]
+    for b in wrong:
+        for j in reversed(range(len(classes))):
+            if classes[j] == "lifted_lost" and census[j].get("last_held") == b:
+                classes[j] = "wrong_box"
+                break
+    by_class = {c: {"stowed": 0, "total": 0} for c in PART_CLASSES}
+    by_box = [{"stowed": 0, "total": 0} for _ in range(num_boxes)]
+    for b, part in enumerate(parts):
+        for row in (by_class[part_class(part)], by_box[int(destination[b])]):
+            row["total"] += 1
+            row["stowed"] += int(bool(stowed[b]))
+    return {"stowed_by_class": by_class, "stowed_by_box": by_box, "wrong_box_parts": len(wrong)}
+
+
+def resting_out_of_reach(pos, speed: float, held: bool, bl, stow_half_xy, in_box=None) -> bool:
     """A part knocked out of reach: at rest (the grader's speed rule), not between the jaws,
     down on the desk or heap (the selector's ``CANDIDATE_MAX_Z``), outside ``layout.in_reach``
-    and outside the destination bin's footprint. A slow or paused carry is none of these."""
+    and outside the destination bin's footprint. A slow or paused carry is none of these.
+
+    With desk boxes ``in_box`` says whether the part lies in any box. A part at rest in its own
+    box is stowed before this is asked (``cycle_end``), so one in a box here is in another
+    box: out of play, like a part out of reach (the class branch names it ``wrong_box``). Off
+    the boxes the part must also lie under DESK_REST_MAX_Z: a desk box's release is at
+    ``CANDIDATE_MAX_Z``'s own height, where a part the opening jaws hold under the force floor
+    and still read as at rest, out of reach beside the box."""
     x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
     if held or speed > AT_REST_SPEED or z > CANDIDATE_MAX_Z:
         return False
+    if in_box is not None:
+        return bool(in_box) or (z <= DESK_REST_MAX_Z and not layout.in_reach(x, y, bl))
     cx, cy, _ = layout.heap_bin_center(bl)
     in_bin = abs(x - cx) <= float(stow_half_xy[0]) and abs(y - cy) <= float(stow_half_xy[1])
     return not in_bin and not layout.in_reach(x, y, bl)
+
+
+def _left_parts(selector, pos: torch.Tensor, in_bin: torch.Tensor) -> list:
+    """(part, x, y, z, rakes, failed cycles) of every part not in a box, rounded to 0.1 mm."""
+    failures = getattr(selector, "failures", {})
+    raked = getattr(selector, "raked", {})
+    return [
+        [b, *(round(float(v), 4) for v in pos[b].tolist()), raked.get(b, 0), failures.get(b, 0)]
+        for b in range(pos.shape[0])
+        if not bool(in_bin[b])
+    ]
 
 
 def _close_cycle(st: EnvState, reason: str, stowed: list[int], step: int, scene) -> None:
@@ -729,15 +997,23 @@ def rollout(
     squeeze_floor: bool = False,
     close_gate: bool = False,
     square_wrist: bool = False,
+    scripted_place: bool = False,
+    scripted_rake: bool = False,
+    part_failures: bool = False,
+    pick_snap: bool = False,
+    dwell_close: bool = False,
+    adopt_held: bool = False,
+    rake_cap: int = 0,
+    rake_crowd: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
     ``policy`` is a ``policy_client.ServerPolicy`` or None for the oracle driver.
     ``takeover`` is a ``TakeoverConfig`` (the DAgger mode, phase B design 5.5) or None.
-    The six switches are the module docstring's; ``replan_on_switch`` needs a policy whose
+    The fourteen settings are the module docstring's; ``replan_on_switch`` needs a policy whose
     ``step`` takes ``replan``, and the flag is left off the wire when the switch is off;
-    ``squeeze_floor``, ``close_gate`` and ``square_wrist`` need the continuous gripper and a
-    served target row.
+    ``squeeze_floor``, ``close_gate``, ``square_wrist`` and ``pick_snap`` need the continuous
+    gripper and a served target row.
     ``on_frame(ordinal, step_in_cycle, wrist, overhead)`` is called with env 0's two policy
     frames every ``FRAME_EVERY`` steps of each of its cycles, for a forensics dump.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
@@ -770,11 +1046,26 @@ def rollout(
             )
     if takeover is not None and policy is None:
         raise EvalFailure("takeover", "the takeover triggers need a policy to take over from")
+    if scripted_place and policy is None:
+        raise EvalFailure("scripted_place", "the scripted place takes over from a policy")
+    if scripted_rake and policy is None:
+        raise EvalFailure("scripted_rake", "the scripted rake serves a policy; the driver rakes")
     ctx_target = getattr(env, "context_target", None)
+    # MS7a desk boxes: one destination box per part, and the served box part follows the target.
+    per_part = torch.as_tensor(env.destination_bins).dim() == 2
+    if per_part:
+        # The loop runs one episode per env: its truth, before an env's own end resets it.
+        destination = torch.as_tensor(env.destination_bins).clone().to("cpu")
+        class_to_box = [dict(zip(PART_CLASSES, map(int, row))) for row in env.class_to_box]
+        final_box = torch.full((num_envs, k), -1, dtype=torch.long)
+    if adopt_held and not per_part:
+        raise EvalFailure("adopt_held", "needs desk boxes: a part's own box is the one it adopts")
     for name, on in (
         ("squeeze_floor", squeeze_floor),
         ("close_gate", close_gate),
         ("square_wrist", square_wrist),
+        ("pick_snap", pick_snap),
+        ("dwell_close", dwell_close),
     ):
         if on and (gripper_mode != "continuous" or ctx_target is None):
             raise EvalFailure(name, "needs the continuous gripper and a served target row")
@@ -790,6 +1081,15 @@ def rollout(
     # pre-selection at hand-back (``_select``). Phase B design 5.2 pinned the loop's target on
     # those frames; campaign n (2026-09-22) reverses it.
     states = [EnvState(selector=_selector(rig, i)) for i in range(num_envs)]
+    if part_failures:
+        for st in states:
+            st.selector.failure_scope = "part"
+    for st in states:
+        if rake_cap:
+            st.selector.rake_part_cap = rake_cap
+            st.selector.max_rakes = max(MAX_RAKES, MAX_RAKES * rake_cap // RAKE_PART_CAP)
+        if rake_crowd:
+            st.selector.rake_crowd = grasp.RAKE_CROWD_M
     for st in states:
         if st.selector.cycle_budget != cycle_budget:
             raise EvalFailure(
@@ -808,6 +1108,14 @@ def rollout(
         "squeeze_floor": bool(squeeze_floor),
         "close_gate": bool(close_gate),
         "square_wrist": bool(square_wrist),
+        "scripted_place": bool(scripted_place),
+        "scripted_rake": bool(scripted_rake),
+        "part_failures": bool(part_failures),
+        "pick_snap": bool(pick_snap),
+        "dwell_close": bool(dwell_close),
+        "adopt_held": bool(adopt_held),
+        "rake_cap": int(rake_cap),
+        "rake_crowd": bool(rake_crowd),
     }
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
@@ -823,6 +1131,10 @@ def rollout(
             raise EvalFailure("wall_clock", f"exceeded {max_wall_minutes} min at step {step}")
         per_brick = per_brick_stowed(env).to("cpu")
         tracker.latch_pre_step(per_brick)
+        if per_part:
+            # Latched like the tracker's mask: the step that ends an episode also resets it.
+            live = ~tracker.done
+            final_box[live] = parts_resting_box(env).to("cpu")[live]
         in_bin = per_brick_stowed(env, max_speed=math.inf).to("cpu")
         pos, vel = _brick_states(env)
         pos, speed = pos.to("cpu"), vel.norm(dim=-1).to("cpu")
@@ -830,6 +1142,7 @@ def rollout(
         right_mag = env.scene["finger_right_brick"].data.force_matrix_w.norm(dim=-1).squeeze(1)
         held = held_brick_from_forces(left_mag, right_mag, min_force=HELD_MIN_FORCE).to("cpu")
         openings = policy_state(robot.data.joint_pos)[:, 6].to("cpu")
+        boxed = parts_in_desk_boxes(env).to("cpu") if per_part else None
         # 1. Grade and select on the envs the loop holds: episode live, rig idle.
         for i in range(num_envs):
             if bool(tracker.done[i]) or not rig.idle[i]:
@@ -844,6 +1157,7 @@ def rollout(
                     int(held[i]) == b,
                     _layout_of(rig, i),
                     env.stow_half_extents,
+                    in_box=None if boxed is None else bool(boxed[i, b]),
                 )
                 end = cycle_end(st.cycle, stowed_now, out, step, set(st.stowed_parts))
                 if select_at_release and (end is None or end[0] == "budget"):
@@ -870,17 +1184,34 @@ def rollout(
                         opening, step - st.idle_since, st.reasons[-1] in RELEASE_ENDS
                     )
                 else:
-                    ready = select_ready(rig.pick_point(i).to("cpu"), opening, step - st.idle_since)
+                    ready = select_ready(
+                        rig.pick_point(i).to("cpu"),
+                        opening,
+                        step - st.idle_since,
+                        st.selector.retreat_point,
+                    )
                 if not ready:
                     st.select_wait_steps += 1
                     continue
             scene = rig.snapshot(i)
             target = _select(st, scene)
+            rake = getattr(st.selector, "push", None)
+            raking = policy is None or scripted_rake
+            if target is None and raking and rake is not None and rake.part is not None:
+                # MS7a tray: no grasp ranks and the teacher planned a rake off a wall. The
+                # oracle driver (and a policy under ``scripted_rake``) runs it as a takeover of
+                # its own, not a cycle, and the selector books it (its per-part and per-episode
+                # caps), then selects again.
+                st.selector._end_push()
+                st.rakes += 1
+                rig.resume(i, push=rake)
+                continue
             if target is None:
                 loop_done[i] = True
                 st.done_reason = (
                     "cycle_budget" if st.selector.cycles >= cycle_budget else "no_candidate"
                 )
+                st.left = _left_parts(st.selector, pos[i], in_bin[i])
                 continue
             waited = 0 if st.idle_since is None else step - st.idle_since
             chosen = getattr(st.selector, "grasp", None)
@@ -896,6 +1227,8 @@ def rollout(
                 wait_capped=waited >= int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET),
             )
             env.target_part[i] = target
+            if per_part:
+                env.set_context_box(i, int(env.destination_bins[i, target]))
             if ctx_target is not None:
                 ctx_target[i] = target_context(scene.brick_pos[target], st.selector.grasp)
             replan[i] = True
@@ -931,6 +1264,23 @@ def rollout(
             if triggers is not None:
                 grip_open = grip_open_flags(policy_action[:, 6], gripper_mode, close_below)
                 triggers.offer(env, rig, states, tracker, grip_open, held, pos, ordinal, step)
+            if scripted_place:
+                for i, st in enumerate(states):
+                    c, h = st.cycle, int(held[i])
+                    if c is None or c.taken_over or not rig.idle[i] or bool(tracker.done[i]):
+                        continue
+                    if h >= 0 and float(pos[i, h, 2] - c.start_z[h]) >= SCRIPTED_PLACE_RISE:
+                        _take_over(
+                            rig,
+                            env,
+                            st,
+                            i,
+                            ordinal,
+                            reason="scripted_place",
+                            holding=True,
+                            start_z=c.start_z,
+                        )
+                        c.taken_over = True  # one scripted place a cycle, taken or declined
         # 3. Compose: the rig's row where it drives, the policy's where the rig is idle.
         rig_action = rig.actions().to("cpu")
         action_cpu = rig_action.clone()
@@ -940,7 +1290,7 @@ def rollout(
         if policy_action is not None:
             idle = torch.tensor(rig.idle)
             action_cpu[idle] = policy_action[idle]
-            if close_gate or squeeze_floor or square_wrist:
+            if close_gate or squeeze_floor or square_wrist or pick_snap or dwell_close:
                 for i, st in enumerate(states):
                     if st.cycle is None or not rig.idle[i] or bool(tracker.done[i]):
                         continue
@@ -964,6 +1314,27 @@ def rollout(
                         if roll != float(action_cpu[i, WRIST_ROLL_INDEX]):
                             action_cpu[i, WRIST_ROLL_INDEX] = roll
                             c.squared_steps += 1
+                    hold_open = False
+                    if pick_snap:
+                        cmd = commanded_pick(rig.ik, action_cpu[i, :6])
+                        c.snap = snap_shift(
+                            cmd,
+                            picks[i],
+                            row,
+                            c.snap,
+                            2.0 * GRIPPER_OPEN_POS * float(openings[i]),
+                            held=held_so_far,
+                        )
+                        hist = pick_z_hist[i]
+                        descending = len(hist) > GATE_WINDOW and hist[0] - hist[-1] > GATE_DESCENT
+                        hold_open = snap_hold(
+                            cmd, picks[i], row, c.snap, descending, held=held_so_far
+                        )
+                        if any(c.snap):
+                            snapped = snapped_arm(rig.ik, action_cpu[i, :6], c.snap)
+                            if snapped is not None:
+                                action_cpu[i, :6] = snapped.to(action_cpu.dtype)
+                                c.snapped_steps += 1
                     if close_gate:
                         hist = pick_z_hist[i]
                         descending = len(hist) > GATE_WINDOW and hist[0] - hist[-1] > GATE_DESCENT
@@ -978,6 +1349,32 @@ def rollout(
                         if gated != gap:
                             gap = gated
                             st.cycle.gated_steps += 1
+                    if hold_open:
+                        landing = 2.0 * (grasp.landing_half_gap(width) - grasp.JAW_HOLD_BAND)
+                        if gap < landing:
+                            gap = landing
+                            c.snap_held_steps += 1
+                    if dwell_close and c.latched > 0:
+                        # The close runs until the policy's own gap command closes or the cap.
+                        if float(policy_action[i, 6]) < width or c.latched >= CLOSE_LATCH_STEPS:
+                            c.latched = -1
+                        else:
+                            c.latched += 1
+                            gap = min(gap, grasp.close_gap(width))
+                    elif dwell_close and c.latched == 0:
+                        c.dwell = dwell_count(
+                            c.dwell,
+                            picks[i],
+                            row,
+                            2.0 * GRIPPER_OPEN_POS * float(openings[i]),
+                            gap,
+                            held=held_so_far,
+                        )
+                        if c.dwell >= DWELL_STEPS:
+                            c.latched = 1
+                            c.dwell_closes += 1
+                            gap = min(gap, grasp.close_gap(width))
+                            replan[i] = True
                     if squeeze_floor:
                         floored = floored_gap(gap, width)
                         if floored != gap:
@@ -1019,6 +1416,20 @@ def rollout(
                 close_cm=close_cm,
                 pick_z=float(pick[2]),
             )
+            if (
+                adopt_held
+                and per_part
+                and rig.idle[i]
+                and h >= 0
+                and h not in (c.target, c.adopted)
+                and float(pos[i, h, 2] - c.start_z[h]) >= oracle.LIFT_MIN_RISE
+            ):
+                # The teacher's LIFT that comes up with another part carries that part to its
+                # own box, and its marker and box row follow the part (adopt_held_part).
+                c.adopted = h
+                env.target_part[i] = h
+                env.set_context_box(i, int(destination[i, h]))
+                replan[i] = True
         arm_clamped, overshoot = clamp_arm_actions(action_cpu[:, :6], limits)
         tracker.record_clamps(overshoot)
         clamped = torch.cat([arm_clamped, action_cpu[:, 6:7]], dim=-1)
@@ -1068,6 +1479,7 @@ def rollout(
         tracker.record_step(step, dones | loop_done, truncated.cpu(), success)
         for i in torch.nonzero(newly_env).flatten().tolist():
             st = states[i]
+            st.left = _left_parts(st.selector, pos[i], in_bin[i])  # pre-step: the reset ran
             if int(env.oracle_actor[i]) > 0:
                 # A takeover the episode's end cut short: its part is in on success (the
                 # six-brick DAgger loop's rule), and its frames are already exported.
@@ -1109,6 +1521,18 @@ def rollout(
     for i, result in enumerate(tracker.results):
         st = states[i]
         final = tracker.stowed_mask(i)
+        boxes = {}
+        if per_part:
+            boxes = box_census(
+                env.parts,
+                destination[i],
+                final,
+                final_box[i],
+                st.classes,
+                st.census,
+                env.desk_boxes,
+            )
+            boxes["class_to_box"] = class_to_box[i]
         episodes.append(
             {
                 **result.to_json(),
@@ -1127,6 +1551,9 @@ def rollout(
                 "takeovers_stowed": st.takeovers_stowed,
                 "takeovers_failed": st.takeovers_failed,
                 "select_wait_steps": st.select_wait_steps,
+                "rakes": st.rakes,
+                "left_parts": st.left,
+                **boxes,
             }
         )
     steps_total = sum(e["steps"] for e in episodes)
@@ -1155,9 +1582,11 @@ def rollout(
         "cycles_total": cycles_total,
         "stowed_total": stowed_total,
         "cycles_per_stowed": (cycles_total / stowed_total) if stowed_total else None,
+        **(_sum_box_rows(episodes) if per_part else {}),
         "takeovers": sum(e["takeovers"] for e in episodes),
         "takeovers_stowed": sum(e["takeovers_stowed"] for e in episodes),
         "takeovers_failed": sum(e["takeovers_failed"] for e in episodes),
+        "rakes": sum(e["rakes"] for e in episodes),
         "triggers": {} if triggers is None else dict(triggers.counts),
         "takeovers_declined": 0 if triggers is None else triggers.declined,
         "clamp_fraction": (
@@ -1167,6 +1596,27 @@ def rollout(
         "wall_sec_per_episode": round(wall / num_envs, 1),
     }
     return payload
+
+
+def _sum_box_rows(episodes: list[dict]) -> dict:
+    """The payload's desk-box rows: every episode's class and box rows and wrong-box parts."""
+    by_class = {c: {"stowed": 0, "total": 0} for c in PART_CLASSES}
+    by_box: list[dict] = []
+    for ep in episodes:
+        for c, row in ep["stowed_by_class"].items():
+            for key in ("stowed", "total"):
+                by_class[c][key] += row[key]
+        for m, row in enumerate(ep["stowed_by_box"]):
+            if m == len(by_box):
+                by_box.append({"stowed": 0, "total": 0})
+            for key in ("stowed", "total"):
+                by_box[m][key] += row[key]
+    return {
+        "stowed_by_class": by_class,
+        "stowed_by_box": by_box,
+        "wrong_box_parts": sum(ep["wrong_box_parts"] for ep in episodes),
+        "wrong_box_cycles": sum(ep["cycle_classes"].count("wrong_box") for ep in episodes),
+    }
 
 
 def _book_census(st: EnvState, cycle: Cycle, reason: str) -> None:
@@ -1191,7 +1641,15 @@ def _close_cycle_unmarked(st: EnvState, step: int) -> None:
 
 
 def _take_over(
-    rig, env, st: EnvState, i: int, ordinal: list[int], *, reason: str, holding: bool = False
+    rig,
+    env,
+    st: EnvState,
+    i: int,
+    ordinal: list[int],
+    *,
+    reason: str,
+    holding: bool = False,
+    start_z=None,
 ) -> bool:
     """Hand env ``i`` to the rig on the loop's target; False when the rig declines.
 
@@ -1201,8 +1659,10 @@ def _take_over(
     six-brick behavior: the cycle runs on and the caller's cooldown spaces the next trigger.
     ``OracleRig.resume`` declines most of a correct carry (RULING P32: a part above
     ``LIFT_HEIGHT - LIFT_MIN_RISE``), and ending the cycle there would spend it and mark the
-    failure memory at a point in the air."""
-    if rig.resume(i, target=st.cycle.target):
+    failure memory at a point in the air. ``start_z`` is the scripted place's: the cycle's part
+    heights at its open, from which the rig's LIFT measures the held part's rise."""
+    lifted = {} if start_z is None else {"start_z": start_z}
+    if rig.resume(i, target=st.cycle.target, **lifted):
         st.cycle.taken_over = True
         ordinal[i] += 1
         st.takeovers += 1

@@ -2,6 +2,7 @@
 
 import math
 import random
+from collections import Counter
 
 import pytest
 
@@ -118,3 +119,26 @@ def test_by_name_round_trips_the_catalog_and_still_replays_a_flat_part():
     assert parts.by_name(["plate_2x4"]) == [parts.make_part("plate", 2, 4)]
     with pytest.raises(KeyError):
         parts.by_name(["brick_9x9"])
+
+
+def test_every_catalog_part_has_exactly_one_class():
+    classes = Counter(parts.part_class(p) for p in parts.catalog())
+    assert classes == {"slope": 6, "tall": 5, "narrow": 8, "wide": 10}
+    assert set(classes) == set(parts.PART_CLASSES)
+    assert parts.part_class(parts.make_part("brick", 1, 2, 5)) == "tall"
+    assert parts.part_class(parts.make_part("brick", 1, 8)) == "narrow"
+    assert parts.part_class(parts.make_part("brick", 2, 2)) == "wide"
+    assert parts.part_class(parts.make_part("slope", 2, 4)) == "slope"
+
+
+def test_every_class_holds_a_held_out_part():
+    _, heldout = parts.split(parts.catalog(), 20260915)
+    by_class = {
+        c: sorted(p.name for p in heldout if parts.part_class(p) == c) for c in parts.PART_CLASSES
+    }
+    assert by_class == {
+        "slope": ["slope_1x2", "slope_1x3"],
+        "tall": ["brick_1x2x2", "brick_1x2x5"],
+        "narrow": ["brick_1x6"],
+        "wide": ["brick_2x3", "brick_2x7"],
+    }

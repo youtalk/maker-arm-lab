@@ -87,6 +87,9 @@ class GateCfg:
     cycle_budget: int | None = None  # None: the client's default, ceil(1.3 * K)
     max_cycles_per_stowed: float | None = None  # the second gate rule, None: not applied
     gripper: str = "binary"  # MuJoCo only: the checkpoint's handshake (MS6 phase B design 5.4)
+    desk_boxes: int = 0  # MuJoCo heap only: MS7a desk boxes; 0 is the MS6 shelf bin
+    tray: bool = False  # MuJoCo heap only: the heap drops into the tray (MS7a)
+    tray_lean: float = 0.0  # MuJoCo heap only: the tray walls lean outward, degrees
     # MuJoCo only: extra flags handed to the eval client verbatim, e.g. the heap loop's
     # protocol switches. A cached payload must have run with the same switches.
     client_flags: tuple = ()
@@ -99,14 +102,29 @@ LOOP_SWITCHES = (
     "squeeze_floor",
     "close_gate",
     "square_wrist",
+    "scripted_place",
+    "scripted_rake",
+    "part_failures",
+    "pick_snap",
+    "dwell_close",
+    "adopt_held",
+    "rake_crowd",
 )
 """The heap loop's protocol switches (core.loop.rollout); the client records them in the
 payload's inference block under "loop", and the cache matches on them."""
+LOOP_SETTINGS = ("rake_cap",)
+"""The heap loop's integer settings, recorded and matched like the switches; 0 is off."""
 
 
 def loop_switches(client_flags) -> dict:
-    """Which of ``LOOP_SWITCHES`` the client flags turn on."""
-    return {name: f"--{name}" in client_flags for name in LOOP_SWITCHES}
+    """Which of ``LOOP_SWITCHES`` the client flags turn on, and each of ``LOOP_SETTINGS``'s
+    values (``--rake_cap 4`` reads 4)."""
+    flags = list(client_flags)
+    found = {name: f"--{name}" in flags for name in LOOP_SWITCHES}
+    for name in LOOP_SETTINGS:
+        key = f"--{name}"
+        found[name] = int(flags[flags.index(key) + 1]) if key in flags else 0
+    return found
 
 
 def make_eval_draws(processes: int, seed: int) -> list[EvalDraw]:
@@ -216,6 +234,25 @@ def aggregate_gate(
                 key = f"{color}->{landed}"
                 confusion[key] = confusion.get(key, 0) + 1
     lo, hi = wilson_interval(bricks_stowed, bricks_total)
+    # MS7a desk boxes: bricks_stowed counts parts at rest in their own box only (the grader),
+    # and these rows say where the rest went. Absent on every payload without desk boxes.
+    boxed = [ep for ep in episodes if "stowed_by_class" in ep]
+    box_rows = {}
+    if boxed:
+        box_rows = {
+            "stowed_by_class": {
+                c: {
+                    k: sum(ep["stowed_by_class"][c][k] for ep in boxed) for k in ("stowed", "total")
+                }
+                for c in boxed[0]["stowed_by_class"]
+            },
+            "stowed_by_box": [
+                {k: sum(ep["stowed_by_box"][m][k] for ep in boxed) for k in ("stowed", "total")}
+                for m in range(len(boxed[0]["stowed_by_box"]))
+            ],
+            "wrong_box_parts": sum(ep["wrong_box_parts"] for ep in boxed),
+            "wrong_box_cycles": sum(ep["cycle_classes"].count("wrong_box") for ep in boxed),
+        }
     return {
         "gate": {
             "threshold": threshold,
@@ -267,6 +304,7 @@ def aggregate_gate(
                 for j in range(6)
             ],
             "mean_steps": (steps_total / len(episodes)) if episodes else None,
+            **box_rows,
         },
     }
 
@@ -371,6 +409,12 @@ def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
             if cfg.cycle_budget is not None:
                 prefix += ["--cycle_budget", str(cfg.cycle_budget)]
             prefix += ["--gripper", cfg.gripper]
+            if cfg.desk_boxes:
+                prefix += ["--desk_boxes", str(cfg.desk_boxes)]
+            if cfg.tray_lean:
+                prefix += ["--tray_lean", str(cfg.tray_lean)]
+            if cfg.tray:
+                prefix.append("--tray")
         prefix += list(cfg.client_flags)
     else:
         prefix = [
@@ -448,6 +492,9 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
             and payload.get("parts_seed") == cfg.parts_seed
             and payload.get("cycle_budget") == budget
             and payload.get("gripper", "binary") == cfg.gripper
+            and payload.get("desk_boxes", 0) == cfg.desk_boxes
+            and payload.get("tray", False) == cfg.tray
+            and float(payload.get("tray_lean", 0.0)) == cfg.tray_lean
         )
     # The served inference configuration is part of what a draw measured. An open-loop read
     # (the checkpoint's own n_action_steps) must never stand in for a temporal-ensemble read.
@@ -459,7 +506,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     # them ran with every switch off.
     recorded = served.get("loop") or {}
     same_inference = same_inference and loop_switches(cfg.client_flags) == {
-        name: bool(recorded.get(name, False)) for name in LOOP_SWITCHES
+        **{name: bool(recorded.get(name, False)) for name in LOOP_SWITCHES},
+        **{name: int(recorded.get(name, 0)) for name in LOOP_SETTINGS},
     }
     return payload if same_draw and same_policy and same_task and same_inference else None
 
@@ -545,6 +593,12 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
         sum(p.get("wall_sec", 0.0) for p in ordered) / results["gate"]["episodes"]
         if results["gate"]["episodes"]
         else None
+    )
+    # MS7a design, the fallback: a pass through the scripted place is its own outcome.
+    scripted = "--scripted_place" in cfg.client_flags
+    results["gate"]["scripted_place"] = scripted
+    results["gate"]["outcome"] = (
+        ("PASS (scripted place)" if scripted else "PASS") if results["gate"]["passed"] else "FAIL"
     )
     (cfg.out_dir / "gate_results.json").write_text(json.dumps(results, indent=2))
     token = "GATE_OK" if results["gate"]["passed"] else "GATE_FAIL"
@@ -642,6 +696,75 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="MuJoCo only: forwarded to the heap client; must match the checkpoint's handshake",
     )
     parser.add_argument(
+        "--desk_boxes",
+        type=int,
+        default=0,
+        help="MuJoCo heap only: N desk boxes replace the shelf bin (MS7a); forwarded to the "
+        "heap client",
+    )
+    parser.add_argument(
+        "--tray",
+        action="store_true",
+        help="MuJoCo heap only: forwarded to the heap client, which drops the heap into the "
+        "tray (MS7a)",
+    )
+    parser.add_argument(
+        "--tray_lean",
+        type=float,
+        default=0.0,
+        help="MuJoCo heap only: forwarded to the heap client, which leans the tray walls outward "
+        "by this many degrees (0 is vertical)",
+    )
+    parser.add_argument(
+        "--scripted_place",
+        action="store_true",
+        help="MuJoCo heap only: the MS7a fallback read, forwarded to the heap client as "
+        "--scripted_place; a pass is reported as 'PASS (scripted place)'",
+    )
+    parser.add_argument(
+        "--scripted_rake",
+        action="store_true",
+        help="MuJoCo heap only: forwarded to the heap client as --scripted_rake, which runs the "
+        "teacher's rake off a tray wall where the policy's loop finds no target",
+    )
+    parser.add_argument(
+        "--part_failures",
+        action="store_true",
+        help="MuJoCo heap only: forwarded to the heap client as --part_failures, which books a "
+        "failed cycle against its part instead of its 5 cm cell",
+    )
+    parser.add_argument(
+        "--pick_snap",
+        action="store_true",
+        help="MuJoCo heap only: forwarded to the heap client as --pick_snap, which moves the "
+        "commanded pick point onto the served row on the final approach",
+    )
+    parser.add_argument(
+        "--dwell_close",
+        action="store_true",
+        help="MuJoCo heap only: forwarded to the heap client as --dwell_close, which closes the "
+        "jaws for a policy that waits at grasp height",
+    )
+    parser.add_argument(
+        "--adopt_held",
+        action="store_true",
+        help="MuJoCo heap only: forwarded to the heap client as --adopt_held, which serves the "
+        "box of a lifted part that is not the target",
+    )
+    parser.add_argument(
+        "--rake_cap",
+        type=int,
+        default=0,
+        help="MuJoCo heap only: forwarded to the heap client as --rake_cap N, which lets the "
+        "loop rake one part up to N times; 0 keeps the teacher's cap",
+    )
+    parser.add_argument(
+        "--rake_crowd",
+        action="store_true",
+        help="MuJoCo heap only: forwarded to the heap client as --rake_crowd, which lets a rake "
+        "start land the tips into a neighbour when no start is clear",
+    )
+    parser.add_argument(
         "--client_flags",
         type=str,
         default="",
@@ -655,6 +778,26 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
     if args.gripper != "binary" and (args.heap_k <= 0 or args.backend != "mujoco"):
         # Only the MuJoCo heap client drives a continuous gripper (phase B design 5.4).
         raise ValueError("--gripper continuous needs --heap_k > 0 and --backend mujoco")
+    if args.scripted_place and (args.heap_k <= 0 or args.backend != "mujoco"):
+        raise ValueError("--scripted_place needs --heap_k > 0 and --backend mujoco")
+    if args.scripted_rake and (args.heap_k <= 0 or args.backend != "mujoco"):
+        raise ValueError("--scripted_rake needs --heap_k > 0 and --backend mujoco")
+    if args.part_failures and (args.heap_k <= 0 or args.backend != "mujoco"):
+        raise ValueError("--part_failures needs --heap_k > 0 and --backend mujoco")
+    if args.pick_snap and (args.heap_k <= 0 or args.backend != "mujoco"):
+        raise ValueError("--pick_snap needs --heap_k > 0 and --backend mujoco")
+    if args.rake_cap < 0:
+        raise ValueError(f"--rake_cap must be 0 (off) or a positive cap, got {args.rake_cap}")
+    for name in ("dwell_close", "adopt_held", "rake_cap", "rake_crowd"):
+        if getattr(args, name) and (args.heap_k <= 0 or args.backend != "mujoco"):
+            raise ValueError(f"--{name} needs --heap_k > 0 and --backend mujoco")
+    if args.desk_boxes and (args.heap_k <= 0 or args.backend != "mujoco" or args.desk_boxes < 0):
+        # Only the MuJoCo heap client builds desk boxes (MS7a design, desk boxes).
+        raise ValueError("--desk_boxes needs a positive count, --heap_k > 0 and --backend mujoco")
+    if args.tray_lean and not args.tray:
+        raise ValueError("--tray_lean leans the tray's walls: it needs --tray")
+    if args.tray and args.heap_k <= 0:
+        raise ValueError("--tray needs --heap_k > 0: the tray holds a heap")
     if args.heap_k > 0:
         if args.backend != "mujoco":
             raise ValueError("--heap_k needs --backend mujoco: the Isaac env has no heap")
@@ -691,7 +834,18 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         cycle_budget=args.cycle_budget,
         max_cycles_per_stowed=args.max_cycles_per_stowed,
         gripper=args.gripper,
-        client_flags=tuple(shlex.split(args.client_flags)),
+        desk_boxes=args.desk_boxes,
+        tray=args.tray,
+        tray_lean=args.tray_lean,
+        client_flags=tuple(shlex.split(args.client_flags))
+        + (("--scripted_place",) if args.scripted_place else ())
+        + (("--scripted_rake",) if args.scripted_rake else ())
+        + (("--part_failures",) if args.part_failures else ())
+        + (("--pick_snap",) if args.pick_snap else ())
+        + (("--dwell_close",) if args.dwell_close else ())
+        + (("--adopt_held",) if args.adopt_held else ())
+        + (("--rake_cap", str(args.rake_cap)) if args.rake_cap else ())
+        + (("--rake_crowd",) if args.rake_crowd else ()),
     )
 
 

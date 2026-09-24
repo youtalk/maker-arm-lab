@@ -282,8 +282,8 @@ ROLL_MAX_STEP_RAD = math.radians(6.0)
 # A level plane has no jaw under the part. On the corpus seeds p0..p3 (K=50) it stows 180 of
 # 200 against 158 on the stood-up plane; p4..p7 read 188 of 200, binary 190. A first probe
 # that rolled level without the unroll lost RETREATs: planned from the rolled wrist, 3 to 13
-# per heap came back unplanned, and two episodes were abandoned. RETREAT now turns the wrist
-# back along the same waypoints before it plans. The margin keeps the level roll off the wrist
+# per heap came back unplanned, and two episodes were abandoned. RETREAT now plans from the
+# unrolled wrist and turns it back along the way. The margin keeps the level roll off the wrist
 # stop; 10 degrees is chosen, not swept.
 LEVEL_ROLL_MARGIN_RAD = math.radians(10.0)
 
@@ -876,6 +876,8 @@ class OracleRig:
                 # the brick sorted if it arrived; hand the env back instead of the next HOVER.
                 self._go_idle(i, brick in orc.sorted_bricks)
                 continue
+            if self._push_takeover_over(i):
+                continue
             self._enter_phase(i, scene, ending_phase=goal.phase)
 
     def _phase_result(self, i: int, goal: oracle.Goal) -> oracle.PhaseResult | None:
@@ -1168,33 +1170,38 @@ class OracleRig:
         ):
             roll = self._roll_waypoints(plan[-1])
             if roll and self.gripper_mode != "binary":
-                roll = self._paced_roll(i, plan, plan[-1], roll[-1])
+                arrival = plan[-1]
+                plan = self._spread_roll(i, plan, roll[-1] - arrival, rising=True)
                 # RETREAT turns the wrist back from where RELEASE holds to the carry's end.
-                self.unroll[i] = (roll[-1], plan[-1])
-            plan = plan + roll
+                self.unroll[i] = (plan[-1], arrival)
+            else:
+                plan = plan + roll
         elif goal.phase == oracle.Phase.RETREAT and self.unroll[i] is not None:
             (rolled, arrival), self.unroll[i] = self.unroll[i], None
             # The carry plan starts at `arrival`; the walk starts where RELEASE holds.
-            plan = [rolled] + self._paced_roll(i, plan, rolled, arrival) + plan[1:]
+            plan = self._spread_roll(i, [arrival] + plan[1:], rolled - arrival, rising=False)
         self.plans[i] = plan
 
-    def _paced_roll(
-        self, i: int, plan: list[torch.Tensor], start: torch.Tensor, end: torch.Tensor
+    def _spread_roll(
+        self, i: int, plan: list[torch.Tensor], turn: torch.Tensor, rising: bool
     ) -> list[torch.Tensor]:
-        """Wrist-only waypoints after ``start`` up to ``end``, walked with ``plan``.
+        """``plan`` with the wrist-only ``turn`` spread along it: none of it at the first
+        waypoint and all of it at the last (``rising``), or the other way round.
 
-        The walk gives every segment the same share of its steps (``polyline_point``), and the
-        carry's steps come from its Cartesian length, which a wrist roll does not add to. So
-        the roll is cut into as many segments as keep the wrist under ``ROLL_MAX_STEP_RAD``
-        per control step at the minimum-jerk peak, and the walk grows by the carry's own
-        steps per segment for each one: the carry keeps its pace.
+        Only ``WRIST_ROLL_INDEX`` moves, and it turns about the tool axis, so the pick point
+        walks the carry's own path (``_roll_waypoints``). Appended as wrist-only waypoints, the
+        turn held the tool still over the bin or box before RELEASE and again after it, 37 to
+        50 control steps a cycle on the 2026-09-23 K=20 heaps.
+        The walk grows only where the wrist would pass ``ROLL_MAX_STEP_RAD`` per control step
+        at the minimum-jerk peak (``polyline_point`` gives every segment the same time).
         """
-        per_segment = self.walk_steps[i] / len(plan)
-        turn = abs(float(end[WRIST_ROLL_INDEX] - start[WRIST_ROLL_INDEX]))
-        peak = trajectory.MIN_JERK_PEAK_VELOCITY * turn / (ROLL_MAX_STEP_RAD * per_segment)
-        n = max(1, math.ceil(peak))
-        self.walk_steps[i] = math.ceil(self.walk_steps[i] * (len(plan) + n) / len(plan))
-        return [start + (end - start) * k / n for k in range(1, n + 1)]
+        n = len(plan) - 1
+        out = [q + turn * ((k if rising else n - k) / n) for k, q in enumerate(plan)]
+        wrist = torch.stack(out)[:, WRIST_ROLL_INDEX]
+        worst = float((wrist[1:] - wrist[:-1]).abs().max()) * n
+        floor = math.ceil(trajectory.MIN_JERK_PEAK_VELOCITY * worst / ROLL_MAX_STEP_RAD)
+        self.walk_steps[i] = max(self.walk_steps[i], floor)
+        return out
 
     def _matched_close_command(self, i: int, fully_closed: float) -> float:
         """Hold the jaws at the part's own width instead of driving them shut.
@@ -1315,7 +1322,12 @@ class OracleRig:
         made the same two-episode gate run 6.0 -> 8.1 minutes. The obvious optimisation is a
         pessimisation here; do not re-add it without timing it.
         """
-        for offset in HEADING_RELAXATION_RAD:
+        offsets = HEADING_RELAXATION_RAD
+        if getattr(self.oracles[i], "carry_half_turn", False):
+            # The jaws are symmetric under a half turn, so the other representative of the held
+            # heading is the same grasp, with the wrist a half turn away (``EnvOracle``).
+            offsets += tuple(half + o for half in (-math.pi, math.pi) for o in offsets)
+        for offset in offsets:
             plan = self._plan_cartesian(
                 i, goal, start, pick_from, tilt_from, pick_to, tilt_to, heading, heading + offset
             )
@@ -1589,13 +1601,21 @@ class OracleRig:
             if not idle:
                 self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE
 
-    def resume(self, i: int, target: int | None = None) -> bool:
+    def resume(self, i: int, target: int | None = None, push=None, start_z=None) -> bool:
         """Take idle env ``i`` over from the policy for one brick cycle (MS4 c2 design 6.2).
 
         Returns False, and leaves the env idle, when the oracle answers DONE or ABANDON at
         entry or the first leg cannot be planned. With ``target`` (the heap outer loop, phase
         B design 5.5) a takeover that holds nothing works that part instead of letting HOVER
-        select; it is declined when no grasp ranks on the part any more.
+        select; it is declined when no grasp ranks on the part any more. With ``push`` (a
+        ``HeapOracle.Push``, MS7a tray) the takeover runs that one push or rake instead and
+        hands the env back when it ends (``_push_takeover_over``).
+
+        ``start_z`` (K,), the part heights when the loop's cycle opened, is the scripted place
+        of MS7a: LIFT then measures a held part's rise from where it lay, not from its live
+        height, so a part the policy already lifted past RULING P32's line is carried on
+        instead of declined. The resumed LIFT holds it at LIFT_HEIGHT above the desk, and the
+        rise from the desk clears LIFT_MIN_RISE, so no reopen drops it.
         """
         if not self.idle[i]:
             raise RuntimeError(f"env {i} is not idle")
@@ -1623,7 +1643,12 @@ class OracleRig:
         right = self.right_brick.data.force_matrix_w[i, 0].norm(dim=-1)
         held = int(held_brick_from_forces(left[None], right[None], HELD_MIN_FORCE)[0])
         scene = self.snapshot(i)
-        if held >= 0 and float(scene.brick_pos[held, 2]) > oracle.LIFT_HEIGHT - LIFT_MIN_RISE:
+        lifted_from = None if start_z is None or held < 0 else float(start_z[held])
+        if (
+            held >= 0
+            and lifted_from is None
+            and float(scene.brick_pos[held, 2]) > oracle.LIFT_HEIGHT - LIFT_MIN_RISE
+        ):
             # RULING P32, tightened on re-review: decline a carry the clamped LIFT target
             # cannot clear LIFT_MIN_RISE from. A takeover may only enter LIFT from a carry low
             # enough that the clamped target still clears the rise gate -- the LIFT entry this
@@ -1643,10 +1668,17 @@ class OracleRig:
             self._go_idle(i, None)
             return False
         orc.resume(scene, held)
-        if target is not None and held < 0 and not orc.aim_hover_at(scene, target):
+        if push is not None:
+            if held >= 0:
+                self._go_idle(i, None)
+                return False
+            orc.aim_push(push)
+        elif target is not None and held < 0 and not orc.aim_hover_at(scene, target):
             self._go_idle(i, None)
             return False
         self.brick_start[i] = self._brick_pos(i, held) if held >= 0 else None
+        if lifted_from is not None:
+            self.brick_start[i][2] = lifted_from
         self.idle[i] = False
         self.single_cycle[i] = True
         self.takeover_result[i] = None
@@ -1654,6 +1686,19 @@ class OracleRig:
         if self.goals[i] is None or self.unplanned[i]:
             self._go_idle(i, None)
             return False
+        return True
+
+    def _push_takeover_over(self, i: int) -> bool:
+        """A takeover that ran one push (``resume(push=...)``) ends when its oracle is back
+        at HOVER with no target; hand the env back so the loop selects again."""
+        orc = self.oracles[i]
+        if not self.single_cycle[i] or getattr(orc, "push", None) is not None:
+            return False
+        if orc.phase != oracle.Phase.HOVER or orc.target_brick is not None:
+            return False
+        if not getattr(orc, "push_takeover", False):
+            return False
+        self._go_idle(i, None)
         return True
 
     def _go_idle(self, i: int, stowed: bool | None) -> None:
@@ -1793,6 +1838,14 @@ class OracleRig:
                 tripped = float(tracking) >= WATCHDOG_TRACKING_TOL_RAD
             self.watchdog_strikes[i] = self.watchdog_strikes[i] + 1 if tripped else 0
             if self.watchdog_strikes[i] >= WATCHDOG_TRIP_STRIKES:
+                # MS7a tray: an oracle that can give up the jammed leg instead of the episode
+                # says so (HeapOracle.recover_from_jam); every other oracle abandons as before.
+                recover = getattr(self.oracles[i], "recover_from_jam", None)
+                if recover is not None and recover(self.snapshot(i)):
+                    self.watchdog_strikes[i] = 0
+                    if not self._push_takeover_over(i):
+                        self._enter_phase(i, self.snapshot(i))
+                    continue
                 self.abandoned[i] = True
                 self.goals[i] = None
                 if self.stats[i]["abandon"] is None:

@@ -42,6 +42,9 @@ def test_the_census_sums_classes_stows_closes_and_steps(tmp_path):
     ]
     s = census.read_payloads(paths)
     assert (s["draws"], s["episodes"], s["cycles"]) == (2, 2, 8)
+    assert s["rakes"] == 0  # payloads before the MS7a tray carry none
+    raked = census.read_payloads([_write(tmp_path, "eval_002.json", [_episode(rakes=3)])])
+    assert raked["rakes"] == 3
     assert (s["parts_total"], s["parts_stowed"], s["stowed_fraction"]) == (100, 5, 0.05)
     assert s["classes"]["stowed"] == {"cycles": 4, "share": 0.5}
     assert s["classes"]["no_close"]["cycles"] == 2 and s["classes"]["close_miss"]["cycles"] == 2
@@ -67,3 +70,39 @@ def test_the_census_prints_one_token_on_every_path(tmp_path, capsys):
     )
     assert census.main(["--evals", str(old)]) == 1
     assert "predates the census" in capsys.readouterr().out
+
+
+def test_the_census_sums_the_desk_box_rows(tmp_path):
+    rows = {
+        "stowed_by_class": {"slope": {"stowed": 1, "total": 2}, "wide": {"stowed": 1, "total": 1}},
+        "stowed_by_box": [{"stowed": 1, "total": 2}, {"stowed": 1, "total": 1}],
+        "wrong_box_parts": 1,
+    }
+    boxed = _episode(cycle_classes=["stowed", "no_close", "stowed", "wrong_box"], **rows)
+    paths = [_write(tmp_path, f"eval_00{k}.json", [boxed]) for k in range(2)]
+    s = census.read_payloads(paths)
+    assert s["classes"]["wrong_box"]["cycles"] == 2
+    assert s["stowed_by_class"] == {
+        "slope": {"stowed": 2, "total": 4},
+        "wide": {"stowed": 2, "total": 2},
+    }
+    assert s["stowed_by_box"] == {"0": {"stowed": 2, "total": 4}, "1": {"stowed": 2, "total": 2}}
+    assert s["wrong_box_parts"] == 2
+    # A payload without desk boxes reports no box rows.
+    assert "stowed_by_class" not in census.read_payloads(
+        [_write(tmp_path, "six.json", [_episode()])]
+    )
+
+
+def test_the_census_counts_the_parts_left_at_a_tray_wall(tmp_path):
+    from maker_arm_lab.core import grasp, layout
+
+    assert census.TRAY_INTERIOR_XY == layout.tray_bounds()
+    assert census.WALL_BAND_M == grasp.RAKE_BAND_M
+    left = [
+        [3, 0.195, -0.09, 0.005, 2, 0],  # 10 mm off the left wall
+        [4, 0.195, 0.0, 0.005, 0, 3],  # the tray's middle
+        [5, 0.30, 0.20, 0.03, 0, 0],  # outside the tray
+    ]
+    s = census.read_payloads([_write(tmp_path, "eval_000.json", [_episode(left_parts=left)])])
+    assert (s["left_parts"], s["left_at_wall"]) == (3, 1)

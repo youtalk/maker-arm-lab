@@ -394,6 +394,8 @@ def test_extra_stats_report_the_counters():
     assert stats == {
         "cycles": 0,
         "pushes": 0,
+        "rakes": 0,
+        "jams": 0,
         "tips": 0,
         "tips_ok": 0,
         "forced_picks": 0,
@@ -682,3 +684,193 @@ def test_the_six_brick_oracle_selects_at_hover_only():
     assert oracle.EnvOracle(BL, 6, oracle.nominal_draw()).preselects_next_target is False
     assert not hasattr(oracle.EnvOracle(BL, 6, oracle.nominal_draw()), "next_brick")
     assert _oracle([BRICK]).preselects_next_target is True
+
+
+def test_the_tray_teacher_squares_the_jaws_along_a_wall():
+    """MS7a design, the tray: a brick 12 mm from the left wall at yaw 90 degrees closes across
+    its 15.8 mm axis, which then runs along x, the wall's direction."""
+    (_, _), (y0, _) = layout.tray_bounds()
+    scene = _snapshot([[layout.TRAY_CENTER[0], y0 + 0.012, 0.0048]])
+    scene.brick_quat[0] = torch.tensor(quat_from_rpy_deg((0.0, 0.0, 90.0)))
+    orc = heap_oracle.HeapOracle(
+        BL, [BRICK], 1, oracle.nominal_draw(), rng=random.Random(0), tray=True
+    )
+    assert len(orc.walls) == 4
+    hover = _to_hover(orc, scene)
+    assert orc.target_brick == 0 and orc.grasp.width == pytest.approx(0.0158)
+    assert math.sin(orc.grasp.heading) == pytest.approx(0.0, abs=1e-6)  # closing along x
+    assert hover.yaw == pytest.approx(orc.grasp.heading - math.pi / 2)
+    assert _oracle([BRICK]).walls == ()  # the bare desk ranks no walls
+
+
+# -- MS7a design, the rake -----------------------------------------------------------------------
+
+
+def _tray_oracle(part_list):
+    return heap_oracle.HeapOracle(
+        BL, part_list, 1, oracle.nominal_draw(), rng=random.Random(0), tray=True
+    )
+
+
+@pytest.fixture
+def narrow_band(monkeypatch):
+    """The stuck scene below needs a band narrower than 45 degrees: at 45 a box part always
+    keeps an axis in the band. The rake itself does not read the band's width."""
+    monkeypatch.setattr(grasp, "WALL_BAND_RAD", math.radians(20.0))
+
+
+def _stuck_scene(extra=()):
+    """A 2x4 brick at yaw 45 degrees, its centre 25 mm from the left wall: under a 20 degree
+    band both closing axes lie outside it and both fingers would reach the wall, so no grasp
+    ranks (``narrow_band``). Its near corner stays 8 mm off the wall face."""
+    (_, _), (y0, _) = layout.tray_bounds()
+    rows = [[layout.TRAY_CENTER[0], y0 + 0.025, 0.0048], *extra]
+    scene = _snapshot(rows)
+    scene.brick_quat[0] = torch.tensor(quat_from_rpy_deg((0.0, 0.0, 45.0)))
+    return scene
+
+
+def test_the_rake_fires_when_no_grasp_ranks_and_a_part_lies_in_a_wall_band(narrow_band):
+    orc = _tray_oracle([BRICK])
+    scene = _stuck_scene()
+    assert orc._ranked(scene, orc._candidates(scene)) == []
+    hover = _to_hover(orc, scene)
+    assert hover.phase is oracle.Phase.PUSH_HOVER and orc.target_brick is None
+    push = orc.push
+    assert push.part == 0 and hover.gripper == -1.0  # the jaws closed
+    # The blade first: the closing axis runs along the sweep, which runs off the wall (+y).
+    assert push.jaw == push.heading and hover.yaw == pytest.approx(push.heading - math.pi / 2)
+    assert math.sin(push.heading) >= math.cos(max(grasp.RAKE_SWINGS_RAD)) - 1e-9
+    (_, _), (y0, _) = layout.tray_bounds()
+    part_y = float(scene.brick_pos[0, 1])
+    assert y0 < push.start[1] < part_y < push.end[1]
+    # The hull clears every wall at its top, and the tips land clear of the part.
+    assert all(
+        grasp.polygon_distance(grasp.rake_footprint(push.start, w.top), list(w.footprint)) >= 0
+        for w in orc.walls
+    )
+    part = grasp.footprint(orc.sizes[0], scene.brick_pos[0], scene.brick_quat[0])
+    tips = grasp.rake_footprint(push.start)
+    assert grasp.polygon_distance(tips, part) >= grasp.RAKE_START_GAP_M - 1e-6
+    _push_phases_counted(orc, scene)
+    assert orc.rakes == 1 and orc.pushes == 0 and orc.raked == {0: 1}
+    assert orc.extra_stats()["rakes"] == 1
+
+
+def _push_phases_counted(orc, scene):
+    for phase in (oracle.Phase.PUSH_HOVER, oracle.Phase.PUSH_DESCEND, oracle.Phase.PUSH_SWEEP):
+        goal = orc.next_goal(scene)
+        assert goal.phase is phase
+        orc.report(oracle.PhaseResult(outcome="converged"), scene)
+    assert orc.phase is oracle.Phase.HOVER and orc.push is None
+
+
+def test_the_rake_never_fires_while_any_grasp_ranks(narrow_band):
+    # A free brick in the middle of the tray ranks, so the stuck one waits.
+    free = [layout.TRAY_CENTER[0], layout.TRAY_CENTER[1] + 0.03, 0.0048]
+    orc = _tray_oracle([BRICK, BRICK])
+    scene = _stuck_scene([free])
+    hover = _to_hover(orc, scene)
+    assert hover.phase is oracle.Phase.HOVER and orc.target_brick == 1 and orc.push is None
+
+
+def test_the_rake_never_fires_away_from_a_wall_or_without_the_tray(narrow_band):
+    # A brick propped at 45 and 30 degrees in the middle of the tray: no body axis lies
+    # near the jaw plane, so nothing ranks, and no wall is near it.
+    tilted = torch.tensor(quat_from_rpy_deg((45.0, 30.0, 0.0)))
+    orc = _tray_oracle([BRICK])
+    scene = _snapshot([[layout.TRAY_CENTER[0], layout.TRAY_CENTER[1], 0.012]])
+    scene.brick_quat[0] = tilted
+    assert orc._ranked(scene, orc._candidates(scene)) == []
+    _to_hover(orc, scene)
+    assert orc.phase is oracle.Phase.DONE and orc.push is None and orc.rakes == 0
+    # The same stuck part with the tray off: the bare desk has no walls to rake from, and
+    # with no walls the part ranks both its grasps.
+    bare = _oracle([BRICK])
+    _to_hover(bare, _stuck_scene())
+    assert bare.target_brick == 0 and bare.push is None
+
+
+def test_the_rakes_are_capped_per_part_and_per_episode(narrow_band):
+    orc = _tray_oracle([BRICK])
+    scene = _stuck_scene()  # a stub: the rakes move nothing
+    _to_hover(orc, scene)
+    for _ in range(heap_oracle.RAKE_PART_CAP):
+        _push_phases_counted(orc, scene)
+        orc.next_goal(scene)
+    assert orc.rakes == heap_oracle.RAKE_PART_CAP
+    assert orc.phase is oracle.Phase.DONE
+    capped = _tray_oracle([BRICK])
+    capped.rakes = heap_oracle.MAX_RAKES
+    _to_hover(capped, _stuck_scene())
+    assert capped.phase is oracle.Phase.DONE and capped.push is None
+    # The heap loop's --rake_cap raises both caps on its selector.
+    more = _tray_oracle([BRICK])
+    more.rake_part_cap, more.max_rakes = 4, 40
+    _to_hover(more, scene)
+    for _ in range(4):
+        _push_phases_counted(more, scene)
+        more.next_goal(scene)
+    assert more.rakes == 4 and more.phase is oracle.Phase.DONE
+
+
+def test_an_unplanned_rake_hover_turns_the_jaws_then_holds_them_then_gives_up(narrow_band):
+    """Driven 2026-09-23: the blade does not plan off the near and far walls, the knife not
+    off the left wall; the rake then tries the next jaw heading before it is spent."""
+    orc = _tray_oracle([BRICK])
+    scene = _stuck_scene()
+    _to_hover(orc, scene)
+    sweep = orc.push.heading
+    unplanned = oracle.PhaseResult(outcome="unplanned")
+    orc.report(unplanned, scene)
+    assert orc.phase is oracle.Phase.PUSH_HOVER and orc.push.jaw == pytest.approx(
+        sweep + math.pi / 2
+    )
+    assert orc.next_goal(scene).yaw == pytest.approx(sweep)  # the knife: yaw along the sweep
+    orc.report(unplanned, scene)
+    assert orc.push.jaw is None and orc.next_goal(scene).yaw is None  # hold the jaws
+    orc.report(unplanned, scene)
+    assert orc.phase is oracle.Phase.HOVER and orc.push is None
+    assert orc.rakes == 1 and orc.raked == {0: 1}  # spent, not retried forever
+
+
+def test_a_jammed_tray_pick_gives_up_the_cycle_and_a_bare_desk_one_the_episode():
+    scene = _snapshot([[layout.TRAY_CENTER[0], 0.0, 0.0048]])
+    bare = _oracle([BRICK])
+    _to_hover(bare, scene)
+    bare.phase = oracle.Phase.CLOSE
+    assert bare.recover_from_jam(scene) is False  # the rig abandons, as in MS6
+    orc = _tray_oracle([BRICK])
+    _to_hover(orc, scene)
+    orc.phase = oracle.Phase.CLOSE
+    assert orc.recover_from_jam(scene) is True
+    assert orc.phase is oracle.Phase.REOPEN and orc.cycle_outcomes == [False]
+    assert orc.failures[orc.cell_of(scene.brick_pos[0, :2].tolist())] == 1
+    _step(orc, scene)  # REOPEN ends the given-up cycle
+    assert orc.phase is oracle.Phase.HOVER and orc.target_brick is None
+    assert orc.extra_stats()["jams"] == 1
+    orc.phase = oracle.Phase.EXTEND  # a jam in transit still abandons
+    assert orc.recover_from_jam(scene) is False
+
+
+def test_a_jammed_rake_is_spent(narrow_band):
+    orc = _tray_oracle([BRICK])
+    scene = _stuck_scene()
+    _to_hover(orc, scene)
+    orc.report(oracle.PhaseResult(outcome="converged"), scene)  # PUSH_HOVER -> PUSH_DESCEND
+    assert orc.recover_from_jam(scene) is True
+    assert orc.phase is oracle.Phase.HOVER and orc.push is None and orc.rakes == 1
+
+
+def test_the_failure_scope_decides_whether_a_cell_neighbour_stays_a_candidate():
+    """Two bricks 2 cm apart in one 5 cm cell; the first fails three cycles."""
+    x, y = 0.16, 0.01
+    assert heap_oracle.HeapOracle.cell_of((x, y)) == heap_oracle.HeapOracle.cell_of((x + 0.02, y))
+    scene = _snapshot([[x, y, 0.0048], [x + 0.02, y, 0.0048]])
+    for scope, first, second in (("cell", False, False), ("part", False, True)):
+        orc = _oracle([BRICK, BRICK])
+        orc.failure_scope = scope
+        for _ in range(heap_oracle.CELL_FAILURE_CAP):
+            orc._mark_failure(scene, 0)
+        assert orc._candidates(scene).tolist() == [first, second], scope
+    assert _oracle([BRICK]).failure_scope == "cell"  # the teacher's rule by default

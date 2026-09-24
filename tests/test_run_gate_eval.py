@@ -4,6 +4,7 @@ injected fakes; the real ones need a GPU."""
 
 import importlib.util
 import json
+import types
 from pathlib import Path
 
 import pytest
@@ -610,6 +611,7 @@ def test_cached_payload_matches_the_task_as_well_as_the_draw(tmp_path):
         {"parts_seed": 1},
         {"cycle_budget": 9},
         {"gripper": "continuous"},
+        {"tray": True},
     ):
         assert not cached(heap_cfg, _heap_payload(draw, **other)), other
     heap_cfg.cycle_budget = 70
@@ -634,6 +636,25 @@ def test_eval_command_forwards_the_gripper_to_the_heap_client(tmp_path):
     )
     cmd = ge._eval_command(cfg, ge.make_eval_draws(1, 1)[0])
     assert cmd[cmd.index("--gripper") + 1] == "continuous"
+    assert "--tray" not in cmd
+
+
+def test_the_tray_reaches_only_the_heap_client_and_its_cache(tmp_path):
+    base = ["--checkpoint", "ck", "--out_dir", str(tmp_path), "--ledger", "l"]
+    base += ["--threshold", "0.85", "--seed", "1", "--backend", "mujoco", "--tray"]
+    cfg = ge._build_cfg(ge._parse_args(base + ["--heap_k", "50"]))
+    assert cfg.tray and "--tray" in ge._eval_command(cfg, ge.make_eval_draws(1, 1)[0])
+    with pytest.raises(ValueError, match="--tray"):
+        ge._build_cfg(ge._parse_args(base))
+    cached = _cfg(tmp_path, _fake_ledger(tmp_path), processes=1, backend="mujoco", heap_k=50)
+    cached.tray = True
+    cached.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    path = cached.out_dir / "eval_000.json"
+    path.write_text(json.dumps(_heap_payload(draw, tray=True)))
+    assert ge._cached_payload(cached, draw) is not None
+    path.write_text(json.dumps(_heap_payload(draw)))
+    assert ge._cached_payload(cached, draw) is None
 
 
 def test_a_heap_gate_defaults_the_cycles_rule_and_refuses_the_isaac_backend(
@@ -815,3 +836,237 @@ def test_client_flags_reach_the_mujoco_client_and_the_cache_matches_on_the_switc
     assert ge._cached_payload(cfg, draw) is None
     cfg.client_flags = ()
     assert ge._cached_payload(cfg, draw) is not None
+
+
+def test_desk_boxes_reach_the_heap_client_only_and_split_the_cache(tmp_path):
+    ledger = _fake_ledger(tmp_path)
+    cfg = _cfg(tmp_path, ledger, processes=1, backend="mujoco", heap_k=50)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    assert "--desk_boxes" not in ge._eval_command(cfg, draw)  # the MS6 command is unchanged
+    cfg.desk_boxes = 4
+    cmd = ge._eval_command(cfg, draw)
+    assert cmd[1] == "scripts/mj_eval_heap.py" and cmd[cmd.index("--desk_boxes") + 1] == "4"
+    cfg.out_dir.mkdir(parents=True)
+    path = cfg.out_dir / "eval_000.json"
+    for payload_boxes, hit in ((4, True), (1, False), (None, False)):
+        extra = {} if payload_boxes is None else {"desk_boxes": payload_boxes}
+        path.write_text(json.dumps(_heap_payload(draw, **extra)))
+        assert (ge._cached_payload(cfg, draw) is not None) is hit, payload_boxes
+    cfg.desk_boxes = 0
+    path.write_text(json.dumps(_heap_payload(draw)))  # an MS6 payload predates the key
+    assert ge._cached_payload(cfg, draw) is not None
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [["--backend", "mujoco"], ["--backend", "isaac", "--heap_k", "50"]],
+)
+def test_desk_boxes_refuse_anything_but_the_mujoco_heap(monkeypatch, capsys, tmp_path, extra):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path), "--ledger", "l"]
+    argv += ["--threshold", "0.85", "--seed", "1", "--desk_boxes", "1"]
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(argv + extra) == 2
+    out = capsys.readouterr()
+    assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--desk_boxes" in out.err
+    heap = ["--backend", "mujoco", "--heap_k", "50"]
+    assert ge._build_cfg(ge._parse_args(argv + heap)).desk_boxes == 1
+
+
+def test_the_gate_reports_desk_box_rows_and_counts_own_box_stows_only():
+    draw = ge.make_eval_draws(1, 20261400)[0]
+    ep = dict(
+        _episode(0),
+        num_bricks=4,
+        bricks_stowed=2,
+        cycles=4,
+        cycle_classes=["stowed", "stowed", "wrong_box", "no_close"],
+        stowed_by_class={"slope": {"stowed": 2, "total": 3}, "wide": {"stowed": 0, "total": 1}},
+        stowed_by_box=[{"stowed": 2, "total": 3}, {"stowed": 0, "total": 1}],
+        wrong_box_parts=1,
+    )
+    results = ge.aggregate_gate([_payload(draw, [ep, ep])], threshold=0.5)
+    assert results["gate"]["bricks_stowed"] == 4 and results["gate"]["per_brick_rate"] == 0.5
+    rows = results["secondary"]
+    assert rows["stowed_by_class"]["slope"] == {"stowed": 4, "total": 6}
+    assert rows["stowed_by_box"][1] == {"stowed": 0, "total": 2}
+    assert rows["wrong_box_parts"] == 2 and rows["wrong_box_cycles"] == 2
+    six = ge.aggregate_gate([_payload(draw, [_episode(0)])], threshold=0.1)["secondary"]
+    assert "stowed_by_class" not in six
+
+
+def test_the_scripted_place_reaches_the_heap_client_keys_the_cache_and_names_its_pass(
+    tmp_path, monkeypatch, capsys
+):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
+    argv += ["--threshold", "0.7", "--seed", "1"]
+    heap = ["--backend", "mujoco", "--heap_k", "50"]
+    cfg = ge._build_cfg(ge._parse_args(argv + heap + ["--scripted_place"]))
+    draw = ge.make_eval_draws(1, 1)[0]
+    assert "--scripted_place" in ge._eval_command(cfg, draw)
+    assert ge.loop_switches(cfg.client_flags)["scripted_place"] is True
+    plain = ge._build_cfg(ge._parse_args(argv + heap))
+    assert "--scripted_place" not in ge._eval_command(plain, draw)
+    cfg.out_dir.mkdir()
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    for on, hit in ((True, True), (False, False)):
+        loop = {name: False for name in ge.LOOP_SWITCHES} | {"scripted_place": on}
+        payload = _heap_payload(draw, inference={**served, "loop": loop})
+        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        assert (ge._cached_payload(cfg, draw) is not None) is hit
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(argv + ["--backend", "mujoco", "--scripted_place"]) == 2
+    assert "--scripted_place" in capsys.readouterr().err
+
+
+def test_a_pass_through_the_scripted_place_is_its_own_outcome(tmp_path):
+    ledger = _fake_ledger(tmp_path)
+    cfg = _cfg(tmp_path, ledger, processes=1, backend="mujoco", heap_k=50, threshold=0.5)
+    cfg.client_flags = ("--scripted_place",)
+    draw = ge.make_eval_draws(1, cfg.seed)[0]
+
+    def server():
+        return types.SimpleNamespace(ready={}, stop=lambda: None)
+
+    results = ge.run_gate(cfg, run_eval=lambda d: _heap_payload(d), start_server=server)
+    assert results["gate"]["outcome"] == "PASS (scripted place)"
+    cfg.client_flags = ()
+    (cfg.out_dir / "eval_000.json").unlink()
+    results = ge.run_gate(cfg, run_eval=lambda d: _heap_payload(d), start_server=server)
+    assert results["gate"]["outcome"] == "PASS" and draw.process_index == 0
+
+
+def test_the_scripted_rake_reaches_the_heap_client_only_and_keys_the_cache(
+    tmp_path, monkeypatch, capsys
+):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
+    argv += ["--threshold", "0.7", "--seed", "1"]
+    heap = ["--backend", "mujoco", "--heap_k", "50", "--tray"]
+    cfg = ge._build_cfg(ge._parse_args(argv + heap + ["--scripted_rake"]))
+    draw = ge.make_eval_draws(1, 1)[0]
+    assert "--scripted_rake" in ge._eval_command(cfg, draw)
+    assert ge.loop_switches(cfg.client_flags)["scripted_rake"] is True
+    plain = ge._build_cfg(ge._parse_args(argv + heap))
+    assert "--scripted_rake" not in ge._eval_command(plain, draw)
+    cfg.out_dir.mkdir()
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    for on, hit in ((True, True), (False, False)):
+        loop = {name: False for name in ge.LOOP_SWITCHES} | {"scripted_rake": on}
+        payload = _heap_payload(draw, tray=True, inference={**served, "loop": loop})
+        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        assert (ge._cached_payload(cfg, draw) is not None) is hit
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(argv + ["--backend", "isaac", "--scripted_rake"]) == 2
+    assert "--scripted_rake" in capsys.readouterr().err
+
+
+def test_part_failures_reach_the_heap_client_only_and_key_the_cache(tmp_path, monkeypatch, capsys):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
+    argv += ["--threshold", "0.7", "--seed", "1"]
+    heap = ["--backend", "mujoco", "--heap_k", "50"]
+    cfg = ge._build_cfg(ge._parse_args(argv + heap + ["--part_failures"]))
+    draw = ge.make_eval_draws(1, 1)[0]
+    assert "--part_failures" in ge._eval_command(cfg, draw)
+    assert ge.loop_switches(cfg.client_flags)["part_failures"] is True
+    assert "--part_failures" not in ge._eval_command(
+        ge._build_cfg(ge._parse_args(argv + heap)), draw
+    )
+    cfg.out_dir.mkdir()
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    for on, hit in ((True, True), (False, False)):
+        loop = {name: False for name in ge.LOOP_SWITCHES} | {"part_failures": on}
+        payload = _heap_payload(draw, inference={**served, "loop": loop})
+        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        assert (ge._cached_payload(cfg, draw) is not None) is hit
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(argv + ["--backend", "isaac", "--part_failures"]) == 2
+    assert "--part_failures" in capsys.readouterr().err
+
+
+def test_pick_snap_reaches_the_heap_client_only_and_keys_the_cache(tmp_path, monkeypatch, capsys):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
+    argv += ["--threshold", "0.7", "--seed", "1"]
+    heap = ["--backend", "mujoco", "--heap_k", "50"]
+    cfg = ge._build_cfg(ge._parse_args(argv + heap + ["--pick_snap"]))
+    draw = ge.make_eval_draws(1, 1)[0]
+    assert "--pick_snap" in ge._eval_command(cfg, draw)
+    assert ge.loop_switches(cfg.client_flags)["pick_snap"] is True
+    assert "--pick_snap" not in ge._eval_command(ge._build_cfg(ge._parse_args(argv + heap)), draw)
+    cfg.out_dir.mkdir()
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    for on, hit in ((True, True), (False, False)):
+        loop = {name: False for name in ge.LOOP_SWITCHES} | {"pick_snap": on}
+        payload = _heap_payload(draw, inference={**served, "loop": loop})
+        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        assert (ge._cached_payload(cfg, draw) is not None) is hit
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(argv + ["--backend", "isaac", "--pick_snap"]) == 2
+    assert "--pick_snap" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", ["dwell_close", "adopt_held"])
+def test_the_serving_2_switches_reach_the_heap_client_only_and_key_the_cache(
+    name, tmp_path, monkeypatch, capsys
+):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
+    argv += ["--threshold", "0.7", "--seed", "1"]
+    heap = ["--backend", "mujoco", "--heap_k", "50"]
+    cfg = ge._build_cfg(ge._parse_args(argv + heap + [f"--{name}"]))
+    draw = ge.make_eval_draws(1, 1)[0]
+    assert f"--{name}" in ge._eval_command(cfg, draw)
+    assert ge.loop_switches(cfg.client_flags)[name] is True
+    assert f"--{name}" not in ge._eval_command(ge._build_cfg(ge._parse_args(argv + heap)), draw)
+    cfg.out_dir.mkdir()
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    for on, hit in ((True, True), (False, False)):
+        loop = {n: False for n in ge.LOOP_SWITCHES} | {name: on}
+        payload = _heap_payload(draw, inference={**served, "loop": loop})
+        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        assert (ge._cached_payload(cfg, draw) is not None) is hit
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(argv + ["--backend", "isaac", f"--{name}"]) == 2
+    assert f"--{name}" in capsys.readouterr().err
+
+
+def test_the_rake_settings_reach_the_heap_client_only_and_key_the_cache(tmp_path, monkeypatch):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
+    argv += ["--threshold", "0.7", "--seed", "1"]
+    heap = ["--backend", "mujoco", "--heap_k", "50", "--tray", "--desk_boxes", "4"]
+    cfg = ge._build_cfg(ge._parse_args(argv + heap + ["--rake_cap", "4", "--rake_crowd"]))
+    draw = ge.make_eval_draws(1, 1)[0]
+    cmd = ge._eval_command(cfg, draw)
+    assert cmd[cmd.index("--rake_cap") + 1] == "4" and "--rake_crowd" in cmd
+    found = ge.loop_switches(cfg.client_flags)
+    assert found["rake_cap"] == 4 and found["rake_crowd"] is True
+    plain = ge._build_cfg(ge._parse_args(argv + heap))
+    assert ge.loop_switches(plain.client_flags)["rake_cap"] == 0
+    assert "--rake_cap" not in ge._eval_command(plain, draw)
+    cfg.out_dir.mkdir()
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    loop = {name: False for name in ge.LOOP_SWITCHES} | {"rake_crowd": True}
+    for cap, hit in ((4, True), (2, False), (0, False)):
+        payload = _heap_payload(
+            draw, tray=True, desk_boxes=4, inference={**served, "loop": loop | {"rake_cap": cap}}
+        )
+        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        assert (ge._cached_payload(cfg, draw) is not None) is hit, cap
+    for bad in (["--rake_cap", "4"], ["--rake_crowd"]):
+        with pytest.raises(ValueError, match="--rake_c"):
+            ge._build_cfg(ge._parse_args(argv + ["--backend", "isaac"] + bad))
+
+
+def test_the_tray_lean_reaches_the_heap_client_and_keys_the_cache(tmp_path):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
+    argv += ["--threshold", "0.7", "--seed", "1", "--backend", "mujoco", "--heap_k", "50"]
+    cfg = ge._build_cfg(ge._parse_args(argv + ["--tray", "--tray_lean", "45"]))
+    cmd = ge._eval_command(cfg, ge.make_eval_draws(1, 1)[0])
+    assert cmd[cmd.index("--tray_lean") + 1] == "45.0" and "--tray" in cmd
+    with pytest.raises(ValueError, match="--tray_lean"):
+        ge._build_cfg(ge._parse_args(argv + ["--tray_lean", "45"]))
+    cached = _cfg(tmp_path, _fake_ledger(tmp_path), processes=1, backend="mujoco", heap_k=50)
+    cached.tray, cached.tray_lean = True, 45.0
+    cached.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    path = cached.out_dir / "eval_000.json"
+    for lean, hit in ((45.0, True), (30.0, False), (0.0, False)):
+        path.write_text(json.dumps(_heap_payload(draw, tray=True, tray_lean=lean)))
+        assert (ge._cached_payload(cached, draw) is not None) is hit, lean

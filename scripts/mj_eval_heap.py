@@ -60,6 +60,17 @@ def parse_args(argv=None) -> argparse.Namespace:
         default="camera_box",
     )
     parser.add_argument("--heap_k", type=int, default=50, help="parts in the heap (> 0)")
+    parser.add_argument(
+        "--tray",
+        action="store_true",
+        help="MuJoCo heap only: drop the heap into the walled tray (MS7a); off is the bare desk",
+    )
+    parser.add_argument(
+        "--tray_lean",
+        type=float,
+        default=0.0,
+        help="MS7a: lean the tray's walls outward by this many degrees (0 is vertical)",
+    )
     parser.add_argument("--parts_seed", type=int, default=20260915)
     parser.add_argument("--parts_split", choices=PARTS_SPLITS, default="heldout")
     parser.add_argument(
@@ -73,6 +84,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         choices=("binary", "continuous"),
         default="binary",
         help="the env's gripper contract; must match the checkpoint's handshake",
+    )
+    parser.add_argument(
+        "--desk_boxes",
+        type=int,
+        default=0,
+        help="N desk boxes beside the arm replace the shelf and its heap bin (MS7a: 1 for "
+        "rung 1, 4 for rung 2); 0 is the MS6 scene",
     )
     parser.add_argument("--server", type=str, default="tcp://127.0.0.1:5555")
     parser.add_argument("--out", type=str, default="", help="write the EVAL_OK payload here too")
@@ -123,6 +141,56 @@ def parse_args(argv=None) -> argparse.Namespace:
         "approach, before the first hold (loop.squared_roll)",
     )
     parser.add_argument(
+        "--scripted_place",
+        action="store_true",
+        help="MS7a fallback: at the cycle's first hold plus a 5 cm lift the teacher resumes at "
+        "LIFT and carries the part to its own box (loop.SCRIPTED_PLACE_RISE); needs the server",
+    )
+    parser.add_argument(
+        "--scripted_rake",
+        action="store_true",
+        help="MS7a tray: when the loop finds no target but the teacher would rake a part off a "
+        "wall, the rig runs that rake and hands the env back to the policy; needs the server",
+    )
+    parser.add_argument(
+        "--part_failures",
+        action="store_true",
+        help="MS7a: book a failed cycle against its part, not its 5 cm cell, so the loop skips "
+        "a part after three failed cycles and its neighbours stay candidates",
+    )
+    parser.add_argument(
+        "--pick_snap",
+        action="store_true",
+        help="MS7a: on the final approach move the commanded pick point onto the served row, xy "
+        "toward its centre and, with the jaws open over it, down to the teacher's grasp height "
+        "(loop.snap_shift)",
+    )
+    parser.add_argument(
+        "--dwell_close",
+        action="store_true",
+        help="MS7a: command the teacher's close when the policy waits at grasp height with the "
+        "jaws open for loop.DWELL_STEPS (loop.dwell_count)",
+    )
+    parser.add_argument(
+        "--adopt_held",
+        action="store_true",
+        help="MS7a desk boxes: serve the box and marker of a lifted part that is not the target, "
+        "as the teacher's adopt_held_part does",
+    )
+    parser.add_argument(
+        "--rake_cap",
+        type=int,
+        default=0,
+        help="MS7a rake prototype: rake one part up to N times (the teacher's cap is "
+        "heap_oracle.RAKE_PART_CAP) and scale the episode's rake cap with it; 0 keeps both",
+    )
+    parser.add_argument(
+        "--rake_crowd",
+        action="store_true",
+        help="MS7a rake prototype: when no rake start clears every neighbour, land the tips up "
+        "to grasp.RAKE_CROWD_M into one",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -135,6 +203,8 @@ def parse_args(argv=None) -> argparse.Namespace:
             parser.error(f"--{name} is outside numpy's seed range (0 <= seed < 2**32)")
     if args.heap_k <= 0:
         parser.error("--heap_k must be positive: this client evaluates heap episodes only")
+    if args.desk_boxes < 0:
+        parser.error("--desk_boxes must be 0 or more")
     if args.cycle_budget is None:
         args.cycle_budget = cycle_budget(args.heap_k)
     if args.max_wall_minutes is None:
@@ -180,6 +250,9 @@ def main(argv=None) -> int:
             context=args.context,
             episode_length_s=episode_length_s(args.cycle_budget),
             gripper_mode=args.gripper,
+            desk_boxes=args.desk_boxes,
+            tray=args.tray,
+            tray_lean_deg=args.tray_lean,
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
@@ -188,10 +261,13 @@ def main(argv=None) -> int:
             return HeapOracle(
                 bl,
                 env.parts,
-                int(env.destination_bins[i]),
+                env.destination_bins[i],
                 episode_draw,
                 rng=rig_rng,
                 cycle_budget=args.cycle_budget,
+                boxes=env.desk_box_poses[i],
+                tray=env.tray,
+                tray_lean_deg=env.tray_lean_deg,
             )
 
         rig = OracleRig(
@@ -214,9 +290,20 @@ def main(argv=None) -> int:
             squeeze_floor=args.squeeze_floor,
             close_gate=args.close_gate,
             square_wrist=args.square_wrist,
+            scripted_place=args.scripted_place,
+            scripted_rake=args.scripted_rake,
+            part_failures=args.part_failures,
+            pick_snap=args.pick_snap,
+            dwell_close=args.dwell_close,
+            adopt_held=args.adopt_held,
+            rake_cap=args.rake_cap,
+            rake_crowd=args.rake_crowd,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
+        payload["desk_boxes"] = args.desk_boxes
+        payload["tray"] = args.tray
+        payload["tray_lean"] = args.tray_lean
     except EvalFailure as err:
         print("EVAL_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True)
         return 1

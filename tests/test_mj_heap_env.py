@@ -324,3 +324,60 @@ def test_heap_mode_builds_one_bin_and_grades_against_it():
     assert sum(1 for n in names if n and n.startswith("heap_bin_")) == 5
     assert not any(n and n.startswith("bin_") for n in names)
     env.close()
+
+
+def test_a_tray_env_builds_the_walls_and_drops_every_part_inside_them():
+    """MS7a design, the tray: a 50-part held-out heap settles inside the four walls."""
+    draw = layout.sample_run_draw(random.Random(4))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    _, heldout = parts.split(parts.catalog(), 20260915)
+    parts_list = parts.sample_parts(random.Random(9), heldout, 50)
+    env = MjLegoSortEnv(1, draw, num_bricks=50, parts=parts_list, cameras=False, tray=True)
+    env.reset(seed=2)
+    names = {
+        mujoco.mj_id2name(env.models[0], mujoco.mjtObj.mjOBJ_GEOM, g)
+        for g in range(env.models[0].ngeom)
+    }
+    assert {name for name, _, _ in layout.tray_static_boxes()} <= names
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    for b in range(50):
+        x, y, z = env.scene[f"brick_{b}"].data.root_pos_w[0].tolist()
+        assert x0 <= x <= x1 and y0 <= y <= y1 and z < layout.TRAY_WALL_HEIGHT * 3, (b, x, y, z)
+        assert env.scene[f"brick_{b}"].data.root_lin_vel_w[0].norm() < 0.05
+    env.close()
+
+
+def test_the_tray_is_off_by_default_and_needs_a_heap():
+    draw = layout.sample_run_draw(random.Random(4))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(1, draw, num_bricks=2, parts=PARTS[:2], cameras=False)
+    names = {
+        mujoco.mj_id2name(env.models[0], mujoco.mjtObj.mjOBJ_GEOM, g)
+        for g in range(env.models[0].ngeom)
+    }
+    assert env.tray is False and not any(n and n.startswith("tray_") for n in names)
+    env.close()
+    with pytest.raises(ValueError, match="tray"):
+        MjLegoSortEnv(1, draw, cameras=False, tray=True)
+
+
+def test_a_leaning_tray_builds_tilted_walls_and_keeps_the_heap_inside():
+    draw = layout.sample_run_draw(random.Random(4))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    _, heldout = parts.split(parts.catalog(), 20260915)
+    parts_list = parts.sample_parts(random.Random(9), heldout, 30)
+    env = MjLegoSortEnv(
+        1, draw, num_bricks=30, parts=parts_list, cameras=False, tray=True, tray_lean_deg=45.0
+    )
+    env.reset(seed=2)
+    m = env.models[0]
+    quat = m.geom_quat[m.geom("tray_wall_left").id]
+    assert abs(quat[0]) < 0.99  # tilted, not the identity
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    grow = layout.TRAY_WALL_HEIGHT  # tan 45
+    for b in range(30):
+        x, y, _ = env.scene[f"brick_{b}"].data.root_pos_w[0].tolist()
+        assert x0 - grow <= x <= x1 + grow and y0 - grow <= y <= y1 + grow, (b, x, y)
+    env.close()
+    with pytest.raises(ValueError, match="tray_lean_deg"):
+        MjLegoSortEnv(1, draw, num_bricks=2, parts=PARTS[:2], cameras=False, tray_lean_deg=30.0)

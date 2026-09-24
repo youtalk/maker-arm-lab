@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import torch
 
+from maker_arm_lab.core.quat import quat_from_rpy_deg, quat_mul
+
 BRICK_SIZE = (0.0318, 0.0158, 0.0096)
 BRICK_MASS = 0.003  # kg; real brick ~2.3 g, slightly rounded up for solver health
 BRICK_COLOR_ORDER = ("red", "blue", "yellow", "green")
@@ -176,6 +178,103 @@ SHELF_POS = (0.44, 0.0, 0.075)
 # where it is (`core.heap_oracle`).
 HEAP_CENTER = (0.21, 0.0)
 """The zone's centre: where the push heading's bias points (`HeapOracle._push_heading`)."""
+
+# MS7a design, the tray: the H1 tray returns (MS6 design H1, git c15f8f8^). The interior is
+# 0.13 x 0.20 m at x 0.13 to 0.26 and y -0.10 to 0.10, inside the measured reach, with four
+# static walls TRAY_WALL thick and TRAY_WALL_HEIGHT high. The MS7 desk boxes keep their
+# footprints outside it. The tray itself is switched on per env; without it the heap drops on
+# the bare desk as in MS6.
+TRAY_CENTER = (0.195, 0.0)
+TRAY_INTERIOR = (0.13, 0.20)
+TRAY_WALL_HEIGHT = 0.02
+TRAY_WALL = 0.005
+
+
+TRAY_DROP_INSET = 0.005
+"""Inset (m) of the tray drop over a part's whole half diagonal, so no part starts over a wall
+at any orientation. # INITIAL: the MS7a tray ladder reads the spill over the walls."""
+
+
+def tray_bounds() -> tuple[tuple[float, float], tuple[float, float]]:
+    """((x_min, x_max), (y_min, y_max)) of the tray interior."""
+    cx, cy = TRAY_CENTER
+    hx, hy = TRAY_INTERIOR[0] / 2, TRAY_INTERIOR[1] / 2
+    return ((cx - hx, cx + hx), (cy - hy, cy + hy))
+
+
+def tray_static_boxes() -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
+    """(name, center, size) for the four tray walls, as static colliders on the desk.
+
+    The near and far walls (at -x and +x) run the full outer length, so they close the corners.
+    """
+    (x0, x1), (y0, y1) = tray_bounds()
+    z = TRAY_WALL_HEIGHT / 2
+    w = TRAY_WALL
+    long_y = TRAY_INTERIOR[1] + 2 * w
+    return [
+        ("tray_wall_near", (x0 - w / 2, TRAY_CENTER[1], z), (w, long_y, TRAY_WALL_HEIGHT)),
+        ("tray_wall_far", (x1 + w / 2, TRAY_CENTER[1], z), (w, long_y, TRAY_WALL_HEIGHT)),
+        (
+            "tray_wall_left",
+            (TRAY_CENTER[0], y0 - w / 2, z),
+            (TRAY_INTERIOR[0], w, TRAY_WALL_HEIGHT),
+        ),
+        (
+            "tray_wall_right",
+            (TRAY_CENTER[0], y1 + w / 2, z),
+            (TRAY_INTERIOR[0], w, TRAY_WALL_HEIGHT),
+        ),
+    ]
+
+
+TRAY_WALL_OUTWARD_DEG = {"near": 180.0, "far": 0.0, "left": -90.0, "right": 90.0}
+"""The world heading each tray wall faces outward, degrees (``tray_lean_boxes``)."""
+
+
+def tray_lean_boxes(
+    lean_deg: float,
+) -> list[tuple[str, tuple[float, float, float], tuple[float, float, float], tuple]]:
+    """(name, center, size, quat) of the four tray walls leaning outward by ``lean_deg``.
+
+    Each wall is a slab TRAY_WALL thick whose inner bottom edge lies on the interior edge on
+    the desk, tilted outward about that edge so its rim stands TRAY_WALL_HEIGHT high, as the
+    MS6 round dish's rim leaned (git c15f8f8). The interior footprint at the desk is the H1
+    one; at the rim it is ``TRAY_WALL_HEIGHT * tan(lean)`` wider on every side. Each slab runs
+    long enough past the corners to meet its neighbours at the rim. ``lean_deg`` 0 builds
+    vertical slabs; the scene builds ``tray_static_boxes`` then instead.
+    """
+    tilt = math.radians(lean_deg)
+    span = TRAY_WALL_HEIGHT / math.cos(tilt)
+    out = 0.5 * span * math.sin(tilt) + 0.5 * TRAY_WALL * math.cos(tilt)
+    z = 0.5 * span * math.cos(tilt) - 0.5 * TRAY_WALL * math.sin(tilt)
+    grow = TRAY_WALL_HEIGHT * math.tan(tilt) + TRAY_WALL
+    (x0, x1), (y0, y1) = tray_bounds()
+    cx, cy = TRAY_CENTER
+    edges = {"near": (x0, cy), "far": (x1, cy), "left": (cx, y0), "right": (cx, y1)}
+    sides = {"near": y1 - y0, "far": y1 - y0, "left": x1 - x0, "right": x1 - x0}
+    boxes = []
+    for name, heading in TRAY_WALL_OUTWARD_DEG.items():
+        ux, uy = math.cos(math.radians(heading)), math.sin(math.radians(heading))
+        ex, ey = edges[name]
+        quat = quat_mul(
+            quat_from_rpy_deg((0.0, 0.0, heading)), quat_from_rpy_deg((0.0, lean_deg, 0.0))
+        )
+        size = (TRAY_WALL, sides[name] + 2.0 * grow, span)
+        boxes.append((f"tray_wall_{name}", (ex + out * ux, ey + out * uy, z), size, quat))
+    return boxes
+
+
+def sample_tray_point(rng: random.Random, inset: float) -> tuple[float, float]:
+    """A drop point uniform over the tray interior shrunk by ``inset`` on every edge.
+
+    An inset past half the interior collapses that axis onto the tray's center line.
+    """
+    (x0, x1), (y0, y1) = tray_bounds()
+    ix = min(inset, (x1 - x0) / 2)
+    iy = min(inset, (y1 - y0) / 2)
+    return rng.uniform(x0 + ix, x1 - ix), rng.uniform(y0 + iy, y1 - iy)
+
+
 HEAP_RADIUS = 0.088
 """The radius over which that bias narrows to its floor: the old drop disc's."""
 HEAP_DROP_INSET = 0.02
@@ -298,14 +397,18 @@ def in_reach(x: float, y: float, bl: BinLayout, margin: float = 0.0) -> bool:
     )
 
 
-def sample_heap_point(rng: random.Random, bl: BinLayout, inset: float) -> tuple[float, float]:
+def sample_heap_point(
+    rng: random.Random, bl: BinLayout, inset: float, zone=None
+) -> tuple[float, float]:
     """A drop point uniform over the scatter zone shrunk by ``inset`` on every edge.
 
     The zone is ``scatter_x(bl)`` by SCATTER_Y with the far corners clipped at
     SCATTER_MAX_RADIUS, the same region the six-brick task scatters over. Rejection on the
     radius keeps the draw uniform per unit area instead of piling parts on the arc.
+    ``zone``, ``((x0, x1), (y0, y1))``, replaces the scatter zone: the tray footprint when
+    desk boxes stand beside it (MS7a design, desk boxes).
     """
-    (x0, x1), (y0, y1) = scatter_x(bl), SCATTER_Y
+    (x0, x1), (y0, y1) = zone or (scatter_x(bl), SCATTER_Y)
     while True:
         x, y = rng.uniform(x0 + inset, x1 - inset), rng.uniform(y0 + inset, y1 - inset)
         if math.hypot(x, y) <= SCATTER_MAX_RADIUS - inset:
@@ -317,6 +420,8 @@ def sample_heap_batch(
     bl: BinLayout,
     half_diagonals: Sequence[float],
     tries: int = HEAP_DROP_TRIES,
+    zone=None,
+    tray: bool = False,
 ) -> list[tuple[float, float]]:
     """Drop points for parts released into the air together, one per half diagonal.
 
@@ -330,14 +435,22 @@ def sample_heap_batch(
     whole: the edge is a reach bound on the part's CENTRE, not a wall, and the whole diagonal
     left a 4x8 brick a sliver 5 cm wide to land in, so two of them could not keep apart. The
     largest parts are placed first, so the small ones fill in around them. Measured over 300
-    batches of HEAP_DROP_BATCH catalog parts: no pair overlaps.
+    batches of HEAP_DROP_BATCH catalog parts: no pair overlaps. ``zone`` is
+    ``sample_heap_point``'s.
+
+    ``tray`` (MS7a design, the tray) draws inside the tray interior instead, inset by the
+    whole half diagonal plus TRAY_DROP_INSET: there the edge is a wall, not a reach bound. It
+    takes the place of ``zone``.
     """
     order = sorted(range(len(half_diagonals)), key=lambda k: -half_diagonals[k])
     points: dict[int, tuple[float, float]] = {}
     for k in order:
         hd = half_diagonals[k]
         for attempt in range(tries):
-            x, y = sample_heap_point(rng, bl, 0.25 * hd + HEAP_DROP_INSET)
+            if tray:
+                x, y = sample_tray_point(rng, hd + TRAY_DROP_INSET)
+            else:
+                x, y = sample_heap_point(rng, bl, 0.25 * hd + HEAP_DROP_INSET, zone)
             clear = all(
                 math.dist((x, y), q) >= hd + half_diagonals[j] + HEAP_DROP_GAP
                 for j, q in points.items()

@@ -4,7 +4,9 @@ Stdlib only, runs under system python3 like the other supervisors. Reads the ``e
 payloads ``scripts/run_gate_eval.py --heap_k`` leaves in its out_dir and sums what
 ``core/loop.py`` books per cycle. It reports the rows MS6 phase B design 5.10 asks for: the
 census classes, the successful cycles that stowed a part other than the target, the first
-close distance against the outcome, and the step count per end reason. Prints exactly one of
+close distance against the outcome, and the step count per end reason. With desk boxes it adds
+the MS7a rows: ``wrong_box`` among the classes, parts stowed per class and per box, and the
+parts at rest in a box that is not their own. Prints exactly one of
 ``CENSUS_OK {json}`` or ``CENSUS_FAIL {json}`` on stdout.
 """
 
@@ -20,6 +22,18 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 CLOSE_CM_EDGES = (1.0, 2.0, 3.0)  # cm: the bins of the first close distance
+TRAY_INTERIOR_XY = ((0.13, 0.26), (-0.10, 0.10))
+"""m: the MS7a tray interior, ``layout.tray_bounds()`` (pinned by tests/test_heap_cycle_census.py)."""
+WALL_BAND_M = 0.03
+"""m: a part left this close to a tray wall is left at a wall: ``grasp.RAKE_BAND_M``, the band
+the teacher rakes from (pinned by the same test)."""
+
+
+def at_tray_wall(x: float, y: float) -> bool:
+    """Inside the tray interior and within WALL_BAND_M of one of its walls."""
+    (x0, x1), (y0, y1) = TRAY_INTERIOR_XY
+    inside = x0 <= x <= x1 and y0 <= y <= y1
+    return inside and min(x - x0, x1 - x, y - y0, y1 - y) < WALL_BAND_M
 
 
 def _close_bin(cm: float | None) -> str:
@@ -35,8 +49,21 @@ def read_payloads(paths: list[Path]) -> dict:
     classes: Counter = Counter()
     closes: dict[str, list[int]] = defaultdict(lambda: [0, 0])  # bin -> [stowed, cycles]
     steps: dict[str, list[int]] = defaultdict(list)  # end reason -> cycle steps
-    summary = {"draws": len(paths), "episodes": 0, "parts_total": 0, "parts_stowed": 0, "cycles": 0}
+    summary = {
+        "draws": len(paths),
+        "episodes": 0,
+        "parts_total": 0,
+        "parts_stowed": 0,
+        "cycles": 0,
+        "rakes": 0,
+        "left_parts": 0,
+        "left_at_wall": 0,
+    }
     target_stows = other_stows = unaligned = 0
+    # MS7a desk boxes: parts stowed in their own box and parts in total, per class and per box.
+    by_class: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    by_box: dict[int, list[int]] = defaultdict(lambda: [0, 0])
+    wrong_box_parts = 0
     for path in paths:
         for ep in json.loads(Path(path).read_text())["episodes"]:
             if "cycle_classes" not in ep:
@@ -45,7 +72,19 @@ def read_payloads(paths: list[Path]) -> dict:
             summary["parts_total"] += int(ep["num_bricks"])
             summary["parts_stowed"] += int(ep["bricks_stowed"])
             summary["cycles"] += int(ep["cycles"])
+            summary["rakes"] += int(ep.get("rakes", 0))  # MS7a tray: they run between cycles
+            # The parts the episode left out of every box (part, x, y, z, rakes, failures).
+            left = ep.get("left_parts", [])
+            summary["left_parts"] += len(left)
+            summary["left_at_wall"] += sum(1 for row in left if at_tray_wall(row[1], row[2]))
             classes.update(ep["cycle_classes"])
+            for name, row in ep.get("stowed_by_class", {}).items():
+                by_class[name][0] += row["stowed"]
+                by_class[name][1] += row["total"]
+            for m, row in enumerate(ep.get("stowed_by_box", [])):
+                by_box[m][0] += row["stowed"]
+                by_box[m][1] += row["total"]
+            wrong_box_parts += int(ep.get("wrong_box_parts", 0))
             for ok, cm in zip(ep["cycle_outcomes"], ep["cycle_first_close_cm"]):
                 row = closes[_close_bin(cm)]
                 row[0] += bool(ok)
@@ -72,6 +111,14 @@ def read_payloads(paths: list[Path]) -> dict:
         "episodes_not_paired": unaligned,
     }
     summary["first_close_cm"] = {k: {"stowed": v[0], "cycles": v[1]} for k, v in closes.items()}
+    if by_class:
+        summary["stowed_by_class"] = {
+            k: {"stowed": v[0], "total": v[1]} for k, v in by_class.items()
+        }
+        summary["stowed_by_box"] = {
+            str(m): {"stowed": v[0], "total": v[1]} for m, v in sorted(by_box.items())
+        }
+        summary["wrong_box_parts"] = wrong_box_parts
     summary["cycle_steps"] = {
         reason: {
             "cycles": len(v),

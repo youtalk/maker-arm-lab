@@ -145,6 +145,24 @@ def make_part(family: str, nx: int, ny: int, nz: int = 1) -> Part:
     )
 
 
+PART_CLASSES = ("slope", "tall", "narrow", "wide")
+"""The four sorting classes of MS7a (MS7a design, classes and the class map), in the order the
+class-to-box map lists them. Every class holds a held-out part, so a held-out heap fills all
+four boxes."""
+
+
+def part_class(part: Part) -> str:
+    """The sorting class of ``part``: ``slope`` for a slope, ``tall`` for a brick taller than one
+    brick height, ``narrow`` for a one-height brick one stud wide and ``wide`` for a one-height
+    brick two or more studs wide. The catalog holds 6, 5, 8 and 10. A flat or retired part,
+    which only a replay builds, classes by its width like a one-height brick."""
+    if part.family == "slope":
+        return "slope"
+    if part.size[2] > BRICK_HEIGHT + 1e-9:
+        return "tall"
+    return "narrow" if part.nx == 1 else "wide"
+
+
 def stud_positions(part: Part) -> list[tuple[float, float]]:
     """(x, y) of every stud on the top face, part frame. Tiles and slopes have none."""
     if not part.studs:

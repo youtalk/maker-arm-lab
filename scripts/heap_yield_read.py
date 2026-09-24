@@ -27,6 +27,7 @@ def read_meta(paths: list[Path]) -> dict:
         "parts_out_of_reach": 0,
         "cycles": 0,
         "pushes": 0,
+        "rakes": 0,
         "runs": len(paths),
     }
     families: dict[str, dict[str, int]] = defaultdict(lambda: {"attempts": 0, "stowed": 0})
@@ -40,6 +41,7 @@ def read_meta(paths: list[Path]) -> dict:
             summary["parts_out_of_reach"] += int(episode.get("parts_out_of_reach", 0))
             summary["cycles"] += int(episode.get("cycles", 0))
             summary["pushes"] += int(episode.get("pushes", 0))
+            summary["rakes"] += int(episode.get("rakes", 0))
             outcomes = episode.get("cycle_outcomes", [])
             for k, part in enumerate(episode.get("cycle_parts", [])):
                 family = names[part].split("_")[0]

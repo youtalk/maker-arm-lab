@@ -198,6 +198,17 @@ uv run python scripts/mj_dagger_heap.py --num_envs 5 --heap_k 50 --parts_split t
     --out_dir ~/data/maker-arm-ms6/l/dagger/r1 --shard_name proc_0
 ```
 
+`scripts/fleet.py` runs the MS7a campaign across hosts. It uses only the standard library. It reads the host table `<campaign>/hosts.json`, and the default campaign is `~/data/maker-arm-ms7`. `sync` puts the campaign worktree of every host on one SHA from GitHub and runs a fast test subset. `ship` copies a directory or a file with rsync and compares the file lists at both ends. `run` starts a logged job in the worktree of a host. `read` splits one gate read across hosts by their lane caps. It pulls the payloads into one new TAG directory and refuses a payload older than the read. Then it runs the aggregate pass. `status` prints the last token line of every job log. A payload records the checkpoint path as its policy id, so every path must be the same absolute path on every host.
+
+```bash
+python3 scripts/fleet.py sync --sha "$(git rev-parse origin/main)"             # SYNC_OK {...}
+python3 scripts/fleet.py ship <dir> aarch64:<dir> --streams 4                   # SHIP_OK {...}
+python3 scripts/fleet.py run aarch64 <name> -- <command>                        # RUN_OK {...}
+python3 scripts/fleet.py read --ckpt <abs pretrained_model> --tag <TAG> --seed 20261700 \
+    --draws 0-11 --hosts c,a,b [-- <more run_gate_eval.py flags>]  # GATE_OK {...}
+python3 scripts/fleet.py status                                                 # STATUS_OK
+```
+
 ## Training smoke
 
 ```bash
@@ -219,3 +230,4 @@ For an **online** run — the default, `WANDB_ENABLE=true` with `WANDB_MODE=onli
 - [`docs/ms6-target-context.md`](docs/ms6-target-context.md) — the second phase B lever: a 16-wide `camera_box_target` context that hands the policy its target's centre and the teacher's grasp, the heap loop's cycle boundary moved to the teacher's (bin entry, then a wait for the retreat), and a 50-action serving horizon. The 400k checkpoint reads 0.6250 on 3000 held-out parts against the previous 0.4297 and a goal of 0.80. It records the stale-row mechanism, the wait constants that measured lower, and the census of the two checks.
 - [`docs/ms6-square-wrist.md`](docs/ms6-square-wrist.md) — campaign n, the third phase B lever: the next target at the release on both the teacher and the eval loop, a squeeze floor and a wrist squaring that serve from the target row, on a warm start trained on the re-recorded corpus. The checked read passes the goal of 0.80 at 2711/3000 = 0.9037, and the official seed confirms it at 2759/3000 = 0.9197. It records the depth forensic that found the jaw-angle mechanism and the levers that read lower.
 - [`docs/ms6-bare-desk-heap.md`](docs/ms6-bare-desk-heap.md) — the ladder from the bare desk at 0.633 to a 0.933 held-out and 0.940 train-split stowed fraction: no pushes, a batched drop over the whole scatter zone, a catalog without round bricks or wedge slopes, a slope that closes on its side, and a backstop wall. It records the desk contact and reach defects found on the way, the converter defect that dropped heap episodes, and the corpus and training commands.
+- [`docs/ms7-sorting.md`](docs/ms7-sorting.md): MS7a. Rung 1 stows a tray heap in one desk box, and rung 2 sorts it into four desk boxes by four part classes. The teachers pass at 0.920, 0.963 and 0.905 on 600 parts. The rung 2 checked read passes on a tray whose walls lean out 30 degrees: 2610/3000 = 0.870 at 1.138 cycles per correct stow. On vertical walls, the same checkpoint reads 2513/3000 = 0.838 on the same draws. The lean is a deviation from the design. Rung 1 passes on the leaned tray at 2614/3000 = 0.871 and fails on vertical walls at 2533/3000 = 0.844. The report records `scripts/fleet.py` on three hosts, the serving rules, the forensics of the lost parts and the host lessons. The official read passes on the leaned tray: 5205/6000 = 0.8675 at 1.134 cycles per correct stow.

@@ -17,7 +17,12 @@ What changes against the six-brick oracle, and nothing else:
   edge first, with a short stroke into it, and picked on a later scan (MS6 rework section 7);
 * the episode ends DONE, never ABANDON, at the cycle budget or with no candidate left;
 * the next target is chosen the moment RELEASE ends, so its row and marker show through
-  RETREAT, and HOVER adopts that choice (``preselects_next_target``, 2026-09-22).
+  RETREAT, and HOVER adopts that choice (``preselects_next_target``, 2026-09-22);
+* with desk boxes (``boxes``, MS7a design, desk boxes) every part has its own box, the
+  release is at the pick tilt over that box's centre with no RAISE, and a part inside any box
+  is never a target;
+* in the MS7a tray, when no grasp ranks and a candidate lies within ``grasp.RAKE_BAND_M`` of
+  a wall, the closed jaws rake it off the wall through the push phases (``_plan_rake``).
 
 The phases, the correctives, the induction and the retry ladder are the base class's.
 """
@@ -27,12 +32,12 @@ from __future__ import annotations
 import math
 import random
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
-from maker_arm_lab.core import checker, grasp, layout, oracle
-from maker_arm_lab.core.parts import Part
+from maker_arm_lab.core import checker, desk_boxes, grasp, layout, oracle
+from maker_arm_lab.core.parts import Part, part_class
 
 CYCLE_BUDGET = 50
 CELL_FAILURE_CAP = 3
@@ -48,6 +53,10 @@ the part (``core.grasp``), so the model's refusal is stricter than the physics. 
 value the dish ran; the push machinery stays and this constant turns it back on.
 """
 PUSH_BUDGET = CYCLE_BUDGET
+MAX_RAKES = 20
+"""Rakes one episode may spend (MS7a design, the rake). # INITIAL"""
+RAKE_PART_CAP = 2
+"""Rakes one part may take before it is left where it lies. # INITIAL"""
 CANDIDATE_MAX_Z = 0.10
 """A part above this height sits in a bin or on the shelf, never on the heap."""
 PUSH_HOVER_Z = 0.08
@@ -114,6 +123,9 @@ def target_context(pos, chosen: grasp.Grasp | None) -> list[float]:
 class Push:
     start: tuple[float, float]
     end: tuple[float, float]
+    part: int | None = None  # the raked part; None is the densest-cell push
+    heading: float | None = None  # a rake's sweep direction
+    jaw: float | None = None  # the closing axis the legs square to; None holds the jaws
 
 
 @dataclass(frozen=True)
@@ -133,10 +145,31 @@ class HeapOracle(oracle.EnvOracle):
         induction: oracle.FailureInduction | None = None,
         rng: random.Random | None = None,
         cycle_budget: int = CYCLE_BUDGET,
+        boxes: Sequence[Sequence[float]] = (),
+        tray: bool = False,
+        tray_lean_deg: float = 0.0,
     ):
+        """``destination`` is the MS6 bin index, or with ``boxes`` (one (x, y, yaw) per desk
+        box) the box index of every part, (K,), or one index for them all."""
         super().__init__(bl, len(parts), draw, induction=induction, rng=rng)
+        # MS7a design, the tray: the heap lies inside four walls that ``core.grasp`` ranks
+        # against (``grasp.wall_allows``). Off, the heap lies on the bare desk as in MS6.
+        self.walls = grasp.tray_walls(tray_lean_deg) if tray else ()
         self.parts = tuple(parts)
-        self.destination = int(destination)
+        self.boxes = tuple(tuple(float(v) for v in box) for box in boxes)
+        if self.boxes:
+            dest = torch.as_tensor(destination).long()
+            self.part_boxes = (
+                dest.expand(len(self.parts)).tolist() if dest.dim() == 0 else dest.tolist()
+            )
+            self.destination = None
+            self.release_tilt = oracle.PICK_TILT_RAD
+            self.retreat_point = desk_boxes.DESK_BOX_RETREAT_POINT
+            self.raises = False
+            self.carry_half_turn = True
+        else:
+            self.part_boxes = None
+            self.destination = int(destination)
         self.sizes = torch.tensor([p.size for p in self.parts], dtype=torch.float32)
         self.cycle_budget = cycle_budget
         self.grasp: grasp.Grasp | None = None
@@ -162,20 +195,49 @@ class HeapOracle(oracle.EnvOracle):
         self.tip: Tip | None = None
         self.cycles = 0
         self.pushes = 0
+        self.rakes = 0
+        self.raked: dict[int, int] = {}
+        self.jams = 0
+        self.push_takeover = False  # set by aim_push: this oracle runs one push, then idles
         self.tips = 0
         self.tips_ok = 0
         self.forced_picks = 0
         self.held_swaps = 0
         self._give_up = False
         self.pushes_in_a_row = 0
-        self.failures: dict[tuple[int, int], int] = {}
+        self.failures: dict = {}
+        # "cell": failures count per 5 cm cell (design 7.2), the teacher's rule. "part": per
+        # part, so a failing policy excludes the part it keeps missing and not its neighbours
+        # (the heap loop's --part_failures switch, MS7a).
+        self.failure_scope = "cell"
+        # The rake's caps and its start rule; the heap loop's --rake_cap and --rake_crowd
+        # raise them on its selectors (MS7a rake prototype), the teacher keeps these.
+        self.rake_part_cap = RAKE_PART_CAP
+        self.max_rakes = MAX_RAKES
+        self.rake_crowd = 0.0
         self.cycle_parts: list[int] = []
         self.out_of_reach = 0
         self._push_rng = rng if rng is not None else random.Random(0)
 
     # -- grading against the destination -----------------------------------
 
+    def _box_tensor(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """(1,M,4) grader boxes and their half extents, as ``stowed.env_desk_boxes`` builds."""
+        z, half = desk_boxes.stow_region(len(self.boxes))
+        boxes = torch.tensor([[(x, y, z, yaw) for x, y, yaw in self.boxes]])
+        return boxes, torch.tensor(half)
+
     def _stowed(self, scene: oracle.SceneSnapshot) -> set[int]:
+        if self.boxes:
+            boxes, half = self._box_tensor()
+            ok = checker.parts_at_rest_in_own_boxes(
+                scene.brick_pos.unsqueeze(0),
+                scene.brick_lin_vel.unsqueeze(0),
+                boxes,
+                half,
+                torch.tensor([self.part_boxes]),
+            )[0]
+            return {i for i in range(self.num_bricks) if bool(ok[i])}
         # The MS6 z-centre fix: heap mode has one physical bin, so grading reads
         # layout.heap_bin_center directly instead of the six-brick per-color array.
         ids = torch.zeros(self.num_bricks, dtype=torch.long)
@@ -189,6 +251,10 @@ class HeapOracle(oracle.EnvOracle):
         return {i for i in range(self.num_bricks) if bool(ok[i])}
 
     def _release_target(self, brick: int) -> torch.Tensor:
+        if self.boxes:
+            # Over the centre of the part's own box: the level jaws drop it straight down.
+            x, y, _ = self.boxes[self.part_boxes[brick]]
+            return torch.tensor([x, y, desk_boxes.DESK_BOX_RELEASE_Z])
         return torch.tensor(
             [
                 self.bl.bin_x - oracle.RELEASE_X_SETBACK,
@@ -226,6 +292,12 @@ class HeapOracle(oracle.EnvOracle):
     def _candidates(self, scene: oracle.SceneSnapshot) -> torch.Tensor:
         """(B,) bool: parts still to pick that the arm can reach and whose cell is open."""
         done = self._stowed(scene) | self._sorted
+        if self.boxes:
+            # A part in any box, its own or another, is out of play: the grasp model knows no
+            # walls, and a part in another box is the class branch's wrong_box, not a target.
+            boxes, half = self._box_tensor()
+            boxed = checker.in_boxes(scene.brick_pos.unsqueeze(0), boxes, half)[0].any(-1)
+            done |= {b for b in range(self.num_bricks) if bool(boxed[b])}
         mask = torch.zeros(self.num_bricks, dtype=torch.bool)
         self.out_of_reach = 0
         for b in range(self.num_bricks):
@@ -235,7 +307,7 @@ class HeapOracle(oracle.EnvOracle):
             if not layout.in_reach(x, y, self.bl):
                 self.out_of_reach += 1
                 continue
-            if self.failures.get(self.cell_of((x, y)), 0) >= CELL_FAILURE_CAP:
+            if self.failures.get(self._failure_key(b, (x, y)), 0) >= CELL_FAILURE_CAP:
                 continue
             mask[b] = True
         return mask
@@ -248,6 +320,7 @@ class HeapOracle(oracle.EnvOracle):
             mask,
             oracle.PICK_TILT_RAD,
             [p.closing_axes for p in self.parts],
+            self.walls,
         )
 
     def _push_heading(self, center: tuple[float, float]) -> float:
@@ -349,6 +422,8 @@ class HeapOracle(oracle.EnvOracle):
             if chosen is None:
                 if ranked and self.pushes < PUSH_BUDGET:
                     self.push = self._plan_push(scene, mask)
+                elif not ranked and self.walls and self.rakes < self.max_rakes:
+                    self.push = self._plan_rake(scene, mask)
                 return None
             if 2.0 * chosen.half_height < TIP_MIN_GRIP_HEIGHT:
                 # MS6 rework section 7: a flat part offers only its in-plane axes, so the
@@ -372,6 +447,71 @@ class HeapOracle(oracle.EnvOracle):
         """A sweep through the densest cell of the candidates (design H8)."""
         center = grasp.densest_cell(scene.brick_pos[mask, :2])
         return Push(*grasp.push_segment(center, self._push_heading(center)))
+
+    def _plan_rake(self, scene: oracle.SceneSnapshot, mask: torch.Tensor) -> Push | None:
+        """A rake off a wall for the candidate nearest one, or None (MS7a design, the rake).
+
+        Called only when no grasp ranks. A candidate within ``grasp.RAKE_BAND_M`` of a wall
+        and under ``RAKE_PART_CAP`` rakes is swept off its nearest wall by one part length,
+        its longest side (at least ``grasp.PUSH_HALF_LENGTH_M``), the nearest first; a part
+        whose every start lands the tips on a neighbor is skipped (``grasp.rake_segment``).
+        """
+        near = []
+        for b in torch.nonzero(mask).flatten().tolist():
+            if self.raked.get(b, 0) >= self.rake_part_cap:
+                continue
+            xy = tuple(scene.brick_pos[b, :2].tolist())
+            dist, wall = min((grasp.wall_distance(xy, w), k) for k, w in enumerate(self.walls))
+            if dist < grasp.RAKE_BAND_M:
+                near.append((dist, b, self.walls[wall]))
+        if not near:
+            return None
+        prints = {
+            b: grasp.footprint(self.sizes[b], scene.brick_pos[b], scene.brick_quat[b])
+            for b in range(self.num_bricks)
+            if float(scene.brick_pos[b, 2]) <= CANDIDATE_MAX_Z
+        }
+        for _, b, wall in sorted(near, key=lambda t: (t[0], t[1])):
+            length = max(max(self.parts[b].size), grasp.PUSH_HALF_LENGTH_M)
+            others = [f for k, f in prints.items() if k != b]
+            xy = tuple(scene.brick_pos[b, :2].tolist())
+            segment = grasp.rake_segment(
+                xy, prints[b], length, wall, self.walls, others, self.rake_crowd
+            )
+            if segment is not None:
+                start, end, heading = segment
+                return Push(start, end, part=b, heading=heading, jaw=heading)
+        return None
+
+    def _push_yaw(self) -> float | None:
+        """Goal.yaw of a push leg: a rake squares the jaws to ``Push.jaw``, a push holds."""
+        if self.push is None or self.push.jaw is None:
+            return None
+        return self.push.jaw - math.pi / 2
+
+    def aim_push(self, push: Push) -> None:
+        """Enter the push phases on ``push`` from the HOVER that ``resume`` left pending: the
+        heap loop's oracle driver runs a rake its selector planned as a takeover of its own
+        (``OracleRig.resume(push=...)``), which ends back at HOVER."""
+        self.push = push
+        self.push_takeover = True
+        self.target_brick = None
+        self.phase = oracle.Phase.PUSH_HOVER
+
+    def _turn_rake_jaw(self) -> bool:
+        """The rig could not plan the rake's hover at this jaw heading: take the next one.
+
+        The closing axis runs along the sweep first (the finger plates stand parallel to the
+        wall), then across it, then the jaws hold the heading they have. Driven on 2026-09-23:
+        the first fails to plan off the near and far walls, where it points the closing axis
+        along the arm's radius, and the second off the left wall. False when all three failed.
+        """
+        push = self.push
+        if push.jaw is None:
+            return False
+        along = abs(oracle.wrap_to_pi(push.jaw - push.heading)) < 1e-9
+        self.push = replace(push, jaw=push.heading + math.pi / 2 if along else None)
+        return True
 
     def _plan_tip(self, scene: oracle.SceneSnapshot, part: int) -> Tip | None:
         """A short stroke into the part's edge, from outside its footprint toward its centre.
@@ -487,12 +627,13 @@ class HeapOracle(oracle.EnvOracle):
             return self._goal(
                 oracle.Phase.PUSH_HOVER,
                 target,
-                None,
+                self._push_yaw(),
                 0.0,
                 -1.0,
                 0.01,
                 0,
                 oracle.DEFAULT_MAX_STEPS,
+                hold_xy=(self.push.start, self.push.end) if self.push.jaw is not None else (),
                 half_height=PUSH_HALF_HEIGHT,
             )
         if self.phase == oracle.Phase.PUSH_DESCEND:
@@ -500,12 +641,13 @@ class HeapOracle(oracle.EnvOracle):
             return self._goal(
                 oracle.Phase.PUSH_DESCEND,
                 target,
-                None,
+                self._push_yaw(),
                 0.0,
                 -1.0,
                 0.003,
                 oracle.DESCEND_STALL_STEPS,
                 oracle.DEFAULT_MAX_STEPS,
+                hold_xy=(self.push.start, self.push.end) if self.push.jaw is not None else (),
                 half_height=PUSH_HALF_HEIGHT,
             )
         if self.phase == oracle.Phase.PUSH_SWEEP:
@@ -567,16 +709,17 @@ class HeapOracle(oracle.EnvOracle):
     def report(self, result: oracle.PhaseResult, scene: oracle.SceneSnapshot) -> None:
         phase = self.phase
         if phase == oracle.Phase.PUSH_HOVER:
+            if result.outcome == "unplanned" and self.push.part is not None:
+                if not self._turn_rake_jaw():
+                    self._end_push()  # no heading plans: spent, so the part is not retried forever
+                return  # PUSH_HOVER again, at the next jaw heading
             self.phase = oracle.Phase.PUSH_DESCEND
             return
         if phase == oracle.Phase.PUSH_DESCEND:
             self.phase = oracle.Phase.PUSH_SWEEP
             return
         if phase == oracle.Phase.PUSH_SWEEP:
-            self.pushes += 1
-            self.pushes_in_a_row += 1
-            self.push = None
-            self.phase = oracle.Phase.HOVER
+            self._end_push()
             return
         if phase == oracle.Phase.TIP_HOVER:
             self.phase = oracle.Phase.TIP_DESCEND
@@ -624,15 +767,63 @@ class HeapOracle(oracle.EnvOracle):
         if phase == oracle.Phase.RETREAT and brick is not None and brick not in self._sorted:
             self._mark_failure(scene, brick)
 
+    def recover_from_jam(self, scene: oracle.SceneSnapshot) -> bool:
+        """The rig's watchdog found the arm jammed: give up the leg, not the episode.
+
+        MS7a tray only; on the bare desk this returns False and the rig abandons the episode as
+        in MS6. A jammed pick (DESCEND, CLOSE or LIFT) ends its cycle the way a lift that
+        failed its retries does, through REOPEN with the cell marked; a jammed rake or push is
+        spent. On the 600-part tray read of 2026-09-23 two of twelve episodes were abandoned
+        with 19 and 7 parts still in the tray: the wrist roll 0.02 rad off its stop while a
+        forced pick's descend stalled on a neighbor, and a wedge rake at the near wall.
+        Anything else (a jam in transit) still abandons.
+        """
+        if not self.walls:
+            return False
+        if self.phase in oracle.PUSH_PHASES and self.push is not None:
+            self.jams += 1
+            self._end_push()
+            return True
+        picking = (oracle.Phase.DESCEND, oracle.Phase.CLOSE, oracle.Phase.LIFT)
+        if self.phase in picking and self.target_brick is not None:
+            self.jams += 1
+            self._mark_failure(scene, self.target_brick)
+            self.cycle_outcomes.append(False)
+            self._give_up = True
+            self.phase = oracle.Phase.REOPEN
+            return True
+        return False
+
+    def _end_push(self) -> None:
+        """Count the push or rake that just ended and scan again at HOVER."""
+        if self.push.part is None:
+            self.pushes += 1
+            self.pushes_in_a_row += 1
+        else:
+            self.rakes += 1
+            self.raked[self.push.part] = self.raked.get(self.push.part, 0) + 1
+        self.push = None
+        self.phase = oracle.Phase.HOVER
+
+    def _failure_key(self, brick: int, xy) -> tuple[int, int] | int:
+        """Where a failure is booked: the part's 5 cm cell, or the part (``failure_scope``)."""
+        return brick if self.failure_scope == "part" else self.cell_of(xy)
+
     def _mark_failure(self, scene: oracle.SceneSnapshot, brick: int) -> None:
-        cell = self.cell_of(scene.brick_pos[brick, :2].tolist())
-        self.failures[cell] = self.failures.get(cell, 0) + 1
+        key = self._failure_key(brick, scene.brick_pos[brick, :2].tolist())
+        self.failures[key] = self.failures.get(key, 0) + 1
+
+    def class_to_box(self) -> dict[str, int]:
+        """The box of each class the heap holds, read off the per-part destinations."""
+        return {part_class(p): b for p, b in zip(self.parts, self.part_boxes)}
 
     def extra_stats(self) -> dict:
         """Merged into ``OracleRig.episode_stats`` beside the induction counters."""
-        return {
+        stats = {
             "cycles": self.cycles,
             "pushes": self.pushes,
+            "rakes": self.rakes,
+            "jams": self.jams,
             "tips": self.tips,
             "tips_ok": self.tips_ok,
             "forced_picks": self.forced_picks,
@@ -642,3 +833,8 @@ class HeapOracle(oracle.EnvOracle):
             "cells_excluded": sum(1 for v in self.failures.values() if v >= CELL_FAILURE_CAP),
             "parts_out_of_reach": self.out_of_reach,
         }
+        if self.boxes:
+            # The episode's class-to-box map and each part's box (MS7a design, classes).
+            stats["part_boxes"] = list(self.part_boxes)
+            stats["class_to_box"] = self.class_to_box()
+        return stats
