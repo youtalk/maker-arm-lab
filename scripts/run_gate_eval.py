@@ -107,14 +107,23 @@ LOOP_SWITCHES = (
     "pick_snap",
     "dwell_close",
     "adopt_held",
+    "rake_crowd",
 )
 """The heap loop's protocol switches (core.loop.rollout); the client records them in the
 payload's inference block under "loop", and the cache matches on them."""
+LOOP_SETTINGS = ("rake_cap",)
+"""The heap loop's integer settings, recorded and matched like the switches; 0 is off."""
 
 
 def loop_switches(client_flags) -> dict:
-    """Which of ``LOOP_SWITCHES`` the client flags turn on."""
-    return {name: f"--{name}" in client_flags for name in LOOP_SWITCHES}
+    """Which of ``LOOP_SWITCHES`` the client flags turn on, and each of ``LOOP_SETTINGS``'s
+    values (``--rake_cap 4`` reads 4)."""
+    flags = list(client_flags)
+    found = {name: f"--{name}" in flags for name in LOOP_SWITCHES}
+    for name in LOOP_SETTINGS:
+        key = f"--{name}"
+        found[name] = int(flags[flags.index(key) + 1]) if key in flags else 0
+    return found
 
 
 def make_eval_draws(processes: int, seed: int) -> list[EvalDraw]:
@@ -493,7 +502,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     # them ran with every switch off.
     recorded = served.get("loop") or {}
     same_inference = same_inference and loop_switches(cfg.client_flags) == {
-        name: bool(recorded.get(name, False)) for name in LOOP_SWITCHES
+        **{name: bool(recorded.get(name, False)) for name in LOOP_SWITCHES},
+        **{name: int(recorded.get(name, 0)) for name in LOOP_SETTINGS},
     }
     return payload if same_draw and same_policy and same_task and same_inference else None
 
@@ -731,6 +741,19 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "box of a lifted part that is not the target",
     )
     parser.add_argument(
+        "--rake_cap",
+        type=int,
+        default=0,
+        help="MuJoCo heap only: forwarded to the heap client as --rake_cap N, which lets the "
+        "loop rake one part up to N times; 0 keeps the teacher's cap",
+    )
+    parser.add_argument(
+        "--rake_crowd",
+        action="store_true",
+        help="MuJoCo heap only: forwarded to the heap client as --rake_crowd, which lets a rake "
+        "start land the tips into a neighbour when no start is clear",
+    )
+    parser.add_argument(
         "--client_flags",
         type=str,
         default="",
@@ -752,7 +775,9 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError("--part_failures needs --heap_k > 0 and --backend mujoco")
     if args.pick_snap and (args.heap_k <= 0 or args.backend != "mujoco"):
         raise ValueError("--pick_snap needs --heap_k > 0 and --backend mujoco")
-    for name in ("dwell_close", "adopt_held"):
+    if args.rake_cap < 0:
+        raise ValueError(f"--rake_cap must be 0 (off) or a positive cap, got {args.rake_cap}")
+    for name in ("dwell_close", "adopt_held", "rake_cap", "rake_crowd"):
         if getattr(args, name) and (args.heap_k <= 0 or args.backend != "mujoco"):
             raise ValueError(f"--{name} needs --heap_k > 0 and --backend mujoco")
     if args.desk_boxes and (args.heap_k <= 0 or args.backend != "mujoco" or args.desk_boxes < 0):
@@ -804,7 +829,9 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         + (("--part_failures",) if args.part_failures else ())
         + (("--pick_snap",) if args.pick_snap else ())
         + (("--dwell_close",) if args.dwell_close else ())
-        + (("--adopt_held",) if args.adopt_held else ()),
+        + (("--adopt_held",) if args.adopt_held else ())
+        + (("--rake_cap", str(args.rake_cap)) if args.rake_cap else ())
+        + (("--rake_crowd",) if args.rake_crowd else ()),
     )
 
 

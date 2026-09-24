@@ -22,6 +22,18 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 CLOSE_CM_EDGES = (1.0, 2.0, 3.0)  # cm: the bins of the first close distance
+TRAY_INTERIOR_XY = ((0.13, 0.26), (-0.10, 0.10))
+"""m: the MS7a tray interior, ``layout.tray_bounds()`` (pinned by tests/test_heap_cycle_census.py)."""
+WALL_BAND_M = 0.03
+"""m: a part left this close to a tray wall is left at a wall: ``grasp.RAKE_BAND_M``, the band
+the teacher rakes from (pinned by the same test)."""
+
+
+def at_tray_wall(x: float, y: float) -> bool:
+    """Inside the tray interior and within WALL_BAND_M of one of its walls."""
+    (x0, x1), (y0, y1) = TRAY_INTERIOR_XY
+    inside = x0 <= x <= x1 and y0 <= y <= y1
+    return inside and min(x - x0, x1 - x, y - y0, y1 - y) < WALL_BAND_M
 
 
 def _close_bin(cm: float | None) -> str:
@@ -44,6 +56,8 @@ def read_payloads(paths: list[Path]) -> dict:
         "parts_stowed": 0,
         "cycles": 0,
         "rakes": 0,
+        "left_parts": 0,
+        "left_at_wall": 0,
     }
     target_stows = other_stows = unaligned = 0
     # MS7a desk boxes: parts stowed in their own box and parts in total, per class and per box.
@@ -59,6 +73,10 @@ def read_payloads(paths: list[Path]) -> dict:
             summary["parts_stowed"] += int(ep["bricks_stowed"])
             summary["cycles"] += int(ep["cycles"])
             summary["rakes"] += int(ep.get("rakes", 0))  # MS7a tray: they run between cycles
+            # The parts the episode left out of every box (part, x, y, z, rakes, failures).
+            left = ep.get("left_parts", [])
+            summary["left_parts"] += len(left)
+            summary["left_at_wall"] += sum(1 for row in left if at_tray_wall(row[1], row[2]))
             classes.update(ep["cycle_classes"])
             for name, row in ep.get("stowed_by_class", {}).items():
                 by_class[name][0] += row["stowed"]

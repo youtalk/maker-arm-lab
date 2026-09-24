@@ -1025,3 +1025,30 @@ def test_the_serving_2_switches_reach_the_heap_client_only_and_key_the_cache(
     monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
     assert ge.main(argv + ["--backend", "isaac", f"--{name}"]) == 2
     assert f"--{name}" in capsys.readouterr().err
+
+
+def test_the_rake_settings_reach_the_heap_client_only_and_key_the_cache(tmp_path, monkeypatch):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
+    argv += ["--threshold", "0.7", "--seed", "1"]
+    heap = ["--backend", "mujoco", "--heap_k", "50", "--tray", "--desk_boxes", "4"]
+    cfg = ge._build_cfg(ge._parse_args(argv + heap + ["--rake_cap", "4", "--rake_crowd"]))
+    draw = ge.make_eval_draws(1, 1)[0]
+    cmd = ge._eval_command(cfg, draw)
+    assert cmd[cmd.index("--rake_cap") + 1] == "4" and "--rake_crowd" in cmd
+    found = ge.loop_switches(cfg.client_flags)
+    assert found["rake_cap"] == 4 and found["rake_crowd"] is True
+    plain = ge._build_cfg(ge._parse_args(argv + heap))
+    assert ge.loop_switches(plain.client_flags)["rake_cap"] == 0
+    assert "--rake_cap" not in ge._eval_command(plain, draw)
+    cfg.out_dir.mkdir()
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    loop = {name: False for name in ge.LOOP_SWITCHES} | {"rake_crowd": True}
+    for cap, hit in ((4, True), (2, False), (0, False)):
+        payload = _heap_payload(
+            draw, tray=True, desk_boxes=4, inference={**served, "loop": loop | {"rake_cap": cap}}
+        )
+        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        assert (ge._cached_payload(cfg, draw) is not None) is hit, cap
+    for bad in (["--rake_cap", "4"], ["--rake_crowd"]):
+        with pytest.raises(ValueError, match="--rake_c"):
+            ge._build_cfg(ge._parse_args(argv + ["--backend", "isaac"] + bad))

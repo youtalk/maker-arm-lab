@@ -92,3 +92,17 @@ def test_the_census_sums_the_desk_box_rows(tmp_path):
     assert "stowed_by_class" not in census.read_payloads(
         [_write(tmp_path, "six.json", [_episode()])]
     )
+
+
+def test_the_census_counts_the_parts_left_at_a_tray_wall(tmp_path):
+    from maker_arm_lab.core import grasp, layout
+
+    assert census.TRAY_INTERIOR_XY == layout.tray_bounds()
+    assert census.WALL_BAND_M == grasp.RAKE_BAND_M
+    left = [
+        [3, 0.195, -0.09, 0.005, 2, 0],  # 10 mm off the left wall
+        [4, 0.195, 0.0, 0.005, 0, 3],  # the tray's middle
+        [5, 0.30, 0.20, 0.03, 0, 0],  # outside the tray
+    ]
+    s = census.read_payloads([_write(tmp_path, "eval_000.json", [_episode(left_parts=left)])])
+    assert (s["left_parts"], s["left_at_wall"]) == (3, 1)
