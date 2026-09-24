@@ -29,9 +29,10 @@ desk, and the rim stays 20 mm high. On vertical walls, the same checkpoint stows
 0.838, on the same draws. That read is 37 parts short. On the lean, it stows 97 more parts, and
 63 of them are slopes.
 
-Rung 1 fails. Its checked read under the snap protocol stows 2466 of 3000, 0.822, at 1.352
-cycles per stowed part. The re-read under the full protocol stows 2533, 0.844 (0.831 to 0.857),
-at 1.241. It is 17 parts short. Rung 1 has no read on the leaned tray.
+Rung 1 passes on the leaned tray. Checkpoint r1 A 350k stows 2614 of 3000 parts, 0.871 (0.859
+to 0.883), at 1.221 cycles per stowed part. On vertical walls, the same checkpoint stows 2466,
+0.822, under the snap protocol and 2533, 0.844, under the full protocol. Both vertical reads
+fail.
 
 Slopes are the largest loss. On the vertical rung 2 checked read of r2 B 300k, 609 of 910
 slopes stow, 0.67. A forensic of that read finds 413 lost parts that the policy never targeted.
@@ -221,6 +222,9 @@ needed no approval.
 - At 08:49, the controller sent SIGTERM to the owner's paused MS6 T1 run in place of arm A2. T1
   ends on SIGCONT and can resume only from its 300000 checkpoint, so read a PID's output
   directory before a kill.
+- At 07:38:12, something outside the campaign scripts pruned seven finished training
+  directories on Machine A to their last checkpoint. r1 A 350k came back from Machine B's copy,
+  with the same sha256. Keep a second copy of every checkpoint that a read can need.
 
 ## 3. The scene
 
@@ -815,6 +819,7 @@ Machine A runs draws 0 to 7 on 8 lanes, and Machine B runs draws 8 to 11 on 4 la
 | rung 2, r2 A2 100k | r2A2_100000_chk | 2b87de2 | full | 2513 | 0.838 | 0.824 to 0.850 | 2987 | 1.189 | 790 | 70 | GATE_FAIL |
 | rung 2 on the leaned tray, r2 A2 100k | r2A2_100000_L30_chk | 751e3dd | full + lean | 2610 | 0.870 | 0.857 to 0.882 | 2971 | 1.138 | 669 | 57 | GATE_OK |
 | rung 2 on the leaned tray, r2 B 300k | r2B_300000_L30_chk | 751e3dd | full + lean | 2557 | 0.852 | 0.839 to 0.865 | 2973 | 1.163 | 684 | 74 | GATE_OK |
+| rung 1 on the leaned tray, r1 A 350k | r1A_350000_L30_chk2 | 751e3dd | full + lean | 2614 | 0.871 | 0.859 to 0.883 | 3193 | 1.221 | 668 | 0 | GATE_OK |
 
 The lean read's payload gives the outcome `PASS`. The policy ids are:
 
@@ -827,7 +832,10 @@ of 2550, and it stands beside the first rung 1 read, not in its place. The r2 A2
 parts short, the best vertical-wall read. The lean read launched at 08:51 on the same checkpoint
 and the same draws, and it passed at 09:35. A second lean read, of r2 B 300k on 12 aarch64 CPU
 lanes, passed at 2557. On vertical walls, the same checkpoint read 2482 on the same draws, so
-the lean adds 75 parts on a second checkpoint.
+the lean adds 75 parts on a second checkpoint. The rung 1 lean read, pre-registered at 10:58,
+passed at 2614 (per draw 211, 220, 216, 217, 213, 224, 215, 217, 227, 221, 212, 221). Its first
+TAG, r1A_350000_L30_chk, ended READ_FAIL before any lane ran, because the checkpoint was gone
+from Machine A (section 2.4). The read ran once more in a fresh TAG, as the rule allows.
 
 Per draw, 250 parts each:
 
