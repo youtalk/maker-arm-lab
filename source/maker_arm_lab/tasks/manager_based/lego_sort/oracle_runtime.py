@@ -282,8 +282,8 @@ ROLL_MAX_STEP_RAD = math.radians(6.0)
 # A level plane has no jaw under the part. On the corpus seeds p0..p3 (K=50) it stows 180 of
 # 200 against 158 on the stood-up plane; p4..p7 read 188 of 200, binary 190. A first probe
 # that rolled level without the unroll lost RETREATs: planned from the rolled wrist, 3 to 13
-# per heap came back unplanned, and two episodes were abandoned. RETREAT now turns the wrist
-# back along the same waypoints before it plans. The margin keeps the level roll off the wrist
+# per heap came back unplanned, and two episodes were abandoned. RETREAT now plans from the
+# unrolled wrist and turns it back along the way. The margin keeps the level roll off the wrist
 # stop; 10 degrees is chosen, not swept.
 LEVEL_ROLL_MARGIN_RAD = math.radians(10.0)
 
@@ -1170,33 +1170,38 @@ class OracleRig:
         ):
             roll = self._roll_waypoints(plan[-1])
             if roll and self.gripper_mode != "binary":
-                roll = self._paced_roll(i, plan, plan[-1], roll[-1])
+                arrival = plan[-1]
+                plan = self._spread_roll(i, plan, roll[-1] - arrival, rising=True)
                 # RETREAT turns the wrist back from where RELEASE holds to the carry's end.
-                self.unroll[i] = (roll[-1], plan[-1])
-            plan = plan + roll
+                self.unroll[i] = (plan[-1], arrival)
+            else:
+                plan = plan + roll
         elif goal.phase == oracle.Phase.RETREAT and self.unroll[i] is not None:
             (rolled, arrival), self.unroll[i] = self.unroll[i], None
             # The carry plan starts at `arrival`; the walk starts where RELEASE holds.
-            plan = [rolled] + self._paced_roll(i, plan, rolled, arrival) + plan[1:]
+            plan = self._spread_roll(i, [arrival] + plan[1:], rolled - arrival, rising=False)
         self.plans[i] = plan
 
-    def _paced_roll(
-        self, i: int, plan: list[torch.Tensor], start: torch.Tensor, end: torch.Tensor
+    def _spread_roll(
+        self, i: int, plan: list[torch.Tensor], turn: torch.Tensor, rising: bool
     ) -> list[torch.Tensor]:
-        """Wrist-only waypoints after ``start`` up to ``end``, walked with ``plan``.
+        """``plan`` with the wrist-only ``turn`` spread along it: none of it at the first
+        waypoint and all of it at the last (``rising``), or the other way round.
 
-        The walk gives every segment the same share of its steps (``polyline_point``), and the
-        carry's steps come from its Cartesian length, which a wrist roll does not add to. So
-        the roll is cut into as many segments as keep the wrist under ``ROLL_MAX_STEP_RAD``
-        per control step at the minimum-jerk peak, and the walk grows by the carry's own
-        steps per segment for each one: the carry keeps its pace.
+        Only ``WRIST_ROLL_INDEX`` moves, and it turns about the tool axis, so the pick point
+        walks the carry's own path (``_roll_waypoints``). Appended as wrist-only waypoints, the
+        turn held the tool still over the bin or box before RELEASE and again after it, 37 to
+        50 control steps a cycle on the 2026-09-23 K=20 heaps.
+        The walk grows only where the wrist would pass ``ROLL_MAX_STEP_RAD`` per control step
+        at the minimum-jerk peak (``polyline_point`` gives every segment the same time).
         """
-        per_segment = self.walk_steps[i] / len(plan)
-        turn = abs(float(end[WRIST_ROLL_INDEX] - start[WRIST_ROLL_INDEX]))
-        peak = trajectory.MIN_JERK_PEAK_VELOCITY * turn / (ROLL_MAX_STEP_RAD * per_segment)
-        n = max(1, math.ceil(peak))
-        self.walk_steps[i] = math.ceil(self.walk_steps[i] * (len(plan) + n) / len(plan))
-        return [start + (end - start) * k / n for k in range(1, n + 1)]
+        n = len(plan) - 1
+        out = [q + turn * ((k if rising else n - k) / n) for k, q in enumerate(plan)]
+        wrist = torch.stack(out)[:, WRIST_ROLL_INDEX]
+        worst = float((wrist[1:] - wrist[:-1]).abs().max()) * n
+        floor = math.ceil(trajectory.MIN_JERK_PEAK_VELOCITY * worst / ROLL_MAX_STEP_RAD)
+        self.walk_steps[i] = max(self.walk_steps[i], floor)
+        return out
 
     def _matched_close_command(self, i: int, fully_closed: float) -> float:
         """Hold the jaws at the part's own width instead of driving them shut.
