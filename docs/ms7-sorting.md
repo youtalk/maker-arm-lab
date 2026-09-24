@@ -1,7 +1,6 @@
-# MS7a: a tray heap sorted into desk boxes (draft)
+# MS7a: a tray heap sorted into desk boxes
 
-Date: 2026-09-24. Status: draft. The campaign still runs. Each `TBD` marks a result or a
-number that this draft does not give.
+Date: 2026-09-24. Status: final. The rung 2 official read passes on the leaned tray.
 
 The design is `2026-09-23-ms7a-sorting-design.md` in the claude-memory repository. The owner
 approved it section by section. The campaign ledger is `~/data/maker-arm-ms7/README.md`, and
@@ -21,7 +20,8 @@ box. In rung 2, the same tray heap goes into four desk boxes by four part classe
 The rung 2 checked read passes on the leaned tray. Checkpoint r2 A2 100k stows 2610 of 3000
 parts in their own class's box, 0.870 (Wilson 95 % 0.857 to 0.882). It uses 1.138 cycles per
 correct stow. The gate needs at least 2550 parts and at most 1.3 cycles. The official read of
-rung 2 is the milestone's number: TBD.
+rung 2 is the milestone's number. It stows 5205 of 6000 parts, 0.8675 (Wilson 95 % 0.859 to
+0.876), at 1.134 cycles per correct stow, and passes. MS7a is met on the leaned tray.
 
 The leaned tray is a deviation from the design (section 3.5). The H1 tray of the design has
 vertical walls. The lean tilts each wall 30 degrees outward about its interior edge on the
@@ -36,7 +36,7 @@ at 1.241. It is 17 parts short. Rung 1 has no read on the leaned tray.
 Slopes are the largest loss. On the vertical rung 2 checked read of r2 B 300k, 609 of 910
 slopes stow, 0.67. A forensic of that read finds 413 lost parts that the policy never targeted.
 Most of them start near a wall. A driven test shows that the refusal matches the physics. Two
-rake levers and a snap floor lever measured null. On the passing read, 675 of 910 slopes stow,
+rake levers, a snap floor lever and a re-detect lever measured null. On the passing read, 675 of 910 slopes stow,
 0.74.
 
 The reads come from a learned policy plus serving rules. A serving rule changes the policy's
@@ -814,6 +814,7 @@ Machine A runs draws 0 to 7 on 8 lanes, and Machine B runs draws 8 to 11 on 4 la
 | rung 2, r2 B 300k | r2B_300000_chk | 2b87de2 | full | 2482 | 0.827 | 0.813 to 0.840 | 2959 | 1.192 | 758 | 66 | GATE_FAIL |
 | rung 2, r2 A2 100k | r2A2_100000_chk | 2b87de2 | full | 2513 | 0.838 | 0.824 to 0.850 | 2987 | 1.189 | 790 | 70 | GATE_FAIL |
 | rung 2 on the leaned tray, r2 A2 100k | r2A2_100000_L30_chk | 751e3dd | full + lean | 2610 | 0.870 | 0.857 to 0.882 | 2971 | 1.138 | 669 | 57 | GATE_OK |
+| rung 2 on the leaned tray, r2 B 300k | r2B_300000_L30_chk | 751e3dd | full + lean | 2557 | 0.852 | 0.839 to 0.865 | 2973 | 1.163 | 684 | 74 | GATE_OK |
 
 The lean read's payload gives the outcome `PASS`. The policy ids are:
 
@@ -824,7 +825,9 @@ The lean read's payload gives the outcome `PASS`. The policy ids are:
 The rung 1 re-read launched at 06:33 as pre-registered and ended at 07:55. It is 17 parts short
 of 2550, and it stands beside the first rung 1 read, not in its place. The r2 A2 100k read is 37
 parts short, the best vertical-wall read. The lean read launched at 08:51 on the same checkpoint
-and the same draws, and it passed at 09:35.
+and the same draws, and it passed at 09:35. A second lean read, of r2 B 300k on 12 aarch64 CPU
+lanes, passed at 2557. On vertical walls, the same checkpoint read 2482 on the same draws, so
+the lean adds 75 parts on a second checkpoint.
 
 Per draw, 250 parts each:
 
@@ -985,16 +988,36 @@ any other result. It reads r2 A2 100k with the protocol of the passing checked r
 | seed, draws | 20261800, draws 0 to 23, 6000 parts, 120 episodes |
 | split | Machine A 8 lanes, Machine B 4 lanes |
 | pass | at least 5100 correct stows and at most 1.3 cycles per correct stow |
-| stowed of 6000 | TBD |
-| fraction, Wilson 95 % | TBD |
-| cycles per correct stow | TBD |
-| rakes, wrong-box parts | TBD |
-| per draw | TBD |
-| outcome (`PASS`, `PASS (scripted place)` or `FAIL`) | TBD |
+| stowed of 6000 | 5205 (Machine A draws 0 to 15: 3471 of 4000, Machine B draws 16 to 23: 1734 of 2000) |
+| fraction, Wilson 95 % | 0.8675, 0.859 to 0.876 |
+| cycles per correct stow | 1.134 (5902 cycles) |
+| rakes, wrong-box parts | 1268, 138 |
+| per draw | 223, 210, 221, 210, 222, 216, 220, 221, 218, 212, 214, 224, 214, 207, 221, 218, 218, 224, 216, 212, 215, 215, 217, 217 |
+| outcome | `PASS` (GATE_OK), 105 parts above 5100 |
 
 The result is the milestone's number, whatever it is. A READ_FAIL is an orchestration error
-with no gate token. It reruns once in a fresh TAG with the same settings. The best vertical-wall
-checked read, 0.838, stands beside the official read.
+with no gate token. It reruns once in a fresh TAG with the same settings. No READ_FAIL occurred.
+The best vertical-wall checked read, 0.838, stands beside the official read.
+
+The census of the official read counts 5177 stowed cycles, 359 close_miss, 232 held_no_lift, 49
+lifted_lost, 46 carrying, 30 no_close, 5 wrong_box and 4 no_open. 557 parts end at a wall.
+
+| class | stowed | total | rate |
+| --- | --- | --- | --- |
+| slope | 1132 | 1565 | 0.723 |
+| tall | 1521 | 1670 | 0.911 |
+| narrow | 824 | 915 | 0.901 |
+| wide | 1728 | 1850 | 0.934 |
+
+| box | stowed | total |
+| --- | --- | --- |
+| 0 | 1226 | 1413 |
+| 1 | 1467 | 1668 |
+| 2 | 1238 | 1435 |
+| 3 | 1274 | 1484 |
+
+Slopes stay the largest loss, as on the checked reads. The next lever is the tray wall, not
+the policy.
 
 ## 9. Rejected levers
 
@@ -1041,7 +1064,22 @@ First closes in the band of 2 to 15 mm fell from 38 to 24 and 26. But lateral `c
 from 25 to 43 in one rollout. In the other, tall parts fell from 82 to 74. The ledger closed the
 lever at 09:10.
 
-### 9.3 The base refresh
+### 9.3 Re-detect after a miss
+
+`--refresh_on_miss` is 78f2c7d on `feat/ms7-refresh-on-miss`, not pushed. When the commanded
+close stops below the row's width, it rebuilds the target row, and the snap re-centres. It fires at most
+3 times a cycle. On r2 B 300k, draw 2, full protocol plus the lean:
+
+| serving | stowed of 250 | cycles per stow | close_miss |
+| --- | --- | --- | --- |
+| the reference | 221 | 1.204 | 24 |
+| refresh, first rollout | 212 | 1.080 | 5 |
+| refresh, second rollout | 216 | 1.157 | 15 |
+
+Misses and cycles fall, but stows do not rise. More parts end at a wall, 28 and 29 against 20.
+The ledger closed the lever at 09:53.
+
+### 9.4 The base refresh
 
 T5 (777) and T6 (853) both read under T0's 900 (section 5). Neither replaced the base.
 
@@ -1078,35 +1116,29 @@ stack, bottom to top:
 
 | order | branch | tip | what it adds | PR |
 | --- | --- | --- | --- | --- |
-| 1 | `feat/fleet` | b843d3d | `scripts/fleet.py` and its tests, the bundle fetch, `--hosts` and the sync guard | TBD |
-| 2 | `feat/ms7-desk-boxes` | 0602635 | the H1 tray footprint constants and the desk boxes in the grader and the scene. The release over each part's own box, `--desk_boxes`, the certified side band and the box sizes. | TBD |
-| 3 | `feat/ms7-tray` | 13bd798 | `--tray`, the wall-ranked grasps, the rake, the end-to-end grasps and the wedge. The 45 degree band, the jam recovery and the rake as its own takeover. | TBD |
-| 4 | `feat/ms7-classes` | 22153d5 | `part_class`, the class-to-box map, the target's box on the context row, the `wrong_box` census, the rows per class and per box, `--scripted_place` | TBD |
-| 5 | `feat/ms7-rake-serving` | a6b631e | the converter without the rake frames, `--scripted_rake` | TBD |
-| 6 | `feat/ms7-part-failures` | be86bc8 | `--part_failures` | TBD |
-| 7 | `feat/ms7-pick-snap` | 9bcb2ed | `--pick_snap` | TBD |
-| 8 | `feat/ms7-smooth-carry` | 48bc50c | the release roll along the carry | TBD |
-| 9 | `fix/convert-reopen-fragments` | 944cdc1 | the converter without the REOPEN fragments | TBD |
-| 10 | `feat/ms7-serving-2` | 2b87de2 | `--dwell_close` and `--adopt_held` | TBD |
-| 11 | `feat/ms7-rake-more` | 3cda4c4 | `--rake_cap` and `--rake_crowd`, `left_parts` in the payload, the census `left_at_wall` and the gate forwarding. Off by default and measured null. | TBD |
-| 12 | `feat/ms7-tray-lean` | 751e3dd | `--tray_lean DEG`, the leaning walls in the scene and the grasp model, the gate forwarding and the cache key. Off by default. | TBD |
-| 13 | `docs/ms7-sorting` | | this report | TBD |
+| 1 | `feat/fleet` | b843d3d | `scripts/fleet.py` and its tests, the bundle fetch, `--hosts` and the sync guard | #97 |
+| 2 | `feat/ms7-desk-boxes` | 0602635 | the H1 tray footprint constants and the desk boxes in the grader and the scene. The release over each part's own box, `--desk_boxes`, the certified side band and the box sizes. | #98 |
+| 3 | `feat/ms7-tray` | 13bd798 | `--tray`, the wall-ranked grasps, the rake, the end-to-end grasps and the wedge. The 45 degree band, the jam recovery and the rake as its own takeover. | #99 |
+| 4 | `feat/ms7-classes` | 22153d5 | `part_class`, the class-to-box map, the target's box on the context row, the `wrong_box` census, the rows per class and per box, `--scripted_place` | #100 |
+| 5 | `feat/ms7-rake-serving` | a6b631e | the converter without the rake frames, `--scripted_rake` | #101 |
+| 6 | `feat/ms7-part-failures` | be86bc8 | `--part_failures` | #102 |
+| 7 | `feat/ms7-pick-snap` | 9bcb2ed | `--pick_snap` | #103 |
+| 8 | `feat/ms7-smooth-carry` | 48bc50c | the release roll along the carry | #104 |
+| 9 | `fix/convert-reopen-fragments` | 944cdc1 | the converter without the REOPEN fragments | #105 |
+| 10 | `feat/ms7-serving-2` | 2b87de2 | `--dwell_close` and `--adopt_held` | #106 |
+| 11 | `feat/ms7-rake-more` | 3cda4c4 | `--rake_cap` and `--rake_crowd`, `left_parts` in the payload, the census `left_at_wall` and the gate forwarding. Off by default and measured null. | #107 |
+| 12 | `feat/ms7-tray-lean` | 751e3dd | `--tray_lean DEG`, the leaning walls in the scene and the grasp model, the gate forwarding and the cache key. Off by default. | #108 |
+| 13 | `docs/ms7-sorting` | | this report | this PR |
 
 Every new switch is off by default, so the MS6 protocol stays reproducible. At 751e3dd the CPU
 suite collects 1081 tests. Two prototypes stay off the stack and unpushed:
-`feat/ms7-snap-floor` (0c37b51, null) and `feat/ms7-refresh-on-miss` (78f2c7d). No PR is open
-yet. The stack goes up with `GH_REPO=youtalk/maker-arm-lab gh stack`.
+`feat/ms7-snap-floor` (0c37b51, null) and `feat/ms7-refresh-on-miss` (78f2c7d, null). The PRs
+are linked into one GitHub stack.
 
 ## 12. What is still open
 
-- The official read of rung 2 (TAG r2_official) and the milestone outcome: TBD.
-- The PR stack and its numbers: TBD.
-- A lean checked read of r2 B 300k (TAG r2B_300000_L30_chk) runs on 12 aarch64 CPU lanes. The
-  gate does not need it.
-- Round 3 (`r2/train_r3L`) trains on Machine B. Its 50k screen reads 210 of 250 on the lean, and the
-  later screens are TBD. The gate does not need it.
-- `--refresh_on_miss` (78f2c7d) runs on draw 2. After an empty close, it rebuilds the target row
-  from the live scene. The ledger expects 30 to 60 more parts per 3000.
+- Round 3 (`r2/train_r3L`) trains on Machine B. Its screens on the lean read 210 of 250 at 50k and 220
+  at 100k. The gate does not need it.
 - The real tray. The passing read uses walls that lean out 30 degrees. The vertical-wall reads
   stay the reference for a tray with vertical walls.
 - The real arm. `--square_wrist`, `--dwell_close` and `--adopt_held` read the held part and the
