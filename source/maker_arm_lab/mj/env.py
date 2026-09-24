@@ -38,6 +38,13 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
         env.destination_bins (N, K) long (part b of env i goes to box destination_bins[i, b],
         its class's box), env.place_desk_boxes(i, poses),
         env.set_context_box(i, box) (the context row's box part, set per target)
+    perceived state (MS7c design section 6, heap mode): env.marker_points (N, 3) float32, NaN
+        by default and after the env's reset; a finite row is the frozen marker that
+        stamp_markers() draws in place of target_part's live centre.
+        env.perceived_box_poses, None by default, or (N, M, 3) perceived (x, y, yaw) per desk
+        box that set_context_box() serves in place of desk_box_poses; its owner writes row i
+        at each episode start and then calls set_context_box(i, ...) again, because the
+        reset serves box 0 before that
 
 Semantics carried over from ``ManagerBasedRLEnv`` because the rig depends on them: a done
 env is auto-reset INSIDE ``step`` (its state tensors already show the next episode when
@@ -317,6 +324,7 @@ class MjLegoSortEnv:
         # MS7a design, desk boxes: N boxes on the desk replace the shelf and its heap bin.
         self.desk_boxes = desk_boxes
         self.desk_box_poses = np.zeros((num_envs, desk_boxes, 3))
+        self.perceived_box_poses = None  # MS7c: (N, M, 3) when the loop serves perceived boxes
         # The episode's box per class, in core.parts.PART_CLASSES order (MS7a design, classes).
         self.class_to_box = np.zeros((num_envs, len(PART_CLASSES)), dtype=np.int64)
         self.context_mode = context
@@ -390,6 +398,7 @@ class MjLegoSortEnv:
                 self.destination_bins = torch.zeros(num_envs, dtype=torch.long)
                 self.stow_half_extents = torch.tensor(STOW_HALF_EXTENTS)
             self.target_part = torch.full((num_envs,), -1, dtype=torch.int16)
+            self.marker_points = torch.full((num_envs, 3), math.nan)
             if cameras:
                 self._depth = np.zeros((num_envs, 224, 224), dtype=np.uint16)
                 self.obs_buf["images"]["overhead_depth"] = torch.from_numpy(self._depth)
@@ -557,10 +566,14 @@ class MjLegoSortEnv:
         a recorded frame and a served one agree. With desk boxes (MS7a design, desk boxes) the
         row is the box's (x, y, yaw) and follows the current target's box: the rig's marker in
         ``step`` and the heap loop's selection both call this. Without them it is the one heap
-        bin, ``(bin_x, bin_y, 0)``, for the whole episode, as in MS6.
+        bin, ``(bin_x, bin_y, 0)``, for the whole episode, as in MS6. With
+        ``perceived_box_poses`` set (MS7c), the desk box row is the perceived pose.
         """
         if self.desk_boxes:
-            row = self.desk_box_poses[i, box]
+            poses = self.desk_box_poses
+            if self.perceived_box_poses is not None:
+                poses = self.perceived_box_poses  # MS7c: the box as the rig perceives it
+            row = poses[i, box]
         else:
             bl = self.bin_layouts[i]
             row = (bl.bin_x, bl.bin_ys[box], 0.0)
@@ -588,22 +601,29 @@ class MjLegoSortEnv:
         calls it before the recorder reads the frame, and the heap loop calls it again after
         it moves ``target_part`` and before the policy reads the frame. A second stamp at the
         same point writes the same pixels (``overlay.stamp_marker`` sets fixed values).
+
+        A finite ``marker_points`` row is stamped instead of the target's live centre: the
+        frozen marker of MS7c, the perceived centre at selection held for the whole cycle.
         """
         if not self.cameras:
             return
         h, c = self.handles, self._cam_overhead
         for i in range(self.num_envs):
-            t = int(self.target_part[i])
-            if t < 0:
-                continue
             m, d = self.models[i], self.datas[i]
+            t = int(self.target_part[i])
+            if bool(self.marker_points[i].isfinite().all()):
+                point = self.marker_points[i].tolist()
+            elif t >= 0:
+                point = d.xpos[h.brick_bodies[t]]
+            else:
+                continue
             uv = overlay.project_point(
                 d.cam_xpos[c],
                 d.cam_xmat[c],
                 float(m.cam_fovy[c]),
                 224,
                 224,
-                d.xpos[h.brick_bodies[t]],
+                point,
             )
             if uv is not None:
                 overlay.stamp_marker(self._overhead[i], *uv)
@@ -694,6 +714,7 @@ class MjLegoSortEnv:
             # rung 1). MS6: the one heap bin.
             self.set_context_box(i, 0 if self.desk_boxes else int(self.destination_bins[i]))
             self.context_target[i] = 0.0
+            self.marker_points[i] = math.nan
         mujoco.mj_forward(m, d)
         self.episode_length_buf[i] = 0
         if self.recorder is not None:

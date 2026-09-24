@@ -278,6 +278,42 @@ def test_the_marker_lands_on_the_targets_projection_and_depth_is_rendered():
     e.close()
 
 
+def test_a_marker_point_is_nan_until_set_and_again_after_its_envs_reset():
+    e = MjLegoSortEnv(2, _draw(), parts=PARTS[:3], cameras=False, episode_length_s=1.0)
+    assert e.marker_points.shape == (2, 3) and e.marker_points.isnan().all()
+    e.reset(seed=3)
+    e.marker_points[:] = torch.tensor([0.2, 0.0, 0.01])
+    e.reset(env_ids=torch.tensor([1]))
+    assert e.marker_points[0].isfinite().all() and e.marker_points[1].isnan().all()
+    e.close()
+
+
+@pytest.mark.skipif(not _can_render(), reason="no MuJoCo GL context on this host")
+def test_a_finite_marker_point_is_stamped_instead_of_the_live_part():
+    e = MjLegoSortEnv(1, _draw(), parts=PARTS[:3], cameras=True, episode_length_s=1.0)
+    e.reset(seed=3)
+    before = e.obs_buf["images"]["overhead_rgb"][0].numpy().copy()
+    d, h, c = e.datas[0], e.handles, e._cam_overhead
+
+    def pixel(point):
+        u, v = overlay.project_point(
+            d.cam_xpos[c], d.cam_xmat[c], float(e.models[0].cam_fovy[c]), 224, 224, point
+        )
+        return round(v), round(u)
+
+    live = d.xpos[h.brick_bodies[1]].copy()
+    frozen = live + np.array([0.06, 0.0, 0.0])
+    e.target_part[0] = 1
+    e.marker_points[0] = torch.from_numpy(frozen)
+    e.stamp_markers()
+    image = e.obs_buf["images"]["overhead_rgb"][0].numpy()
+    ring = overlay.MARKER_RADIUS_PX + overlay.MARKER_RING_PX
+    assert np.hypot(*np.subtract(pixel(frozen), pixel(live))) > 2 * ring
+    assert tuple(image[pixel(frozen)]) == (255, 255, 255)
+    assert (image[pixel(live)] == before[pixel(live)]).all()
+    e.close()
+
+
 @pytest.mark.skipif(not _can_render(), reason="no MuJoCo GL context on this host")
 def test_a_heap_shard_carries_the_new_datasets(tmp_path):
     e = MjLegoSortEnv(
