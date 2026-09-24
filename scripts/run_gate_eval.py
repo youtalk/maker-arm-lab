@@ -109,6 +109,8 @@ LOOP_SWITCHES = (
     "dwell_close",
     "adopt_held",
     "rake_crowd",
+    "park_done",
+    "rake_turn",
 )
 """The heap loop's protocol switches (core.loop.rollout); the client records them in the
 payload's inference block under "loop", and the cache matches on them."""
@@ -765,6 +767,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "start land the tips into a neighbour when no start is clear",
     )
     parser.add_argument(
+        "--park_done",
+        action="store_true",
+        help="MuJoCo heap only: forwarded to the heap client as --park_done, which holds an env "
+        "whose episode has ended at its last command while the rest of the batch runs",
+    )
+    parser.add_argument(
+        "--rake_turn",
+        action="store_true",
+        help="MuJoCo heap only: forwarded to the heap client as --rake_turn, which retries a "
+        "rake the rig declined at the teacher's next jaw headings",
+    )
+    parser.add_argument(
         "--client_flags",
         type=str,
         default="",
@@ -788,7 +802,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError("--pick_snap needs --heap_k > 0 and --backend mujoco")
     if args.rake_cap < 0:
         raise ValueError(f"--rake_cap must be 0 (off) or a positive cap, got {args.rake_cap}")
-    for name in ("dwell_close", "adopt_held", "rake_cap", "rake_crowd"):
+    for name in ("dwell_close", "adopt_held", "rake_cap", "rake_crowd", "park_done", "rake_turn"):
         if getattr(args, name) and (args.heap_k <= 0 or args.backend != "mujoco"):
             raise ValueError(f"--{name} needs --heap_k > 0 and --backend mujoco")
     if args.desk_boxes and (args.heap_k <= 0 or args.backend != "mujoco" or args.desk_boxes < 0):
@@ -845,7 +859,9 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         + (("--dwell_close",) if args.dwell_close else ())
         + (("--adopt_held",) if args.adopt_held else ())
         + (("--rake_cap", str(args.rake_cap)) if args.rake_cap else ())
-        + (("--rake_crowd",) if args.rake_crowd else ()),
+        + (("--rake_crowd",) if args.rake_crowd else ())
+        + (("--park_done",) if args.park_done else ())
+        + (("--rake_turn",) if args.rake_turn else ()),
     )
 
 
