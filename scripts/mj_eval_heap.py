@@ -14,6 +14,7 @@ driver and the loop's end-to-end check, no server and no cameras needed.
 """
 
 import argparse
+import gzip
 import json
 import os
 import random
@@ -209,6 +210,15 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="dump env 0's wrist and overhead policy frames as PNGs here, every "
         "loop.FRAME_EVERY steps of each cycle (forensics; needs the policy server)",
     )
+    parser.add_argument(
+        "--hold_trace",
+        type=str,
+        default="",
+        help="MS7c: write the per-step hold trace here as gzipped JSON lines, one list per live "
+        "env per step in core.hold.TRACE_FIELDS order (env, step, cycle, measured gap, "
+        "commanded gap, pick z, contact-held part, its rise), for scripts/hold_agreement.py "
+        "--traces; off by default",
+    )
     args = parser.parse_args(argv)
     for name in ("run_seed", "layout_seed"):
         if not (0 <= getattr(args, name) < 2**32):
@@ -286,6 +296,7 @@ def main(argv=None) -> int:
             env, env.cfg.bin_layout, oracle.OracleNoise(), rig_rng, oracle_factory=factory
         )
         policy = None if args.oracle_driver else policy_client.ServerPolicy(args.server)
+        trace = [] if args.hold_trace else None
         payload = rollout(
             env,
             rig,
@@ -312,6 +323,7 @@ def main(argv=None) -> int:
             rake_crowd=args.rake_crowd,
             park_done=args.park_done,
             rake_turn=args.rake_turn,
+            hold_trace=trace,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
@@ -345,6 +357,9 @@ def main(argv=None) -> int:
     try:
         if args.out:
             Path(args.out).write_text(json.dumps(payload, indent=2))
+        if trace is not None:
+            with gzip.open(args.hold_trace, "wt") as f:
+                f.writelines(json.dumps(row) + "\n" for row in trace)
     except Exception as err:  # noqa: BLE001 -- the rollout already ran; still print a token
         print("EVAL_FAIL " + json.dumps({"reason": "write_out", "detail": str(err)}), flush=True)
         return 1

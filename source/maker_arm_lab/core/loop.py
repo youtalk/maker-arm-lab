@@ -58,6 +58,14 @@ first hover leg does not plan, which the teacher answers by turning the jaws
 (``HeapOracle._turn_rake_jaw``), while the loop booked the rake as spent. The payload's
 ``inference`` block records all sixteen.
 
+The MS7c hold census rides along, observation only: a ``hold.HoldDetector`` per env reads
+the hold and the lift from proprioception alone (the measured jaw gap, the gap the previous
+step's command asked for, the FK pick point) on every live step, whoever drives, and each
+cycle's census row records what it saw beside the contact truth (``hold_detected``,
+``lift_detected``, ``first_hold_at``, ``first_held_at``). The payload's ``hold_agreement`` is
+``hold.agreement`` over every cycle (MS7c design section 5). Nothing reads the detector to
+decide anything, so every switch and every read is what it was without it.
+
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
 loop's own end-to-end check. A takeover holds the env until the rig hands it back at
@@ -90,6 +98,7 @@ from maker_arm_lab.core.heap_oracle import (
     RAKE_PART_CAP,
     target_context,
 )
+from maker_arm_lab.core.hold import HoldDetector, agreement, commanded_gap
 from maker_arm_lab.core.parts import PART_CLASSES, part_class
 from maker_arm_lab.core.stowed import (
     _brick_states,
@@ -100,6 +109,7 @@ from maker_arm_lab.core.stowed import (
 )
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_REGEX,
+    GRIPPER_JOINT_NAMES,
     GRIPPER_OPEN_POS,
     JAW_AXIS_BODY,
     PICK_OFFSET_MEASURED,
@@ -696,6 +706,12 @@ class Cycle:
     dwell_closes: int = 0  # times ``dwell_close`` fired in the cycle (at most one)
     adopted: int = -1  # the lifted non-target part ``adopt_held`` served the box of, else -1
     grace_steps: int = 0  # steps ``budget_ends_cycle``'s carry grace kept the cycle open
+    # The MS7c hold census: the proprioceptive detector (``hold.HoldDetector``) on this
+    # cycle's steps beside the contact truth. Observation only.
+    hold_detected: bool = False  # the detector held on at least one step of the cycle
+    lift_detected: bool = False  # and read a lift on at least one
+    first_hold_at: int | None = None  # steps into the cycle at its first detected hold
+    first_held_at: int | None = None  # steps into the cycle at the first contact-held step
 
 
 @dataclass
@@ -805,6 +821,7 @@ def census_step(
     if cycle.holding:
         if cycle.first_held < 0:
             cycle.first_held = held
+            cycle.first_held_at = t
         cycle.last_held = held
         cycle.held_steps += 1
         cycle.max_rise = max(cycle.max_rise, rise)
@@ -875,6 +892,10 @@ CENSUS_EXPORT = (
     "dwell_closes",
     "adopted",
     "grace_steps",
+    "hold_detected",
+    "lift_detected",
+    "first_hold_at",
+    "first_held_at",
 )
 """The ``Cycle`` fields each episode's ``cycle_census`` row exports, plus the two is_target
 flags of ``first_held`` and ``last_held``. Observation only, never the metric."""
@@ -1014,6 +1035,7 @@ def rollout(
     rake_crowd: bool = False,
     park_done: bool = False,
     rake_turn: bool = False,
+    hold_trace: list | None = None,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1025,6 +1047,8 @@ def rollout(
     gripper and a served target row.
     ``on_frame(ordinal, step_in_cycle, wrist, overhead)`` is called with env 0's two policy
     frames every ``FRAME_EVERY`` steps of each of its cycles, for a forensics dump.
+    ``hold_trace``, when a list, receives one ``hold.TRACE_FIELDS`` row per live env per step,
+    the input of ``hold.cycle_rows``'s threshold replay.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1034,6 +1058,7 @@ def rollout(
     arm_ids = robot.find_joints([ARM_JOINT_REGEX])[0]
     if list(arm_ids) != list(range(6)):
         raise EvalFailure("joint_order", f"arm joints are at {list(arm_ids)}, expected 0..5")
+    jaw_ids = robot.find_joints(list(GRIPPER_JOINT_NAMES))[0]
     if getattr(env, "parts", None) is None:
         raise EvalFailure("scene", "the heap loop needs a heap env (parts=...), not six bricks")
     context_mode = getattr(env, "context_mode", "none")
@@ -1134,6 +1159,9 @@ def rollout(
     # The roll command each env received on the last step, ``square_wrist``'s rate read.
     last_roll = robot.data.joint_pos[:, WRIST_ROLL_INDEX].to("cpu").clone()
     parked = None  # ``park_done``: the command each env got on the step before
+    detectors = [HoldDetector() for _ in range(num_envs)]  # the MS7c hold census
+    # m, the gap each env's last command asked for; before the first, the jaws' own gap.
+    gap_cmd = robot.data.joint_pos[:, jaw_ids].sum(dim=-1).tolist()
 
     started = time.monotonic()
     max_steps = int(env.max_episode_length)
@@ -1154,6 +1182,7 @@ def rollout(
         right_mag = env.scene["finger_right_brick"].data.force_matrix_w.norm(dim=-1).squeeze(1)
         held = held_brick_from_forces(left_mag, right_mag, min_force=HELD_MIN_FORCE).to("cpu")
         openings = policy_state(robot.data.joint_pos)[:, 6].to("cpu")
+        gaps = robot.data.joint_pos[:, jaw_ids].sum(dim=-1).to("cpu")  # m, measured jaw gap
         boxed = parts_in_desk_boxes(env).to("cpu") if per_part else None
         # 1. Grade and select on the envs the loop holds: episode live, rig idle.
         for i in range(num_envs):
@@ -1446,6 +1475,23 @@ def rollout(
                 env.target_part[i] = h
                 env.set_context_box(i, int(destination[i, h]))
                 replan[i] = True
+        # The MS7c hold census, observation only: the detector reads the jaw gap measured at
+        # the top of this step against the command the last step sent, whoever drives.
+        for i, st in enumerate(states):
+            if bool(tracker.done[i]):
+                continue
+            d, c, h = detectors[i], st.cycle, int(held[i])
+            gap, pick_z = float(gaps[i]), float(picks[i][2])
+            d.update(gap, gap_cmd[i], pick_z)
+            if c is not None:
+                if d.holding and c.first_hold_at is None:
+                    c.first_hold_at = step - c.start_step
+                c.hold_detected = c.first_hold_at is not None
+                c.lift_detected = c.lift_detected or d.lifted
+            if hold_trace is not None:
+                rise = float(pos[i, h, 2] - c.start_z[h]) if h >= 0 and c is not None else 0.0
+                ordinal_i = -1 if c is None else c.ordinal
+                hold_trace.append([i, step, ordinal_i, gap, gap_cmd[i], pick_z, h, rise])
         arm_clamped, overshoot = clamp_arm_actions(action_cpu[:, :6], limits)
         tracker.record_clamps(overshoot)
         clamped = torch.cat([arm_clamped, action_cpu[:, 6:7]], dim=-1)
@@ -1456,6 +1502,7 @@ def rollout(
                 clamped[tracker.done] = parked[tracker.done]
             parked = clamped.clone()
         last_roll = clamped[:, WRIST_ROLL_INDEX].clone()
+        gap_cmd = [commanded_gap(float(g), gripper_mode) for g in clamped[:, 6]]
         if step == max_steps - 1 and recorder is not None:
             # The time-out cuts a running takeover short of RETREAT: negate before the env's
             # step exports the episode (the six-brick DAgger loop's ruling P7).
@@ -1616,6 +1663,7 @@ def rollout(
         ),
         "wall_sec": round(wall, 1),
         "wall_sec_per_episode": round(wall / num_envs, 1),
+        "hold_agreement": agreement(row for e in episodes for row in e["cycle_census"]),
     }
     return payload
 

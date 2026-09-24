@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import torch
 
-from maker_arm_lab.core import dagger_loop, desk_boxes, layout, loop, oracle
+from maker_arm_lab.core import dagger_loop, desk_boxes, hold, layout, loop, oracle
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj import overlay
@@ -817,6 +817,40 @@ def test_the_census_reads_the_first_close_geometry_and_the_hold_ids():
     assert st.classes == ["close_miss"] and set(loop.CENSUS_EXPORT) < set(row)
     assert row["first_held_is_target"] and not row["last_held_is_target"]
     assert row["squeeze_margin"] == 0.004 and row["wait_steps"] == 0 and not row["wait_capped"]
+
+
+HOLD_KEYS = (
+    "held_steps",
+    "max_rise",
+    "first_held_at",
+    "hold_detected",
+    "lift_detected",
+    "first_hold_at",
+)
+
+
+def test_the_hold_census_agrees_with_the_contacts_on_the_teachers_cycles():
+    env, rig = _env_and_rig(gripper_mode="continuous")
+    _place(env, SPREAD)
+    trace = []
+    payload = _rollout(env, rig, None, hold_trace=trace)
+    env.close()
+    ep = payload["episodes"][0]
+    assert ep["cycle_classes"] == ["stowed"] * 3, ep
+    for row in ep["cycle_census"]:
+        # Every teacher cycle holds and lifts its part. The detector reads both from the jaw
+        # gap alone, a few steps after the contacts: the soft contact creeps for a few steps.
+        assert row["hold_detected"] and row["lift_detected"], row
+        assert 0 < row["first_hold_at"] - row["first_held_at"] <= 10, row
+    agree = payload["hold_agreement"]
+    assert agree["cycles"] == 3 and agree["offset_cycles"] == 3
+    for event in ("hold", "lift"):
+        assert (agree[event]["precision"], agree[event]["recall"]) == (1.0, 1.0), agree
+    # One trace row per live step, and the replay at the module thresholds is the census.
+    assert len(trace) == payload["steps_run"] and {r[2] for r in trace} - {-1} == {1, 2, 3}
+    replayed = hold.cycle_rows(trace)
+    assert replayed == [{k: row[k] for k in HOLD_KEYS} for row in ep["cycle_census"]]
+    assert hold.agreement(replayed) == agree
 
 
 def _census(**fields):

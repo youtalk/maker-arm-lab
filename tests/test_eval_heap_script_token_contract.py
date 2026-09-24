@@ -61,3 +61,8 @@ def test_the_heap_client_takes_the_protocol_switches():
         "rake_turn",
     ):
         assert f'"--{name}"' in text and f"{name}=args.{name}" in text
+
+
+def test_the_heap_client_writes_the_hold_trace():
+    text = SCRIPT.read_text()
+    assert '"--hold_trace"' in text and "hold_trace=trace" in text

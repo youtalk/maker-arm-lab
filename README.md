@@ -189,6 +189,13 @@ python3 scripts/heap_cycle_census.py \
 
 Every gate read and every DAgger rollout serves the policy under the MS3 inference protocol, `--n_action_steps 1 --temporal_ensemble_coeff 0.01`. The supervisor passes the two flags to the policy server. A reused draw must report the same inference configuration in its payload. Because the temporal ensemble state lives in the server, a DAgger round starts one policy server per client. `heap_cycle_census.py` sums the cycle census of a read: how far each failed cycle got, the stows of a part other than the target, the first close distance on a continuous run and the step count per end reason.
 
+MS7c adds a hold census. A real arm has no contact sensors. `core/hold.py` reads the hold and the lift from three signals only: the measured jaw gap, the commanded jaw gap and the FK pick point. The loop runs this detector beside the contact truth on every step. Nothing reads the detector to make a decision. Each census row records `hold_detected`, `lift_detected`, `first_hold_at` and `first_held_at`. Each payload has a `hold_agreement` block. `mj_eval_heap.py --hold_trace PATH` also writes a per-step trace as gzipped JSON lines. `scripts/hold_agreement.py` reports the agreement over a set of payloads. It can also replay the detector over traces at other thresholds. It checks the pre-registered bar. Precision and recall must be 0.95 or more for the hold and for the lift. The median first-hold offset must be 5 steps or fewer.
+
+```bash
+uv run python scripts/hold_agreement.py --payloads '/tmp/gate/eval_*.json'   # HOLD_OK or HOLD_FAIL {...}
+uv run python scripts/hold_agreement.py --traces '/tmp/gate/*.trace.jsonl.gz' --stable 0.0004
+```
+
 Round k rolls out the previous round's policy on train-split heaps and records takeover frames only. The conversion flags are `--dagger --split_cycles --context camera_box --gripper <mode>`.
 
 ```bash
