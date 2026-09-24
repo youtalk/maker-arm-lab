@@ -111,21 +111,51 @@ LOOP_SWITCHES = (
     "rake_crowd",
     "park_done",
     "rake_turn",
+    "perceived",
+    "contact_hold",
 )
 """The heap loop's protocol switches (core.loop.rollout); the client records them in the
 payload's inference block under "loop", and the cache matches on them."""
 LOOP_SETTINGS = ("rake_cap",)
 """The heap loop's integer settings, recorded and matched like the switches; 0 is off."""
+PERCEPTION_KNOBS = ("pos", "heading", "size", "box", "miss", "class")
+"""``core.perception.KNOBS``, copied because the supervisor imports no torch; the test pins it."""
+
+
+def noise_scales_key(text: str) -> str:
+    """The canonical ``--noise_scales`` text the heap client records under ``--perceived``:
+    ``core.perception.format_scales(parse_scales(text))``, a stdlib copy that the test pins
+    against those two. Raises ValueError on an unknown knob or a scale that is not a finite
+    number >= 0."""
+    scales = dict.fromkeys(PERCEPTION_KNOBS, 1.0)
+    for item in text.split(","):
+        if not item.strip():
+            continue
+        name, _, value = (part.strip() for part in item.partition("="))
+        if name != "all" and name not in PERCEPTION_KNOBS:
+            raise ValueError(f"--noise_scales: unknown perception knob {name!r}")
+        try:
+            scale = float(value)
+        except ValueError:
+            scale = math.nan
+        if not (math.isfinite(scale) and scale >= 0.0):
+            raise ValueError(f"--noise_scales: {name} needs a finite number >= 0, got {value!r}")
+        for knob in PERCEPTION_KNOBS if name == "all" else (name,):
+            scales[knob] = scale
+    return ",".join(f"{k}={repr(float(scales[k])).removesuffix('.0')}" for k in PERCEPTION_KNOBS)
 
 
 def loop_switches(client_flags) -> dict:
-    """Which of ``LOOP_SWITCHES`` the client flags turn on, and each of ``LOOP_SETTINGS``'s
-    values (``--rake_cap 4`` reads 4)."""
+    """Which of ``LOOP_SWITCHES`` the client flags turn on, each of ``LOOP_SETTINGS``'s values
+    (``--rake_cap 4`` reads 4), and the ``noise_scales`` the client records: the canonical
+    scales under ``--perceived``, else empty."""
     flags = list(client_flags)
     found = {name: f"--{name}" in flags for name in LOOP_SWITCHES}
     for name in LOOP_SETTINGS:
         key = f"--{name}"
         found[name] = int(flags[flags.index(key) + 1]) if key in flags else 0
+    text = flags[flags.index("--noise_scales") + 1] if "--noise_scales" in flags else ""
+    found["noise_scales"] = noise_scales_key(text) if found["perceived"] else ""
     return found
 
 
@@ -510,6 +540,7 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     same_inference = same_inference and loop_switches(cfg.client_flags) == {
         **{name: bool(recorded.get(name, False)) for name in LOOP_SWITCHES},
         **{name: int(recorded.get(name, 0)) for name in LOOP_SETTINGS},
+        "noise_scales": str(recorded.get("noise_scales", "")),
     }
     return payload if same_draw and same_policy and same_task and same_inference else None
 
@@ -779,6 +810,25 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "rake the rig declined at the teacher's next jaw headings",
     )
     parser.add_argument(
+        "--perceived",
+        action="store_true",
+        help="MuJoCo heap only: forwarded to the heap client as --perceived (MS7c), whose "
+        "decisions read only the perceived state and the hold detector",
+    )
+    parser.add_argument(
+        "--noise_scales",
+        type=str,
+        default="",
+        help="MuJoCo heap only, with --perceived: the perception knob scales, e.g. 'heading=2', "
+        "forwarded in their canonical form; empty is every knob at 1, the nominal",
+    )
+    parser.add_argument(
+        "--contact_hold",
+        action="store_true",
+        help="MuJoCo heap only, with --perceived: forwarded as --contact_hold, the fallback "
+        "whose serving rules read the contacts for their stop flag",
+    )
+    parser.add_argument(
         "--client_flags",
         type=str,
         default="",
@@ -802,9 +852,24 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError("--pick_snap needs --heap_k > 0 and --backend mujoco")
     if args.rake_cap < 0:
         raise ValueError(f"--rake_cap must be 0 (off) or a positive cap, got {args.rake_cap}")
-    for name in ("dwell_close", "adopt_held", "rake_cap", "rake_crowd", "park_done", "rake_turn"):
+    for name in (
+        "dwell_close",
+        "adopt_held",
+        "rake_cap",
+        "rake_crowd",
+        "park_done",
+        "rake_turn",
+        "perceived",
+    ):
         if getattr(args, name) and (args.heap_k <= 0 or args.backend != "mujoco"):
             raise ValueError(f"--{name} needs --heap_k > 0 and --backend mujoco")
+    for name in ("noise_scales", "contact_hold"):
+        if getattr(args, name) and not args.perceived:
+            raise ValueError(f"--{name} needs --perceived")
+    if args.perceived and (not args.desk_boxes or args.gripper != "continuous"):
+        # The client's own usage error, before a server starts and every draw loses to it.
+        raise ValueError("--perceived needs --desk_boxes and --gripper continuous")
+    scales = noise_scales_key(args.noise_scales) if args.noise_scales else ""
     if args.desk_boxes and (args.heap_k <= 0 or args.backend != "mujoco" or args.desk_boxes < 0):
         # Only the MuJoCo heap client builds desk boxes (MS7a design, desk boxes).
         raise ValueError("--desk_boxes needs a positive count, --heap_k > 0 and --backend mujoco")
@@ -861,7 +926,10 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         + (("--rake_cap", str(args.rake_cap)) if args.rake_cap else ())
         + (("--rake_crowd",) if args.rake_crowd else ())
         + (("--park_done",) if args.park_done else ())
-        + (("--rake_turn",) if args.rake_turn else ()),
+        + (("--rake_turn",) if args.rake_turn else ())
+        + (("--perceived",) if args.perceived else ())
+        + (("--noise_scales", scales) if scales else ())
+        + (("--contact_hold",) if args.contact_hold else ()),
     )
 
 

@@ -26,7 +26,7 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lerobot_stack"))
 import policy_client
-from maker_arm_lab.core import oracle
+from maker_arm_lab.core import oracle, perception
 from maker_arm_lab.core.batch_loop import PARTS_SPLITS, heap_parts
 from maker_arm_lab.core.eval_loop import EvalFailure
 from maker_arm_lab.core.heap_oracle import HeapOracle
@@ -44,6 +44,14 @@ class _TokenEmittingParser(argparse.ArgumentParser):
         print(f"{self.prog}: error: {message}", file=sys.stderr, flush=True)
         print("EVAL_FAIL " + json.dumps({"reason": "usage", "detail": message}), flush=True)
         raise SystemExit(2)
+
+
+def _scales(text: str) -> dict:
+    """``--noise_scales``: ``perception.parse_scales`` with its reason in the usage error."""
+    try:
+        return perception.parse_scales(text)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(str(err)) from None
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -204,6 +212,27 @@ def parse_args(argv=None) -> argparse.Namespace:
         "headings (across the sweep, then held) before it counts as spent",
     )
     parser.add_argument(
+        "--perceived",
+        action="store_true",
+        help="MS7c: the loop's decisions read only the perceived state (core.perception) and the "
+        "hold detector, never the simulator truth; needs --desk_boxes, --gripper continuous and "
+        "the server",
+    )
+    parser.add_argument(
+        "--noise_scales",
+        type=_scales,
+        default=None,
+        help="MS7c, with --perceived: a scale per perception knob, e.g. 'heading=2' or "
+        "'all=0,miss=1' (knobs: all, " + ", ".join(perception.KNOBS) + "); a knob not named "
+        "stays at 1, the nominal, and so does every knob when this is omitted",
+    )
+    parser.add_argument(
+        "--contact_hold",
+        action="store_true",
+        help="MS7c, with --perceived: the pre-registered fallback, the serving rules' stop flag "
+        "reads the contacts again; everything else stays perceived",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -227,6 +256,16 @@ def parse_args(argv=None) -> argparse.Namespace:
         parser.error("--heap_k must be positive: this client evaluates heap episodes only")
     if args.desk_boxes < 0:
         parser.error("--desk_boxes must be 0 or more")
+    if args.perceived:
+        if not args.desk_boxes:
+            parser.error("--perceived needs --desk_boxes: a perceived box ends each cycle")
+        if args.oracle_driver:
+            parser.error("--perceived serves a policy; the oracle driver reads the truth")
+        if args.gripper != "continuous":
+            parser.error("--perceived needs --gripper continuous: the hold reads the jaw gap")
+    for name in ("noise_scales", "contact_hold"):
+        if getattr(args, name) not in (None, False) and not args.perceived:
+            parser.error(f"--{name} needs --perceived")
     if args.cycle_budget is None:
         args.cycle_budget = cycle_budget(args.heap_k)
     if args.max_wall_minutes is None:
@@ -324,6 +363,9 @@ def main(argv=None) -> int:
             park_done=args.park_done,
             rake_turn=args.rake_turn,
             hold_trace=trace,
+            perceived=args.perceived,
+            noise_scales=args.noise_scales,
+            contact_hold=args.contact_hold,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
