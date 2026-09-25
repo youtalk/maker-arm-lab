@@ -88,7 +88,7 @@ PERCEIVED = ["--perceived", "--desk_boxes", "4", "--gripper", "continuous"]
     ],
 )
 def test_the_perceived_flags_refuse_a_bad_combination_with_the_token(argv):
-    env = {**os.environ, "PYTHONPATH": str(ROOT / "source"), "MUJOCO_GL": "egl"}
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "source"), "MUJOCO_GL": "disable"}  # CI has no GL
     out = subprocess.run(
         [sys.executable, str(SCRIPT), *argv],
         capture_output=True,
