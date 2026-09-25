@@ -5,7 +5,10 @@ Torch and stdlib only. Behind the heap loop's ``--perceived`` switch, the loop's
 ``PerceivedState`` instead of the simulator truth (MS7c design section 4). In simulation that
 state is the truth passed through noise and failure models, one knob each (``KNOBS``). A knob
 is a scale on a nominal value: 0 turns that model off and 1 is the nominal. Every nominal is
-``# INITIAL:``, and MS5a measures it on real frames.
+``# INITIAL:``, and MS5a measures it on real frames. The seven MS7d knobs (``tool`` to
+``torque_k``, the MS7d design's new knobs) are in ``KNOBS`` so that ``all``, the payload and the
+gate cache carry them, but the ``Perceiver`` draws nothing for them: their models arrive with
+the MS7d lever branches.
 
 Two structural rules hold at every scale, zero included: a part whose centre another part
 covers from above is not seen, and neither is a part under the tool
@@ -30,8 +33,23 @@ from maker_arm_lab.core import grasp, oracle
 from maker_arm_lab.core.parts import BOX_AXES, PART_CLASSES, SLOPE_AXES, Part
 from maker_arm_lab.core.quat import quat_apply, quat_mul
 
-KNOBS = ("pos", "heading", "size", "box", "miss", "class")
-"""The knob names, in the order ``format_scales`` writes them."""
+KNOBS = (
+    "pos",
+    "heading",
+    "size",
+    "box",
+    "miss",
+    "class",
+    "tool",
+    "wrist",
+    "wrist_bias",
+    "wrist_miss",
+    "rho",
+    "torque",
+    "torque_k",
+)
+"""The knob names, in the order ``format_scales`` writes them: the six MS7c knobs, then the
+seven of MS7d."""
 EXTRA_KNOBS = ("pos_z",)
 """Diagnostic multipliers that ``all`` leaves alone and ``format_scales`` writes only when not
 1: ``pos_z`` scales the z axis of the position bias and noise on top of ``pos``, to split the

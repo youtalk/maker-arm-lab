@@ -95,6 +95,19 @@ class GateCfg:
     client_flags: tuple = ()
 
 
+MS7D_LEVERS = {
+    "box_filter_xy": "L1",
+    "release_gap": "L2",
+    "rearm_hold": "L8",
+    "box_walls": "L9",
+    "marker_bias": "L3",
+    "wrist_fix": "L4",
+    "class_views": "L5",
+    "hold_force": "L6",
+    "force_cap": "L7",
+}
+"""The MS7d switches and their levers (MS7d design section 4), each forwarded to the MuJoCo
+heap client as its own flag. All but ``hold_force`` and ``force_cap`` need ``--perceived``."""
 LOOP_SWITCHES = (
     "select_at_release",
     "replan_on_switch",
@@ -113,12 +126,27 @@ LOOP_SWITCHES = (
     "rake_turn",
     "perceived",
     "contact_hold",
+    *MS7D_LEVERS,
 )
 """The heap loop's protocol switches (core.loop.rollout); the client records them in the
 payload's inference block under "loop", and the cache matches on them."""
 LOOP_SETTINGS = ("rake_cap",)
 """The heap loop's integer settings, recorded and matched like the switches; 0 is off."""
-PERCEPTION_KNOBS = ("pos", "heading", "size", "box", "miss", "class")
+PERCEPTION_KNOBS = (
+    "pos",
+    "heading",
+    "size",
+    "box",
+    "miss",
+    "class",
+    "tool",
+    "wrist",
+    "wrist_bias",
+    "wrist_miss",
+    "rho",
+    "torque",
+    "torque_k",
+)
 """``core.perception.KNOBS``, copied because the supervisor imports no torch; the test pins it."""
 PERCEPTION_EXTRA_KNOBS = ("pos_z",)
 """``core.perception.EXTRA_KNOBS``: outside ``all``, written only when not 1."""
@@ -832,6 +860,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="MuJoCo heap only, with --perceived: forwarded as --contact_hold, the fallback "
         "whose serving rules read the contacts for their stop flag",
     )
+    for name, lever in MS7D_LEVERS.items():
+        parser.add_argument(
+            f"--{name}",
+            action="store_true",
+            help=f"MuJoCo heap only: forwarded to the heap client as --{name}, MS7d {lever}",
+        )
     parser.add_argument(
         "--client_flags",
         type=str,
@@ -864,10 +898,12 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         "park_done",
         "rake_turn",
         "perceived",
+        *MS7D_LEVERS,
     ):
         if getattr(args, name) and (args.heap_k <= 0 or args.backend != "mujoco"):
             raise ValueError(f"--{name} needs --heap_k > 0 and --backend mujoco")
-    for name in ("noise_scales", "contact_hold"):
+    perceived_only = [n for n in MS7D_LEVERS if n not in ("hold_force", "force_cap")]
+    for name in ("noise_scales", "contact_hold", *perceived_only):
         if getattr(args, name) and not args.perceived:
             raise ValueError(f"--{name} needs --perceived")
     if args.perceived and (not args.desk_boxes or args.gripper != "continuous"):
@@ -933,7 +969,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         + (("--rake_turn",) if args.rake_turn else ())
         + (("--perceived",) if args.perceived else ())
         + (("--noise_scales", scales) if scales else ())
-        + (("--contact_hold",) if args.contact_hold else ()),
+        + (("--contact_hold",) if args.contact_hold else ())
+        + tuple(f"--{name}" for name in MS7D_LEVERS if getattr(args, name)),
     )
 
 

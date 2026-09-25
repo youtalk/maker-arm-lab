@@ -235,6 +235,58 @@ def parse_args(argv=None) -> argparse.Namespace:
         "reads the contacts again; everything else stays perceived",
     )
     parser.add_argument(
+        "--box_filter_xy",
+        action="store_true",
+        help="MS7d L1, with --perceived: the candidate filter tests only a detection's x and y "
+        "against each perceived box's outer footprint plus desk_boxes.BOX_FILTER_MARGIN_M",
+    )
+    parser.add_argument(
+        "--release_gap",
+        action="store_true",
+        help="MS7d L2, with --perceived: a release also completes at the jaw gap of the hold's "
+        "end plus loop.RELEASE_OPEN_M",
+    )
+    parser.add_argument(
+        "--rearm_hold",
+        action="store_true",
+        help="MS7d L8, with --perceived: the serving levers' stop flag clears after a hold that "
+        "ends with no lift",
+    )
+    parser.add_argument(
+        "--box_walls",
+        action="store_true",
+        help="MS7d L9, with --perceived: the grasp model and the rake read the walls of the "
+        "perceived desk boxes",
+    )
+    parser.add_argument(
+        "--marker_bias",
+        action="store_true",
+        help="MS7d L3, with --perceived: every detection is corrected by a bias estimate from the "
+        "gripper marker in the overhead image",
+    )
+    parser.add_argument(
+        "--wrist_fix",
+        action="store_true",
+        help="MS7d L4, with --perceived: a wrist look at the final approach corrects the serving "
+        "row",
+    )
+    parser.add_argument(
+        "--class_views",
+        action="store_true",
+        help="MS7d L5, with --perceived: a correlated class error model, and a third view on a "
+        "disagreement of two",
+    )
+    parser.add_argument(
+        "--hold_force",
+        action="store_true",
+        help="MS7d L6: a hold enters only while the pick-point force is under the bar",
+    )
+    parser.add_argument(
+        "--force_cap",
+        action="store_true",
+        help="MS7d L7: the arm holds still on a step with a large pick-point force",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -265,7 +317,17 @@ def parse_args(argv=None) -> argparse.Namespace:
             parser.error("--perceived serves a policy; the oracle driver reads the truth")
         if args.gripper != "continuous":
             parser.error("--perceived needs --gripper continuous: the hold reads the jaw gap")
-    for name in ("noise_scales", "contact_hold"):
+    for name in (
+        "noise_scales",
+        "contact_hold",
+        "box_filter_xy",
+        "release_gap",
+        "rearm_hold",
+        "box_walls",
+        "marker_bias",
+        "wrist_fix",
+        "class_views",
+    ):
         if getattr(args, name) not in (None, False) and not args.perceived:
             parser.error(f"--{name} needs --perceived")
     if args.cycle_budget is None:
@@ -368,6 +430,15 @@ def main(argv=None) -> int:
             perceived=args.perceived,
             noise_scales=args.noise_scales,
             contact_hold=args.contact_hold,
+            box_filter_xy=args.box_filter_xy,
+            release_gap=args.release_gap,
+            rearm_hold=args.rearm_hold,
+            box_walls=args.box_walls,
+            marker_bias=args.marker_bias,
+            wrist_fix=args.wrist_fix,
+            class_views=args.class_views,
+            hold_force=args.hold_force,
+            force_cap=args.force_cap,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

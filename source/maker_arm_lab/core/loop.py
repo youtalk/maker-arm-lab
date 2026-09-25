@@ -90,6 +90,12 @@ the tool is clear of the tray or the look has waited the retreat wait's cap
 moves it away and looks again before it calls the heap empty. While it waits, the rows and the
 marker stay, the policy drives, and every step perceives again.
 
+Nine MS7d switches (MS7d design section 4), all off by default so the MS7c protocol stays
+reproducible, and all recorded in the payload's ``inference`` block: ``box_filter_xy`` (L1),
+``release_gap`` (L2), ``rearm_hold`` (L8), ``box_walls`` (L9), ``marker_bias`` (L3),
+``wrist_fix`` (L4), ``class_views`` (L5), ``hold_force`` (L6) and ``force_cap`` (L7). Each
+comes with its lever's commit; until then ``NOT_BUILT`` makes the rollout fail on it.
+
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
 loop's own end-to-end check. A takeover holds the env until the rig hands it back at
@@ -240,6 +246,19 @@ def release_ready(open_fraction: float, waited: int, after_stow: bool) -> bool:
 RELEASE_ENDS = ("stowed", "released", "placed", "dropped")
 """The cycle ends a release makes; ``release_ready`` waits for the jaws' full gap after them.
 ``placed`` and ``dropped`` are ``perceived``'s (``perceived_cycle_end``)."""
+NOT_BUILT = (
+    "box_filter_xy",  # L1: the candidate filter tests x and y against the outer footprint
+    "release_gap",  # L2: a release also completes on the opening past the hold's end gap
+    "rearm_hold",  # L8: the stop flag clears after a hold that ends with no lift
+    "box_walls",  # L9: the grasp model and the rake read the perceived desk box walls
+    "marker_bias",  # L3: the bias estimate from the gripper marker
+    "wrist_fix",  # L4: the wrist look at the final approach
+    "class_views",  # L5: the correlated class error and the third view
+    "hold_force",  # L6: the hold enters only under the pick-point force bar
+    "force_cap",  # L7: the arm holds still over the force cap
+)
+"""The MS7d switches whose behavior is not in this commit. ``rollout`` fails on each of them
+before the first step (MS7d design section 6): a switch never runs as a no-op."""
 
 
 def released_after_lift(cycle: Cycle, open_fraction: float, held: int) -> bool:
@@ -1263,6 +1282,15 @@ def rollout(
     perceived: bool = False,
     noise_scales: dict | None = None,
     contact_hold: bool = False,
+    box_filter_xy: bool = False,
+    release_gap: bool = False,
+    rearm_hold: bool = False,
+    box_walls: bool = False,
+    marker_bias: bool = False,
+    wrist_fix: bool = False,
+    class_views: bool = False,
+    hold_force: bool = False,
+    force_cap: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1281,6 +1309,8 @@ def rollout(
     flag's contact fallback. It needs a policy, desk boxes, the continuous gripper and a served
     target row, and refuses the switches that read the truth (``takeover``,
     ``scripted_place``, ``row_refresh``).
+    The nine MS7d switches are the module docstring's; all but ``hold_force`` and
+    ``force_cap`` need ``perceived``, and one in ``NOT_BUILT`` raises ``not_built``.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1351,6 +1381,23 @@ def rollout(
         ):
             if on:
                 raise EvalFailure("perceived", f"{name} reads the truth")
+    ms7d = {
+        "box_filter_xy": bool(box_filter_xy),
+        "release_gap": bool(release_gap),
+        "rearm_hold": bool(rearm_hold),
+        "box_walls": bool(box_walls),
+        "marker_bias": bool(marker_bias),
+        "wrist_fix": bool(wrist_fix),
+        "class_views": bool(class_views),
+        "hold_force": bool(hold_force),
+        "force_cap": bool(force_cap),
+    }
+    for name, on in ms7d.items():
+        # The hold calibration runs the teacher with --hold_force, and the cap binds every driver.
+        if on and not perceived and name not in ("hold_force", "force_cap"):
+            raise EvalFailure(name, "changes a perceived decision: it needs perceived")
+        if on and name in NOT_BUILT:
+            raise EvalFailure("not_built", f"{name}: its behavior is not in this commit")
     limits = robot.data.joint_pos_limits[:, arm_ids, :].to("cpu")
     tracker = RolloutTracker(num_envs, k)
     recorder = getattr(env, "recorder", None)
@@ -1421,6 +1468,7 @@ def rollout(
         "perceived": bool(perceived),
         "noise_scales": perception.format_scales(scales) if perceived else "",
         "contact_hold": bool(contact_hold),
+        **ms7d,
     }
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.

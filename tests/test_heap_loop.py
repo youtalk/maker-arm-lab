@@ -1315,6 +1315,10 @@ def test_the_switches_select_at_once_after_a_budget_end_refresh_at_a_reopen_and_
         "perceived": False,
         "noise_scales": "",
         "contact_hold": False,
+        **dict.fromkeys(
+            ("box_filter_xy", "release_gap", "rearm_hold", "box_walls", "marker_bias"), False
+        ),
+        **dict.fromkeys(("wrist_fix", "class_views", "hold_force", "force_cap"), False),
     }
     # Every cycle ended on its budget, so no selection waited for a retreat.
     assert ep["cycle_reasons"] == ["budget"] * 3 and ep["select_wait_steps"] == 0

@@ -278,6 +278,37 @@ def test_perceived_needs_a_policy_desk_boxes_and_a_row_and_refuses_the_truth_swi
     assert err.value.reason == "perceived"
 
 
+PERCEIVED_ONLY = (
+    "box_filter_xy",
+    "release_gap",
+    "rearm_hold",
+    "box_walls",
+    "marker_bias",
+    "wrist_fix",
+    "class_views",
+)
+"""The MS7d switches that need ``perceived``; ``hold_force`` and ``force_cap`` do not."""
+
+
+def test_the_ms7d_switches_need_perceived_and_an_unbuilt_one_fails_before_a_step():
+    env, rig = _env_and_rig()
+    served = _served(env)
+    for name in PERCEIVED_ONLY:
+        with pytest.raises(loop.EvalFailure) as err:
+            _rollout(env, rig, _Still(), **{name: True})
+        assert err.value.reason == name
+    for name in loop.NOT_BUILT:
+        with pytest.raises(loop.EvalFailure) as err:
+            _rollout(env, rig, _Still(), perceived=True, **{name: True})
+        assert (err.value.reason, err.value.detail.split(":")[0]) == ("not_built", name)
+        if name not in PERCEIVED_ONLY:  # the teacher's hold calibration runs L6
+            with pytest.raises(loop.EvalFailure) as err:
+                _rollout(env, rig, None, **{name: True})
+            assert err.value.reason == "not_built"
+    env.close()
+    assert served == []
+
+
 def test_the_row_marker_and_box_are_the_detections_at_selection_and_stay_frozen(monkeypatch):
     monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
     env, rig = _env_and_rig(budget=12)
@@ -313,7 +344,7 @@ def test_the_row_marker_and_box_are_the_detections_at_selection_and_stay_frozen(
     assert ep["done_reason"] == "no_candidate"
     assert payload["perception"] == {
         "perceived": True,
-        "noise_scales": "pos=1,heading=1,size=1,box=1,miss=1,class=1",
+        "noise_scales": perception.format_scales(perception.parse_scales("")),
         "contact_hold": False,
         "selections": 9,
         "wrong_overhead_class": payload["perception"]["wrong_overhead_class"],

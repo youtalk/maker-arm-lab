@@ -16,6 +16,10 @@ BOXES = ((0.08, 0.20, 0.3), (0.10, -0.20, -0.5))
 SPREAD = [[0.15 + 0.04 * (i % 4), -0.08 + 0.05 * (i // 4), Z] for i in range(8)]
 """Eight parts 40 mm or more apart, none covering another, all far from a tool at (0, 0)."""
 ZERO = perception.parse_scales("all=0")
+NOMINAL = (
+    "pos=1,heading=1,size=1,box=1,miss=1,class=1,"
+    "tool=1,wrist=1,wrist_bias=1,wrist_miss=1,rho=1,torque=1,torque_k=1"
+)
 
 
 def _truth(centres, part_list=None, quats=None, tool_xy=(0.0, 0.0)):
@@ -103,6 +107,52 @@ def test_the_draws_are_paired_across_scales():
         assert all(seen[d.sim_index] == d for d in one.detections if d.sim_index in seen)
 
 
+MS7C_DRAWS = {
+    0: [
+        [-0.000108, 0.001035, -0.000483],
+        [0.078318, 0.197641, 0.347844],
+        [0.102587, -0.197989, -0.499882],
+        [0, 0.149108, -0.079932, 0.002497, 0.031668, 0.015448, 0.008677, -0.001772, "wide"],
+        [1, 0.192954, -0.081804, 0.003163, 0.023677, 0.017372, 0.012362, 0.020681, "slope"],
+        [0, 0.149018, -0.079731, 0.002976, 0.029912, 0.017807, 0.008028, -0.031607, "wide"],
+        [1, 0.189857, -0.076529, 0.0037, 0.024065, 0.015494, 0.011476, 0.021436, "slope"],
+        ["tall", 0.604433],
+    ],
+    3: [
+        [0.001226, 0.000747, 0.000781],
+        [0.08043, 0.204194, 0.256346],
+        [0.101959, -0.194316, -0.435433],
+        [0, 0.151479, -0.080274, 0.00676, 0.029735, 0.015819, 0.004057, -0.022749, "wide"],
+        [1, 0.18972, -0.079519, 0.004772, 0.023781, 0.017249, 0.008482, -0.05418, "slope"],
+        [0, 0.151229, -0.078847, 0.010302, 0.031777, 0.014581, 0.009471, 0.00841, "wide"],
+        [1, 0.191772, -0.079768, 0.003511, 0.021608, 0.016305, 0.008996, 0.036269, "slope"],
+        ["tall", 0.848383],
+    ],
+}
+"""A ``Perceiver`` sequence recorded at MS7c's main (cc5f009), run seed 20261700, envs 0 and
+3, rounded to 1e-6: the episode bias, the two box poses, two ``perceive`` calls (each
+detection's index, centre, size, quaternion z and class), a ``classify`` and the generator's
+next draw."""
+
+
+def test_the_draws_with_every_ms7d_switch_off_equal_the_ms7c_sequence():
+    """The MS7d design's pairing rule: the new knobs draw nothing in the ``Perceiver``, so its
+    stream and the checked reads pair with the MS7c candidates."""
+    truth = _truth([[0.15, -0.08, Z], [0.19, -0.08, Z]], [BRICK, SLOPE])
+
+    def r(values):
+        return [round(v, 6) for v in values]
+
+    for env_index, expected in MS7C_DRAWS.items():
+        p = _perceiver(20261700, env_index)
+        got = [r(p.bias), *(r(b) for b in p.box_poses)]
+        for _ in range(2):
+            for d in p.perceive(truth).detections:
+                got.append([d.sim_index, *r(d.centre), *r(d.size), round(d.quat[3], 6), d.cls])
+        got.append([p.classify("tall"), round(p.rng.random(), 6)])
+        assert got == expected, env_index
+
+
 def test_the_confusion_fires_near_its_rate_and_never_keeps_the_true_class():
     p = _perceiver(5, 0, {"class": 10.0})  # 0.3
     draws = [p.classify("narrow") for _ in range(4000)]
@@ -141,7 +191,7 @@ def test_parse_scales(text, expected):
 
 def test_format_scales_is_canonical_and_round_trips():
     canonical = perception.format_scales(perception.parse_scales(""))
-    assert canonical == "pos=1,heading=1,size=1,box=1,miss=1,class=1"
+    assert canonical == NOMINAL
     for text in ("miss=4,pos=0", "all=0,heading=0.25", "size=0.1,class=1e-3"):
         scales = perception.parse_scales(text)
         assert perception.parse_scales(perception.format_scales(scales)) == scales
