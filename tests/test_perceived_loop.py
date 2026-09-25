@@ -393,6 +393,29 @@ def test_the_wrist_row_moves_the_centre_and_turns_the_heading_by_the_folded_yaw_
     assert np.array_equal(row, kept)
 
 
+def test_the_force_window_reads_the_wrist_looks_serving_row():
+    """MS7d L4 with L6 and L7: after a wrist look the force sensor's snap window reads the
+    serving row, as ``pick_snap`` does, and not the row served at selection."""
+    windows = []
+
+    class Sensor:
+        def update(self, window):
+            windows.append(window)
+            return 0.0
+
+    class Env:
+        def arm_torques(self, i):
+            return ()
+
+    st = loop.EnvState(selector=None)
+    st.cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
+    moved = [ROW[0] + 2 * loop.SNAP_RADIUS, *ROW[1:]]
+    for serving in (None, moved):
+        st.cycle.serving_row = serving
+        loop._pick_forces(Env(), [Sensor()], [st], [ROW], [moved[:3]], [False])
+    assert windows == [False, True]
+
+
 # -- the rollout --------------------------------------------------------------------------------
 
 

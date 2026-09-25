@@ -615,17 +615,25 @@ def snap_hold(cmd, pick, row, shift, descending: bool, held: bool = False) -> bo
     return descending and float(pick[2]) > floor + SNAP_Z_TOL
 
 
+def snap_window(pick, row) -> bool:
+    """Is the pick point inside ``pick_snap``'s window of the served ``row``: a live row (width
+    over 0), within ``SNAP_RADIUS`` of its centre in xy and under its top plus ``SQUARE_ABOVE``?
+    ``row`` None is no row. At each entry the force sensor takes its snap tare and
+    ``wrist_fix`` a wrist look (``look_due``). Pure."""
+    if row is None or float(row[5]) <= 0.0:
+        return False
+    near = math.hypot(float(pick[0]) - float(row[0]), float(pick[1]) - float(row[1]))
+    return near <= SNAP_RADIUS and float(pick[2]) < float(row[2]) + float(row[6]) + SQUARE_ABOVE
+
+
 def look_due(cycle: Cycle, pick, row) -> bool:
     """``wrist_fix``: does the loop take a wrist look on this step (the MS7d design's L4 model)?
 
-    The look window is ``snap_shift``'s: the measured pick point ``pick`` within
-    ``SNAP_RADIUS`` of the serving row ``row``'s centre in xy and under its top plus
-    ``SQUARE_ABOVE``, with a live row (width over 0). A look fires on the step the pick point
-    enters the window, so once per stay: it must leave and come back for the next. Pure except
-    for ``cycle.in_window``, the last step's read."""
-    near = math.hypot(float(pick[0]) - float(row[0]), float(pick[1]) - float(row[1]))
-    top = float(row[2]) + float(row[6])
-    inside = float(row[5]) > 0.0 and near <= SNAP_RADIUS and float(pick[2]) < top + SQUARE_ABOVE
+    The look window is ``snap_window`` of the serving row ``row`` at the measured pick point
+    ``pick``. A look fires on the step the pick point enters the window, so once per stay: it
+    must leave and come back for the next. Pure except for ``cycle.in_window``, the last step's
+    read."""
+    inside = snap_window(pick, row)
     due = inside and not cycle.in_window
     cycle.in_window = inside
     return due
@@ -645,16 +653,6 @@ def wrist_row(row, look, seen_yaw: float) -> list[float]:
     out = [float(v) for v in row]
     out[0], out[1], out[3], out[4] = look[0], look[1], math.cos(heading), math.sin(heading)
     return out
-
-
-def snap_window(pick, row) -> bool:
-    """Is the pick point inside ``pick_snap``'s window of the served ``row``: a live row (width
-    over 0), within ``SNAP_RADIUS`` of its centre in xy and under its top plus ``SQUARE_ABOVE``?
-    ``row`` None is no row. The force sensor's snap tare is taken at each entry. Pure."""
-    if row is None or float(row[5]) <= 0.0:
-        return False
-    near = math.hypot(float(pick[0]) - float(row[0]), float(pick[1]) - float(row[1]))
-    return near <= SNAP_RADIUS and float(pick[2]) < float(row[2]) + float(row[6]) + SQUARE_ABOVE
 
 
 DWELL_STEPS = 150
@@ -1411,14 +1409,18 @@ the hold entries L6 refused (one per confirmed run of the jaw-gap rule) and the 
 
 def _pick_forces(env, sensors, states, rows, picks, done) -> list[float]:
     """MS7d L6 and L7: each live env's pick-point force at the top of the step, N (0 for a done
-    env). The window is ``snap_window`` of the served row while a cycle is open; the force of
+    env). The window is ``snap_window`` of the row ``pick_snap`` reads while a cycle is open:
+    the served row, or after a wrist look ``wrist_fix``'s ``Cycle.serving_row``. The force of
     an approach step (the cycle's open to its first close) joins ``EnvState.forces``."""
     forces = [0.0] * len(sensors)
     for i, sensor in enumerate(sensors):
         if bool(done[i]):
             continue
         c = states[i].cycle
-        window = snap_window(picks[i], None if c is None or rows is None else rows[i])
+        row = None if c is None or rows is None else rows[i]
+        if c is not None and c.serving_row is not None:
+            row = c.serving_row
+        window = snap_window(picks[i], row)
         forces[i] = sensor.update(*env.arm_torques(i), window)
         if c is not None and c.first_close_at is None:
             states[i].forces.append(forces[i])
