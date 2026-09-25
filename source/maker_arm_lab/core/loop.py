@@ -77,8 +77,9 @@ at each selection (``perception_truth``), the class of the part between the jaws
 number compares with MS7a). A selection ranks the detections; the row, the frozen marker
 (``env.marker_points``) and the box of the class perceived overhead come from the target's
 detection. The serving rules' stop flag is the detector's hold or lift (``contact_hold``, the
-pre-registered fallback, reads the contacts again). A cycle ends when a lifted hold ends, as
-``placed`` over a perceived box footprint and ``dropped`` anywhere else
+pre-registered fallback, reads the contacts again). A cycle ends when a lifted hold ends and
+the measured opening then reads ``SELECT_OPEN_FRACTION`` (``perceived_release``), as ``placed``
+if the hold ended over a perceived box footprint and ``dropped`` anywhere else
 (``perceived_cycle_end``), or on its budget. A failure is booked at the target's perceived
 position (``perception.PositionMemory``), and so is a rake. At the detector's lift the box
 follows the class drawn for the part between the jaws (``lift_class_box``), which replaces
@@ -740,6 +741,9 @@ class Cycle:
     target_xy: tuple | None = None  # m, its perceived centre xy
     seen_class: str | None = None  # its class perceived overhead
     box: int = -1  # the box served now: the overhead class's, then the class drawn at a lift
+    # ``perceived_release``: a lifted hold ended over a box (True) or off one (False), and the
+    # jaws have not yet opened to ``SELECT_OPEN_FRACTION``; None with no release under way.
+    release_over: bool | None = None
 
 
 @dataclass
@@ -823,12 +827,30 @@ def cycle_end(
     return None
 
 
+def perceived_release(
+    cycle: Cycle, lost: bool, regrasped: bool, over_now: bool, open_fraction: float
+) -> bool:
+    """``perceived``: does a release complete on this step? The hold detector's lifted hold
+    ending (``lost``) starts one and keeps ``over_now``, the ``over_box`` test of the FK pick
+    point at that step, in ``cycle.release_over``; a new detected hold (``regrasped``) cancels
+    it. It completes once the measured opening reads ``SELECT_OPEN_FRACTION``, the
+    proprioceptive read ``released_after_lift`` makes. Ending the cycle on the hold's end
+    instead switched the target row while the part was still pinched: the next chunk closed
+    the jaws again at about 14 mm and carried wide parts off the box (MS7c ledger,
+    2026-09-24). Pure except for ``cycle.release_over``."""
+    if lost:
+        cycle.release_over = over_now
+    elif regrasped:
+        cycle.release_over = None
+    return cycle.release_over is not None and open_fraction >= SELECT_OPEN_FRACTION
+
+
 def perceived_cycle_end(cycle: Cycle, step: int, released: bool, over: bool) -> str | None:
     """``perceived``: why the cycle ends now, or None while it runs (MS7c design section 6).
 
-    ``released`` is the hold detector's lifted hold ending on this step (``ended and lost``)
-    and ``over`` whether the FK pick point then lies over a perceived box (``over_box``): a
-    release over a box ends the cycle ``placed``, anywhere else ``dropped``. Then the rig's
+    ``released`` is a completed release (``perceived_release``) and ``over`` whether the FK
+    pick point lay over a perceived box (``over_box``) when its hold ended: a release over a
+    box ends the cycle ``placed``, anywhere else ``dropped``. Then the rig's
     answer on a takeover and the step budget, as in ``cycle_end``. No truth in-box test ends a
     cycle, and there is no out-of-reach end: the budget ends a cycle whose part left reach.
     Pure."""
@@ -1447,9 +1469,9 @@ def rollout(
             stowed_now = {b for b in range(k) if bool(in_bin[i, b])}
             if st.cycle is not None and perceived:
                 c, d = st.cycle, detectors[i]
-                released = d.ended and d.lost  # a lifted hold ended on this step
-                over = released and over_box(top_picks[i][:2], st.perceiver.box_poses)
-                reason = perceived_cycle_end(c, step, released, over)
+                over = d.lost and over_box(top_picks[i][:2], st.perceiver.box_poses)
+                released = perceived_release(c, d.lost, d.started, over, float(openings[i]))
+                reason = perceived_cycle_end(c, step, released, bool(c.release_over))
                 # The carry grace keeps a cycle open while the detector holds.
                 grace = not budget_ends_cycle(step - c.start_step, d.holding, c.grace_steps)
                 if select_at_release and reason == "budget" and grace:

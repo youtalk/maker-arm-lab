@@ -163,6 +163,20 @@ def test_the_perceived_cycle_end_is_the_release_over_a_box_or_off_it_then_the_bu
     assert {"placed", "dropped"} <= set(loop.RELEASE_ENDS)
 
 
+def test_a_perceived_release_completes_only_once_the_jaws_open():
+    cycle = loop.Cycle(ordinal=1, target=0, start_step=100, stowed_before=set())
+    wide = loop.SELECT_OPEN_FRACTION
+    assert not loop.perceived_release(cycle, False, False, False, wide)  # no lifted hold ended
+    assert not loop.perceived_release(cycle, True, False, True, 0.3)  # the hold ends, jaws shut
+    assert not loop.perceived_release(cycle, False, False, False, 0.5)
+    assert loop.perceived_release(cycle, False, False, False, wide)  # over kept from the end
+    assert cycle.release_over is True
+    cycle.release_over = None
+    loop.perceived_release(cycle, True, False, False, 0.3)
+    assert not loop.perceived_release(cycle, False, True, False, wide)  # a new hold cancels it
+    assert cycle.release_over is None
+
+
 def test_over_box_reads_each_boxs_yawed_footprint():
     _, (h, _, _) = desk_boxes.stow_region(2)  # the footprint is square
     boxes = [(0.10, 0.20, 0.0), (0.10, -0.20, math.pi / 4)]
@@ -428,9 +442,11 @@ def test_at_zero_scales_the_loop_serves_the_truth_paths_rows_and_boxes(monkeypat
 
 def test_the_class_at_lift_classifies_each_lift_and_a_placed_stow_counts(monkeypatch):
     """The teacher drives as the policy: each lift draws the class of the part between the
-    jaws, each release over a box ends its cycle placed, and at the episode's end every placed
-    part rests in its own box, so each placed cycle counts as a stow. At a class scale that
-    always confuses, every overhead and wrist class is wrong and the teacher still stows."""
+    jaws, each release over a box ends its cycle placed once the jaws open, and at the
+    episode's end every placed part rests in its own box, so each placed cycle counts as a
+    stow. The last part lands before the jaws open, so the env's success ends that cycle
+    stowed. At a class scale that always confuses, every overhead and wrist class is wrong and
+    the teacher still stows."""
     for scale, wrong in ((0.0, 0), (1000.0, 3)):
         env, rig = _env_and_rig()
         _place(env, SPREAD)
@@ -444,7 +460,8 @@ def test_the_class_at_lift_classifies_each_lift_and_a_placed_stow_counts(monkeyp
         )
         env.close()
         ep, seen = payload["episodes"][0], payload["perception"]
-        assert ep["cycle_reasons"] == ["placed"] * 3 and ep["cycle_outcomes"] == [True] * 3, ep
+        assert ep["cycle_reasons"] == ["placed", "placed", "stowed"], ep
+        assert ep["cycle_outcomes"] == [True] * 3, ep
         assert ep["cycle_classes"] == ["stowed"] * 3 and sorted(ep["stowed_parts"]) == [0, 1, 2]
         assert ep["bricks_stowed"] == 3 and payload["cycles_per_stowed"] == pytest.approx(1.0)
         assert (seen["lifts_classified"], seen["lifts_empty"]) == (3, 0), seen
