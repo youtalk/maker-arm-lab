@@ -2,6 +2,7 @@
 the position memory and the adapters that feed the heap selector."""
 
 import math
+import random
 
 import pytest
 import torch
@@ -319,3 +320,39 @@ def test_undetected_slots_are_parked_out_of_the_selectors_reach():
     mask = selector._candidates(scene)
     assert mask.tolist() == [True, True, False]
     assert {g.part for g in selector._ranked(scene, mask)} == {0, 1}
+
+
+def test_a_wrist_look_is_the_truth_at_zero_scales_and_nothing_when_missed_or_covered():
+    """MS7d L4. Part 1 lies on part 0 over its centre: the covering rule, the overhead camera's
+    too, covers part 0 only."""
+    truth = _truth([[0.20, 0.0, Z], [0.205, 0.003, 3 * Z], [0.20, -0.10, Z]])
+    cover = [perception.covered(truth.pos, truth.quat, truth.sizes, b) for b in range(3)]
+    assert cover == [True, False, False]
+    cam = perception.WristCamera(3, 0, {"wrist": 0.0, "wrist_bias": 0.0, "wrist_miss": 0.0})
+    assert cam.bias == (0.0, 0.0)
+    assert cam.look((0.2, -0.1), 0.4, False) == (0.2, -0.1, 0.4)
+    assert cam.look((0.2, -0.1), 0.4, True) is None
+    missing = perception.WristCamera(3, 0, {"wrist_miss": 1000.0})
+    assert all(missing.look((0.2, -0.1), 0.4, False) is None for _ in range(20))
+
+
+def test_the_wrist_draws_are_paired_across_scales_and_outcomes():
+    """Two bias draws per episode and four per look, whatever the scales and whether the look
+    finds the part, from the camera's own generator: a scale multiplies what was drawn."""
+
+    def run(scales):
+        cam = perception.WristCamera(5, 1, {"wrist_miss": 0.0, **scales})
+        looks = [cam.look((0.2, 0.0), 0.5, hidden) for hidden in (False, True, False)]
+        return cam.bias, looks, cam.rng.random()
+
+    base, double, missed = run({}), run({"wrist": 2.0, "wrist_bias": 2.0}), run({"wrist_miss": 1e3})
+    assert base[2] == double[2] == missed[2]
+    assert base[1][1] is None and missed[1] == [None] * 3
+    assert double[0] == pytest.approx(tuple(2.0 * v for v in base[0]), abs=1e-15)
+    truth = (0.2, 0.0, 0.5)
+    for one, two in zip(base[1][::2], double[1][::2]):
+        assert [b - t for b, t in zip(two, truth)] == pytest.approx(
+            [2.0 * (a - t) for a, t in zip(one, truth)], abs=1e-12
+        )
+    first = random.Random("wrist:5:1").gauss(0.0, 1.0)
+    assert base[0][0] == first * perception.WRIST_BIAS_SIGMA_M

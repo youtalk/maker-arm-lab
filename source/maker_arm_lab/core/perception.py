@@ -8,7 +8,7 @@ is a scale on a nominal value: 0 turns that model off and 1 is the nominal. Ever
 ``# INITIAL:``, and MS5a measures it on real frames. The seven MS7d knobs (``tool`` to
 ``torque_k``, the MS7d design's new knobs) are in ``KNOBS`` so that ``all``, the payload and the
 gate cache carry them, but the ``Perceiver`` draws nothing for them: their models arrive with
-the MS7d lever branches.
+the MS7d lever branches. ``WristCamera`` is L4's (``wrist``, ``wrist_bias``, ``wrist_miss``).
 
 Two structural rules hold at every scale, zero included: a part whose centre another part
 covers from above is not seen, and neither is a part under the tool
@@ -76,6 +76,17 @@ TOOL_SIGMA_M = 0.001  # INITIAL: MS5a measures it on real frames
 each of x, y and z: a fiducial of known size on the gripper, seen at about 0.6 m."""
 # Structural rule 2: the arm hides a part this close to the tool (xy) from the overhead camera.
 TOOL_OCCLUSION_RADIUS_M = 0.040  # INITIAL: MS5a measures it on real frames
+# Wrist look (MS7d L4, ``WristCamera``): the 224 px wrist frame covers about 0.14 m at the look
+# height, about 0.6 mm per pixel, and the camera mount's hand-eye calibration adds a bias.
+WRIST_SIGMA_M = 0.0005  # INITIAL: MS5a measures it on real frames
+"""m: the noise per wrist look on the target's centre x and y (knob ``wrist``)."""
+WRIST_YAW_SIGMA_RAD = math.radians(2.0)  # INITIAL: MS5a measures it on real frames
+"""rad: the noise per wrist look on the target's yaw (knob ``wrist``)."""
+WRIST_BIAS_SIGMA_M = 0.0005  # INITIAL: MS5a measures it on real frames
+"""m: the hand-eye bias per episode on every wrist look, x and y (knob ``wrist_bias``)."""
+WRIST_MISS_PROBABILITY = 0.05  # INITIAL: MS5a measures it on real frames
+"""A wrist look that finds nothing: the fingers and the neighbours in the frame (knob
+``wrist_miss``)."""
 # PositionMemory: ten sigmas of the per-detection xy noise.
 ASSOCIATION_RADIUS_M = 0.015  # INITIAL: the MS7c reads check it
 PARKED_CENTRE = (3.0, 0.0, 1.0)
@@ -186,23 +197,34 @@ class Truth:
     tool_xy: tuple[float, float]  # the tool point the arm hides parts around
 
 
+def covered(
+    pos: torch.Tensor, quat: torch.Tensor, sizes: torch.Tensor, b: int, radius=None
+) -> bool:
+    """Structural rule 1: does part ``b``'s centre lie inside the footprint of a part whose
+    centre is higher? ``radius`` is ``grasp.neighbor_extents``'s first result, computed here
+    when None. The overhead camera (``_hidden``) and L4's wrist look both read it."""
+    if radius is None:
+        radius, _ = grasp.neighbor_extents(sizes, quat)
+    centres = pos.tolist()
+    x, y, z = centres[b]
+    for c, (cx, cy, cz) in enumerate(centres):
+        if cz <= z or math.hypot(x - cx, y - cy) > float(radius[c]):
+            continue  # c is the part itself, lower, or too far to reach b's centre
+        if grasp.polygon_distance([(x, y)], grasp.footprint(sizes[c], pos[c], quat[c])) < 0:
+            return True
+    return False
+
+
 def _hidden(pos: torch.Tensor, quat: torch.Tensor, sizes: torch.Tensor, tool_xy) -> set[int]:
     """The parts the two structural rules remove: a part within TOOL_OCCLUSION_RADIUS_M of the
     tool in xy, and a part whose centre lies inside the footprint of a part whose centre is
-    higher."""
+    higher (``covered``)."""
     radius, _ = grasp.neighbor_extents(sizes, quat)
-    centres = pos.tolist()
     hidden = set()
-    for b, (x, y, z) in enumerate(centres):
-        if math.hypot(x - tool_xy[0], y - tool_xy[1]) < TOOL_OCCLUSION_RADIUS_M:
+    for b, (x, y, _) in enumerate(pos.tolist()):
+        near_tool = math.hypot(x - tool_xy[0], y - tool_xy[1]) < TOOL_OCCLUSION_RADIUS_M
+        if near_tool or covered(pos, quat, sizes, b, radius):
             hidden.add(b)
-            continue
-        for c, (cx, cy, cz) in enumerate(centres):
-            if cz <= z or math.hypot(x - cx, y - cy) > float(radius[c]):
-                continue  # c is the part itself, lower, or too far to reach b's centre
-            if grasp.polygon_distance([(x, y)], grasp.footprint(sizes[c], pos[c], quat[c])) < 0:
-                hidden.add(b)
-                break
     return hidden
 
 
@@ -360,6 +382,39 @@ class MarkerBias:
         """A metric read, never a decision's: the estimate's xy distance to the true bias, mm."""
         (ex, ey, _), (bx, by, _) = self.estimate, self.perceiver.bias
         return 1000.0 * math.hypot(ex - bx, ey - by)
+
+
+class WristCamera:
+    """One env's wrist look (MS7d L4, the MS7d design's wrist look model): the target's centre
+    x and y and its yaw as the wrist camera reports them on the final approach.
+
+    Its own generator, seeded ``wrist:{run_seed}:{env_index}``, so the ``Perceiver``'s stream
+    keeps its draws. The camera is built per episode and draws the episode's hand-eye bias
+    (x, y) first. The loop knows the tool pose from FK, so a look carries no overhead camera
+    bias. The draws are PAIRED as the ``Perceiver``'s are: every ``look`` draws 1 miss and 3
+    noise values whatever the scales and whether it finds the part.
+    """
+
+    def __init__(self, run_seed: int, env_index: int, scales: dict[str, float] | None = None):
+        self.scales = {**dict.fromkeys(KNOBS + EXTRA_KNOBS, 1.0), **(scales or {})}
+        self.rng = random.Random(f"wrist:{run_seed}:{env_index}")
+        sigma = self.scales["wrist_bias"] * WRIST_BIAS_SIGMA_M
+        self.bias = (sigma * self.rng.gauss(0.0, 1.0), sigma * self.rng.gauss(0.0, 1.0))
+
+    def look(self, xy, yaw: float, hidden: bool) -> tuple[float, float, float] | None:
+        """One look at a part whose true centre is ``xy`` and whose body x axis heads ``yaw``:
+        None at the ``wrist_miss`` rate or when another part covers its centre (``hidden``),
+        else the centre plus the episode bias and the noise, and the yaw plus the noise."""
+        s = self.scales
+        missed = self.rng.random() < min(1.0, WRIST_MISS_PROBABILITY * s["wrist_miss"])
+        dx, dy, dyaw = (self.rng.gauss(0.0, 1.0) for _ in range(3))
+        if missed or hidden:
+            return None
+        return (
+            float(xy[0]) + self.bias[0] + s["wrist"] * WRIST_SIGMA_M * dx,
+            float(xy[1]) + self.bias[1] + s["wrist"] * WRIST_SIGMA_M * dy,
+            float(yaw) + s["wrist"] * WRIST_YAW_SIGMA_RAD * dyaw,
+        )
 
 
 class PositionMemory:
