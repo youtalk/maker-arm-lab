@@ -64,6 +64,22 @@ def test_a_threshold_override_can_fail_the_bar(tmp_path, capsys):
     assert summary["thresholds"] == {"min_excess": 0.01}
 
 
+def test_the_force_bar_replays_the_hold_gate_on_a_force_column(tmp_path, capsys):
+    """MS7d L6: 20 N on the first 10 steps of cycle 1 hold its entry back 5 steps, past the
+    bar's offset of 5; a bar over the press lets it in on time."""
+    trace = tmp_path / "eval_000.trace.jsonl.gz"
+    with gzip.open(trace, "wt") as f:
+        for row in _trace():
+            pressed = row[2] == 1 and row[1] - 2 < 10
+            f.write(json.dumps(row + [20.0 if pressed else 0.5]) + "\n")
+    assert script.main(["--traces", str(trace), "--force_max", "5"]) == 1
+    token, summary = _token(capsys)
+    assert token == "HOLD_FAIL" and summary["first_hold_offset_median"] == 8
+    assert summary["thresholds"] == {"force_max": 5.0}
+    assert script.main(["--traces", str(trace), "--force_max", "25"]) == 0
+    assert _token(capsys)[1]["first_hold_offset_median"] == 3
+
+
 def test_a_missing_file_is_an_error_token(tmp_path, capsys):
     assert script.main(["--payloads", str(tmp_path / "missing_*.json")]) == 1
     token, body = _token(capsys)

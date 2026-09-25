@@ -46,6 +46,8 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
         box that set_context_box() serves in place of desk_box_poses; its owner writes row i
         at each episode start and then calls set_context_box(i, ...) again, because the
         reset serves box 0 before that
+    arm torques (MS7d L6 and L7, core.torque): env.arm_torques(i) -> (constraint (6,),
+        gravity (6,), actuator (6,), pick Jacobian (3, 6)) float64 tensors of env i's arm
 
 Semantics carried over from ``ManagerBasedRLEnv`` because the rig depends on them: a done
 env is auto-reset INSIDE ``step`` (its state tensors already show the next episode when
@@ -585,6 +587,28 @@ class MjLegoSortEnv:
         self.context_box[i] = row
         self.context_camera_box[i, 6:] = self.context_box[i]
         self.context_camera_box_target[i, 6:9] = self.context_box[i]
+
+    def arm_torques(self, i: int) -> tuple[torch.Tensor, ...]:
+        """MS7d L6 and L7: what ``core.torque`` turns into the pick-point force, read from env
+        ``i``'s last forward pass, arrays only and no contact loop. The constraint torque on
+        the six arm joints (``qfrc_constraint``, which the QDD spike found equal to the
+        contact torques J^T f), the gravity torque the arm's ``gravcomp`` cancels
+        (``qfrc_gravcomp``), the six arm actuator torques (``actuator_force``) and the (3, 6)
+        translational Jacobian of the FK pick point, the tool body plus
+        ``PICK_OFFSET_MEASURED``. All float64. It stands for the real arm's motor torque
+        reports: ``core.torque`` adds their noise and model error, and the heap loop's no-truth
+        test leaves it alone."""
+        m, d, h = self.models[i], self.datas[i], self.handles
+        dofs, tool = list(h.joint_dof[:6]), h.tool_body
+        pick = d.xpos[tool] + d.xmat[tool].reshape(3, 3) @ np.asarray(PICK_OFFSET_MEASURED)
+        jac = np.zeros((3, m.nv))
+        mujoco.mj_jac(m, d, jac, None, pick, tool)
+        rows = (
+            d.qfrc_constraint[dofs],
+            d.qfrc_gravcomp[dofs],
+            d.actuator_force[list(h.arm_actuators)],
+        )
+        return (*(torch.from_numpy(r) for r in rows), torch.from_numpy(jac[:, dofs]))
 
     def place_desk_boxes(self, i: int, poses) -> None:
         """Stand env ``i``'s desk boxes at ``poses``, one (x, y, yaw) per box, on the desk.
