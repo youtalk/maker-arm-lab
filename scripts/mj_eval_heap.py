@@ -223,7 +223,9 @@ def parse_args(argv=None) -> argparse.Namespace:
         type=_scales,
         default=None,
         help="MS7c, with --perceived: a scale per perception knob, e.g. 'heading=2' or "
-        "'all=0,miss=1' (knobs: all, " + ", ".join(perception.KNOBS) + "); a knob not named "
+        "'all=0,miss=1' (knobs: all, "
+        + ", ".join(perception.KNOBS + perception.EXTRA_KNOBS)
+        + "); a knob not named "
         "stays at 1, the nominal, and so does every knob when this is omitted",
     )
     parser.add_argument(

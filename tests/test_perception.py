@@ -133,7 +133,10 @@ def test_the_box_bias_holds_for_the_episode_and_is_redrawn_at_reset():
     ],
 )
 def test_parse_scales(text, expected):
-    assert perception.parse_scales(text) == {**dict.fromkeys(KNOBS, 1.0), **expected}
+    assert perception.parse_scales(text) == {
+        **dict.fromkeys(KNOBS + perception.EXTRA_KNOBS, 1.0),
+        **expected,
+    }
 
 
 def test_format_scales_is_canonical_and_round_trips():
@@ -142,6 +145,19 @@ def test_format_scales_is_canonical_and_round_trips():
     for text in ("miss=4,pos=0", "all=0,heading=0.25", "size=0.1,class=1e-3"):
         scales = perception.parse_scales(text)
         assert perception.parse_scales(perception.format_scales(scales)) == scales
+
+
+def test_pos_z_scales_only_the_z_axis_and_stays_out_of_all_and_the_default_text():
+    assert perception.parse_scales("all=0")["pos_z"] == 1.0
+    assert perception.format_scales(perception.parse_scales("pos_z=1")).count("pos_z") == 0
+    text = perception.format_scales(perception.parse_scales("pos_z=0"))
+    assert text.endswith(",pos_z=0") and perception.parse_scales(text)["pos_z"] == 0.0
+    truth = _truth(SPREAD)
+    base, flat = _perceiver(7), _perceiver(7, scales={"pos_z": 0.0})
+    assert base.bias[:2] == flat.bias[:2] and flat.bias[2] == 0.0 and base.bias[2] != 0.0
+    for a, b in zip(base.perceive(truth).detections, flat.perceive(truth).detections):
+        assert a.centre[:2] == b.centre[:2] and a.size == b.size and a.cls == b.cls
+        assert b.centre[2] == pytest.approx(float(truth.pos[b.sim_index][2]))
 
 
 @pytest.mark.parametrize("text", ["speed=1", "pos=-1", "pos=abc", "pos", "pos=nan", "all=inf"])

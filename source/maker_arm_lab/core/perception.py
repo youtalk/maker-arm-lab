@@ -32,6 +32,10 @@ from maker_arm_lab.core.quat import quat_apply, quat_mul
 
 KNOBS = ("pos", "heading", "size", "box", "miss", "class")
 """The knob names, in the order ``format_scales`` writes them."""
+EXTRA_KNOBS = ("pos_z",)
+"""Diagnostic multipliers that ``all`` leaves alone and ``format_scales`` writes only when not
+1: ``pos_z`` scales the z axis of the position bias and noise on top of ``pos``, to split the
+position cost between xy and z (MS7c ledger, 2026-09-24)."""
 
 # Position: the iPhone wide camera covers the 0.9 m desk with 1920 px, about 0.5 mm per pixel,
 # and the tag-board extrinsics add a bias per episode. Both on (x, y, z).
@@ -67,13 +71,14 @@ def parse_scales(text: str) -> dict[str, float]:
     heading alone. An unknown knob, or a value that is not a finite number >= 0, raises
     ValueError (an argparse ``type=`` turns it into a usage error).
     """
-    scales = dict.fromkeys(KNOBS, 1.0)
+    scales = dict.fromkeys(KNOBS + EXTRA_KNOBS, 1.0)
     for item in text.split(","):
         if not item.strip():
             continue
         name, _, value = (s.strip() for s in item.partition("="))
-        if name != "all" and name not in KNOBS:
-            raise ValueError(f"unknown perception knob {name!r}; knobs: all, {', '.join(KNOBS)}")
+        if name != "all" and name not in scales:
+            names = ", ".join(KNOBS + EXTRA_KNOBS)
+            raise ValueError(f"unknown perception knob {name!r}; knobs: all, {names}")
         try:
             scale = float(value)
         except ValueError:
@@ -87,8 +92,10 @@ def parse_scales(text: str) -> dict[str, float]:
 
 def format_scales(scales: dict[str, float]) -> str:
     """The canonical form the payload and the gate cache record: every knob, in ``KNOBS``
-    order, the shortest text that ``parse_scales`` reads back to the same float."""
-    return ",".join(f"{k}={repr(float(scales[k])).removesuffix('.0')}" for k in KNOBS)
+    order, then each of ``EXTRA_KNOBS`` that is not 1, the shortest text that
+    ``parse_scales`` reads back to the same float."""
+    names = KNOBS + tuple(k for k in EXTRA_KNOBS if float(scales.get(k, 1.0)) != 1.0)
+    return ",".join(f"{k}={repr(float(scales[k])).removesuffix('.0')}" for k in names)
 
 
 @dataclass(frozen=True)
@@ -193,10 +200,10 @@ class Perceiver:
     """
 
     def __init__(self, run_seed: int, env_index: int, scales: dict[str, float] | None = None):
-        unknown = set(scales or {}) - set(KNOBS)
+        unknown = set(scales or {}) - set(KNOBS + EXTRA_KNOBS)
         if unknown:
             raise ValueError(f"unknown perception knobs {sorted(unknown)}; knobs: {KNOBS}")
-        self.scales = {**dict.fromkeys(KNOBS, 1.0), **(scales or {})}
+        self.scales = {**dict.fromkeys(KNOBS + EXTRA_KNOBS, 1.0), **(scales or {})}
         self.rng = random.Random(f"perceive:{run_seed}:{env_index}")
         self._bias = (0.0, 0.0, 0.0)
         self._box_poses: tuple[tuple[float, float, float], ...] = ()
@@ -215,10 +222,17 @@ class Perceiver:
     def _gauss(self) -> float:
         return self.rng.gauss(0.0, 1.0)
 
+    def _pos_axes(self) -> tuple[float, float, float]:
+        """The position scale per axis: ``pos`` on x and y, ``pos`` times ``pos_z`` on z."""
+        pos = self.scales["pos"]
+        return (pos, pos, pos * self.scales["pos_z"])
+
     def reset_episode(self, true_boxes: Sequence[Sequence[float]]) -> None:
         """Draw the episode's position bias, then each box's bias in box order."""
-        pos, box = self.scales["pos"], self.scales["box"]
-        self._bias = tuple(pos * sigma * self._gauss() for sigma in POS_BIAS_SIGMA_M)
+        box = self.scales["box"]
+        self._bias = tuple(
+            a * s * self._gauss() for a, s in zip(self._pos_axes(), POS_BIAS_SIGMA_M)
+        )
         poses = []
         for x, y, yaw in true_boxes:
             dx, dy, dyaw = self._gauss(), self._gauss(), self._gauss()
@@ -252,9 +266,10 @@ class Perceiver:
         sizes = torch.as_tensor(truth.sizes, dtype=torch.float32)
         hidden = _hidden(pos, quat, sizes, truth.tool_xy)
         miss = min(1.0, MISS_PROBABILITY * s["miss"])
+        axes = self._pos_axes()
         detections = []
         for b in range(pos.shape[0]):
-            noise = [s["pos"] * sigma * self._gauss() for sigma in POS_NOISE_SIGMA_M]
+            noise = [a * sigma * self._gauss() for a, sigma in zip(axes, POS_NOISE_SIGMA_M)]
             dyaw = s["heading"] * HEADING_SIGMA_RAD * self._gauss()
             dsize = [s["size"] * SIZE_SIGMA_M * self._gauss() for _ in range(3)]
             missed = self.rng.random() < miss

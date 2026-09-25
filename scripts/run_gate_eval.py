@@ -120,6 +120,8 @@ LOOP_SETTINGS = ("rake_cap",)
 """The heap loop's integer settings, recorded and matched like the switches; 0 is off."""
 PERCEPTION_KNOBS = ("pos", "heading", "size", "box", "miss", "class")
 """``core.perception.KNOBS``, copied because the supervisor imports no torch; the test pins it."""
+PERCEPTION_EXTRA_KNOBS = ("pos_z",)
+"""``core.perception.EXTRA_KNOBS``: outside ``all``, written only when not 1."""
 
 
 def noise_scales_key(text: str) -> str:
@@ -127,12 +129,12 @@ def noise_scales_key(text: str) -> str:
     ``core.perception.format_scales(parse_scales(text))``, a stdlib copy that the test pins
     against those two. Raises ValueError on an unknown knob or a scale that is not a finite
     number >= 0."""
-    scales = dict.fromkeys(PERCEPTION_KNOBS, 1.0)
+    scales = dict.fromkeys(PERCEPTION_KNOBS + PERCEPTION_EXTRA_KNOBS, 1.0)
     for item in text.split(","):
         if not item.strip():
             continue
         name, _, value = (part.strip() for part in item.partition("="))
-        if name != "all" and name not in PERCEPTION_KNOBS:
+        if name != "all" and name not in scales:
             raise ValueError(f"--noise_scales: unknown perception knob {name!r}")
         try:
             scale = float(value)
@@ -142,7 +144,9 @@ def noise_scales_key(text: str) -> str:
             raise ValueError(f"--noise_scales: {name} needs a finite number >= 0, got {value!r}")
         for knob in PERCEPTION_KNOBS if name == "all" else (name,):
             scales[knob] = scale
-    return ",".join(f"{k}={repr(float(scales[k])).removesuffix('.0')}" for k in PERCEPTION_KNOBS)
+    extra = tuple(k for k in PERCEPTION_EXTRA_KNOBS if scales[k] != 1.0)
+    names = PERCEPTION_KNOBS + extra
+    return ",".join(f"{k}={repr(float(scales[k])).removesuffix('.0')}" for k in names)
 
 
 def loop_switches(client_flags) -> dict:

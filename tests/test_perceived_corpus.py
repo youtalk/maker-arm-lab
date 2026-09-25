@@ -279,7 +279,7 @@ def test_the_run_meta_records_the_perceived_switch_and_the_canonical_scales():
     assert meta["perceived"] is True
     assert meta["noise_scales"] == "pos=0,heading=2,size=0,box=0,miss=0,class=0"
     off = batch.parse_args(HEAP)
-    assert off.noise_scales == dict.fromkeys(perception.KNOBS, 1.0)
+    assert off.noise_scales == dict.fromkeys(perception.KNOBS + perception.EXTRA_KNOBS, 1.0)
     meta = batch.run_meta(
         off, draw, noise, None, num_bricks=3, export_mode="EXPORT_ALL", backend="mujoco", task="t"
     )

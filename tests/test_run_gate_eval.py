@@ -1152,7 +1152,9 @@ def test_the_supervisors_copy_of_the_scales_parse_matches_the_perception_module(
     from maker_arm_lab.core import perception
 
     assert ge.PERCEPTION_KNOBS == perception.KNOBS
-    for text in ("", "heading=2", "all=0,heading=1", " pos=0.5 , miss=4", "class=1e-3", "all=2.50"):
+    assert ge.PERCEPTION_EXTRA_KNOBS == perception.EXTRA_KNOBS
+    texts = ("", "heading=2", "all=0,heading=1", " pos=0.5 , miss=4", "class=1e-3", "all=2.50")
+    for text in texts + ("pos_z=0", "all=2,pos_z=0.5", "pos_z=1"):
         expected = perception.format_scales(perception.parse_scales(text))
         assert ge.noise_scales_key(text) == expected, text
     for bad in ("bogus=1", "heading=-1", "pos=nan", "miss=inf", "heading=", "size=x"):
