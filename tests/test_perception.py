@@ -1,6 +1,8 @@
 """The MS7c perceived state (core.perception): the knobs, the structural rules, the seeding,
 the position memory and the adapters that feed the heap selector."""
 
+import math
+
 import pytest
 import torch
 
@@ -151,6 +153,64 @@ def test_the_draws_with_every_ms7d_switch_off_equal_the_ms7c_sequence():
                 got.append([d.sim_index, *r(d.centre), *r(d.size), round(d.quat[3], 6), d.cls])
         got.append([p.classify("tall"), round(p.rng.random(), 6)])
         assert got == expected, env_index
+
+
+TOOL_POINT = (0.25, 0.02, 0.12)  # an FK pick point for the marker looks
+
+
+def test_at_tool_zero_one_look_reads_the_bias_and_the_detections_keep_only_their_noise():
+    """MS7d L3: with ``tool`` at 0 the first look's estimate is the episode bias, and the
+    corrected detections are the truth plus the per-detection noise. The marker's generator is
+    its own: the ``Perceiver``'s detections are the same with looks between its calls."""
+    truth = _truth(SPREAD)
+    p = _perceiver(7, scales={"tool": 0.0})
+    marker = perception.MarkerBias(p, 7, 0)
+    assert marker.estimate == (0.0, 0.0, 0.0) and math.hypot(*p.bias[:2]) > 1e-4
+    marker.look(TOOL_POINT)
+    assert marker.estimate == pytest.approx(p.bias, abs=1e-12)
+    assert marker.error_mm() == pytest.approx(0.0, abs=1e-9)
+    raw = p.perceive(truth)
+    marker.look(TOOL_POINT)
+    assert raw == _perceiver(7, scales={"tool": 0.0}).perceive(truth)
+    fixed = marker.correct(raw)
+    assert fixed.box_poses == raw.box_poses and len(fixed.detections) == len(raw.detections) > 0
+    for f, r in zip(fixed.detections, raw.detections):
+        assert (f.quat, f.size, f.cls, f.sim_index) == (r.quat, r.size, r.cls, r.sim_index)
+        true = truth.pos[f.sim_index].tolist()
+        noise = [c - t - b for c, t, b in zip(r.centre, true, p.bias)]
+        assert [c - t for c, t in zip(f.centre, true)] == pytest.approx(noise, abs=1e-12)
+
+
+def test_the_marker_estimate_error_falls_with_the_looks():
+    """MS7d L3 at the nominal ``tool``: the estimate is the mean of the looks, so its error on
+    each axis falls as TOOL_SIGMA_M / sqrt(looks), within a loose 25 % over 300 seeds."""
+    looks = (1, 4, 16)
+    errors = {n: [] for n in looks}
+    for seed in range(300):
+        p = _perceiver(seed)
+        marker = perception.MarkerBias(p, seed, 0)
+        for n in range(1, looks[-1] + 1):
+            marker.look(TOOL_POINT)
+            if n in errors:
+                errors[n] += [e - b for e, b in zip(marker.estimate, p.bias)]
+    for n in looks:
+        rms = math.sqrt(sum(e * e for e in errors[n]) / len(errors[n]))
+        assert rms == pytest.approx(perception.TOOL_SIGMA_M / math.sqrt(n), rel=0.25), n
+
+
+def test_the_tool_knob_scales_paired_marker_draws():
+    """Every look draws three values at every scale, so a scale only multiplies them."""
+    markers = [
+        perception.MarkerBias(_perceiver(3, scales={"tool": s}), 3, 0) for s in (0.0, 1.0, 2.0)
+    ]
+    for m in markers:
+        for _ in range(5):
+            m.look(TOOL_POINT)
+    bias = markers[0].perceiver.bias
+    zero, one, two = ([e - b for e, b in zip(m.estimate, bias)] for m in markers)
+    assert zero == pytest.approx([0.0] * 3, abs=1e-12) and max(map(abs, one)) > 0
+    assert two == pytest.approx([2 * e for e in one], abs=1e-12)
+    assert len({m.rng.random() for m in markers}) == 1
 
 
 def test_the_confusion_fires_near_its_rate_and_never_keeps_the_true_class():

@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 import random
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -71,6 +71,9 @@ BOX_YAW_SIGMA_RAD = math.radians(2.0)  # INITIAL: MS5a measures it on real frame
 MISS_PROBABILITY = 0.05  # INITIAL: MS5a measures it on real frames
 # Class: a wrong class per classification, the MS7b classifier gate of 0.97.
 CLASS_ERROR_PROBABILITY = 0.03  # INITIAL: MS5a measures it on real frames
+TOOL_SIGMA_M = 0.001  # INITIAL: MS5a measures it on real frames
+"""m: the ``tool`` knob's nominal, the noise per look on the gripper marker (``MarkerBias``) on
+each of x, y and z: a fiducial of known size on the gripper, seen at about 0.6 m."""
 # Structural rule 2: the arm hides a part this close to the tool (xy) from the overhead camera.
 TOOL_OCCLUSION_RADIUS_M = 0.040  # INITIAL: MS5a measures it on real frames
 # PositionMemory: ten sigmas of the per-detection xy noise.
@@ -306,6 +309,57 @@ class Perceiver:
                 )
             )
         return PerceivedState(detections, self._box_poses)
+
+
+class MarkerBias:
+    """``marker_bias`` (MS7d L3): the episode's position bias, estimated from a marker on the
+    gripper and taken off every detection.
+
+    At each perceive call the overhead camera also reads one fixed point on the gripper, a
+    fiducial of known geometry. Its world point is the FK pick point, which the loop computes
+    from the joint encoders (``rig.pick_point``). The look is that point plus the camera's
+    episode bias (``Perceiver.bias``, the one every detection carries) plus the ``tool`` noise,
+    ``TOOL_SIGMA_M`` on each axis. The estimate is the mean of look minus FK point over the
+    episode's looks so far, and ``correct`` subtracts it from every detection's centre. The box
+    poses stay: MS7c models their bias apart from the camera's. A real camera error is not a
+    pure translation, so on a rig the estimate removes it only near the gripper.
+
+    One per env and episode (the heap loop runs one episode per env). Its generator is its
+    own, seeded like the ``Perceiver``'s, so the ``Perceiver``'s stream is the same with the
+    switch on or off. Every look draws three values whatever the scale, so ``tool`` rows pair.
+    """
+
+    def __init__(self, perceiver: Perceiver, run_seed: int, env_index: int):
+        self.perceiver = perceiver
+        self.rng = random.Random(f"marker:{run_seed}:{env_index}")
+        self.looks = 0
+        self._sum = (0.0, 0.0, 0.0)
+
+    @property
+    def estimate(self) -> tuple[float, float, float]:
+        """The running bias estimate (x, y, z), zero before the first look."""
+        return tuple(s / max(self.looks, 1) for s in self._sum)
+
+    def look(self, fk_point) -> None:
+        """One look at the marker, whose FK position is ``fk_point`` (x, y, z)."""
+        tool = self.perceiver.scales["tool"]
+        noise = [tool * TOOL_SIGMA_M * self.rng.gauss(0.0, 1.0) for _ in range(3)]
+        seen = [p + b + n for p, b, n in zip(fk_point, self.perceiver.bias, noise)]
+        self._sum = tuple(s + (v - p) for s, v, p in zip(self._sum, seen, fk_point))
+        self.looks += 1
+
+    def correct(self, state: PerceivedState) -> PerceivedState:
+        """``state`` with the estimate subtracted from every detection's centre."""
+        est = self.estimate
+        moved = [
+            replace(d, centre=tuple(c - e for c, e in zip(d.centre, est))) for d in state.detections
+        ]
+        return replace(state, detections=moved)
+
+    def error_mm(self) -> float:
+        """A metric read, never a decision's: the estimate's xy distance to the true bias, mm."""
+        (ex, ey, _), (bx, by, _) = self.estimate, self.perceiver.bias
+        return 1000.0 * math.hypot(ex - bx, ey - by)
 
 
 class PositionMemory:
