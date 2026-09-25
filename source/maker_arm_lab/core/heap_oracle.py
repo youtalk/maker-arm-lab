@@ -126,6 +126,7 @@ class Push:
     part: int | None = None  # the raked part; None is the densest-cell push
     heading: float | None = None  # a rake's sweep direction
     jaw: float | None = None  # the closing axis the legs square to; None holds the jaws
+    box_wall: bool = False  # a rake off a desk box wall (``grasp.Wall.box``, MS7d L9)
 
 
 @dataclass(frozen=True)
@@ -493,7 +494,7 @@ class HeapOracle(oracle.EnvOracle):
             )
             if segment is not None:
                 start, end, heading = segment
-                return Push(start, end, part=b, heading=heading, jaw=heading)
+                return Push(start, end, part=b, heading=heading, jaw=heading, box_wall=wall.box)
         return None
 
     def _push_yaw(self) -> float | None:

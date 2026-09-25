@@ -490,6 +490,34 @@ def test_rearm_hold_serves_the_rules_again_after_a_hold_with_no_lift(monkeypatch
         assert payload["perception"]["rearms"] == int(rearm)
 
 
+def test_the_box_walls_join_the_selectors_walls_only_with_the_switch(monkeypatch):
+    """MS7d L9: with the switch off the selector ranks against the tray walls alone and the
+    payload has no box-wall counts; with it on the walls of the perceived boxes follow the
+    tray's. On three parts in the middle of the tray, far from every box, nothing else changes."""
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
+    walls, runs = [], {}
+    real = loop._perceived_scene
+
+    def spy(st, env, rig, i, k):
+        walls.append(st.selector.walls)
+        return real(st, env, rig, i, k)
+
+    monkeypatch.setattr(loop, "_perceived_scene", spy)
+    for on in (False, True):
+        walls.clear()
+        env, rig = _env_and_rig(budget=3, tray=True)
+        _place(env, SPREAD)
+        runs[on] = _rollout(env, rig, _Still(), budget=3, perceived=True, box_walls=on)
+        boxes = env.perceived_box_poses[0].copy()
+        env.close()
+        expected = grasp.tray_walls() + (desk_boxes.box_walls(boxes, 4) if on else ())
+        assert walls and all(w == expected for w in walls)
+    off, on = runs[False], runs[True]
+    assert off["episodes"][0]["cycles"] == 3 and on["episodes"] == off["episodes"]
+    assert on["perception"] == {**off["perception"], "box_wall_rakes": 0, "box_wall_refusals": 0}
+    assert [p["inference"]["loop"]["box_walls"] for p in (off, on)] == [False, True]
+
+
 def test_the_census_reads_the_graders_any_box_region():
     """``TruthReads.boxed``, the read behind ``target_in_box``: a part on box 0's floor and one
     on box 3's are in a box, whoever's box it is, and a part on the desk is not."""
@@ -805,7 +833,7 @@ def _rake_scene(monkeypatch):
     return env, rig, _Still(), 4, switches
 
 
-MS7D_ON = {"box_filter_xy": True, "release_gap": True, "rearm_hold": True}
+MS7D_ON = {"box_filter_xy": True, "release_gap": True, "rearm_hold": True, "box_walls": True}
 """The MS7d switches whose behavior is built: the no-truth test runs with them off and on."""
 
 

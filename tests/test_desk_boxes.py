@@ -19,8 +19,10 @@ from maker_arm_lab.core import (
     cameras,
     checker,
     desk_boxes,
+    grasp,
     heap_oracle,
     layout,
+    loop,
     oracle,
     parts,
     stowed,
@@ -28,6 +30,7 @@ from maker_arm_lab.core import (
 from maker_arm_lab.core.grasp import polygon_distance
 from maker_arm_lab.core.quat import compose_offset_rot, quat_mul
 from maker_arm_lab.mj import overlay
+from test_mj_desk_boxes import FIXED
 
 
 def _tray_outer():
@@ -307,6 +310,94 @@ def test_the_ms6_constructor_path_is_unchanged():
     assert orc.destination == 1 and orc.part_boxes is None and orc.raises
     assert orc.release_tilt == oracle.RELEASE_TILT_RAD
     assert orc.retreat_point == oracle.RETREAT_POINT
+
+
+def test_the_box_walls_stand_where_the_box_geoms_put_them_on_a_yawed_box():
+    """MS7d L9: four walls a box, their outer corners the footprint's ``corners``, their inner
+    faces the interior's, their tops the rim, ``outward`` away from the box centre, the
+    heading along the wall and no lean."""
+    n = len(FIXED)
+    walls = desk_boxes.box_walls(FIXED, n)
+    assert len(walls) == 4 * n
+    ix, _, _ = desk_boxes.interior(n)
+    for k, pose in enumerate(FIXED):
+        mine = walls[4 * k : 4 * k + 4]
+        vertices = [p for w in mine for p in w.footprint]
+        for corner in desk_boxes.corners(pose, n):
+            assert min(math.dist(corner, p) for p in vertices) < 1e-12
+        for w in mine:
+            assert w.box and w.lean == 0.0 and w.top == desk_boxes.rim_z(n)
+            assert grasp.wall_distance(pose[:2], w) == pytest.approx(ix / 2)
+            cx = sum(x for x, _ in w.footprint) / 4 - pose[0]
+            cy = sum(y for _, y in w.footprint) / 4 - pose[1]
+            ox, oy = w.outward
+            assert (cx * ox + cy * oy, cx * oy - cy * ox) == pytest.approx(
+                ((ix + desk_boxes.DESK_BOX_WALL) / 2, 0.0), abs=1e-12
+            )
+            assert math.cos(w.heading) * ox + math.sin(w.heading) * oy == pytest.approx(0.0)
+
+
+def _beside_box_wall(box, gap, turn=0.0):
+    """A 2x4 brick lying flat outside the wall of box ``box`` that faces the tray, its centre
+    ``gap`` (m) off the wall's outer face at the wall's middle, its long axis turned ``turn``
+    off the wall; and the wall's outward normal."""
+    pose = FIXED[box]
+    side = -1.0 if pose[1] > 0.0 else 1.0
+    _, hy = desk_boxes.outer_half(len(FIXED))
+    x, y, _ = _in_box(pose, 0.0, side * (hy + gap), 0.0)
+    yaw = pose[2] + turn
+    scene = oracle.SceneSnapshot(
+        brick_pos=torch.tensor([[x, y, BRICK.size[2] / 2]]),
+        brick_yaw=torch.tensor([yaw]),
+        brick_lin_vel=torch.zeros(1, 3),
+        pick_point=torch.tensor([0.3, 0.0, 0.1]),
+        brick_quat=torch.tensor([[math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]]),
+    )
+    return scene, (-side * math.sin(pose[2]), side * math.cos(pose[2]))
+
+
+def _box_wall_selector(on):
+    """The heap loop's selector on the protocol's leaning tray, with the box walls or not."""
+    sel = heap_oracle.HeapOracle(
+        layout.DEFAULT_BIN_LAYOUT, [BRICK], 0, oracle.nominal_draw(), boxes=FIXED, tray=True
+    )
+    sel.walls = grasp.tray_walls(30.0) + (desk_boxes.box_walls(FIXED, len(FIXED)) if on else ())
+    return sel
+
+
+def test_a_box_wall_refuses_a_finger_across_it_and_keeps_the_closing_axis_along_it():
+    """MS7d L9: a 2x4 brick 2 mm off the outside of a yawed box wall, its long axis along the
+    wall. Across the wall a finger lands on it, so that grasp is refused; along the wall the
+    stroke clears. The tray walls alone rank both, as with the switch off."""
+    scene, _ = _beside_box_wall(0, 0.002 + BRICK.size[1] / 2)
+    mask = torch.tensor([True])
+    along = FIXED[0][2]
+    off = [g.heading for g in _box_wall_selector(False)._ranked(scene, mask)]
+    on = _box_wall_selector(True)
+    assert sorted(off) == pytest.approx([along, along + math.pi / 2])
+    assert [g.heading for g in on._ranked(scene, mask)] == pytest.approx([along])
+    assert loop.box_wall_refusals(on, scene, 0) == 1
+    assert loop.box_wall_refusals(_box_wall_selector(False), scene, 0) == 0
+
+
+def test_the_rake_sweeps_a_part_off_a_box_wall_away_from_the_box():
+    """MS7d L9: a brick 12 mm off a box wall at 50 degrees ranks no grasp once the box walls
+    count, so the selector rakes it off the wall along the box's outward normal: the tips land
+    clear of every box wall, and the hull at the end clears every wall, farther from the box.
+    With the tray walls alone the brick is a forced pick."""
+    scene, (ox, oy) = _beside_box_wall(3, 0.012, math.radians(50.0))
+    assert _box_wall_selector(False).select_target(scene) == 0
+    sel = _box_wall_selector(True)
+    assert sel.select_target(scene) is None and sel.push is not None
+    rake = sel.push
+    assert rake.part == 0 and rake.box_wall
+    assert math.cos(rake.heading) * ox + math.sin(rake.heading) * oy == pytest.approx(1.0)
+    boxes = [w for w in sel.walls if w.box]
+    tips = grasp.rake_footprint(rake.start)
+    assert all(grasp.polygon_distance(tips, list(w.footprint)) > 0.0 for w in boxes)
+    assert grasp._clear_of_walls(rake.end, sel.walls)
+    box = FIXED[3][:2]
+    assert math.dist(rake.end, box) > math.dist(scene.brick_pos[0, :2].tolist(), box)
 
 
 def test_desk_boxes_is_a_batch_argument_recorded_in_run_meta():

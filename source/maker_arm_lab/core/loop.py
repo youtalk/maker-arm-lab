@@ -265,7 +265,6 @@ wider than it was when the hold ended (MS7d design section 4.2). The MS7c rule a
 for ``SELECT_OPEN_FRACTION`` of the full gap, and 107 of candidate 3's cycles ran to the step
 budget in that wait, 101 of them with the part already in a box."""
 NOT_BUILT = (
-    "box_walls",  # L9: the grasp model and the rake read the perceived desk box walls
     "marker_bias",  # L3: the bias estimate from the gripper marker
     "wrist_fix",  # L4: the wrist look at the final approach
     "class_views",  # L5: the correlated class error and the third view
@@ -697,6 +696,25 @@ def cycle_close_below(selector, scene, target: int) -> float:
     if chosen is not None:
         return float(chosen.width)
     return float(min(selector.parts[target].size[:2]))
+
+
+def box_wall_refusals(selector, scene, target: int) -> int:
+    """``box_walls`` (MS7d L9): the grasps on ``target`` that a desk box wall alone refuses,
+    the ones ``grasp.candidate_grasps`` finds against the tray walls and not against every wall
+    of the selector. Read at a selection, so a read shows how often the lever turned a grasp
+    off a box wall. Pure."""
+    args = (
+        target,
+        selector.sizes[target],
+        scene.brick_pos[target],
+        scene.brick_quat[target],
+        oracle.PICK_TILT_RAD,
+        selector.parts[target].closing_axes,
+    )
+    tray = [w for w in selector.walls if not w.box]
+    return len(grasp.candidate_grasps(*args, tray)) - len(
+        grasp.candidate_grasps(*args, selector.walls)
+    )
 
 
 def refreshed_row(row, selector, scene, target: int) -> list[float]:
@@ -1253,6 +1271,10 @@ PERCEPTION_COUNTS = (
 overhead class was wrong, the lifts classified, the wrong wrist classes, the lifts with no
 part between the jaws, ``look_again``'s streaks that waited, steps spent waiting and
 streaks that ended in a target or a rake, and ``rearm_hold``'s stop flag clears."""
+BOX_WALL_COUNTS = ("box_wall_rakes", "box_wall_refusals")
+"""``box_walls``'s counts, in the ``perception`` block only with the switch on: the rakes off a
+desk box wall (``Push.box_wall``) and the grasps on the selected targets that a box wall alone
+refused (``box_wall_refusals``)."""
 
 
 def _perceived_scene(st: EnvState, env, rig, i: int, k: int):
@@ -1502,6 +1524,10 @@ def rollout(
             st.selector.failure_scope = "part"
             st.selector.knows_destinations = False
             st.selector.box_filter_xy = box_filter_xy
+            if box_walls:
+                # L9: the grasp model and the rake also read the perceived boxes' walls.
+                boxes = st.perceiver.box_poses
+                st.selector.walls += desk_boxes.box_walls(boxes, len(boxes))
         env.perceived_box_poses = poses
         for i in range(num_envs):
             env.set_context_box(i, 0)  # the reset served box 0's true pose
@@ -1659,6 +1685,7 @@ def rollout(
                 # caps), then selects again.
                 st.selector._end_push()
                 st.rakes += 1
+                st.counts["box_wall_rakes"] += rake.box_wall
                 overrides = {}
                 if perceived:
                     # Booked where the part was perceived; the rig's takeover reads the hold
@@ -1713,6 +1740,8 @@ def rollout(
                 env.set_context_box(i, st.cycle.box)
                 st.counts["selections"] += 1
                 st.counts["wrong_overhead_class"] += seen.cls != true_classes[target]
+                if box_walls:
+                    st.counts["box_wall_refusals"] += box_wall_refusals(st.selector, scene, target)
             else:
                 env.target_part[i] = target
                 if per_part:
@@ -2138,6 +2167,9 @@ def rollout(
             "noise_scales": switches["noise_scales"],
             "contact_hold": switches["contact_hold"],
             **{name: sum(st.counts[name] for st in states) for name in PERCEPTION_COUNTS},
+            **{
+                name: sum(st.counts[name] for st in states) for name in BOX_WALL_COUNTS if box_walls
+            },
         },
     }
     return payload
