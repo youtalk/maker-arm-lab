@@ -210,6 +210,10 @@ class HeapOracle(oracle.EnvOracle):
         # part, so a failing policy excludes the part it keeps missing and not its neighbours
         # (the heap loop's --part_failures switch, MS7a).
         self.failure_scope = "cell"
+        # False under the heap loop's --perceived (MS7c design section 6): the selector reads
+        # no part's destination, so ``_candidates`` skips ``_stowed``; its any-box filter on
+        # the perceived boxes already drops a stowed part.
+        self.knows_destinations = True
         # The rake's caps and its start rule; the heap loop's --rake_cap and --rake_crowd
         # raise them on its selectors (MS7a rake prototype), the teacher keeps these.
         self.rake_part_cap = RAKE_PART_CAP
@@ -291,7 +295,7 @@ class HeapOracle(oracle.EnvOracle):
 
     def _candidates(self, scene: oracle.SceneSnapshot) -> torch.Tensor:
         """(B,) bool: parts still to pick that the arm can reach and whose cell is open."""
-        done = self._stowed(scene) | self._sorted
+        done = (self._stowed(scene) if self.knows_destinations else set()) | self._sorted
         if self.boxes:
             # A part in any box, its own or another, is out of play: the grasp model knows no
             # walls, and a part in another box is the class branch's wrong_box, not a target.

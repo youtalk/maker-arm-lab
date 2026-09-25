@@ -14,6 +14,7 @@ driver and the loop's end-to-end check, no server and no cameras needed.
 """
 
 import argparse
+import gzip
 import json
 import os
 import random
@@ -25,7 +26,7 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lerobot_stack"))
 import policy_client
-from maker_arm_lab.core import oracle
+from maker_arm_lab.core import oracle, perception
 from maker_arm_lab.core.batch_loop import PARTS_SPLITS, heap_parts
 from maker_arm_lab.core.eval_loop import EvalFailure
 from maker_arm_lab.core.heap_oracle import HeapOracle
@@ -43,6 +44,14 @@ class _TokenEmittingParser(argparse.ArgumentParser):
         print(f"{self.prog}: error: {message}", file=sys.stderr, flush=True)
         print("EVAL_FAIL " + json.dumps({"reason": "usage", "detail": message}), flush=True)
         raise SystemExit(2)
+
+
+def _scales(text: str) -> dict:
+    """``--noise_scales``: ``perception.parse_scales`` with its reason in the usage error."""
+    try:
+        return perception.parse_scales(text)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(str(err)) from None
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -203,11 +212,43 @@ def parse_args(argv=None) -> argparse.Namespace:
         "headings (across the sweep, then held) before it counts as spent",
     )
     parser.add_argument(
+        "--perceived",
+        action="store_true",
+        help="MS7c: the loop's decisions read only the perceived state (core.perception) and the "
+        "hold detector, never the simulator truth; needs --desk_boxes, --gripper continuous and "
+        "the server",
+    )
+    parser.add_argument(
+        "--noise_scales",
+        type=_scales,
+        default=None,
+        help="MS7c, with --perceived: a scale per perception knob, e.g. 'heading=2' or "
+        "'all=0,miss=1' (knobs: all, "
+        + ", ".join(perception.KNOBS + perception.EXTRA_KNOBS)
+        + "); a knob not named "
+        "stays at 1, the nominal, and so does every knob when this is omitted",
+    )
+    parser.add_argument(
+        "--contact_hold",
+        action="store_true",
+        help="MS7c, with --perceived: the pre-registered fallback, the serving rules' stop flag "
+        "reads the contacts again; everything else stays perceived",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
         help="dump env 0's wrist and overhead policy frames as PNGs here, every "
         "loop.FRAME_EVERY steps of each cycle (forensics; needs the policy server)",
+    )
+    parser.add_argument(
+        "--hold_trace",
+        type=str,
+        default="",
+        help="MS7c: write the per-step hold trace here as gzipped JSON lines, one list per live "
+        "env per step in core.hold.TRACE_FIELDS order (env, step, cycle, measured gap, "
+        "commanded gap, pick z, contact-held part, its rise), for scripts/hold_agreement.py "
+        "--traces; off by default",
     )
     args = parser.parse_args(argv)
     for name in ("run_seed", "layout_seed"):
@@ -217,6 +258,16 @@ def parse_args(argv=None) -> argparse.Namespace:
         parser.error("--heap_k must be positive: this client evaluates heap episodes only")
     if args.desk_boxes < 0:
         parser.error("--desk_boxes must be 0 or more")
+    if args.perceived:
+        if not args.desk_boxes:
+            parser.error("--perceived needs --desk_boxes: a perceived box ends each cycle")
+        if args.oracle_driver:
+            parser.error("--perceived serves a policy; the oracle driver reads the truth")
+        if args.gripper != "continuous":
+            parser.error("--perceived needs --gripper continuous: the hold reads the jaw gap")
+    for name in ("noise_scales", "contact_hold"):
+        if getattr(args, name) not in (None, False) and not args.perceived:
+            parser.error(f"--{name} needs --perceived")
     if args.cycle_budget is None:
         args.cycle_budget = cycle_budget(args.heap_k)
     if args.max_wall_minutes is None:
@@ -286,6 +337,7 @@ def main(argv=None) -> int:
             env, env.cfg.bin_layout, oracle.OracleNoise(), rig_rng, oracle_factory=factory
         )
         policy = None if args.oracle_driver else policy_client.ServerPolicy(args.server)
+        trace = [] if args.hold_trace else None
         payload = rollout(
             env,
             rig,
@@ -312,6 +364,10 @@ def main(argv=None) -> int:
             rake_crowd=args.rake_crowd,
             park_done=args.park_done,
             rake_turn=args.rake_turn,
+            hold_trace=trace,
+            perceived=args.perceived,
+            noise_scales=args.noise_scales,
+            contact_hold=args.contact_hold,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
@@ -345,6 +401,9 @@ def main(argv=None) -> int:
     try:
         if args.out:
             Path(args.out).write_text(json.dumps(payload, indent=2))
+        if trace is not None:
+            with gzip.open(args.hold_trace, "wt") as f:
+                f.writelines(json.dumps(row) + "\n" for row in trace)
     except Exception as err:  # noqa: BLE001 -- the rollout already ran; still print a token
         print("EVAL_FAIL " + json.dumps({"reason": "write_out", "detail": str(err)}), flush=True)
         return 1

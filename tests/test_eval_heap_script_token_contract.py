@@ -4,9 +4,15 @@ Read as source: the script sets MUJOCO_GL at import and builds a MuJoCo env, so 
 contract is checked structurally, as tests/test_dagger_script_token_contract.py does."""
 
 import ast
+import os
 import pathlib
+import subprocess
+import sys
 
-SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "mj_eval_heap.py"
+import pytest
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "mj_eval_heap.py"
 
 
 def _module_scope_calls(tree):
@@ -59,5 +65,43 @@ def test_the_heap_client_takes_the_protocol_switches():
         "adopt_held",
         "park_done",
         "rake_turn",
+        "perceived",
+        "noise_scales",
+        "contact_hold",
     ):
         assert f'"--{name}"' in text and f"{name}=args.{name}" in text
+
+
+PERCEIVED = ["--perceived", "--desk_boxes", "4", "--gripper", "continuous"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--perceived", "--gripper", "continuous"],  # no desk boxes
+        ["--perceived", "--desk_boxes", "4"],  # the binary gripper
+        [*PERCEIVED, "--oracle_driver"],
+        ["--contact_hold"],
+        ["--noise_scales", "heading=2"],
+        [*PERCEIVED, "--noise_scales", "bogus=1"],
+        [*PERCEIVED, "--noise_scales", "heading=-1"],
+    ],
+)
+def test_the_perceived_flags_refuse_a_bad_combination_with_the_token(argv):
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "source"), "MUJOCO_GL": "disable"}  # CI has no GL
+    out = subprocess.run(
+        [sys.executable, str(SCRIPT), *argv],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=300,
+        check=False,
+    )
+    assert out.returncode == 2, out.stderr
+    assert out.stdout.strip().splitlines() == [out.stdout.strip()]  # one token line
+    assert out.stdout.startswith('EVAL_FAIL {"reason": "usage"'), out.stdout
+
+
+def test_the_heap_client_writes_the_hold_trace():
+    text = SCRIPT.read_text()
+    assert '"--hold_trace"' in text and "hold_trace=trace" in text

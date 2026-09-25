@@ -1094,3 +1094,71 @@ def test_the_tail_switches_reach_the_heap_client_only_and_key_the_cache(tmp_path
     for flag in ("--park_done", "--rake_turn"):
         with pytest.raises(ValueError, match=flag):
             ge._build_cfg(ge._parse_args(argv + ["--backend", "isaac", flag]))
+
+
+def test_the_perceived_flags_reach_the_heap_client_and_key_the_cache(tmp_path):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
+    argv += ["--threshold", "0.7", "--seed", "1"]
+    heap = ["--backend", "mujoco", "--heap_k", "50", "--tray", "--desk_boxes", "4"]
+    heap += ["--gripper", "continuous"]
+    draw = ge.make_eval_draws(1, 1)[0]
+    off = ge._build_cfg(ge._parse_args(argv + heap))
+    plain = ge._eval_command(off, draw)
+    assert not {"--perceived", "--noise_scales", "--contact_hold"} & set(plain)
+    on = ["--perceived", "--noise_scales", "heading=2", "--contact_hold"]
+    cfg = ge._build_cfg(ge._parse_args(argv + heap + on))
+    cmd = ge._eval_command(cfg, draw)
+    canonical = "pos=1,heading=2,size=1,box=1,miss=1,class=1"
+    assert "--perceived" in cmd and "--contact_hold" in cmd
+    assert cmd[cmd.index("--noise_scales") + 1] == canonical  # forwarded canonical
+    found = ge.loop_switches(cfg.client_flags)
+    assert found["perceived"] and found["contact_hold"] and found["noise_scales"] == canonical
+    nominal = ge._build_cfg(ge._parse_args(argv + heap + ["--perceived"]))
+    assert "--noise_scales" not in ge._eval_command(nominal, draw)
+    assert ge.loop_switches(nominal.client_flags)["noise_scales"] == ge.noise_scales_key("")
+    cfg.out_dir.mkdir()
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    base = {name: False for name in ge.LOOP_SWITCHES}
+    read = base | {"perceived": True, "contact_hold": True, "noise_scales": canonical}
+    for loop, hit in (
+        (read, True),
+        (read | {"noise_scales": ge.noise_scales_key("heading=4")}, False),
+        (read | {"contact_hold": False}, False),
+        (read | {"perceived": False, "noise_scales": ""}, False),
+        ({}, False),
+    ):
+        payload = _heap_payload(
+            draw, tray=True, desk_boxes=4, gripper="continuous", inference={**served, "loop": loop}
+        )
+        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        assert (ge._cached_payload(cfg, draw) is not None) is hit, loop
+        # A gate with the three off reads a payload that predates them as off, and no other.
+        assert (ge._cached_payload(off, draw) is not None) is (loop == {}), loop
+    for bad, flag in (
+        (["--noise_scales", "heading=2"], "--noise_scales"),
+        (["--contact_hold"], "--contact_hold"),
+        (["--perceived", "--noise_scales", "bogus=1"], "--noise_scales"),
+    ):
+        with pytest.raises(ValueError, match=flag):
+            ge._build_cfg(ge._parse_args(argv + heap + bad))
+    with pytest.raises(ValueError, match="--perceived"):
+        ge._build_cfg(ge._parse_args(argv + ["--backend", "isaac", "--perceived"]))
+    for missing in (heap[:5] + heap[7:], heap[:7]):  # no desk boxes, the binary gripper
+        with pytest.raises(ValueError, match="--perceived needs"):
+            ge._build_cfg(ge._parse_args(argv + missing + ["--perceived"]))
+
+
+def test_the_supervisors_copy_of_the_scales_parse_matches_the_perception_module():
+    from maker_arm_lab.core import perception
+
+    assert ge.PERCEPTION_KNOBS == perception.KNOBS
+    assert ge.PERCEPTION_EXTRA_KNOBS == perception.EXTRA_KNOBS
+    texts = ("", "heading=2", "all=0,heading=1", " pos=0.5 , miss=4", "class=1e-3", "all=2.50")
+    for text in texts + ("pos_z=0", "all=2,pos_z=0.5", "pos_z=1"):
+        expected = perception.format_scales(perception.parse_scales(text))
+        assert ge.noise_scales_key(text) == expected, text
+    for bad in ("bogus=1", "heading=-1", "pos=nan", "miss=inf", "heading=", "size=x"):
+        with pytest.raises(ValueError):
+            perception.parse_scales(bad)
+        with pytest.raises(ValueError):
+            ge.noise_scales_key(bad)

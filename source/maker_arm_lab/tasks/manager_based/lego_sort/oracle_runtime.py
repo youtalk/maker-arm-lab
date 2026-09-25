@@ -65,7 +65,7 @@ import random
 
 import torch
 
-from maker_arm_lab.core import grasp, layout, oracle, trajectory
+from maker_arm_lab.core import grasp, layout, oracle, perception, trajectory
 from maker_arm_lab.core.action_scale import IK_SCALE
 from maker_arm_lab.core.checker import (
     HELD_MIN_FORCE,
@@ -89,6 +89,7 @@ from maker_arm_lab.core.global_ik import (
 )
 from maker_arm_lab.core.heap_oracle import target_context
 from maker_arm_lab.core.oracle import LIFT_MIN_RISE, PHASE_TO_INT
+from maker_arm_lab.core.parts import part_class
 from maker_arm_lab.core.quat import quat_apply
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.robots.frames import (
@@ -442,6 +443,7 @@ class OracleRig:
         induction: oracle.FailureInduction | None = None,
         transport_speed: float = trajectory.TRANSPORT_SPEED,
         oracle_factory=None,
+        perceivers=None,
     ):
         self.env = env
         self.gripper_mode = getattr(env, "gripper_mode", "binary")
@@ -557,6 +559,17 @@ class OracleRig:
         # MS6 design 7.5: who builds an env's oracle. The default is the six-brick EnvOracle;
         # the heap script installs HeapOracle without a rig subclass. Called by rearm and resume.
         self.oracle_factory = oracle_factory or self._default_oracle
+        # MS7c design section 7.1: one core.perception.Perceiver per env (heap mode with desk
+        # boxes). The teacher still acts on the truth; the stash records the target row, the
+        # marker point and the box row as the perceived state reports them. None records the
+        # truth, as before.
+        self.perceivers = perceivers
+        if perceivers is not None:
+            self._part_sizes = torch.tensor([p.size for p in env.parts])
+            self._part_classes = [part_class(p) for p in env.parts]
+            # Per env: (selection key, row, point) of the selection in force, or None.
+            self._frozen: list[tuple | None] = [None] * self.num_envs
+            self._swaps_seen = [0] * self.num_envs
         self.rearm(list(range(self.num_envs)))
 
     @staticmethod
@@ -828,6 +841,8 @@ class OracleRig:
             self.env.oracle_cycle_target = torch.zeros(
                 (self.num_envs, 7), dtype=torch.float32, device=self.device
             )
+        if self.perceivers is not None and not hasattr(self.env, "oracle_marker_point"):
+            self.env.oracle_marker_point = torch.full((self.num_envs, 3), math.nan)
         for i in range(self.num_envs):
             goal_i, orc_i = self.goals[i], self.oracles[i]
             if self.idle[i] or orc_i is None:
@@ -845,10 +860,79 @@ class OracleRig:
             start = getattr(orc_i, "_brick_start", None) if brick_i is not None else None
             chosen = getattr(orc_i, "grasp", None) if start is not None else None
             preselected = brick_i is not None and orc_i.preselects_next_target
-            if preselected and orc_i.next_brick is not None:
+            ahead = preselected and orc_i.next_brick is not None
+            if ahead:
                 marker_i, start, chosen = orc_i.next_brick, orc_i.next_brick_start, orc_i.next_grasp
             self.env.oracle_marker_part[i] = marker_i if marker_i is not None else -1
-            self.env.oracle_cycle_target[i] = torch.tensor(target_context(start, chosen))
+            if self.perceivers is None:
+                self.env.oracle_cycle_target[i] = torch.tensor(target_context(start, chosen))
+                continue
+            # A selection is keyed by its part and its cycle ordinal: HOVER's adoption of the
+            # pre-selection keeps the key, a new cycle on the same part does not.
+            key = (marker_i, getattr(orc_i, "cycles", 0) + int(ahead))
+            row, point = self._perceived_row(i, orc_i, marker_i, key, chosen)
+            self.env.oracle_cycle_target[i] = torch.tensor(row)
+            self.env.oracle_marker_point[i] = torch.tensor(point)
+
+    def _perceived_row(self, i: int, orc, part: int | None, key: tuple, chosen) -> tuple:
+        """MS7c design section 7.1: the recorded target row and marker point of env ``i``.
+
+        Built once per selection from ``perceive()``: the detection's centre, and the grasp
+        ranked on the perceived scene for that part alone, picked by ``HeapOracle._choose``'s
+        rule (the best clear grasp, else the top-ranked one); the teacher's grasp when none
+        ranks. A part the perception misses gets its true centre plus the episode's position
+        bias and the teacher's grasp (a fallback). The row and the point then hold until the
+        next selection: through HOVER's adoption of the pre-selection, a REOPEN's regrasp and
+        an adoption of a held part (``held_swaps``), whose box row the env follows on its own.
+        No part gives zeros and NaN.
+        """
+        swaps = getattr(orc, "held_swaps", 0)
+        adopted = swaps != self._swaps_seen[i]
+        self._swaps_seen[i] = swaps
+        frozen = self._frozen[i]
+        if part is None:
+            self._frozen[i] = None
+            return [0.0] * 7, [math.nan] * 3
+        if frozen is not None and (frozen[0] == key or adopted):
+            self._frozen[i] = (key, frozen[1], frozen[2])
+            return frozen[1], frozen[2]
+        scene = self.snapshot(i)
+        perceiver = self.perceivers[i]
+        state = perceiver.perceive(
+            perception.Truth(
+                pos=scene.brick_pos,
+                quat=scene.brick_quat,
+                sizes=self._part_sizes,
+                classes=self._part_classes,
+                tool_xy=tuple(scene.pick_point[:2].tolist()),
+            )
+        )
+        stats = self.stats[i]
+        stats["perceived_selections"] = stats.get("perceived_selections", 0) + 1
+        found = next((d for d in state.detections if d.sim_index == part), None)
+        if found is None:
+            stats["perceived_fallbacks"] = stats.get("perceived_fallbacks", 0) + 1
+            centre = [t + e for t, e in zip(scene.brick_pos[part].tolist(), perceiver.bias)]
+        else:
+            centre = list(found.centre)
+            seen = state.scene(self.num_bricks, scene.pick_point)
+            seen_parts = state.parts(self.num_bricks)
+            mask = torch.zeros(self.num_bricks, dtype=torch.bool)
+            mask[part] = True
+            ranked = grasp.rank_grasps(
+                torch.tensor([p.size for p in seen_parts]),
+                seen.brick_pos,
+                seen.brick_quat,
+                mask,
+                oracle.PICK_TILT_RAD,
+                [p.closing_axes for p in seen_parts],
+                orc.walls,
+            )
+            if ranked:
+                chosen = grasp.select_grasp(ranked) or ranked[0]
+        row = target_context(centre, chosen)
+        self._frozen[i] = (key, row, centre)
+        return row, centre
 
     def _advance_phases(self, dones: torch.Tensor) -> None:
         """Per env: check the current goal's end condition and transition on end."""
@@ -868,7 +952,9 @@ class OracleRig:
                 # EnvOracle.
                 self.stats[i]["sort_attempts"] += 1
             orc = self.oracles[i]
-            scene = self.snapshot(i)
+            scene = getattr(orc, "takeover_scene", None)  # MS7c: a perceived push takeover
+            if scene is None:
+                scene = self.snapshot(i)
             brick = orc.target_brick
             orc.report(result, scene)
             if self.single_cycle[i] and goal.phase == oracle.Phase.RETREAT:
@@ -1600,8 +1686,25 @@ class OracleRig:
             self.takeover_result[i] = None
             if not idle:
                 self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE
+                if self.perceivers is not None:
+                    self._perceive_episode(i)
 
-    def resume(self, i: int, target: int | None = None, push=None, start_z=None) -> bool:
+    def _perceive_episode(self, i: int) -> None:
+        """MS7c: a new teacher episode draws its perceived box poses. The env's reset served
+        box 0 from the previous episode's table, so box 0 is served again from the new one."""
+        env, perceiver = self.env, self.perceivers[i]
+        perceiver.reset_episode(env.desk_box_poses[i])
+        if env.perceived_box_poses is None:
+            env.perceived_box_poses = env.desk_box_poses.copy()
+        env.perceived_box_poses[i] = perceiver.box_poses
+        env.set_context_box(i, 0)
+        self._frozen[i] = None
+        self._swaps_seen[i] = getattr(self.oracles[i], "held_swaps", 0)
+        self.stats[i].update(perceived_selections=0, perceived_fallbacks=0)
+
+    def resume(
+        self, i: int, target: int | None = None, push=None, start_z=None, held=None, scene=None
+    ) -> bool:
         """Take idle env ``i`` over from the policy for one brick cycle (MS4 c2 design 6.2).
 
         Returns False, and leaves the env idle, when the oracle answers DONE or ABANDON at
@@ -1616,6 +1719,13 @@ class OracleRig:
         height, so a part the policy already lifted past RULING P32's line is carried on
         instead of declined. The resumed LIFT holds it at LIFT_HEIGHT above the desk, and the
         rise from the desk clears LIFT_MIN_RISE, so no reopen drops it.
+
+        ``held`` and ``scene`` are the heap loop's ``--perceived`` (MS7c design section 6):
+        whether its hold detector holds a part, and the perceived scene, in place of the contact
+        read and ``snapshot``. A held part declines the takeover, since the detector names no
+        part to resume on and a push never runs held, and the takeover then reads that one
+        scene until it hands the env back (``takeover_scene``, which ``_advance_phases`` and
+        ``_run_watchdog`` read).
         """
         if not self.idle[i]:
             raise RuntimeError(f"env {i} is not idle")
@@ -1639,10 +1749,19 @@ class OracleRig:
         self.unplanned[i] = False
         self.abandoned[i] = False
         self.stats[i] = self._fresh_stats()
-        left = self.left_brick.data.force_matrix_w[i, 0].norm(dim=-1)
-        right = self.right_brick.data.force_matrix_w[i, 0].norm(dim=-1)
-        held = int(held_brick_from_forces(left[None], right[None], HELD_MIN_FORCE)[0])
-        scene = self.snapshot(i)
+        if scene is not None:
+            orc.takeover_scene = scene
+        if held is None:
+            left = self.left_brick.data.force_matrix_w[i, 0].norm(dim=-1)
+            right = self.right_brick.data.force_matrix_w[i, 0].norm(dim=-1)
+            held = int(held_brick_from_forces(left[None], right[None], HELD_MIN_FORCE)[0])
+        elif held:
+            self._go_idle(i, None)
+            return False
+        else:
+            held = -1
+        if scene is None:
+            scene = self.snapshot(i)
         lifted_from = None if start_z is None or held < 0 else float(start_z[held])
         if (
             held >= 0
@@ -1841,10 +1960,11 @@ class OracleRig:
                 # MS7a tray: an oracle that can give up the jammed leg instead of the episode
                 # says so (HeapOracle.recover_from_jam); every other oracle abandons as before.
                 recover = getattr(self.oracles[i], "recover_from_jam", None)
-                if recover is not None and recover(self.snapshot(i)):
+                fixed = getattr(self.oracles[i], "takeover_scene", None)  # MS7c: perceived
+                if recover is not None and recover(self.snapshot(i) if fixed is None else fixed):
                     self.watchdog_strikes[i] = 0
                     if not self._push_takeover_over(i):
-                        self._enter_phase(i, self.snapshot(i))
+                        self._enter_phase(i, self.snapshot(i) if fixed is None else fixed)
                     continue
                 self.abandoned[i] = True
                 self.goals[i] = None

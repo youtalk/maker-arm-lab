@@ -134,6 +134,20 @@ def test_the_served_box_follows_the_rigs_marker_part():
     env.close()
 
 
+def test_the_context_box_serves_the_perceived_pose_once_one_is_set():
+    env = _env(4)
+    env.reset(seed=3)
+    assert env.perceived_box_poses is None
+    env.set_context_box(0, 2)
+    assert np.allclose(env.context_box[0], env.desk_box_poses[0, 2])
+    env.perceived_box_poses = env.desk_box_poses + np.array([0.003, -0.002, 0.03])
+    env.set_context_box(0, 2)
+    assert np.allclose(env.context_box[0], env.perceived_box_poses[0, 2])
+    assert np.allclose(env.context_camera_box_target[0, 6:9], env.perceived_box_poses[0, 2])
+    assert not np.allclose(env.context_box[0], env.desk_box_poses[0, 2])
+    env.close()
+
+
 def test_the_recorded_initial_state_carries_the_boxes_and_each_parts_destination(tmp_path):
     env = _env(4, export_dir=tmp_path, export_all=True, episode_length_s=0.2)
     env.reset(seed=3)
