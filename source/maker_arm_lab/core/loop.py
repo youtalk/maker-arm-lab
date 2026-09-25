@@ -91,10 +91,12 @@ moves it away and looks again before it calls the heap empty. While it waits, th
 marker stay, the policy drives, and every step perceives again.
 
 Nine MS7d switches (MS7d design section 4), all off by default so the MS7c protocol stays
-reproducible, and all recorded in the payload's ``inference`` block: ``box_filter_xy`` (L1),
-``release_gap`` (L2), ``rearm_hold`` (L8), ``box_walls`` (L9), ``marker_bias`` (L3),
-``wrist_fix`` (L4), ``class_views`` (L5), ``hold_force`` (L6) and ``force_cap`` (L7). Each
-comes with its lever's commit; until then ``NOT_BUILT`` makes the rollout fail on it.
+reproducible, and all recorded in the payload's ``inference`` block. ``box_filter_xy`` (L1),
+a loop fix under ``perceived``, tests only the x and y of a detection against each perceived
+box's outer footprint in the selector's candidate filter (``HeapOracle.box_filter_xy``). The
+others, ``release_gap`` (L2), ``rearm_hold`` (L8), ``box_walls`` (L9), ``marker_bias`` (L3),
+``wrist_fix`` (L4), ``class_views`` (L5), ``hold_force`` (L6) and ``force_cap`` (L7), come
+with their levers' commits; until then ``NOT_BUILT`` makes the rollout fail on them.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
@@ -247,7 +249,6 @@ RELEASE_ENDS = ("stowed", "released", "placed", "dropped")
 """The cycle ends a release makes; ``release_ready`` waits for the jaws' full gap after them.
 ``placed`` and ``dropped`` are ``perceived``'s (``perceived_cycle_end``)."""
 NOT_BUILT = (
-    "box_filter_xy",  # L1: the candidate filter tests x and y against the outer footprint
     "release_gap",  # L2: a release also completes on the opening past the hold's end gap
     "rearm_hold",  # L8: the stop flag clears after a hold that ends with no lift
     "box_walls",  # L9: the grasp model and the rake read the perceived desk box walls
@@ -1440,6 +1441,7 @@ def rollout(
             st.selector.boxes = st.perceiver.box_poses
             st.selector.failure_scope = "part"
             st.selector.knows_destinations = False
+            st.selector.box_filter_xy = box_filter_xy
         env.perceived_box_poses = poses
         for i in range(num_envs):
             env.set_context_box(i, 0)  # the reset served box 0's true pose

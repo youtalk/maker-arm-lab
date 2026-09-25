@@ -104,6 +104,11 @@ over the band (40 trials each): (0.12, 0.0, 0.15) planned 23 times, and (0.15, 0
 (0.18, 0.0, 0.14) and (0.20, 0.0, 0.12) all 40, in 10 to 61 steps. The nearest of the three
 to the arm keeps the most of the heap in the overhead frame."""
 DRAW_TRIES = 5000
+BOX_FILTER_MARGIN_M = 0.005  # INITIAL: the MS7d isolation row R1 measures it
+"""m: ``in_outer_footprint`` grows every box's outer footprint by this on each side (MS7d
+design section 4.2, L1). The perceived candidate filter tested a detection's 3D centre against
+the grader's region, whose lower face is the box floor, so a z error of a few mm under a part
+at rest in its box put it back among the candidates: 92 cycles of MS7c candidate 3."""
 
 
 def interior(n: int) -> tuple[float, float, float]:
@@ -128,6 +133,19 @@ def stow_region(n: int) -> tuple[float, tuple[float, float, float]]:
     ix, iy, _ = interior(n)
     h = DESK_BOX_STOW_HEIGHT
     return DESK_BOX_WALL + h / 2, (ix / 2, iy / 2, h / 2)
+
+
+def in_outer_footprint(xy, poses, n: int, margin: float = BOX_FILTER_MARGIN_M) -> bool:
+    """Does the point ``xy`` lie in the outer footprint (interior plus wall) of any of these
+    box ``poses`` (``n`` on the desk), grown by ``margin`` on every side, in each box's own
+    frame? Its height does not count. Pure."""
+    hx, hy = outer_half(n)
+    for x, y, yaw in poses:
+        dx, dy = float(xy[0]) - float(x), float(xy[1]) - float(y)
+        c, s = math.cos(yaw), math.sin(yaw)
+        if abs(c * dx + s * dy) <= hx + margin and abs(c * dy - s * dx) <= hy + margin:
+            return True
+    return False
 
 
 def box_geoms(n: int) -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:

@@ -246,6 +246,42 @@ def test_the_selector_skips_the_destination_grade_when_it_knows_no_destination()
     assert sel._candidates(scene).all() and graded == [1]
 
 
+def _in_box(pose, u, v, z):
+    """A world point at (u, v) in the box frame, height z."""
+    x, y, yaw = pose
+    c, s = math.cos(yaw), math.sin(yaw)
+    return (x + c * u - s * v, y + s * u + c * v, z)
+
+
+def test_box_filter_xy_tests_the_outer_footprint_plus_the_margin_and_not_z():
+    """MS7d L1. Part 0 rests on box 2's floor, seen 5 mm low: under the grader's region, whose
+    lower face is the floor, so the MS7c filter lets it back in. Parts 1 and 2 lie 20 mm and
+    4 mm off the outer wall of box 3, yawed 0.6 rad: only the first clears the 5 mm margin.
+    Part 3 lies on the open desk."""
+    z = parts.make_part("brick", 2, 4).size[2] / 2
+    _, hy = desk_boxes.outer_half(len(FIXED))
+    positions = [
+        _in_box(FIXED[2], 0.0, -0.035, desk_boxes.DESK_BOX_WALL + z - 0.005),
+        _in_box(FIXED[3], 0.0, hy + 0.020, z),
+        _in_box(FIXED[3], 0.0, hy + 0.004, z),
+        (0.2, 0.0, z),
+    ]
+    scene = oracle.SceneSnapshot(
+        brick_pos=torch.tensor(positions),
+        brick_yaw=torch.zeros(4),
+        brick_lin_vel=torch.zeros(4, 3),
+        pick_point=torch.tensor([0.3, 0.0, 0.1]),
+        brick_quat=torch.tensor([[1.0, 0.0, 0.0, 0.0]] * 4),
+    )
+    sel = HeapOracle(
+        layout.DEFAULT_BIN_LAYOUT, [PARTS[0]] * 4, 0, oracle.nominal_draw(), boxes=FIXED
+    )
+    sel.knows_destinations = False
+    assert sel._candidates(scene).tolist() == [True, True, True, True]
+    sel.box_filter_xy = True
+    assert sel._candidates(scene).tolist() == [False, True, False, True]
+
+
 # -- the rollout --------------------------------------------------------------------------------
 
 
@@ -610,8 +646,13 @@ def _rake_scene(monkeypatch):
     return env, rig, _Still(), 4, switches
 
 
+MS7D_ON = {"box_filter_xy": True}
+"""The MS7d switches whose behavior is built: the no-truth test runs with them off and on."""
+
+
+@pytest.mark.parametrize("ms7d", [{}, MS7D_ON])
 @pytest.mark.parametrize("scene", [_teacher_scene, _rake_scene])
-def test_no_decision_reads_the_truth(scene, monkeypatch):
+def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):
     """MS7c design section 10: under perceived no decision path reads the truth.
 
     Every truth read of the loop goes through one of three accessors: ``perception_truth``
@@ -628,11 +669,13 @@ def test_no_decision_reads_the_truth(scene, monkeypatch):
     must read neither ``snapshot`` nor the contacts either.
     """
     env, rig, policy, budget, switches = scene(monkeypatch)
+    switches |= ms7d
     served = _served(env)
     first = _rollout(env, rig, policy, budget=budget, perceived=True, **switches)
     env.close()
 
     env, rig, policy, budget, switches = scene(monkeypatch)
+    switches |= ms7d
     blind = _served(env)
     metric_calls, gen = [], torch.Generator().manual_seed(7)
 
