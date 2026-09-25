@@ -7,8 +7,10 @@ state is the truth passed through noise and failure models, one knob each (``KNO
 is a scale on a nominal value: 0 turns that model off and 1 is the nominal. Every nominal is
 ``# INITIAL:``, and MS5a measures it on real frames. The seven MS7d knobs (``tool`` to
 ``torque_k``, the MS7d design's new knobs) are in ``KNOBS`` so that ``all``, the payload and the
-gate cache carry them, but the ``Perceiver`` draws nothing for them: their models arrive with
-the MS7d lever branches. ``WristCamera`` is L4's (``wrist``, ``wrist_bias``, ``wrist_miss``).
+gate cache carry them, and the ``Perceiver`` draws nothing for them. ``MarkerBias`` reads
+``tool`` (L3), ``WristCamera`` reads ``wrist``, ``wrist_bias`` and ``wrist_miss`` (L4),
+``ClassViews`` reads ``rho`` (L5) and ``core.torque.ForceSensor`` reads ``torque`` and
+``torque_k`` (L6, L7).
 
 Two structural rules hold at every scale, zero included: a part whose centre another part
 covers from above is not seen, and neither is a part under the tool

@@ -460,21 +460,13 @@ PERCEIVED_ONLY = (
 """The MS7d switches that need ``perceived``; ``hold_force`` and ``force_cap`` do not."""
 
 
-def test_the_ms7d_switches_need_perceived_and_an_unbuilt_one_fails_before_a_step():
+def test_the_ms7d_switches_need_perceived_before_a_step():
     env, rig = _env_and_rig()
     served = _served(env)
     for name in PERCEIVED_ONLY:
         with pytest.raises(loop.EvalFailure) as err:
             _rollout(env, rig, _Still(), **{name: True})
         assert err.value.reason == name
-    for name in loop.NOT_BUILT:
-        with pytest.raises(loop.EvalFailure) as err:
-            _rollout(env, rig, _Still(), perceived=True, **{name: True})
-        assert (err.value.reason, err.value.detail.split(":")[0]) == ("not_built", name)
-        if name not in PERCEIVED_ONLY:  # the teacher's hold calibration runs L6
-            with pytest.raises(loop.EvalFailure) as err:
-                _rollout(env, rig, None, **{name: True})
-            assert err.value.reason == "not_built"
     env.close()
     assert served == []
 

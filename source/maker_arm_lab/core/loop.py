@@ -95,18 +95,19 @@ reproducible, and all recorded in the payload's ``inference`` block. Two are loo
 ``perceived``: ``box_filter_xy`` (L1) tests only the x and y of a detection against each
 perceived box's outer footprint in the selector's candidate filter
 (``HeapOracle.box_filter_xy``), and ``release_gap`` (L2) also completes a perceived release
-at the gap measured when the hold ended plus ``RELEASE_OPEN_M`` (``perceived_release``). The
-other seven, ``rearm_hold`` (L8), ``box_walls`` (L9), ``marker_bias`` (L3), ``wrist_fix``
-(L4), ``class_views`` (L5), ``hold_force`` (L6) and ``force_cap`` (L7), come with their lever
-branches; until then ``NOT_BUILT`` makes the rollout fail on them. Every cycle's census also
-records ``target_in_box``, a metric read: whether the target's true centre lay in a true box
-region, any box, when it was selected. ``marker_bias`` (L3) takes the gripper marker's running
-estimate of the episode's camera bias off every detection before any decision reads it
-(``perception.MarkerBias``). ``wrist_fix`` (L4) takes a wrist look at the target
-(``perception.WristCamera``) each time the pick point enters the snap window (``look_due``),
-and the serving rules then read the look's centre and heading (``wrist_row``); the policy's
-row and the marker stay as selected. The look's one truth read is ``wrist_look_truth``, a
-decision accessor beside ``perception_truth``.
+at the gap measured when the hold ended plus ``RELEASE_OPEN_M`` (``perceived_release``).
+``rearm_hold`` (L8) clears the serving rules' stop flag after a hold that ends with no lift
+(``rearm_stop``). ``box_walls`` (L9) adds the perceived desk boxes' walls to the grasp model
+and the rake (``desk_boxes.box_walls``). ``marker_bias`` (L3) takes the gripper marker's
+estimate of the camera bias off every detection (``perception.MarkerBias``). ``wrist_fix``
+(L4) gives the serving rules the row of a wrist look in the snap window
+(``perception.WristCamera``, ``wrist_row``), whose truth read is the decision accessor
+``wrist_look_truth``. ``class_views`` (L5) votes on the class at lift with a third view under
+a correlated class error (``perception.ClassViews``, ``voted_class``). ``hold_force`` (L6)
+lets a hold enter only under a pick-point force bar (``HoldDetector.update``'s ``entry``).
+``force_cap`` (L7) holds the arm at its measured pose on a step over the force cap
+(``FORCE_CAP_N``). Every cycle's census also records ``target_in_box``, a metric read: whether
+the target's true centre lay in a true box region, any box, when it was selected.
 
 ``rearm_hold`` (L8, MS7d design section 4.2) gives the serving rules a stop flag of their own
 (``Cycle.stop``, ``rearm_stop``): the detector's hold turns it on as before, and a hold that
@@ -282,9 +283,6 @@ RELEASE_OPEN_M = 0.010  # INITIAL: the MS7d isolation row R1 measures it
 wider than it was when the hold ended (MS7d design section 4.2). The MS7c rule alone waited
 for ``SELECT_OPEN_FRACTION`` of the full gap, and 107 of candidate 3's cycles ran to the step
 budget in that wait, 101 of them with the part already in a box."""
-NOT_BUILT = ()
-"""The MS7d switches whose behavior is not in this commit. ``rollout`` fails on each of them
-before the first step (MS7d design section 6): a switch never runs as a no-op."""
 
 
 def released_after_lift(cycle: Cycle, open_fraction: float, held: int) -> bool:
@@ -1554,8 +1552,8 @@ def rollout(
     target row, and refuses the switches that read the truth (``takeover``,
     ``scripted_place``, ``row_refresh``).
     The nine MS7d switches are the module docstring's; all but ``hold_force`` and
-    ``force_cap`` need ``perceived``, and one in ``NOT_BUILT`` raises ``not_built``. Those two
-    need the env's ``arm_torques``, and a ``hold_trace`` row then carries the force too.
+    ``force_cap`` need ``perceived``. Those two need the env's ``arm_torques``, and a
+    ``hold_trace`` row then carries the force too.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1641,8 +1639,6 @@ def rollout(
         # The hold calibration runs the teacher with --hold_force, and the cap binds every driver.
         if on and not perceived and name not in ("hold_force", "force_cap"):
             raise EvalFailure(name, "changes a perceived decision: it needs perceived")
-        if on and name in NOT_BUILT:
-            raise EvalFailure("not_built", f"{name}: its behavior is not in this commit")
     if rearm_hold and contact_hold:
         raise EvalFailure("rearm_hold", "clears the detector's flag; contact_hold reads contacts")
     limits = robot.data.joint_pos_limits[:, arm_ids, :].to("cpu")
