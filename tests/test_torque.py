@@ -1,5 +1,5 @@
-"""MS7d L6 and L7: the pick-point force from the arm torques (core.torque), the hold gate and
-the MuJoCo member behind them, on the three-part heap with cameras off."""
+"""MS7d L6 and L7: the pick-point force from the arm torques (core.torque), the hold gate, the
+force cap and the MuJoCo member behind them, on the three-part heap with cameras off."""
 
 import random
 
@@ -9,7 +9,8 @@ import pytest
 import torch
 
 from maker_arm_lab.core import hold, loop, torque
-from test_heap_loop import SPREAD, _env_and_rig
+from maker_arm_lab.mj.env import MjLegoSortEnv
+from test_heap_loop import HOLD_KEYS, SPREAD, _env_and_rig, _HoldPolicy, _rollout
 from test_hold import CLOSE, W, _grasp
 from test_mj_heap_oracle import _place
 
@@ -164,3 +165,128 @@ def _under(m, b, base) -> bool:
     while b > 0 and b != base:
         b = int(m.body_parentid[b])
     return b == base
+
+
+def _spy_steps(env):
+    """(action, measured arm joints) as the loop hands each action to ``env.step``."""
+    seen, stepped = [], env.step
+
+    def step(action):
+        seen.append((action[0].clone(), env.scene["robot"].data.joint_pos[0, :6].clone()))
+        return stepped(action)
+
+    env.step = step
+    return seen
+
+
+def _forced(monkeypatch, force):
+    """Replace every sensor's force by ``force(call, window, real)``, per sensor call count."""
+    real, calls = torque.ForceSensor.update, []
+
+    def update(self, constraint, gravity, actuator, jac, in_window):
+        calls.append(in_window)
+        read = real(self, constraint, gravity, actuator, jac, in_window)
+        self.force = force(len(calls) - 1, in_window, read)
+        return self.force
+
+    monkeypatch.setattr(torque.ForceSensor, "update", update)
+    return calls
+
+
+def test_the_force_gate_delays_the_census_hold_and_the_trace_replays_it(monkeypatch):
+    """The teacher drives (no ``perceived``): a 20 N press read inside every snap window blocks
+    each hold until the lift takes the pick point out of the window. The census reads the
+    gated detector, and the trace replays it at the same bar."""
+    calls = _forced(monkeypatch, lambda call, window, read: 20.0 if window else read)
+    env, rig = _env_and_rig(gripper_mode="continuous")
+    _place(env, SPREAD)
+    trace = []
+    payload = _rollout(env, rig, None, hold_trace=trace, hold_force=True)
+    env.close()
+    ep = payload["episodes"][0]
+    assert ep["cycle_classes"] == ["stowed"] * 3 and any(calls), ep
+    census = [{k: row[k] for k in HOLD_KEYS} for row in ep["cycle_census"]]
+    assert all(len(row) == 9 for row in trace)
+    assert hold.cycle_rows(trace, force_max=torque.HOLD_FORCE_MAX_N) == census
+    ungated = hold.cycle_rows(trace)
+    for gated, free in zip(census, ungated):
+        assert gated["first_hold_at"] > free["first_hold_at"], (gated, free)
+    counts = payload["torque"]
+    assert counts["hold_blocked"] >= 3 and counts["hold_blocked_cycles"] == 3, counts
+    assert counts["force_capped"] == 0 and ep["torque"]["hold_blocked_cycles"] == 3
+
+
+class _Drift(_HoldPolicy):
+    """Commands the base 0.05 rad past where it is and a 20 mm jaw gap on every step."""
+
+    gripper = "continuous"
+
+    def step(self, state, wrist, overhead, context=None, anchor=None):
+        action = super().step(state, wrist, overhead, context, anchor)
+        action[:, 0] += 0.05
+        action[:, 6] = 0.02
+        return action
+
+
+@pytest.mark.parametrize("driver", [_Drift, None])
+def test_the_force_cap_holds_the_arm_at_its_measured_pose_and_passes_the_gripper(
+    driver, monkeypatch
+):
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
+    capped = range(10, 15)
+    _forced(monkeypatch, lambda call, window, read: 20.0 if call in capped else 0.0)
+    env, rig = _env_and_rig(budget=1, gripper_mode="continuous")
+    _place(env, SPREAD)
+    seen = _spy_steps(env)
+    payload = _rollout(env, rig, None if driver is None else driver(), budget=1, force_cap=True)
+    env.close()
+    assert payload["torque"]["force_capped"] == len(capped)
+    for step, (action, measured) in enumerate(seen[:30]):
+        if step in capped:
+            assert torch.equal(action[:6], measured), step
+        if driver is not None:  # the drift never commands the measured pose on its own
+            assert torch.equal(action[:6], measured) is (step in capped), step
+            assert action[6] == pytest.approx(0.02), step
+
+
+def test_both_switches_off_read_no_torques_and_at_infinite_bars_serve_the_same(monkeypatch):
+    """Off, the loop never calls the member, and the payload and the trace are the MS7c ones.
+    On, with both bars out of reach, the loop serves and censuses what it did off: the member
+    moves no physics and the levers act only through their bars."""
+    runs = []
+    for on in (False, True):
+        env, rig = _env_and_rig(gripper_mode="continuous")
+        _place(env, SPREAD)
+        seen, trace = _spy_steps(env), []
+        if on:
+            monkeypatch.setattr(loop, "HOLD_FORCE_MAX_N", float("inf"))
+            monkeypatch.setattr(loop, "FORCE_CAP_N", float("inf"))
+        else:
+            monkeypatch.setattr(MjLegoSortEnv, "arm_torques", None)
+        payload = _rollout(env, rig, None, hold_trace=trace, hold_force=on, force_cap=on)
+        env.close()
+        monkeypatch.undo()
+        runs.append((payload, seen, trace))
+    (off, off_seen, off_trace), (on, on_seen, on_trace) = runs
+    assert "torque" not in off and "torque" not in off["episodes"][0]
+    assert {len(row) for row in off_trace} == {8}
+    assert len(on_seen) == len(off_seen) > 0
+    assert all(torch.equal(a[0], b[0]) for a, b in zip(on_seen, off_seen))
+    assert [row[:8] for row in on_trace] == off_trace
+    on_ep, off_ep = on["episodes"][0], off["episodes"][0]
+    assert on_ep["cycle_census"] == off_ep["cycle_census"]
+    assert on_ep["cycle_classes"] == ["stowed"] * 3
+    assert on["hold_agreement"] == off["hold_agreement"]
+    # At nominal knobs the teacher's free approach reads the noise and the model error only.
+    approach = on["torque"]["approach_force"]
+    assert approach["steps"] > 0 and approach["max"] < torque.HOLD_FORCE_MAX_N, approach
+
+
+def test_the_switches_need_the_env_member(monkeypatch):
+    monkeypatch.setattr(MjLegoSortEnv, "arm_torques", None)
+    for name in ("hold_force", "force_cap"):
+        env, rig = _env_and_rig()
+        with pytest.raises(loop.EvalFailure) as err:
+            _rollout(env, rig, None, **{name: True})
+        env.close()
+        assert err.value.reason == name

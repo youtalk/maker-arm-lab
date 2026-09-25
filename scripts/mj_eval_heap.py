@@ -299,8 +299,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         default="",
         help="MS7c: write the per-step hold trace here as gzipped JSON lines, one list per live "
         "env per step in core.hold.TRACE_FIELDS order (env, step, cycle, measured gap, "
-        "commanded gap, pick z, contact-held part, its rise), for scripts/hold_agreement.py "
-        "--traces; off by default",
+        "commanded gap, pick z, contact-held part, its rise, and under --hold_force or "
+        "--force_cap the pick-point force), for scripts/hold_agreement.py --traces; off by default",
     )
     args = parser.parse_args(argv)
     for name in ("run_seed", "layout_seed"):

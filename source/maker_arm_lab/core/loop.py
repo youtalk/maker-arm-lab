@@ -115,6 +115,15 @@ ends with no lift turns it off, so ``square_wrist``, ``pick_snap``, ``close_gate
 ``hold_detected``, ``lift_detected`` and ``first_hold_at`` stay as they were; ``rearms``
 counts the clears. It refuses ``contact_hold``, whose flag reads the contacts.
 
+``hold_force`` (L6) and ``force_cap`` (L7) read the pick-point force (``core.torque``) that the
+env's arm torques give (``env.arm_torques``, MuJoCo only), with or without ``perceived``. The
+member stands for the motors' own torque reports, as the FK pick point stands for the joint
+encoders, so under ``perceived`` it is a sensor read and not a truth accessor. L6 lets the hold
+detector enter a hold only on a step whose force is under ``HOLD_FORCE_MAX_N``, and never ends
+one; L7 replaces the arm command of a step whose force is over ``FORCE_CAP_N`` with the measured
+arm joint positions, whoever drives. The payload's ``torque`` block counts what they did
+(``TORQUE_COUNTS``).
+
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
 loop's own end-to-end check. A takeover holds the env until the rig hands it back at
@@ -158,6 +167,7 @@ from maker_arm_lab.core.stowed import (
     parts_resting_box,
     per_brick_stowed,
 )
+from maker_arm_lab.core.torque import FORCE_CAP_N, HOLD_FORCE_MAX_N, ForceSensor, force_summary
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_REGEX,
     GRIPPER_JOINT_NAMES,
@@ -272,10 +282,7 @@ RELEASE_OPEN_M = 0.010  # INITIAL: the MS7d isolation row R1 measures it
 wider than it was when the hold ended (MS7d design section 4.2). The MS7c rule alone waited
 for ``SELECT_OPEN_FRACTION`` of the full gap, and 107 of candidate 3's cycles ran to the step
 budget in that wait, 101 of them with the part already in a box."""
-NOT_BUILT = (
-    "hold_force",  # L6: the hold enters only under the pick-point force bar
-    "force_cap",  # L7: the arm holds still over the force cap
-)
+NOT_BUILT = ()
 """The MS7d switches whose behavior is not in this commit. ``rollout`` fails on each of them
 before the first step (MS7d design section 6): a switch never runs as a no-op."""
 
@@ -640,6 +647,16 @@ def wrist_row(row, look, seen_yaw: float) -> list[float]:
     return out
 
 
+def snap_window(pick, row) -> bool:
+    """Is the pick point inside ``pick_snap``'s window of the served ``row``: a live row (width
+    over 0), within ``SNAP_RADIUS`` of its centre in xy and under its top plus ``SQUARE_ABOVE``?
+    ``row`` None is no row. The force sensor's snap tare is taken at each entry. Pure."""
+    if row is None or float(row[5]) <= 0.0:
+        return False
+    near = math.hypot(float(pick[0]) - float(row[0]), float(pick[1]) - float(row[1]))
+    return near <= SNAP_RADIUS and float(pick[2]) < float(row[2]) + float(row[6]) + SQUARE_ABOVE
+
+
 DWELL_STEPS = 150
 """Control steps the pick point may wait at grasp height with the jaws open before
 ``dwell_close`` closes them. The rung 2 arm B 300k traces of 2026-09-24 (draws 1 and 3 of
@@ -845,6 +862,7 @@ class Cycle:
     # The MS7d census: the target's true centre lay in a true box region, any box, at the
     # selection (``TruthReads.boxed``); None without desk boxes. A metric read only.
     target_in_box: bool | None = None
+    hold_blocked: int = 0  # MS7d L6: hold entries the force gate refused in the cycle
 
 
 @dataclass
@@ -879,6 +897,7 @@ class EnvState:
     counts: Counter = field(default_factory=Counter)
     look_since: int | None = None  # the step a streak of empty selections began (look_again)
     wrist: perception.WristCamera | None = None  # ``wrist_fix``: this env's wrist look
+    forces: list[float] = field(default_factory=list)  # MS7d: N, each approach step's force
 
 
 def _layout_of(rig, i: int):
@@ -1385,6 +1404,33 @@ WRIST_COUNTS = ("wrist_looks", "wrist_misses", "wrist_covered", "wrist_shift_mm"
 wrist looks, those that missed and those whose target another part covered, and over the
 looks that found it, the sums of the serving row's xy move (mm) and heading turn (degrees),
 both against the row at selection."""
+TORQUE_COUNTS = ("force_capped", "hold_blocked", "hold_blocked_cycles")
+"""The ``torque`` block's counts under ``hold_force`` or ``force_cap``: the steps L7 held the arm,
+the hold entries L6 refused (one per confirmed run of the jaw-gap rule) and the cycles with one."""
+
+
+def _pick_forces(env, sensors, states, rows, picks, done) -> list[float]:
+    """MS7d L6 and L7: each live env's pick-point force at the top of the step, N (0 for a done
+    env). The window is ``snap_window`` of the served row while a cycle is open; the force of
+    an approach step (the cycle's open to its first close) joins ``EnvState.forces``."""
+    forces = [0.0] * len(sensors)
+    for i, sensor in enumerate(sensors):
+        if bool(done[i]):
+            continue
+        c = states[i].cycle
+        window = snap_window(picks[i], None if c is None or rows is None else rows[i])
+        forces[i] = sensor.update(*env.arm_torques(i), window)
+        if c is not None and c.first_close_at is None:
+            states[i].forces.append(forces[i])
+    return forces
+
+
+def _count_blocked(st: EnvState) -> None:
+    """MS7d L6: book a hold entry the force gate refused, and its cycle's first."""
+    st.counts["hold_blocked"] += 1
+    if st.cycle is not None:
+        st.cycle.hold_blocked += 1
+        st.counts["hold_blocked_cycles"] += st.cycle.hold_blocked == 1
 
 
 def _perceived_scene(st: EnvState, env, rig, i: int, k: int):
@@ -1506,7 +1552,8 @@ def rollout(
     target row, and refuses the switches that read the truth (``takeover``,
     ``scripted_place``, ``row_refresh``).
     The nine MS7d switches are the module docstring's; all but ``hold_force`` and
-    ``force_cap`` need ``perceived``, and one in ``NOT_BUILT`` raises ``not_built``.
+    ``force_cap`` need ``perceived``, and one in ``NOT_BUILT`` raises ``not_built``. Those two
+    need the env's ``arm_torques``, and a ``hold_trace`` row then carries the force too.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1624,6 +1671,12 @@ def rollout(
                 f"the selector spends {st.selector.cycle_budget} cycles, the loop {cycle_budget}",
             )
     scales = {**perception.parse_scales(""), **(noise_scales or {})}  # a knob not named is 1
+    sensors = None  # MS7d L6 and L7: one pick-point force sensor per env
+    if hold_force or force_cap:
+        if getattr(env, "arm_torques", None) is None:
+            name = "hold_force" if hold_force else "force_cap"
+            raise EvalFailure(name, "needs the env's arm torques (arm_torques, MuJoCo only)")
+        sensors = [ForceSensor(run_seed, i, scales) for i in range(num_envs)]
     if perceived:
         # The episode's perception per env. The box poses are the last truth the setup reads:
         # the perceived ones replace them in the served row, the selector's any-box filter and
@@ -1715,9 +1768,15 @@ def rollout(
         # the gap the last step's command asked for and the FK pick point. ``perceived``
         # decides on its state and events below; otherwise only the census reads it.
         top_picks = [rig.pick_point(i).to("cpu") for i in range(num_envs)]
+        forces = [0.0] * num_envs  # N, the pick-point force, read under L6 or L7 only
+        if sensors is not None:
+            forces = _pick_forces(env, sensors, states, ctx_target, top_picks, tracker.done)
         for i, d in enumerate(detectors):
             if not bool(tracker.done[i]):
-                d.update(float(gaps[i]), gap_cmd[i], float(top_picks[i][2]))
+                gate = not hold_force or forces[i] < HOLD_FORCE_MAX_N  # L6's entry gate
+                d.update(float(gaps[i]), gap_cmd[i], float(top_picks[i][2]), gate)
+                if d.blocked:
+                    _count_blocked(states[i])
         # 1. Grade and select on the envs the loop holds: episode live, rig idle.
         for i in range(num_envs):
             if bool(tracker.done[i]) or not rig.idle[i]:
@@ -2125,7 +2184,8 @@ def rollout(
             if hold_trace is not None:
                 rise = float(pos[i, h, 2] - c.start_z[h]) if h >= 0 and c is not None else 0.0
                 ordinal_i = -1 if c is None else c.ordinal
-                hold_trace.append([i, step, ordinal_i, gap, gap_cmd[i], pick_z, h, rise])
+                row = [i, step, ordinal_i, gap, gap_cmd[i], pick_z, h, rise]
+                hold_trace.append(row if sensors is None else row + [forces[i]])
         arm_clamped, overshoot = clamp_arm_actions(action_cpu[:, :6], limits)
         tracker.record_clamps(overshoot)
         clamped = torch.cat([arm_clamped, action_cpu[:, 6:7]], dim=-1)
@@ -2135,6 +2195,12 @@ def rollout(
             if parked is not None:
                 clamped[tracker.done] = parked[tracker.done]
             parked = clamped.clone()
+        if force_cap:
+            for i in range(num_envs):
+                if forces[i] > FORCE_CAP_N:
+                    # MS7d L7: the arm holds still where it is; the gripper command passes.
+                    clamped[i, :6] = robot.data.joint_pos[i, :6]
+                    states[i].counts["force_capped"] += 1
         last_roll = clamped[:, WRIST_ROLL_INDEX].clone()
         gap_cmd = [commanded_gap(float(g), gripper_mode) for g in clamped[:, 6]]
         if step == max_steps - 1 and recorder is not None:
@@ -2261,6 +2327,11 @@ def rollout(
                 **boxes,
             }
         )
+        if sensors is not None:
+            episodes[-1]["torque"] = {
+                **{name: st.counts[name] for name in TORQUE_COUNTS},
+                "approach_force": force_summary(st.forces),
+            }
     steps_total = sum(e["steps"] for e in episodes)
     cycles_total = sum(e["cycles"] for e in episodes)
     stowed_total = sum(e["bricks_stowed"] for e in episodes)
@@ -2313,6 +2384,17 @@ def rollout(
             },
         },
     }
+    if sensors is not None:
+        payload["torque"] = {
+            "hold_force": bool(hold_force),
+            "force_cap": bool(force_cap),
+            "hold_force_max_n": HOLD_FORCE_MAX_N,
+            "force_cap_n": FORCE_CAP_N,
+            "torque": scales["torque"],
+            "torque_k": scales["torque_k"],
+            **{name: sum(st.counts[name] for st in states) for name in TORQUE_COUNTS},
+            "approach_force": force_summary([f for st in states for f in st.forces]),
+        }
     return payload
 
 

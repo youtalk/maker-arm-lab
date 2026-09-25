@@ -495,9 +495,9 @@ class _ScriptedHold:
     def __init__(self):
         self.t = -1
         self.holding = self.lifted = self.started = self.lift_started = False
-        self.ended = self.lost = False
+        self.ended = self.lost = self.blocked = False
 
-    def update(self, measured_gap, commanded_gap, pick_z):
+    def update(self, measured_gap, commanded_gap, pick_z, entry=True):
         self.t += 1
         was, self.holding = self.holding, 10 <= self.t < 15
         self.started, self.ended = self.holding and not was, was and not self.holding
@@ -1057,6 +1057,8 @@ MS7D_ON = {
     "marker_bias": True,
     "wrist_fix": True,
     "class_views": True,
+    "hold_force": True,
+    "force_cap": True,
 }
 """The MS7d switches whose behavior is built: the no-truth test runs with them off and on."""
 
