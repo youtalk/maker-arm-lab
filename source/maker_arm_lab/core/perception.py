@@ -71,6 +71,10 @@ BOX_YAW_SIGMA_RAD = math.radians(2.0)  # INITIAL: MS5a measures it on real frame
 MISS_PROBABILITY = 0.05  # INITIAL: MS5a measures it on real frames
 # Class: a wrong class per classification, the MS7b classifier gate of 0.97.
 CLASS_ERROR_PROBABILITY = 0.03  # INITIAL: MS5a measures it on real frames
+CLASS_PERSISTENT_SHARE = 0.5  # INITIAL: MS5a measures it on real parts, across views
+"""``ClassViews`` (L5): the share of the class error that is persistent, the same wrong class in
+every view of a part, at the ``rho`` knob's 1 (a scale of 2 gives a share of 1). No
+measurement yet (MS7d design, the knob table)."""
 TOOL_SIGMA_M = 0.001  # INITIAL: MS5a measures it on real frames
 """m: the ``tool`` knob's nominal, the noise per look on the gripper marker (``MarkerBias``) on
 each of x, y and z: a fiducial of known size on the gripper, seen at about 0.6 m."""
@@ -250,6 +254,7 @@ class Perceiver:
         self.rng = random.Random(f"perceive:{run_seed}:{env_index}")
         self._bias = (0.0, 0.0, 0.0)
         self._box_poses: tuple[tuple[float, float, float], ...] = ()
+        self.views: ClassViews | None = None  # ``class_views`` (L5): the per-part class model
 
     @property
     def box_poses(self) -> tuple[tuple[float, float, float], ...]:
@@ -288,15 +293,15 @@ class Perceiver:
             )
         self._box_poses = tuple(poses)
 
-    def classify(self, true_cls: str) -> str:
+    def classify(self, true_cls: str, part: int | None = None) -> str:
         """One classification: the true class, or at the class knob's rate one of the other
-        three, uniformly. Always two draws."""
+        three, uniformly. Always two draws. Under ``views`` a classification of part ``part``
+        goes through that part's model (``ClassViews.view``) on the same two draws."""
+        if self.views is not None and part is not None:
+            return self.views.view(part, true_cls, self.rng)
         fires = self.rng.random() < min(1.0, CLASS_ERROR_PROBABILITY * self.scales["class"])
         pick = self.rng.random()
-        if not fires:
-            return true_cls
-        others = [c for c in PART_CLASSES if c != true_cls]
-        return others[int(pick * len(others))]
+        return _other_class(true_cls, pick) if fires else true_cls
 
     def perceive(self, truth: Truth) -> PerceivedState:
         """Every part's draws in index order, then the structural rules and the miss, then the
@@ -316,7 +321,7 @@ class Perceiver:
             dyaw = s["heading"] * HEADING_SIGMA_RAD * self._gauss()
             dsize = [s["size"] * SIZE_SIGMA_M * self._gauss() for _ in range(3)]
             missed = self.rng.random() < miss
-            cls = self.classify(truth.classes[b])
+            cls = self.classify(truth.classes[b], b)
             if missed or b in hidden:
                 continue
             dsize[int(grasp.body_axes_world(quat[b])[:, 2].abs().argmax())] *= 2.0
@@ -415,6 +420,49 @@ class WristCamera:
             float(xy[1]) + self.bias[1] + s["wrist"] * WRIST_SIGMA_M * dy,
             float(yaw) + s["wrist"] * WRIST_YAW_SIGMA_RAD * dyaw,
         )
+
+
+def _other_class(true_cls: str, pick: float) -> str:
+    """The wrong class a uniform draw ``pick`` in [0, 1) names among the other three."""
+    others = [c for c in PART_CLASSES if c != true_cls]
+    return others[int(pick * len(others))]
+
+
+class ClassViews:
+    """``class_views`` (MS7d design, the L5 model): one env's correlated class error.
+
+    A real classifier errs alike on the views of one part, so the MS7c model, which draws each
+    view apart at p, is optimistic for a vote. Here p is ``CLASS_ERROR_PROBABILITY`` times the
+    ``class`` knob and the share is ``CLASS_PERSISTENT_SHARE`` times the ``rho`` knob, both
+    capped at 1. The rollout runs one episode per env, so the constructor is the episode's
+    reset: each part draws once whether it is persistent, at share times p, and a fixed wrong
+    class, uniformly from the other three. Every view of a persistent part returns that class.
+    Any other part is wrong at ``rate`` q = p (1 - share) / (1 - share p), so a single view
+    still errs at p; at a share of 0, q is p and a view is the MS7c classification, draw for
+    draw. The generator is seeded like the ``Perceiver``'s, from the name ``class_views``, and
+    every part and every view draws twice whatever the scales, so knob rows stay paired.
+    """
+
+    def __init__(self, run_seed: int, env_index: int, scales: dict[str, float], num_parts: int):
+        p = min(1.0, CLASS_ERROR_PROBABILITY * scales["class"])
+        share = min(1.0, CLASS_PERSISTENT_SHARE * scales["rho"])
+        self.rate = 0.0 if share * p >= 1.0 else p * (1.0 - share) / (1.0 - share * p)
+        self.rng = random.Random(f"class_views:{run_seed}:{env_index}")
+        draws = [(self.rng.random(), self.rng.random()) for _ in range(num_parts)]
+        # Per part: the draw that names its fixed wrong class, or None if it is not persistent.
+        self.persistent = [pick if u < share * p else None for u, pick in draws]
+
+    def view(self, part: int, true_cls: str, rng: random.Random | None = None) -> str:
+        """One view of part ``part``, whose class is ``true_cls``: two draws from ``rng``, this
+        generator when None. ``Perceiver.classify`` passes its own, so its stream keeps two
+        draws a classification; the third view at a lift draws from this one."""
+        rng = self.rng if rng is None else rng
+        fires = rng.random() < self.rate
+        pick = rng.random()
+        fixed = self.persistent[part]
+        if fixed is not None:
+            return _other_class(true_cls, fixed)
+        return _other_class(true_cls, pick) if fires else true_cls
 
 
 class PositionMemory:

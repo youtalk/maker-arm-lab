@@ -214,6 +214,64 @@ def test_the_tool_knob_scales_paired_marker_draws():
     assert len({m.rng.random() for m in markers}) == 1
 
 
+def test_class_views_keeps_every_other_draw_of_the_ms7c_sequence():
+    """MS7d L5: the per-part class model draws on the ``Perceiver``'s two class draws, so with
+    it on every draw but the class stays paired with MS7c, the generator's next one included."""
+    truth = _truth([[0.15, -0.08, Z], [0.19, -0.08, Z]], [BRICK, SLOPE])
+    scales = {"class": 1000.0}  # every class is wrong
+
+    def r(values):
+        return [round(v, 6) for v in values]
+
+    for env_index, expected in MS7C_DRAWS.items():
+        p = _perceiver(20261700, env_index, scales)
+        p.views = perception.ClassViews(20261700, env_index, p.scales, 2)
+        got = [r(p.bias), *(r(b) for b in p.box_poses)]
+        for _ in range(2):
+            for d in p.perceive(truth).detections:
+                assert d.cls != truth.classes[d.sim_index]
+                got.append([d.sim_index, *r(d.centre), *r(d.size), round(d.quat[3], 6)])
+        p.classify("tall", 0)
+        got.append(round(p.rng.random(), 6))
+        paired = [*expected[:3], *(row[:-1] for row in expected[3:7]), expected[7][1]]
+        assert got == paired, env_index
+
+
+def test_a_persistent_part_reads_one_wrong_class_in_every_view():
+    """MS7d L5 at a persistent share of 1 (rho 2): the overhead class at every perceive call, a
+    wrist view and a third view of a part name one class, wrong on the persistent parts only."""
+    truth = _truth(SPREAD)
+    true_cls = parts.part_class(BRICK)
+    scales = {"class": 10.0, "rho": 2.0, "miss": 0.0}  # p 0.3, share 1, so q is 0
+    persistent = 0
+    for seed in range(5):
+        p = _perceiver(seed, 0, scales)
+        p.views = perception.ClassViews(seed, 0, p.scales, len(SPREAD))
+        views = [[d.cls for d in p.perceive(truth).detections] for _ in range(3)]
+        views.append([p.classify(true_cls, b) for b in range(len(SPREAD))])
+        views.append([p.views.view(b, true_cls) for b in range(len(SPREAD))])
+        for b in range(len(SPREAD)):
+            seen = {v[b] for v in views}
+            assert len(seen) == 1, (seed, b, seen)
+            persistent += seen != {true_cls}
+    assert 0 < persistent < 5 * len(SPREAD)
+
+
+@pytest.mark.parametrize("rho", [0.0, 1.0, 2.0])
+def test_one_class_view_errs_near_p_at_every_persistent_share(rho):
+    """MS7d L5: at shares 0, 0.5 and 1 a single view, through the ``Perceiver``'s draws or the
+    model's own, errs at ``CLASS_ERROR_PROBABILITY``: 20000 parts, a loose 0.008 bound (the
+    standard error is 0.0012)."""
+    n, wrong, third = 4000, 0, 0
+    for seed in range(5):
+        p = _perceiver(seed, 0, {"rho": rho})
+        p.views = perception.ClassViews(seed, 0, p.scales, n)
+        wrong += sum(p.classify("narrow", b) != "narrow" for b in range(n))
+        third += sum(p.views.view(b, "narrow") != "narrow" for b in range(n))
+    for errors in (wrong, third):
+        assert abs(errors / (5 * n) - perception.CLASS_ERROR_PROBABILITY) < 0.008, (wrong, third)
+
+
 def test_the_confusion_fires_near_its_rate_and_never_keeps_the_true_class():
     p = _perceiver(5, 0, {"class": 10.0})  # 0.3
     draws = [p.classify("narrow") for _ in range(4000)]
