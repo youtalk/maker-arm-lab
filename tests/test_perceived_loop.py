@@ -584,6 +584,56 @@ def test_the_row_marker_and_box_are_the_detections_at_selection_and_stay_frozen(
     assert recorded["noise_scales"] == payload["perception"]["noise_scales"]
 
 
+def test_the_marker_bias_correction_reaches_the_row_and_the_marker(monkeypatch):
+    """MS7d L3. With ``tool`` at 0 the first look reads the episode bias, so each selection's
+    target is the ``Perceiver``'s detection minus that bias, and so are the row and the frozen
+    marker served for its cycle. Every perceive call looks once, and the estimate error reads
+    0. With the switch off the loop builds no ``MarkerBias`` and the payload carries no marker
+    count."""
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
+    raw, perceive = [], perception.Perceiver.perceive
+
+    def spy(self, truth):
+        raw.append((self.bias, perceive(self, truth)))
+        return raw[-1][1]
+
+    monkeypatch.setattr(perception.Perceiver, "perceive", spy)
+    env, rig = _env_and_rig(budget=3)
+    _place(env, SPREAD)
+    served, states = _served(env), _selections(monkeypatch)
+    payload = _rollout(
+        env,
+        rig,
+        _Still(),
+        budget=3,
+        perceived=True,
+        select_at_release=True,
+        marker_bias=True,
+        noise_scales={"tool": 0.0},
+    )
+    env.close()
+    ep, seen = payload["episodes"][0], payload["perception"]
+    assert ep["cycle_reasons"] == ["budget"] * 3, ep
+    assert len(states) == len(raw) == seen["marker_looks"] > 3
+    assert seen["marker_error_mm"] == pytest.approx(0.0, abs=1e-9)
+    assert payload["inference"]["loop"]["marker_bias"] is True
+    for j, target in enumerate(ep["cycle_targets"]):
+        bias, before = raw[j]
+        assert math.hypot(*bias[:2]) > 1e-4
+        fixed = next(d for d in states[j].detections if d.sim_index == target)
+        was = next(d for d in before.detections if d.sim_index == target)
+        assert fixed.centre == pytest.approx([c - b for c, b in zip(was.centre, bias)], abs=1e-12)
+        for row, _, marker, _, _ in served[40 * j : 40 * (j + 1)]:
+            assert np.allclose(row[:3], fixed.centre, atol=1e-6)
+            assert np.allclose(marker.numpy(), fixed.centre, atol=1e-6)
+    monkeypatch.setattr(perception, "MarkerBias", _raises("MarkerBias"))
+    env, rig = _env_and_rig(budget=1)
+    _place(env, SPREAD)
+    payload = _rollout(env, rig, _Still(), budget=1, perceived=True, select_at_release=True)
+    env.close()
+    assert set(loop.MARKER_COUNTS).isdisjoint(payload["perception"])
+
+
 def test_a_part_missed_at_every_call_or_under_the_tool_is_never_selected(monkeypatch):
     monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
     env, rig = _env_and_rig(budget=9)
@@ -833,7 +883,13 @@ def _rake_scene(monkeypatch):
     return env, rig, _Still(), 4, switches
 
 
-MS7D_ON = {"box_filter_xy": True, "release_gap": True, "rearm_hold": True, "box_walls": True}
+MS7D_ON = {
+    "box_filter_xy": True,
+    "release_gap": True,
+    "rearm_hold": True,
+    "box_walls": True,
+    "marker_bias": True,
+}
 """The MS7d switches whose behavior is built: the no-truth test runs with them off and on."""
 
 

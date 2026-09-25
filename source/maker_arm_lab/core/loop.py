@@ -100,7 +100,9 @@ other seven, ``rearm_hold`` (L8), ``box_walls`` (L9), ``marker_bias`` (L3), ``wr
 (L4), ``class_views`` (L5), ``hold_force`` (L6) and ``force_cap`` (L7), come with their lever
 branches; until then ``NOT_BUILT`` makes the rollout fail on them. Every cycle's census also
 records ``target_in_box``, a metric read: whether the target's true centre lay in a true box
-region, any box, when it was selected.
+region, any box, when it was selected. ``marker_bias`` (L3) takes the gripper marker's running
+estimate of the episode's camera bias off every detection before any decision reads it
+(``perception.MarkerBias``).
 
 ``rearm_hold`` (L8, MS7d design section 4.2) gives the serving rules a stop flag of their own
 (``Cycle.stop``, ``rearm_stop``): the detector's hold turns it on as before, and a hold that
@@ -265,7 +267,6 @@ wider than it was when the hold ended (MS7d design section 4.2). The MS7c rule a
 for ``SELECT_OPEN_FRACTION`` of the full gap, and 107 of candidate 3's cycles ran to the step
 budget in that wait, 101 of them with the part already in a box."""
 NOT_BUILT = (
-    "marker_bias",  # L3: the bias estimate from the gripper marker
     "wrist_fix",  # L4: the wrist look at the final approach
     "class_views",  # L5: the correlated class error and the third view
     "hold_force",  # L6: the hold enters only under the pick-point force bar
@@ -830,6 +831,7 @@ class EnvState:
     # ``perceived``: this env's perception, its failure memory and rake counter by position,
     # and the ``PERCEPTION_COUNTS``.
     perceiver: perception.Perceiver | None = None
+    marker: perception.MarkerBias | None = None  # ``marker_bias``: the camera bias estimate
     fail_mem: perception.PositionMemory = field(default_factory=perception.PositionMemory)
     rake_mem: perception.PositionMemory = field(default_factory=perception.PositionMemory)
     counts: Counter = field(default_factory=Counter)
@@ -1275,13 +1277,23 @@ BOX_WALL_COUNTS = ("box_wall_rakes", "box_wall_refusals")
 """``box_walls``'s counts, in the ``perception`` block only with the switch on: the rakes off a
 desk box wall (``Push.box_wall``) and the grasps on the selected targets that a box wall alone
 refused (``box_wall_refusals``)."""
+MARKER_COUNTS = ("marker_looks", "marker_error_mm")
+"""``marker_bias``'s ``perception`` counts, in the payload only with the switch on: the looks at
+the gripper marker, one per perceive call, and over the selections the sum of the estimate's xy
+distance to the true bias in mm (``MarkerBias.error_mm``, a metric read), so over
+``selections`` it is the mean error the selected rows carried."""
 
 
 def _perceived_scene(st: EnvState, env, rig, i: int, k: int):
     """``perceived``: perceive env ``i`` and hand the selector the detections: the scene with
     one slot per part (``PerceivedState.scene``), the perceived sizes and closing axes, and the
-    failure and rake counts by position. Returns the state and the scene."""
+    failure and rake counts by position. Returns the state and the scene. Under
+    ``marker_bias`` every centre is first corrected by the gripper marker's estimate."""
     state = st.perceiver.perceive(perception_truth(env, rig, i))
+    if st.marker is not None:
+        st.marker.look(rig.pick_point(i).tolist())
+        state = st.marker.correct(state)
+        st.counts["marker_looks"] += 1
     sel = st.selector
     sel.parts = state.parts(k)
     sel.sizes = torch.tensor([p.size for p in sel.parts], dtype=torch.float32)
@@ -1519,6 +1531,8 @@ def rollout(
         for i, st in enumerate(states):
             st.perceiver = perception.Perceiver(run_seed, i, scales)
             st.perceiver.reset_episode(poses[i])
+            if marker_bias:
+                st.marker = perception.MarkerBias(st.perceiver, run_seed, i)
             poses[i] = st.perceiver.box_poses
             st.selector.boxes = st.perceiver.box_poses
             st.selector.failure_scope = "part"
@@ -1742,6 +1756,8 @@ def rollout(
                 st.counts["wrong_overhead_class"] += seen.cls != true_classes[target]
                 if box_walls:
                     st.counts["box_wall_refusals"] += box_wall_refusals(st.selector, scene, target)
+                if st.marker is not None:
+                    st.counts["marker_error_mm"] += st.marker.error_mm()
             else:
                 env.target_part[i] = target
                 if per_part:
@@ -2166,9 +2182,11 @@ def rollout(
             "perceived": switches["perceived"],
             "noise_scales": switches["noise_scales"],
             "contact_hold": switches["contact_hold"],
-            **{name: sum(st.counts[name] for st in states) for name in PERCEPTION_COUNTS},
             **{
-                name: sum(st.counts[name] for st in states) for name in BOX_WALL_COUNTS if box_walls
+                name: sum(st.counts[name] for st in states)
+                for name in PERCEPTION_COUNTS
+                + (BOX_WALL_COUNTS if box_walls else ())
+                + (MARKER_COUNTS if marker_bias else ())
             },
         },
     }
