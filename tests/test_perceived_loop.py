@@ -528,7 +528,8 @@ def test_rearm_hold_serves_the_rules_again_after_a_hold_with_no_lift(monkeypatch
     it stays on to the budget. With the switch on, the hold's end clears it: the four serving
     rules read no stop from step 16 on, and ``dwell_close`` fires once more, at step 20, and
     not a third time. The census's hold fields are the latched run's. The switch refuses
-    ``contact_hold``."""
+    ``contact_hold``. Every other MS7d switch on, ``wrist_fix``'s serving row included, leaves
+    the rules' stop flag as it is."""
     monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 60)
     monkeypatch.setattr(loop, "DWELL_STEPS", 5)
     monkeypatch.setattr(loop, "CLOSE_LATCH_STEPS", 3)
@@ -546,7 +547,8 @@ def test_rearm_hold_serves_the_rules_again_after_a_hold_with_no_lift(monkeypatch
     for name in SERVING_RULES:
         monkeypatch.setattr(loop, name, spy(name, getattr(loop, name)))
     serving = dict.fromkeys(("square_wrist", "pick_snap", "close_gate", "dwell_close"), True)
-    for rearm in (False, True):
+    others = {name: True for name in MS7D_ON if name != "rearm_hold"}
+    for extra, rearm in [(e, r) for e in ({}, others) for r in (False, True)]:
         stops.clear()
         env, rig = _env_and_rig(budget=1)
         _place(env, SPREAD)
@@ -555,7 +557,7 @@ def test_rearm_hold_serves_the_rules_again_after_a_hold_with_no_lift(monkeypatch
                 _rollout(env, rig, _Still(), perceived=True, rearm_hold=True, contact_hold=True)
             assert err.value.reason == "rearm_hold"
         payload = _rollout(
-            env, rig, _Still(), budget=1, perceived=True, rearm_hold=rearm, **serving
+            env, rig, _Still(), budget=1, perceived=True, rearm_hold=rearm, **serving, **extra
         )
         env.close()
         want = [False] * 11 + [True] * 5 + [not rearm] * 44
@@ -1075,7 +1077,23 @@ MS7D_ON = {
     "hold_force": True,
     "force_cap": True,
 }
-"""The MS7d switches whose behavior is built: the no-truth test runs with them off and on."""
+"""All nine MS7d switches: the no-truth test runs with them off and on."""
+
+
+def test_every_ms7d_switch_at_once_runs_the_teacher_scene_to_its_end(monkeypatch):
+    """The nine MS7d levers together at the nominal knobs on the perceived teacher scene: the
+    teacher stows every part, one classified lift a cycle, the marker, the wrist and the force
+    sensor act, and the payload records every switch, each lever's counts and the torque
+    block."""
+    env, rig, policy, budget, switches = _teacher_scene(monkeypatch)
+    payload = _rollout(env, rig, policy, budget=budget, perceived=True, **switches, **MS7D_ON)
+    env.close()
+    ep, seen, torque = payload["episodes"][0], payload["perception"], payload["torque"]
+    assert ep["done_reason"] == "all_stowed" and seen["lifts_classified"] == ep["cycles"], ep
+    assert {name: payload["inference"]["loop"][name] for name in MS7D_ON} == MS7D_ON
+    assert set(loop.BOX_WALL_COUNTS + loop.MARKER_COUNTS + loop.WRIST_COUNTS) <= set(seen)
+    assert seen["marker_looks"] > 0 and seen["wrist_looks"] > 0, seen
+    assert torque["hold_force"] and torque["force_cap"] and torque["approach_force"]["steps"] > 0
 
 
 @pytest.mark.parametrize("ms7d", [{}, MS7D_ON])
