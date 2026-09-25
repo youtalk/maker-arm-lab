@@ -102,6 +102,13 @@ branches; until then ``NOT_BUILT`` makes the rollout fail on them. Every cycle's
 records ``target_in_box``, a metric read: whether the target's true centre lay in a true box
 region, any box, when it was selected.
 
+``rearm_hold`` (L8, MS7d design section 4.2) gives the serving rules a stop flag of their own
+(``Cycle.stop``, ``rearm_stop``): the detector's hold turns it on as before, and a hold that
+ends with no lift turns it off, so ``square_wrist``, ``pick_snap``, ``close_gate`` and
+``dwell_close`` act again, and a spent ``dwell_close`` may fire once more. The census's
+``hold_detected``, ``lift_detected`` and ``first_hold_at`` stay as they were; ``rearms``
+counts the clears. It refuses ``contact_hold``, whose flag reads the contacts.
+
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
 loop's own end-to-end check. A takeover holds the env until the rig hands it back at
@@ -258,7 +265,6 @@ wider than it was when the hold ended (MS7d design section 4.2). The MS7c rule a
 for ``SELECT_OPEN_FRACTION`` of the full gap, and 107 of candidate 3's cycles ran to the step
 budget in that wait, 101 of them with the part already in a box."""
 NOT_BUILT = (
-    "rearm_hold",  # L8: the stop flag clears after a hold that ends with no lift
     "box_walls",  # L9: the grasp model and the rake read the perceived desk box walls
     "marker_bias",  # L3: the bias estimate from the gripper marker
     "wrist_fix",  # L4: the wrist look at the final approach
@@ -756,7 +762,7 @@ class Cycle:
     snap_held_steps: int = 0  # steps ``pick_snap`` held the jaws at the landing gap
     dwell: int = 0  # consecutive steps at grasp height with open jaws (``dwell_count``)
     latched: int = 0  # ``dwell_close``: 0 not fired, > 0 steps the close has run, -1 spent
-    dwell_closes: int = 0  # times ``dwell_close`` fired in the cycle (at most one)
+    dwell_closes: int = 0  # times ``dwell_close`` fired (at most 1 + ``rearms``)
     adopted: int = -1  # the lifted non-target part ``adopt_held`` served the box of, else -1
     grace_steps: int = 0  # steps ``budget_ends_cycle``'s carry grace kept the cycle open
     # The MS7c hold census: the proprioceptive detector (``hold.HoldDetector``) on this
@@ -765,6 +771,8 @@ class Cycle:
     lift_detected: bool = False  # and read a lift on at least one
     first_hold_at: int | None = None  # steps into the cycle at its first detected hold
     first_held_at: int | None = None  # steps into the cycle at the first contact-held step
+    stop: bool = False  # ``rearm_hold``: the serving rules' stop flag (``rearm_stop``)
+    rearms: int = 0  # and the times it cleared after a hold with no lift
     # ``perceived``: the target's detection at selection, the failure memory's position.
     target_xy: tuple | None = None  # m, its perceived centre xy
     seen_class: str | None = None  # its class perceived overhead
@@ -954,6 +962,28 @@ def lift_class_box(wrist_cls, classify, class_to_box: dict, served: int):
     return drawn, None if box == served else box
 
 
+def rearm_stop(cycle: Cycle, detector: HoldDetector) -> bool:
+    """``rearm_hold`` (L8): update the serving rules' stop flag ``cycle.stop`` from this step's
+    ``detector``, and say whether it cleared. The hold census calls it after the serving rules,
+    so they read it one step late, as they read ``hold_detected`` and ``lift_detected``.
+
+    A detected hold or lift turns the flag on, as the latched rule does. A hold that ends with
+    no lift (``ended`` and not ``lost``: a finger pressed on the desk, a tray wall or a box,
+    or a grip that slipped before the lift) turns it off, so ``square_wrist``, ``pick_snap``,
+    ``close_gate`` and ``dwell_close`` act again, and a spent ``dwell_close`` (``latched``
+    -1) may fire once more, its dwell counted from 0. A close still running keeps running. A
+    lifted hold that ends (a release or a drop) keeps the flag. On MS7c candidate 3 the latched
+    flag was on with no lift in 503 of 3517 cycles, a median 522 steps before the cycle
+    ended, and the policy's own wrist roll was served at once near the ground (MS7d design
+    section 2, D8). Pure except for ``cycle.stop``, ``rearms``, ``latched`` and ``dwell``."""
+    if cycle.stop and detector.ended and not detector.lost:
+        cycle.stop, cycle.dwell, cycle.latched = False, 0, max(cycle.latched, 0)
+        cycle.rearms += 1
+        return True
+    cycle.stop = cycle.stop or detector.holding or detector.lifted
+    return False
+
+
 def census_step(
     cycle: Cycle,
     *,
@@ -1063,6 +1093,7 @@ CENSUS_EXPORT = (
     "first_hold_at",
     "first_held_at",
     "target_in_box",
+    "rearms",
 )
 """The ``Cycle`` fields each episode's ``cycle_census`` row exports, plus the two is_target
 flags of ``first_held`` and ``last_held``. Observation only, never the metric."""
@@ -1216,11 +1247,12 @@ PERCEPTION_COUNTS = (
     "look_again_waits",
     "look_again_steps",
     "look_again_found",
+    "rearms",
 )
 """The payload's ``perception`` counts: targets selected on a detection, the targets whose
 overhead class was wrong, the lifts classified, the wrong wrist classes, the lifts with no
-part between the jaws, and ``look_again``'s streaks that waited, steps spent waiting and
-streaks that ended in a target or a rake."""
+part between the jaws, ``look_again``'s streaks that waited, steps spent waiting and
+streaks that ended in a target or a rake, and ``rearm_hold``'s stop flag clears."""
 
 
 def _perceived_scene(st: EnvState, env, rig, i: int, k: int):
@@ -1425,6 +1457,8 @@ def rollout(
             raise EvalFailure(name, "changes a perceived decision: it needs perceived")
         if on and name in NOT_BUILT:
             raise EvalFailure("not_built", f"{name}: its behavior is not in this commit")
+    if rearm_hold and contact_hold:
+        raise EvalFailure("rearm_hold", "clears the detector's flag; contact_hold reads contacts")
     limits = robot.data.joint_pos_limits[:, arm_ids, :].to("cpu")
     tracker = RolloutTracker(num_envs, k)
     recorder = getattr(env, "recorder", None)
@@ -1754,7 +1788,9 @@ def rollout(
                     # ``census_step`` and the hold census run after this block, so the fields
                     # read the steps before this one: no hold and no lift so far in the cycle.
                     c = st.cycle
-                    if perceived and not contact_hold:
+                    if rearm_hold:  # it needs perceived and refuses contact_hold
+                        held_so_far = c.stop  # the detector's, cleared by a hold with no lift
+                    elif perceived and not contact_hold:
                         held_so_far = c.hold_detected or c.lift_detected  # the detector's
                     else:
                         held_so_far = c.held_steps > 0 or c.max_rise >= oracle.LIFT_MIN_RISE
@@ -1917,6 +1953,8 @@ def rollout(
                     c.first_hold_at = step - c.start_step
                 c.hold_detected = c.first_hold_at is not None
                 c.lift_detected = c.lift_detected or d.lifted
+                if rearm_hold:
+                    st.counts["rearms"] += rearm_stop(c, d)
             if hold_trace is not None:
                 rise = float(pos[i, h, 2] - c.start_z[h]) if h >= 0 and c is not None else 0.0
                 ordinal_i = -1 if c is None else c.ordinal

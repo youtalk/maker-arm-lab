@@ -12,6 +12,7 @@ import torch
 
 from maker_arm_lab.core import desk_boxes, grasp, layout, loop, oracle, parts, perception
 from maker_arm_lab.core.heap_oracle import HeapOracle
+from maker_arm_lab.core.hold import HoldDetector
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
@@ -195,6 +196,31 @@ def test_the_release_gap_completes_a_release_10_mm_past_the_gap_at_the_holds_end
     loop.perceived_release(cycle, True, False, False, 0.3)  # the switch off
     assert not loop.perceived_release(cycle, False, False, False, 0.3)
     assert loop.perceived_release(cycle, False, False, False, loop.SELECT_OPEN_FRACTION)
+
+
+def test_rearm_stop_clears_after_a_hold_with_no_lift_and_keeps_a_lifted_one():
+    """MS7d L8 on the real detector. Jaws stalled 10 mm wide on a shut command read a hold, and
+    jaws shut on the command end it. A hold with no lift turns the stop flag on and its end
+    clears it once, with a spent ``dwell_close`` armed again from a dwell of 0. A new hold turns
+    it on again, and the end of a lifted hold keeps it and the spent close."""
+    d = HoldDetector()
+    c = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
+    c.latched, c.dwell = -1, loop.DWELL_STEPS  # dwell_close fired and is spent
+
+    def feed(gap, z=0.05):
+        cleared = []
+        for _ in range(8):
+            d.update(gap, 0.0, z)
+            cleared.append(loop.rearm_stop(c, d))
+        return sum(cleared)
+
+    assert feed(0.010) == 0 and d.holding and c.stop
+    assert feed(0.0) == 1 and not c.stop and (c.rearms, c.latched, c.dwell) == (1, 0, 0)
+    assert feed(0.010) == 0 and c.stop
+    feed(0.010, z=0.05 + oracle.LIFT_MIN_RISE)
+    assert d.lifted
+    c.latched = -1  # the second close is spent too
+    assert feed(0.0) == 0 and not d.holding and c.stop and (c.rearms, c.latched) == (1, -1)
 
 
 def test_over_box_reads_each_boxs_yawed_footprint():
@@ -397,6 +423,73 @@ def test_the_release_gap_selects_at_once_after_a_perceived_release(monkeypatch):
         assert payload["inference"]["loop"]["release_gap"] is gap
 
 
+class _ScriptedHold:
+    """A hold detector that reads nothing: it holds on the rollout's steps 10 to 14 and never
+    lifts, so its hold ends with no lift on step 15."""
+
+    def __init__(self):
+        self.t = -1
+        self.holding = self.lifted = self.started = self.lift_started = False
+        self.ended = self.lost = False
+
+    def update(self, measured_gap, commanded_gap, pick_z):
+        self.t += 1
+        was, self.holding = self.holding, 10 <= self.t < 15
+        self.started, self.ended = self.holding and not was, was and not self.holding
+
+
+SERVING_RULES = ("squared_roll", "snap_shift", "snap_hold", "gated_gap")
+
+
+def test_rearm_hold_serves_the_rules_again_after_a_hold_with_no_lift(monkeypatch):
+    """MS7d L8 in the rollout, on the still policy and a scripted detector. ``dwell_close``
+    fires after a dwell of 5 steps (at any pose here), and its close is spent 3 steps later.
+    The hold on steps 10 to 14 turns the stop flag on from step 11. Latched (the switch off),
+    it stays on to the budget. With the switch on, the hold's end clears it: the four serving
+    rules read no stop from step 16 on, and ``dwell_close`` fires once more, at step 20, and
+    not a third time. The census's hold fields are the latched run's. The switch refuses
+    ``contact_hold``."""
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 60)
+    monkeypatch.setattr(loop, "DWELL_STEPS", 5)
+    monkeypatch.setattr(loop, "CLOSE_LATCH_STEPS", 3)
+    monkeypatch.setattr(loop, "HoldDetector", _ScriptedHold)
+    monkeypatch.setattr(loop, "dwell_count", lambda n, *args, held=False: 0 if held else n + 1)
+    stops = []
+
+    def spy(name, real):
+        def rule(*args, held=False):
+            stops.append((name, held))
+            return real(*args, held=held)
+
+        return rule
+
+    for name in SERVING_RULES:
+        monkeypatch.setattr(loop, name, spy(name, getattr(loop, name)))
+    serving = dict.fromkeys(("square_wrist", "pick_snap", "close_gate", "dwell_close"), True)
+    for rearm in (False, True):
+        stops.clear()
+        env, rig = _env_and_rig(budget=1)
+        _place(env, SPREAD)
+        if rearm:
+            with pytest.raises(loop.EvalFailure) as err:
+                _rollout(env, rig, _Still(), perceived=True, rearm_hold=True, contact_hold=True)
+            assert err.value.reason == "rearm_hold"
+        payload = _rollout(
+            env, rig, _Still(), budget=1, perceived=True, rearm_hold=rearm, **serving
+        )
+        env.close()
+        want = [False] * 11 + [True] * 5 + [not rearm] * 44
+        for name in SERVING_RULES:
+            assert [held for n, held in stops if n == name] == want, (rearm, name)
+        ep = payload["episodes"][0]
+        row = ep["cycle_census"][0]
+        assert ep["cycle_reasons"] == ["budget"], ep
+        hold = (row["hold_detected"], row["lift_detected"], row["first_hold_at"])
+        assert hold == (True, False, 10)
+        assert (row["dwell_closes"], row["rearms"]) == (1 + rearm, int(rearm))
+        assert payload["perception"]["rearms"] == int(rearm)
+
+
 def test_the_census_reads_the_graders_any_box_region():
     """``TruthReads.boxed``, the read behind ``target_in_box``: a part on box 0's floor and one
     on box 3's are in a box, whoever's box it is, and a part on the desk is not."""
@@ -456,6 +549,7 @@ def test_the_row_marker_and_box_are_the_detections_at_selection_and_stay_frozen(
         "look_again_waits": 1,
         "look_again_steps": int(loop.SELECT_WAIT_FRACTION * 40),
         "look_again_found": 0,
+        "rearms": 0,
     }
     recorded = payload["inference"]["loop"]
     assert (recorded["perceived"], recorded["contact_hold"]) == (True, False)
@@ -711,7 +805,7 @@ def _rake_scene(monkeypatch):
     return env, rig, _Still(), 4, switches
 
 
-MS7D_ON = {"box_filter_xy": True, "release_gap": True}
+MS7D_ON = {"box_filter_xy": True, "release_gap": True, "rearm_hold": True}
 """The MS7d switches whose behavior is built: the no-truth test runs with them off and on."""
 
 
