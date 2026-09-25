@@ -91,12 +91,16 @@ moves it away and looks again before it calls the heap empty. While it waits, th
 marker stay, the policy drives, and every step perceives again.
 
 Nine MS7d switches (MS7d design section 4), all off by default so the MS7c protocol stays
-reproducible, and all recorded in the payload's ``inference`` block. ``box_filter_xy`` (L1),
-a loop fix under ``perceived``, tests only the x and y of a detection against each perceived
-box's outer footprint in the selector's candidate filter (``HeapOracle.box_filter_xy``). The
-others, ``release_gap`` (L2), ``rearm_hold`` (L8), ``box_walls`` (L9), ``marker_bias`` (L3),
-``wrist_fix`` (L4), ``class_views`` (L5), ``hold_force`` (L6) and ``force_cap`` (L7), come
-with their levers' commits; until then ``NOT_BUILT`` makes the rollout fail on them.
+reproducible, and all recorded in the payload's ``inference`` block. Two are loop fixes under
+``perceived``: ``box_filter_xy`` (L1) tests only the x and y of a detection against each
+perceived box's outer footprint in the selector's candidate filter
+(``HeapOracle.box_filter_xy``), and ``release_gap`` (L2) also completes a perceived release
+at the gap measured when the hold ended plus ``RELEASE_OPEN_M`` (``perceived_release``). The
+other seven, ``rearm_hold`` (L8), ``box_walls`` (L9), ``marker_bias`` (L3), ``wrist_fix``
+(L4), ``class_views`` (L5), ``hold_force`` (L6) and ``force_cap`` (L7), come with their lever
+branches; until then ``NOT_BUILT`` makes the rollout fail on them. Every cycle's census also
+records ``target_in_box``, a metric read: whether the target's true centre lay in a true box
+region, any box, when it was selected.
 
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
@@ -248,8 +252,12 @@ def release_ready(open_fraction: float, waited: int, after_stow: bool) -> bool:
 RELEASE_ENDS = ("stowed", "released", "placed", "dropped")
 """The cycle ends a release makes; ``release_ready`` waits for the jaws' full gap after them.
 ``placed`` and ``dropped`` are ``perceived``'s (``perceived_cycle_end``)."""
+RELEASE_OPEN_M = 0.010  # INITIAL: the MS7d isolation row R1 measures it
+"""m: ``release_gap`` (L2) completes a perceived release once the measured jaw gap is this much
+wider than it was when the hold ended (MS7d design section 4.2). The MS7c rule alone waited
+for ``SELECT_OPEN_FRACTION`` of the full gap, and 107 of candidate 3's cycles ran to the step
+budget in that wait, 101 of them with the part already in a box."""
 NOT_BUILT = (
-    "release_gap",  # L2: a release also completes on the opening past the hold's end gap
     "rearm_hold",  # L8: the stop flag clears after a hold that ends with no lift
     "box_walls",  # L9: the grasp model and the rake read the perceived desk box walls
     "marker_bias",  # L3: the bias estimate from the gripper marker
@@ -764,6 +772,10 @@ class Cycle:
     # ``perceived_release``: a lifted hold ended over a box (True) or off one (False), and the
     # jaws have not yet opened to ``SELECT_OPEN_FRACTION``; None with no release under way.
     release_over: bool | None = None
+    release_gap0: float | None = None  # m, ``release_gap``: the measured jaw gap at that end
+    # The MS7d census: the target's true centre lay in a true box region, any box, at the
+    # selection (``TruthReads.boxed``); None without desk boxes. A metric read only.
+    target_in_box: bool | None = None
 
 
 @dataclass
@@ -848,7 +860,12 @@ def cycle_end(
 
 
 def perceived_release(
-    cycle: Cycle, lost: bool, regrasped: bool, over_now: bool, open_fraction: float
+    cycle: Cycle,
+    lost: bool,
+    regrasped: bool,
+    over_now: bool,
+    open_fraction: float,
+    gap: float | None = None,
 ) -> bool:
     """``perceived``: does a release complete on this step? The hold detector's lifted hold
     ending (``lost``) starts one and keeps ``over_now``, the ``over_box`` test of the FK pick
@@ -857,12 +874,18 @@ def perceived_release(
     proprioceptive read ``released_after_lift`` makes. Ending the cycle on the hold's end
     instead switched the target row while the part was still pinched: the next chunk closed
     the jaws again at about 14 mm and carried wide parts off the box (MS7c ledger,
-    2026-09-24). Pure except for ``cycle.release_over``."""
+    2026-09-24). ``gap`` is ``release_gap``'s (None: off), the measured jaw gap: kept in
+    ``cycle.release_gap0`` at the hold's end, and a gap ``RELEASE_OPEN_M`` wider than that
+    completes the release too. Pure except for ``cycle.release_over`` and ``release_gap0``."""
     if lost:
         cycle.release_over = over_now
+        cycle.release_gap0 = gap
     elif regrasped:
         cycle.release_over = None
-    return cycle.release_over is not None and open_fraction >= SELECT_OPEN_FRACTION
+    if cycle.release_over is None:
+        return False
+    opened = gap is not None and gap >= cycle.release_gap0 + RELEASE_OPEN_M
+    return open_fraction >= SELECT_OPEN_FRACTION or opened
 
 
 def perceived_cycle_end(cycle: Cycle, step: int, released: bool, over: bool) -> str | None:
@@ -1039,6 +1062,7 @@ CENSUS_EXPORT = (
     "lift_detected",
     "first_hold_at",
     "first_held_at",
+    "target_in_box",
 )
 """The ``Cycle`` fields each episode's ``cycle_census`` row exports, plus the two is_target
 flags of ``first_held`` and ``last_held``. Observation only, never the metric."""
@@ -1137,6 +1161,7 @@ class TruthReads:
     quat: torch.Tensor  # (N,K,4) part orientations (w, x, y, z)
     held: torch.Tensor  # (N,) the part both jaws press at HELD_MIN_FORCE, -1 for none
     resting_box: torch.Tensor | None  # (N,K) with desk boxes: the box each part rests in, or -1
+    boxed: torch.Tensor | None  # (N,K) with desk boxes: in any box, moving or not, the grader's
 
 
 def truth_reads(env, per_part: bool) -> TruthReads:
@@ -1154,6 +1179,7 @@ def truth_reads(env, per_part: bool) -> TruthReads:
         ).to("cpu"),
         held=held_brick_from_forces(left, right, min_force=HELD_MIN_FORCE).to("cpu"),
         resting_box=parts_resting_box(env).to("cpu") if per_part else None,
+        boxed=parts_in_desk_boxes(env).to("cpu") if per_part else None,
     )
 
 
@@ -1489,12 +1515,13 @@ def rollout(
         if (time.monotonic() - started) / 60.0 > max_wall_minutes:
             raise EvalFailure("wall_clock", f"exceeded {max_wall_minutes} min at step {step}")
         truth = truth_reads(env, per_part)
-        per_brick, in_bin, pos, speed, held = (
+        per_brick, in_bin, pos, speed, held, boxed = (
             truth.per_brick,
             truth.in_bin,
             truth.pos,
             truth.speed,
             truth.held,
+            truth.boxed,
         )
         tracker.latch_pre_step(per_brick)
         if per_part:
@@ -1503,7 +1530,6 @@ def rollout(
             final_box[live] = truth.resting_box[live]
         openings = policy_state(robot.data.joint_pos)[:, 6].to("cpu")
         gaps = robot.data.joint_pos[:, jaw_ids].sum(dim=-1).to("cpu")  # m, measured jaw gap
-        boxed = parts_in_desk_boxes(env).to("cpu") if per_part and not perceived else None
         # The hold detector reads this step's proprioception first: the jaw gap measured now,
         # the gap the last step's command asked for and the FK pick point. ``perceived``
         # decides on its state and events below; otherwise only the census reads it.
@@ -1520,7 +1546,8 @@ def rollout(
             if st.cycle is not None and perceived:
                 c, d = st.cycle, detectors[i]
                 over = d.lost and over_box(top_picks[i][:2], st.perceiver.box_poses)
-                released = perceived_release(c, d.lost, d.started, over, float(openings[i]))
+                gap = float(gaps[i]) if release_gap else None
+                released = perceived_release(c, d.lost, d.started, over, float(openings[i]), gap)
                 reason = perceived_cycle_end(c, step, released, bool(c.release_over))
                 # The carry grace keeps a cycle open while the detector holds.
                 grace = not budget_ends_cycle(step - c.start_step, d.holding, c.grace_steps)
@@ -1563,8 +1590,12 @@ def rollout(
             if st.idle_since is not None:
                 opening = float(openings[i])
                 if select_at_release:
+                    # ``release_gap`` ended a perceived release on the opening already: the
+                    # wait for the full gap would add back the steps it cut.
+                    last = st.reasons[-1]
+                    gapped = release_gap and last in ("placed", "dropped")
                     ready = release_ready(
-                        opening, step - st.idle_since, st.reasons[-1] in RELEASE_ENDS
+                        opening, step - st.idle_since, last in RELEASE_ENDS and not gapped
                     )
                 else:
                     ready = select_ready(
@@ -1635,6 +1666,7 @@ def rollout(
                 heading=None if chosen is None else float(chosen.heading),
                 wait_steps=waited,
                 wait_capped=waited >= int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET),
+                target_in_box=None if boxed is None else bool(boxed[i, target]),
             )
             if perceived:
                 # The row, the frozen marker and the box of the class perceived overhead all

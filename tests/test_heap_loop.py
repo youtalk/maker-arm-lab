@@ -892,6 +892,7 @@ def test_a_still_policy_is_classed_no_close_and_the_teacher_closes_on_its_target
     for row in ep["cycle_census"]:
         assert -0.02 < row["squeeze_margin"] < 0.0 and row["first_held_is_target"], row
         assert row["pick_z_max"] - row["pick_z_close"] >= oracle.LIFT_MIN_RISE, row
+        assert row["target_in_box"] is None  # no desk boxes
     assert ep["cycle_census"][0]["wait_steps"] == 0
 
     monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)

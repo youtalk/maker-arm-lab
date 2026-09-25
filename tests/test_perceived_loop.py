@@ -177,6 +177,26 @@ def test_a_perceived_release_completes_only_once_the_jaws_open():
     assert cycle.release_over is None
 
 
+def test_the_release_gap_completes_a_release_10_mm_past_the_gap_at_the_holds_end():
+    """MS7d L2: the MS7c rule still completes a release, a new hold still cancels it, and with
+    the switch off (``gap`` None) the rule is MS7c's."""
+    cycle = loop.Cycle(ordinal=1, target=0, start_step=100, stowed_before=set())
+    end = 0.016
+    assert not loop.perceived_release(cycle, True, False, True, 0.3, end)  # the hold ends
+    assert cycle.release_gap0 == end
+    assert not loop.perceived_release(cycle, False, False, False, 0.3, end + 0.0099)
+    assert loop.perceived_release(cycle, False, False, False, 0.3, end + 0.0101)
+    assert cycle.release_over is True
+    loop.perceived_release(cycle, True, False, False, 0.3, end)
+    assert not loop.perceived_release(cycle, False, True, False, 0.3, 0.04)  # a new hold
+    assert cycle.release_over is None
+    loop.perceived_release(cycle, True, False, False, 0.3, end)
+    assert loop.perceived_release(cycle, False, False, False, loop.SELECT_OPEN_FRACTION, end)
+    loop.perceived_release(cycle, True, False, False, 0.3)  # the switch off
+    assert not loop.perceived_release(cycle, False, False, False, 0.3)
+    assert loop.perceived_release(cycle, False, False, False, loop.SELECT_OPEN_FRACTION)
+
+
 def test_over_box_reads_each_boxs_yawed_footprint():
     _, (h, _, _) = desk_boxes.stow_region(2)  # the footprint is square
     boxes = [(0.10, 0.20, 0.0), (0.10, -0.20, math.pi / 4)]
@@ -343,6 +363,50 @@ def test_the_ms7d_switches_need_perceived_and_an_unbuilt_one_fails_before_a_step
             assert err.value.reason == "not_built"
     env.close()
     assert served == []
+
+
+def test_the_release_gap_selects_at_once_after_a_perceived_release(monkeypatch):
+    """MS7d L2: after a cycle that ended ``placed`` or ``dropped`` the loop selects at once, as
+    after a non-release end; with the switch off it waits for the full gap as in MS7c. The
+    teacher drives as the policy and places its parts. The census records that no target lay
+    in a box when it was selected."""
+    real, after_stow = loop.release_ready, []
+
+    def spy(opening, waited, after):
+        after_stow.append(after)
+        return real(opening, waited, after)
+
+    monkeypatch.setattr(loop, "release_ready", spy)
+    for gap in (False, True):
+        after_stow.clear()
+        env, rig = _env_and_rig()
+        _place(env, SPREAD)
+        payload = _rollout(
+            env,
+            rig,
+            _Teacher(env, rig.oracle_factory),
+            perceived=True,
+            select_at_release=True,
+            release_gap=gap,
+        )
+        env.close()
+        ep = payload["episodes"][0]
+        assert ep["cycle_reasons"][:2] == ["placed", "placed"] and ep["bricks_stowed"] == 3, ep
+        assert after_stow and set(after_stow) == {not gap}, after_stow
+        assert [row["target_in_box"] for row in ep["cycle_census"]] == [False] * 3
+        assert payload["inference"]["loop"]["release_gap"] is gap
+
+
+def test_the_census_reads_the_graders_any_box_region():
+    """``TruthReads.boxed``, the read behind ``target_in_box``: a part on box 0's floor and one
+    on box 3's are in a box, whoever's box it is, and a part on the desk is not."""
+    env, _ = _env_and_rig()
+    floor = desk_boxes.DESK_BOX_WALL + 0.006
+    _place(env, [(*FIXED[0][:2], floor, 0.0), (*FIXED[3][:2], floor, 0.3), (0.2, 0.0, 0.006, 0.0)])
+    boxed = loop.truth_reads(env, True).boxed
+    assert loop.truth_reads(env, False).boxed is None
+    env.close()
+    assert boxed.tolist() == [[True, True, False]]
 
 
 def test_the_row_marker_and_box_are_the_detections_at_selection_and_stay_frozen(monkeypatch):
@@ -588,6 +652,7 @@ def _garbage_reads(env, per_part, gen):
         quat=quat / quat.norm(dim=-1, keepdim=True),
         held=torch.randint(-1, k, (n,), generator=gen),
         resting_box=torch.randint(-1, 4, (n, k), generator=gen) if per_part else None,
+        boxed=torch.rand(n, k, generator=gen) < 0.5 if per_part else None,
     )
 
 
@@ -646,7 +711,7 @@ def _rake_scene(monkeypatch):
     return env, rig, _Still(), 4, switches
 
 
-MS7D_ON = {"box_filter_xy": True}
+MS7D_ON = {"box_filter_xy": True, "release_gap": True}
 """The MS7d switches whose behavior is built: the no-truth test runs with them off and on."""
 
 
