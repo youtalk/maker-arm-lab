@@ -328,6 +328,45 @@ def test_box_filter_xy_tests_the_outer_footprint_plus_the_margin_and_not_z():
     assert sel._candidates(scene).tolist() == [False, True, False, True]
 
 
+ROW = [0.2, 0.0, 0.005, math.cos(0.3), math.sin(0.3), 0.016, 0.005]
+"""A served target row (``target_context``): centre, closing axis at 0.3 rad, width, half
+height."""
+
+
+def test_a_wrist_look_is_due_on_entering_the_snap_window_and_again_only_after_leaving_it():
+    """MS7d L4: the window is the snap window, and a look fires once per stay in it."""
+    cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
+    top = ROW[2] + ROW[6]
+    high = [0.2, 0.0, top + loop.SQUARE_ABOVE + 0.001]
+    inside = [0.2 + loop.SNAP_RADIUS - 0.001, 0.0, top + 0.02]
+    wide = [0.2 + loop.SNAP_RADIUS + 0.001, 0.0, top]
+    path = [high, inside, inside, ROW[:3], wide, inside, high, inside]
+    due = [loop.look_due(cycle, pick, ROW) for pick in path]
+    assert due == [False, True, False, False, False, True, False, True]
+    cycle.in_window = False
+    assert not loop.look_due(cycle, ROW[:3], [*ROW[:5], 0.0, ROW[6]])  # no live row
+
+
+def test_the_wrist_row_moves_the_centre_and_turns_the_heading_by_the_folded_yaw_error():
+    """MS7d L4: the serving row takes the look's centre and turns by the look's yaw minus the
+    detection's, folded into a quarter turn; z, width and half height stay, and so does the
+    selected row it was built from."""
+    row = np.array(ROW, dtype=np.float32)
+    kept = row.copy()
+    quarter = math.pi / 4
+    for err, turn in (
+        (0.05, 0.05),
+        (-0.05, -0.05),
+        (math.pi + 0.05, 0.05),
+        (quarter + 0.01, -quarter + 0.01),
+    ):
+        out = loop.wrist_row(row, (0.203, -0.002, 1.0 + err), 1.0)
+        assert out[:2] == [0.203, -0.002]
+        assert [out[2], *out[5:]] == [float(v) for v in (row[2], row[5], row[6])]
+        assert math.atan2(out[4], out[3]) == pytest.approx(0.3 + turn, abs=1e-6)
+    assert np.array_equal(row, kept)
+
+
 # -- the rollout --------------------------------------------------------------------------------
 
 
@@ -786,6 +825,90 @@ def test_credit_placed_credits_a_stowed_part_once_to_its_last_placed_cycle():
     assert st.stowed_parts == [1, 0]
 
 
+def _wrist_rollout(wrist_fix, scales, spies=()):
+    """The teacher drives the three spread parts under ``pick_snap`` and ``square_wrist``, with
+    ``wrist_fix`` on or off. ``spies`` are (name, wrapper) pairs set on ``loop`` for the run.
+    Returns the payload and ``_served``'s rows."""
+    env, rig = _env_and_rig()
+    _place(env, SPREAD)
+    served = _served(env)
+    with pytest.MonkeyPatch.context() as mp:
+        for name, wrap in spies:
+            mp.setattr(loop, name, wrap(env, getattr(loop, name)))
+        payload = _rollout(
+            env,
+            rig,
+            _Teacher(env, rig.oracle_factory),
+            perceived=True,
+            pick_snap=True,
+            square_wrist=True,
+            wrist_fix=wrist_fix,
+            noise_scales=scales,
+        )
+    env.close()
+    return payload, served
+
+
+def test_a_wrist_look_that_misses_keeps_the_overhead_row_as_with_the_switch_off():
+    """MS7d L4: when every look misses, the loop serves exactly what it serves with the switch
+    off, the payload adds only the wrist counts, and the Perceiver's draws are untouched."""
+    scales = {"wrist_miss": 1000.0}
+    (off, off_served), (on, on_served) = (_wrist_rollout(w, scales) for w in (False, True))
+    assert len(on_served) == len(off_served) > 0
+    for (row, box, marker, _, action), b in zip(off_served, on_served):
+        assert np.array_equal(row, b[0]) and np.array_equal(box, b[1]) and torch.equal(action, b[4])
+        assert torch.equal(marker.nan_to_num(), b[2].nan_to_num())
+    assert on["episodes"][0]["cycle_reasons"] == off["episodes"][0]["cycle_reasons"]
+    seen = on["perception"]
+    assert seen["wrist_looks"] >= 3 and seen["wrist_misses"] == seen["wrist_looks"], seen
+    assert seen["wrist_covered"] == seen["wrist_shift_mm"] == seen["wrist_turn_deg"] == 0
+    assert {k: v for k, v in seen.items() if k not in loop.WRIST_COUNTS} == off["perception"]
+    assert not set(loop.WRIST_COUNTS) & set(off["perception"])
+
+
+def test_a_wrist_look_at_zero_noise_snaps_to_the_true_centre_and_leaves_the_policy_row():
+    """MS7d L4, with ``wrist`` and ``wrist_bias`` at 0: after a look the row ``pick_snap``
+    reads is centred on the target's true centre at the look, and nothing else moves; the
+    policy's row stays the detection at selection, where the frozen marker stands."""
+    events = []
+
+    def look_spy(env, real):
+        def spy(env_, rig, i, b):
+            got = real(env_, rig, i, b)
+            true = env.scene[f"brick_{b}"].data.root_pos_w[i] - env.scene.env_origins[i]
+            events.append(("look", got, true[:2].tolist()))
+            return got
+
+        return spy
+
+    def snap_spy(env, real):
+        def spy(cmd, pick, row, *args, **kwargs):
+            events.append(("snap", [float(v) for v in row], env.context_target[0].tolist()))
+            return real(cmd, pick, row, *args, **kwargs)
+
+        return spy
+
+    scales = {"wrist": 0.0, "wrist_bias": 0.0, "wrist_miss": 0.0}
+    payload, served = _wrist_rollout(
+        True, scales, [("wrist_look_truth", look_spy), ("snap_shift", snap_spy)]
+    )
+    seen = payload["perception"]
+    assert seen["wrist_looks"] >= 3 and seen["wrist_misses"] == seen["wrist_covered"] == 0, seen
+    assert seen["wrist_shift_mm"] > 0.0
+    last, snapped = None, 0
+    for kind, got, other in events:
+        if kind == "look":
+            assert got[:2] == pytest.approx(other, abs=1e-6) and got[3] is False
+            last = got[:2]
+        elif got[:2] != other[:2]:  # the serving row moved off the policy's row: a look's
+            assert tuple(got[:2]) == last and [got[2], *got[5:]] == [other[2], *other[5:]]
+            snapped += 1
+    assert snapped > 0
+    for row, _, marker, _, _ in served:
+        if not marker.isnan().any():
+            assert np.allclose(row[:3], marker.numpy(), atol=1e-6)
+
+
 # -- the no-truth test ------------------------------------------------------------------------
 
 
@@ -889,6 +1012,7 @@ MS7D_ON = {
     "rearm_hold": True,
     "box_walls": True,
     "marker_bias": True,
+    "wrist_fix": True,
 }
 """The MS7d switches whose behavior is built: the no-truth test runs with them off and on."""
 

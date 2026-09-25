@@ -102,7 +102,11 @@ branches; until then ``NOT_BUILT`` makes the rollout fail on them. Every cycle's
 records ``target_in_box``, a metric read: whether the target's true centre lay in a true box
 region, any box, when it was selected. ``marker_bias`` (L3) takes the gripper marker's running
 estimate of the episode's camera bias off every detection before any decision reads it
-(``perception.MarkerBias``).
+(``perception.MarkerBias``). ``wrist_fix`` (L4) takes a wrist look at the target
+(``perception.WristCamera``) each time the pick point enters the snap window (``look_due``),
+and the serving rules then read the look's centre and heading (``wrist_row``); the policy's
+row and the marker stay as selected. The look's one truth read is ``wrist_look_truth``, a
+decision accessor beside ``perception_truth``.
 
 ``rearm_hold`` (L8, MS7d design section 4.2) gives the serving rules a stop flag of their own
 (``Cycle.stop``, ``rearm_stop``): the detector's hold turns it on as before, and a hold that
@@ -136,7 +140,7 @@ from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.dagger_loop import DECLINE_COOLDOWN, trigger_reason
 from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _nearest_brick_cm
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
-from maker_arm_lab.core.global_ik import fold_to_half_turn
+from maker_arm_lab.core.global_ik import fold_to_half_turn, wrap_to_pi
 from maker_arm_lab.core.heap_oracle import (
     CANDIDATE_MAX_Z,
     MAX_RAKES,
@@ -145,6 +149,7 @@ from maker_arm_lab.core.heap_oracle import (
 )
 from maker_arm_lab.core.hold import HoldDetector, agreement, commanded_gap
 from maker_arm_lab.core.parts import PART_CLASSES, part_class
+from maker_arm_lab.core.quat import quat_apply
 from maker_arm_lab.core.stowed import (
     _brick_states,
     env_heap_bin_centers,
@@ -267,7 +272,6 @@ wider than it was when the hold ended (MS7d design section 4.2). The MS7c rule a
 for ``SELECT_OPEN_FRACTION`` of the full gap, and 107 of candidate 3's cycles ran to the step
 budget in that wait, 101 of them with the part already in a box."""
 NOT_BUILT = (
-    "wrist_fix",  # L4: the wrist look at the final approach
     "class_views",  # L5: the correlated class error and the third view
     "hold_force",  # L6: the hold enters only under the pick-point force bar
     "force_cap",  # L7: the arm holds still over the force cap
@@ -604,6 +608,38 @@ def snap_hold(cmd, pick, row, shift, descending: bool, held: bool = False) -> bo
     return descending and float(pick[2]) > floor + SNAP_Z_TOL
 
 
+def look_due(cycle: Cycle, pick, row) -> bool:
+    """``wrist_fix``: does the loop take a wrist look on this step (the MS7d design's L4 model)?
+
+    The look window is ``snap_shift``'s: the measured pick point ``pick`` within
+    ``SNAP_RADIUS`` of the serving row ``row``'s centre in xy and under its top plus
+    ``SQUARE_ABOVE``, with a live row (width over 0). A look fires on the step the pick point
+    enters the window, so once per stay: it must leave and come back for the next. Pure except
+    for ``cycle.in_window``, the last step's read."""
+    near = math.hypot(float(pick[0]) - float(row[0]), float(pick[1]) - float(row[1]))
+    top = float(row[2]) + float(row[6])
+    inside = float(row[5]) > 0.0 and near <= SNAP_RADIUS and float(pick[2]) < top + SQUARE_ABOVE
+    due = inside and not cycle.in_window
+    cycle.in_window = inside
+    return due
+
+
+def wrist_row(row, look, seen_yaw: float) -> list[float]:
+    """``wrist_fix``: the serving row after a wrist look that found the target. Pure.
+
+    ``row`` is the target row served at selection (``target_context``), ``look`` the look's
+    (x, y, yaw) and ``seen_yaw`` the heading of the target detection's body x axis at
+    selection. The centre x and y become the look's, and the closing axis heading (``row[3]``,
+    ``row[4]`` = cos, sin) turns by the measured yaw error ``look yaw - seen_yaw``, folded into
+    [-pi/4, pi/4): a box part's grasp axes repeat every quarter turn, and the error is a few
+    degrees. The z, the width and the half height stay."""
+    turn = wrap_to_pi(4.0 * (look[2] - seen_yaw)) / 4.0
+    heading = math.atan2(float(row[4]), float(row[3])) + turn
+    out = [float(v) for v in row]
+    out[0], out[1], out[3], out[4] = look[0], look[1], math.cos(heading), math.sin(heading)
+    return out
+
+
 DWELL_STEPS = 150
 """Control steps the pick point may wait at grasp height with the jaws open before
 ``dwell_close`` closes them. The rung 2 arm B 300k traces of 2026-09-24 (draws 1 and 3 of
@@ -800,6 +836,12 @@ class Cycle:
     # jaws have not yet opened to ``SELECT_OPEN_FRACTION``; None with no release under way.
     release_over: bool | None = None
     release_gap0: float | None = None  # m, ``release_gap``: the measured jaw gap at that end
+    # ``wrist_fix``: the heading of the detection's body x axis at selection, the row the
+    # serving rules read after a wrist look (None before the first, ``wrist_row``), and whether
+    # the pick point was in the look window on the last step (``look_due``).
+    seen_yaw: float = 0.0
+    serving_row: list | None = None
+    in_window: bool = False
     # The MS7d census: the target's true centre lay in a true box region, any box, at the
     # selection (``TruthReads.boxed``); None without desk boxes. A metric read only.
     target_in_box: bool | None = None
@@ -836,6 +878,7 @@ class EnvState:
     rake_mem: perception.PositionMemory = field(default_factory=perception.PositionMemory)
     counts: Counter = field(default_factory=Counter)
     look_since: int | None = None  # the step a streak of empty selections began (look_again)
+    wrist: perception.WristCamera | None = None  # ``wrist_fix``: this env's wrist look
 
 
 def _layout_of(rig, i: int):
@@ -1258,6 +1301,39 @@ def wrist_class(env, i: int) -> str | None:
     return None if b < 0 else part_class(env.parts[b])
 
 
+def wrist_look_truth(env, rig, i: int, b: int) -> tuple[float, float, float, bool]:
+    """``wrist_fix``: the one truth read of a wrist look, the stand-in for the wrist camera
+    (MS7d L4). Part ``b``'s live centre x and y, the heading of its body x axis in the world
+    xy plane (``PerceivedState.scene``'s convention), and whether another part covers its
+    centre from above (``perception.covered``, the overhead camera's rule). A decision
+    accessor like ``perception_truth``, which it reads: the no-truth test leaves both alone."""
+    t = perception_truth(env, rig, i)
+    pos, quat, sizes = (torch.as_tensor(v, dtype=torch.float32) for v in (t.pos, t.quat, t.sizes))
+    x_axis = quat_apply(quat[b], torch.tensor([1.0, 0.0, 0.0]))
+    yaw = math.atan2(float(x_axis[1]), float(x_axis[0]))
+    return float(pos[b, 0]), float(pos[b, 1]), yaw, perception.covered(pos, quat, sizes, b)
+
+
+def _wrist_look(st: EnvState, env, rig, i: int, pick, row) -> None:
+    """``wrist_fix``: take a wrist look at the cycle's target if ``look_due`` says so, and set
+    the serving row from it (``wrist_row``). ``row`` is the target row served at selection. A
+    miss or a covered target keeps the serving row as it is."""
+    c = st.cycle
+    if not look_due(c, pick, row if c.serving_row is None else c.serving_row):
+        return
+    x, y, yaw, covered = wrist_look_truth(env, rig, i, c.target)
+    look = st.wrist.look((x, y), yaw, covered)
+    st.counts["wrist_looks"] += 1
+    st.counts["wrist_covered"] += covered
+    st.counts["wrist_misses"] += look is None and not covered
+    if look is None:
+        return
+    c.serving_row = wrist_row(row, look, c.seen_yaw)
+    st.counts["wrist_shift_mm"] += 1e3 * math.hypot(look[0] - row[0], look[1] - row[1])
+    turn = math.atan2(c.serving_row[4], c.serving_row[3]) - math.atan2(row[4], row[3])
+    st.counts["wrist_turn_deg"] += abs(math.degrees(wrap_to_pi(turn)))
+
+
 PERCEPTION_COUNTS = (
     "selections",
     "wrong_overhead_class",
@@ -1282,6 +1358,11 @@ MARKER_COUNTS = ("marker_looks", "marker_error_mm")
 the gripper marker, one per perceive call, and over the selections the sum of the estimate's xy
 distance to the true bias in mm (``MarkerBias.error_mm``, a metric read), so over
 ``selections`` it is the mean error the selected rows carried."""
+WRIST_COUNTS = ("wrist_looks", "wrist_misses", "wrist_covered", "wrist_shift_mm", "wrist_turn_deg")
+"""``wrist_fix``'s counts, which join the ``perception`` block only with the switch on: the
+wrist looks, those that missed and those whose target another part covered, and over the
+looks that found it, the sums of the serving row's xy move (mm) and heading turn (degrees),
+both against the row at selection."""
 
 
 def _perceived_scene(st: EnvState, env, rig, i: int, k: int):
@@ -1542,6 +1623,8 @@ def rollout(
                 # L9: the grasp model and the rake also read the perceived boxes' walls.
                 boxes = st.perceiver.box_poses
                 st.selector.walls += desk_boxes.box_walls(boxes, len(boxes))
+            if wrist_fix:
+                st.wrist = perception.WristCamera(run_seed, i, scales)
         env.perceived_box_poses = poses
         for i in range(num_envs):
             env.set_context_box(i, 0)  # the reset served box 0's true pose
@@ -1749,6 +1832,7 @@ def rollout(
                 seen = next(d for d in state.detections if d.sim_index == target)
                 st.cycle.target_xy = seen.centre[:2]
                 st.cycle.seen_class = seen.cls
+                st.cycle.seen_yaw = float(scene.brick_yaw[target])
                 st.cycle.box = class_to_box[i][seen.cls]
                 env.marker_points[i] = torch.tensor(seen.centre)
                 env.set_context_box(i, st.cycle.box)
@@ -1823,16 +1907,20 @@ def rollout(
         if policy_action is not None:
             idle = torch.tensor(rig.idle)
             action_cpu[idle] = policy_action[idle]
-            if close_gate or squeeze_floor or square_wrist or pick_snap or dwell_close:
+            if close_gate or squeeze_floor or square_wrist or pick_snap or dwell_close or wrist_fix:
                 for i, st in enumerate(states):
                     if st.cycle is None or not rig.idle[i] or bool(tracker.done[i]):
                         continue
-                    row = ctx_target[i]  # CONTEXT_TARGET_NAMES: z at 2, width at 5, half height 6
+                    c = st.cycle
+                    if wrist_fix:
+                        _wrist_look(st, env, rig, i, picks[i], ctx_target[i])
+                    # CONTEXT_TARGET_NAMES: z at 2, width at 5, half height 6. ``wrist_fix``
+                    # serves the last wrist look's row; the policy keeps ``ctx_target``'s.
+                    row = ctx_target[i] if c.serving_row is None else c.serving_row
                     width = float(row[5])
                     gap = float(action_cpu[i, 6])
                     # ``census_step`` and the hold census run after this block, so the fields
                     # read the steps before this one: no hold and no lift so far in the cycle.
-                    c = st.cycle
                     if rearm_hold:  # it needs perceived and refuses contact_hold
                         held_so_far = c.stop  # the detector's, cleared by a hold with no lift
                     elif perceived and not contact_hold:
@@ -2187,6 +2275,7 @@ def rollout(
                 for name in PERCEPTION_COUNTS
                 + (BOX_WALL_COUNTS if box_walls else ())
                 + (MARKER_COUNTS if marker_bias else ())
+                + (WRIST_COUNTS if wrist_fix else ())
             },
         },
     }
