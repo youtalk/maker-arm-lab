@@ -245,13 +245,39 @@ def test_the_class_at_lift_serves_the_box_of_the_class_drawn_for_the_part_in_the
         return "slope" if cls == "tall" else cls  # a confusion on tall parts
 
     # Nothing between the jaws (a false lift): no draw, the row stays.
-    assert loop.lift_class_box(None, classify, boxes, 0) == (None, None) and draws == []
+    assert loop.lift_class_box(None, classify, boxes, 0) == (None, None, None) and draws == []
     # The served box already fits the drawn class: no switch.
-    assert loop.lift_class_box("wide", classify, boxes, 0) == ("wide", None)
+    assert loop.lift_class_box("wide", classify, boxes, 0) == ("wide", "wide", None)
     # Another class, or a confused one: the box of the class drawn, not of the true one.
-    assert loop.lift_class_box("narrow", classify, boxes, 0) == ("narrow", 1)
-    assert loop.lift_class_box("tall", classify, boxes, 0) == ("slope", 2)
+    assert loop.lift_class_box("narrow", classify, boxes, 0) == ("narrow", "narrow", 1)
+    assert loop.lift_class_box("tall", classify, boxes, 0) == ("slope", "slope", 2)
     assert draws == ["wide", "narrow", "tall"]
+
+
+def test_class_views_draws_a_third_view_only_when_the_wrist_disagrees_with_the_overhead():
+    """MS7d L5: a wrist class equal to the overhead one is taken with no third view; otherwise
+    the vote of the three views is taken and serves its box."""
+    boxes = {"slope": 2, "tall": 3, "narrow": 1, "wide": 0}
+    thirds = []
+
+    def third(cls):
+        thirds.append(cls)
+        return "tall"
+
+    def box(seen, drawn):
+        return loop.lift_class_box("tall", lambda cls: drawn, boxes, 0, seen=seen, third=third)
+
+    assert box("slope", "slope") == ("slope", "slope", 2) and thirds == []
+    assert box("tall", "slope") == ("slope", "tall", 3) and thirds == ["tall"]  # sides with seen
+    assert box("wide", "slope") == ("slope", "tall", 3)  # a split: the third view
+    assert loop.lift_class_box(None, None, boxes, 0, seen="wide", third=third) == (None,) * 3
+
+
+def test_the_vote_takes_the_class_two_views_share_and_the_third_on_a_split():
+    assert loop.voted_class(("wide", "slope", "wide")) == "wide"
+    assert loop.voted_class(("wide", "slope", "slope")) == "slope"
+    assert loop.voted_class(("wide", "wide", "tall")) == "wide"
+    assert loop.voted_class(("wide", "slope", "tall")) == "tall"
 
 
 def test_the_tool_is_clear_of_the_tray_40_mm_off_its_footprint_at_the_rim():
@@ -610,6 +636,9 @@ def test_the_row_marker_and_box_are_the_detections_at_selection_and_stay_frozen(
         "wrong_overhead_class": payload["perception"]["wrong_overhead_class"],
         "lifts_classified": 0,
         "wrong_wrist_class": 0,
+        "third_views": 0,
+        "votes_changed": 0,
+        "wrong_voted_class": 0,
         "lifts_empty": 0,
         # The still tool stands 15 mm off the tray footprint: the empty selection looks again
         # for the retreat wait's cap, 15 steps at this budget, before it ends the episode.
@@ -788,8 +817,13 @@ def test_the_class_at_lift_classifies_each_lift_and_a_placed_stow_counts(monkeyp
     episode's end every placed part rests in its own box, so each placed cycle counts as a
     stow. The last part lands before the jaws open, so the env's success ends that cycle
     stowed. At a class scale that always confuses, every overhead and wrist class is wrong and
-    the teacher still stows."""
-    for scale, wrong in ((0.0, 0), (1000.0, 3)):
+    the teacher still stows. Under ``class_views`` at a persistent share of 1 (rho 2) every part
+    is persistent: all its views name one wrong class, so no vote changes the wrist class. At a
+    share of 0 (rho 0) every view is wrong on its own draws, so the wrist and the overhead
+    disagree on some parts, and the vote draws a third view on those."""
+    rows = ((0.0, 1.0, False), (1000.0, 1.0, False), (1000.0, 2.0, True), (1000.0, 0.0, True))
+    for scale, rho, views in rows:
+        wrong = 3 if scale else 0
         env, rig = _env_and_rig()
         _place(env, SPREAD)
         payload = _rollout(
@@ -797,8 +831,9 @@ def test_the_class_at_lift_classifies_each_lift_and_a_placed_stow_counts(monkeyp
             rig,
             _Teacher(env, rig.oracle_factory),
             perceived=True,
-            noise_scales={"class": scale},
+            noise_scales={"class": scale, "rho": rho},
             select_at_release=True,
+            class_views=views,
         )
         env.close()
         ep, seen = payload["episodes"][0], payload["perception"]
@@ -808,6 +843,14 @@ def test_the_class_at_lift_classifies_each_lift_and_a_placed_stow_counts(monkeyp
         assert ep["bricks_stowed"] == 3 and payload["cycles_per_stowed"] == pytest.approx(1.0)
         assert (seen["lifts_classified"], seen["lifts_empty"]) == (3, 0), seen
         assert seen["wrong_wrist_class"] == wrong and seen["wrong_overhead_class"] == wrong
+        thirds, changed, wrong_voted = (
+            seen[name] for name in ("third_views", "votes_changed", "wrong_voted_class")
+        )
+        assert wrong_voted == (wrong if views else 0), seen
+        if rho == 0.0:
+            assert 0 < thirds <= 3 and changed <= thirds, seen
+        else:
+            assert thirds == changed == 0, seen
 
 
 def test_credit_placed_credits_a_stowed_part_once_to_its_last_placed_cycle():
@@ -1013,6 +1056,7 @@ MS7D_ON = {
     "box_walls": True,
     "marker_bias": True,
     "wrist_fix": True,
+    "class_views": True,
 }
 """The MS7d switches whose behavior is built: the no-truth test runs with them off and on."""
 

@@ -132,6 +132,7 @@ import random
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field, replace
+from functools import partial
 
 import torch
 
@@ -272,7 +273,6 @@ wider than it was when the hold ended (MS7d design section 4.2). The MS7c rule a
 for ``SELECT_OPEN_FRACTION`` of the full gap, and 107 of candidate 3's cycles ran to the step
 budget in that wait, 101 of them with the part already in a box."""
 NOT_BUILT = (
-    "class_views",  # L5: the correlated class error and the third view
     "hold_force",  # L6: the hold enters only under the pick-point force bar
     "force_cap",  # L7: the arm holds still over the force cap
 )
@@ -1009,20 +1009,35 @@ def over_box(xy, boxes) -> bool:
     return bool(checker.in_boxes(point, frames, torch.tensor(half)).any())
 
 
-def lift_class_box(wrist_cls, classify, class_to_box: dict, served: int):
+def voted_class(views) -> str:
+    """``class_views``: the class that two of three views share, the third view's on a split.
+    Pure. The loop draws a third view only when the first two disagree, and then this is always
+    the third view: it sides with one of the two or splits three ways."""
+    first, second, third = views
+    return first if first in (second, third) else third
+
+
+def lift_class_box(wrist_cls, classify, class_to_box: dict, served: int, seen=None, third=None):
     """``perceived``: the class-at-lift rule (MS7c design section 6), the stand-in for the
     MS7b wrist classifier, which replaces ``adopt_held``.
 
     Read on the hold detector's lift in a policy-driven cycle. ``wrist_cls`` is the class of
     the part between the jaws (``wrist_class``; None with nothing there, a false lift),
     ``classify`` draws the perceived class from it (``Perceiver.classify``), ``class_to_box``
-    maps a class to its box and ``served`` is the box served now. Returns the drawn class
-    (None: nothing drawn) and the box to serve (None: keep ``served``)."""
+    maps a class to its box and ``served`` is the box served now. ``class_views`` (MS7d design,
+    the L5 vote) passes ``seen``, the overhead class of the selection, and ``third``, which
+    draws a third view of the same part (a second wrist look during the carry,
+    ``ClassViews.view``): a wrist class equal to ``seen`` is taken, and any other takes
+    ``voted_class`` of the three. Returns the drawn wrist class (None: nothing drawn), the
+    class taken and the box to serve (None: keep ``served``)."""
     if wrist_cls is None:
-        return None, None
+        return None, None, None
     drawn = classify(wrist_cls)
-    box = class_to_box[drawn]
-    return drawn, None if box == served else box
+    taken = drawn
+    if third is not None and drawn != seen:
+        taken = voted_class((seen, drawn, third(wrist_cls)))
+    box = class_to_box[taken]
+    return drawn, taken, None if box == served else box
 
 
 def rearm_stop(cycle: Cycle, detector: HoldDetector) -> bool:
@@ -1292,13 +1307,15 @@ def perception_truth(env, rig, i: int) -> perception.Truth:
     )
 
 
-def wrist_class(env, i: int) -> str | None:
+def wrist_class(env, i: int) -> tuple[str | None, int]:
     """``perceived``: the one truth read a decision makes after a lift, the stand-in for the
-    MS7b wrist camera. The class of the part both jaws press (the contacts), or None."""
+    MS7b wrist camera. The class of the part both jaws press (the contacts) and its index, or
+    (None, -1). Only ``perception.ClassViews`` reads the index, to find the part's own error
+    model; no decision does."""
     left = env.scene["finger_left_brick"].data.force_matrix_w[i : i + 1].norm(dim=-1).squeeze(1)
     right = env.scene["finger_right_brick"].data.force_matrix_w[i : i + 1].norm(dim=-1).squeeze(1)
     b = int(checker.held_brick_from_forces(left, right, min_force=HELD_MIN_FORCE)[0])
-    return None if b < 0 else part_class(env.parts[b])
+    return (None, b) if b < 0 else (part_class(env.parts[b]), b)
 
 
 def wrist_look_truth(env, rig, i: int, b: int) -> tuple[float, float, float, bool]:
@@ -1339,6 +1356,9 @@ PERCEPTION_COUNTS = (
     "wrong_overhead_class",
     "lifts_classified",
     "wrong_wrist_class",
+    "third_views",
+    "votes_changed",
+    "wrong_voted_class",
     "lifts_empty",
     "look_again_waits",
     "look_again_steps",
@@ -1346,9 +1366,11 @@ PERCEPTION_COUNTS = (
     "rearms",
 )
 """The payload's ``perception`` counts: targets selected on a detection, the targets whose
-overhead class was wrong, the lifts classified, the wrong wrist classes, the lifts with no
-part between the jaws, ``look_again``'s streaks that waited, steps spent waiting and
-streaks that ended in a target or a rake, and ``rearm_hold``'s stop flag clears."""
+overhead class was wrong, the lifts classified, the wrong wrist classes, ``class_views``'s
+third views, votes that changed the wrist class and wrong classes taken after the vote (0 with
+the switch off, where the wrist class is taken), the lifts with no part between the jaws,
+``look_again``'s streaks that waited, steps spent waiting and streaks that ended in a target or
+a rake, and ``rearm_hold``'s stop flag clears."""
 BOX_WALL_COUNTS = ("box_wall_rakes", "box_wall_refusals")
 """``box_walls``'s counts, in the ``perception`` block only with the switch on: the rakes off a
 desk box wall (``Push.box_wall``) and the grasps on the selected targets that a box wall alone
@@ -1614,6 +1636,8 @@ def rollout(
             st.perceiver.reset_episode(poses[i])
             if marker_bias:
                 st.marker = perception.MarkerBias(st.perceiver, run_seed, i)
+            if class_views:
+                st.perceiver.views = perception.ClassViews(run_seed, i, scales, k)
             poses[i] = st.perceiver.box_poses
             st.selector.boxes = st.perceiver.box_poses
             st.selector.failure_scope = "part"
@@ -2046,15 +2070,25 @@ def rollout(
                 if rig.idle[i] and detectors[i].lift_started:
                     # The class at lift: the box follows the class drawn for the part between
                     # the jaws, the target or not; nothing between them keeps the row.
-                    true_cls = wrist_class(env, i)
-                    drawn, box = lift_class_box(
-                        true_cls, st.perceiver.classify, class_to_box[i], c.box
+                    true_cls, part = wrist_class(env, i)
+                    views = st.perceiver.views  # ``class_views``: a third view on a disagreement
+                    drawn, taken, box = lift_class_box(
+                        true_cls,
+                        partial(st.perceiver.classify, part=part),
+                        class_to_box[i],
+                        c.box,
+                        seen=c.seen_class,
+                        third=None if views is None else partial(views.view, part),
                     )
                     if drawn is None:
                         st.counts["lifts_empty"] += 1
                     else:
                         st.counts["lifts_classified"] += 1
                         st.counts["wrong_wrist_class"] += drawn != true_cls
+                        if views is not None:
+                            st.counts["third_views"] += drawn != c.seen_class
+                            st.counts["votes_changed"] += taken != drawn
+                            st.counts["wrong_voted_class"] += taken != true_cls
                     if box is not None:
                         c.box = box
                         env.set_context_box(i, box)
