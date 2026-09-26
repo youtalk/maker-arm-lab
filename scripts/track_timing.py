@@ -27,10 +27,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "source"))
 
-import maker_arm_rs
-
-from maker_arm_lab.core import dynamics_model as dm
-
 TICK_S = 0.005  # the tracking loop's own rate
 ROW_HZ = 30.0
 AMPLITUDE_RAD = 0.05
@@ -71,6 +67,11 @@ def _percentile(sorted_values: list[float], p: float) -> float:
 
 
 def run(ticks: int) -> dict:
+    # Imported here, under main's try, so a missing wheel still prints the FAIL token.
+    import maker_arm_rs
+
+    from maker_arm_lab.core import dynamics_model as dm
+
     arm_dof = len(maker_arm_rs.profile()["joints"]) - 1
     tracking = maker_arm_rs.Tracking(
         dm.dynamics(dm.urdf_bodies()),

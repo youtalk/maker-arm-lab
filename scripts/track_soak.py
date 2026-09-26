@@ -4,7 +4,8 @@
 stdlib and ``maker_arm_rs`` only, so it runs unmodified on the Thor from a plain checkout:
 no torch, no MuJoCo, no numpy. Every leg is a minimum-jerk walk between the desk and reach
 poses, planned at 30 Hz and pushed a tenth of a second ahead of the loop clock. Once a second
-it reads ``arm.snapshot()``: any state other than ``"enabled"`` ends the soak as a failure.
+it reads ``arm.snapshot()``: any state other than ``"enabled"`` ends the soak as a failure. So
+does a loop that stops ticking (``Tracking.now()`` reads None after 0.2 s with no tick).
 At the end it reads ``Tracking.telemetry()`` for the tick health (``max_interval``,
 ``late_ticks``, ``gaps``) and always disables the arm before returning.
 
@@ -25,10 +26,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "source"))
-
-import maker_arm_rs
-
-from maker_arm_lab.core import dynamics_model as dm
 
 ROW_HZ = 30.0
 LEG_S = 3.0
@@ -88,6 +85,11 @@ def _first_gripper(arm, timeout: float = FIRST_TICK_TIMEOUT_S) -> float:
 
 
 def run_soak(minutes: float, rt: tuple[int, int] | None) -> dict:
+    # Imported here, under main's try, so a missing wheel still prints the FAIL token.
+    import maker_arm_rs
+
+    from maker_arm_lab.core import dynamics_model as dm
+
     arm = maker_arm_rs.Arm.sim()
     try:
         arm.enable()
@@ -101,8 +103,11 @@ def run_soak(minutes: float, rt: tuple[int, int] | None) -> dict:
         deadline = start + minutes * 60.0
         waypoints, leg, q_from, enabled = (DESK_POSE, REACH_POSE), 0, DESK_POSE, True
         while time.monotonic() < deadline:
+            now = tracking.now()
+            if now is None:  # no tick for over 0.2 s: the loop no longer runs the controller
+                raise RuntimeError("the loop stopped: Tracking.now() is None")
             q_to = waypoints[(leg + 1) % 2]
-            tracking.push(tracking.now() + PUSH_LEAD_S, 1.0 / ROW_HZ, leg_rows(q_from, q_to, grip))
+            tracking.push(now + PUSH_LEAD_S, 1.0 / ROW_HZ, leg_rows(q_from, q_to, grip))
             leg_end = min(time.monotonic() + LEG_S, deadline)
             while enabled and time.monotonic() < leg_end:
                 time.sleep(max(0.0, min(SNAPSHOT_POLL_S, leg_end - time.monotonic())))

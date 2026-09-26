@@ -5,7 +5,7 @@ Thin CLI over ``maker_arm_lab.mj.bench_gate.run_suite``: runs the pre-registered
 suite, or with ``--smoke`` the single short sag check, and prints ``BENCH_OK``/``BENCH_FAIL``
 with a JSON summary (the gate table and the verdict, or the smoke numbers). ``--out`` also
 writes the whole result -- every scenario, the calibration, the report and the gate table --
-as JSON.
+as JSON. A failed write adds ``out_error`` to the summary and leaves the verdict as it is.
 
 Prints its token on every exit path, argparse errors and exceptions included, and exits
 through ``os._exit``. ``bench_gate`` is imported inside ``main`` so a usage error never pays
@@ -46,13 +46,17 @@ def main(argv=None) -> int:
         from maker_arm_lab.mj import bench_gate
 
         result = bench_gate.run_suite(seed=args.seed, smoke=args.smoke)
-        if args.out:
-            Path(args.out).write_text(json.dumps(result, indent=2, default=float))
         ok = bool(result["pass"])
         if args.smoke:
-            summary = result["smoke"]
+            summary = dict(result["smoke"])
         else:
             summary = {"gate": result["gate"], "pass": result["pass"]}
+        if args.out:
+            # A failed write is reported next to the verdict and never changes it.
+            try:
+                Path(args.out).write_text(json.dumps(result, indent=2, default=float))
+            except Exception as exc:  # noqa: BLE001
+                summary["out_error"] = f"{type(exc).__name__}: {exc}"
         token = "BENCH_OK " if ok else "BENCH_FAIL "
         print(token + json.dumps(summary, default=float), flush=True)
         return 0 if ok else 1

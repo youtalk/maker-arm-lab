@@ -1,10 +1,14 @@
 """Token contracts of the tracking bench and Thor timing scripts."""
 
 import ast
+import importlib.util
 import json
 import pathlib
 import subprocess
 import sys
+
+import maker_arm_rs
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPTS = {"mj_track_bench.py": "BENCH", "track_timing.py": "TIMING", "track_soak.py": "SOAK"}
@@ -26,9 +30,15 @@ THOR_ALLOWED = {
 }
 
 
-def _run(name, *args, timeout=300):
+def _run(name, *args, timeout=300, prelude=None):
+    """The script's last stdout line. ``prelude`` runs first in the same interpreter."""
+    script = str(ROOT / "scripts" / name)
+    cmd = [sys.executable, script, *args]
+    if prelude is not None:
+        run = "import runpy, sys\nsys.argv = sys.argv[1:]\nrunpy.run_path(sys.argv[0], None, '__main__')"
+        cmd = [sys.executable, "-c", f"{prelude}\n{run}", script, *args]
     out = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / name), *args],
+        cmd,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -79,3 +89,57 @@ def test_the_bench_smoke_is_deterministic():
 def test_a_short_soak_stays_enabled():
     line = _run("track_soak.py", "--minutes", "0.05", timeout=120)
     assert line.startswith("SOAK_OK "), line
+
+
+def test_a_missing_wheel_prints_the_fail_token():
+    block = "import sys; sys.modules['maker_arm_rs'] = None"
+    for name, args in (
+        ("track_timing.py", ("--ticks", "10")),
+        ("track_soak.py", ("--minutes", "0.01")),
+    ):
+        line = _run(name, *args, prelude=block)
+        token = SCRIPTS[name]
+        assert line.startswith(f"{token}_FAIL "), (name, line)
+        assert "maker_arm_rs" in json.loads(line.split(" ", 1)[1])["reason"], (name, line)
+
+
+def test_a_bench_out_write_failure_keeps_the_verdict(tmp_path):
+    line = _run("mj_track_bench.py", "--smoke", "--out", str(tmp_path / "missing" / "out.json"))
+    assert line.startswith("BENCH_OK "), line
+    assert "FileNotFoundError" in json.loads(line.split(" ", 1)[1])["out_error"]
+
+
+def test_a_stopped_loop_ends_the_soak_and_still_stops_the_arm(monkeypatch):
+    spec = importlib.util.spec_from_file_location("track_soak", ROOT / "scripts" / "track_soak.py")
+    soak = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(soak)
+    calls = []
+
+    class Arm:
+        def enable(self):
+            pass
+
+        def start_tracking(self, tracking, rt=None):
+            pass
+
+        def snapshot(self):
+            return {"state": "enabled", "positions": [0.0] * 7}
+
+        def stop(self):
+            calls.append("stop")
+
+    class Tracking:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def now(self):
+            return None  # the loop's last tick is older than 0.2 s
+
+        def push(self, *args):
+            calls.append("push")
+
+    monkeypatch.setattr(maker_arm_rs, "Arm", type("ArmNS", (), {"sim": staticmethod(Arm)}))
+    monkeypatch.setattr(maker_arm_rs, "Tracking", Tracking)
+    with pytest.raises(RuntimeError, match="loop stopped"):
+        soak.run_soak(0.01, None)
+    assert calls == ["stop"]
