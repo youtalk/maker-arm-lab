@@ -41,7 +41,7 @@ def test_the_plant_is_the_exact_model_with_the_jaws_held():
 def test_a_short_hold_is_deterministic():
     _, a = _hold("A", 0.5)
     _, b = _hold("A", 0.5)
-    for field in ("t", "q", "dq", "tip", "r", "offset", "q_r", "gate"):
+    for field in ("t", "q", "dq", "tip", "force", "r", "offset", "q_r", "gate"):
         assert np.array_equal(getattr(a, field), getattr(b, field)), field
     assert len(a.t) == 100 and abs(a.t[-1] - 0.5) < 1e-12
 

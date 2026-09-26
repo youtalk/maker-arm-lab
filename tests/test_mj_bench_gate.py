@@ -173,3 +173,17 @@ def test_the_gate_arithmetic_reads_relative_and_absolute_bars():
     assert by[("exact", "sway_mm")] is True  # 1.0 <= 0.3 x 4.0
     assert by[("housing", "sway_mm")] is False  # 2.5 > 0.5 x 4.0
     assert by[("exact", "press_force")] is True  # within 20 % of 5.0
+
+
+def test_false_yield_is_the_largest_tip_shift_the_offset_puts_on_the_reference(ik):
+    q = np.array(bg.DESK_POSE)
+    tr = _trace(np.arange(1, 4) * 0.005, np.zeros((3, 3)))
+    tr.q_r = np.tile(q, (3, 1))
+    tr.offset = np.array([[0.0] * 6, [0.0, 0.01, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, -0.004, 0, 0, 0]])
+
+    def shift_mm(k):
+        a, b = ik.fk(list(tr.q_r[k]))[0], ik.fk(list(tr.q_r[k] - tr.offset[k]))[0]
+        return 1000.0 * float(np.linalg.norm(np.asarray(a) - np.asarray(b)))
+
+    assert shift_mm(0) == 0.0 and shift_mm(1) > shift_mm(2) > 0.5
+    assert abs(bg.false_yield_mm(tr, ik) - shift_mm(1)) < 1e-9
