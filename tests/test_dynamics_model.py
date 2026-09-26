@@ -3,6 +3,7 @@
 import ast
 import pathlib
 import random
+import xml.etree.ElementTree as ET
 
 import mujoco
 import numpy as np
@@ -36,18 +37,53 @@ def _addr(m, names, field):
     return [int(getattr(m.joint(n), field)[0]) for n in names]
 
 
-def test_rnea_matches_mujoco_inverse_dynamics():
-    m, d = _mj()
-    qpos = _addr(m, urdf_prep.ARM_JOINT_NAMES, "qposadr")
-    dof = _addr(m, urdf_prep.ARM_JOINT_NAMES, "dofadr")
-    dyn = dm.dynamics(dm.urdf_bodies())
-    limits = urdf_prep.arm_joint_limits()
-    rng = random.Random(20260925)
-    worst = 0.0
-    for _ in range(200):
+def _mj_body(m, link):
+    """MuJoCo's own inertia for ``link``, reconstructed as a ``dm`` body tuple, in the body frame."""
+    bid = m.body(link).id
+    r = np.zeros(9)
+    mujoco.mju_quat2Mat(r, m.body_iquat[bid])
+    r = r.reshape(3, 3)
+    inertia = r @ np.diag(m.body_inertia[bid]) @ r.T
+    return (
+        float(m.body_mass[bid]),
+        tuple(float(v) for v in m.body_ipos[bid]),
+        tuple(tuple(float(v) for v in row) for row in inertia),
+    )
+
+
+def _mujoco_bodies(m, urdf=urdf_prep.VENDORED_URDF):
+    """The ``dm.urdf_bodies()`` shape, but every inertia is MuJoCo's own compiled tensor.
+
+    Isolates the adapter's URDF parsing from MuJoCo's inertia compilation: link_007 is
+    lumped with the two jaw bodies through the adapter's own ``dm.lump`` and jaw transform,
+    exactly as ``dm.arm_bodies`` does, so the only thing this helper changes is the source
+    of each body's mass, COM and inertia.
+    """
+    joints = {j.get("name"): j for j in ET.parse(urdf).getroot().iter("joint")}
+    opening = dm.JAW_FRACTION * urdf_prep.gripper_travel(urdf)
+    bodies = [_mj_body(m, link) for link in dm.ARM_LINKS[:-1]]
+    jaws = [
+        dm._jaw_in_link_007(_mj_body(m, link), joints[name], opening)
+        for link, name in zip(dm.JAW_LINKS, urdf_prep.GRIPPER_JOINT_NAMES)
+    ]
+    bodies.append(dm.lump([_mj_body(m, dm.ARM_LINKS[-1]), *jaws]))
+    return bodies
+
+
+def _draws(limits, seed=20260925, n=200):
+    """``n`` deterministic ``(q, dq, ddq)`` draws, shared by every RNEA parity test."""
+    rng = random.Random(seed)
+    for _ in range(n):
         q = [rng.uniform(lo, hi) for lo, hi in limits]
         dq = [rng.uniform(-3.0, 3.0) for _ in range(6)]
         ddq = [rng.uniform(-20.0, 20.0) for _ in range(6)]
+        yield q, dq, ddq
+
+
+def _rnea_worst_error(dyn, m, d, qpos, dof, limits):
+    """The worst absolute torque gap between ``dyn.inverse`` and ``mj_inverse`` over ``_draws``."""
+    worst = 0.0
+    for q, dq, ddq in _draws(limits):
         d.qvel[:] = 0.0
         d.qacc[:] = 0.0
         d.qpos[qpos] = q
@@ -56,7 +92,34 @@ def test_rnea_matches_mujoco_inverse_dynamics():
         mujoco.mj_inverse(m, d)
         ours = dyn.inverse(q, dq, ddq)
         worst = max(worst, float(np.max(np.abs(np.asarray(ours) - d.qfrc_inverse[dof]))))
+    return worst
+
+
+def test_rnea_matches_mujoco_inverse_dynamics_algorithm():
+    """RNEA parity against ``mj_inverse`` when both sides use the same compiled inertias."""
+    m, d = _mj()
+    qpos = _addr(m, urdf_prep.ARM_JOINT_NAMES, "qposadr")
+    dof = _addr(m, urdf_prep.ARM_JOINT_NAMES, "dofadr")
+    dyn = dm.dynamics(_mujoco_bodies(m))
+    limits = urdf_prep.arm_joint_limits()
+    worst = _rnea_worst_error(dyn, m, d, qpos, dof, limits)
     assert worst < 1e-9, worst
+
+
+def test_rnea_matches_mujoco_inverse_dynamics_adapter():
+    """RNEA parity against ``mj_inverse`` for the adapter's own URDF-derived inertias.
+
+    MuJoCo's compiler stores each inertia as principal moments plus a rotation (the scene
+    also sets balanceinertia), so its tensor differs from the URDF's by up to about 1e-4
+    relative per element. The measured worst torque difference is about 5.7e-8 N m.
+    """
+    m, d = _mj()
+    qpos = _addr(m, urdf_prep.ARM_JOINT_NAMES, "qposadr")
+    dof = _addr(m, urdf_prep.ARM_JOINT_NAMES, "dofadr")
+    dyn = dm.dynamics(dm.urdf_bodies())
+    limits = urdf_prep.arm_joint_limits()
+    worst = _rnea_worst_error(dyn, m, d, qpos, dof, limits)
+    assert worst < 1e-6, worst
 
 
 def test_subtree_mass_and_com_match_mujoco():
