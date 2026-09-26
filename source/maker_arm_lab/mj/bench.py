@@ -33,7 +33,7 @@ from maker_arm_lab.robots.frames import ARM_ARMATURE
 PHYSICS_DT = 0.001
 TICK_S = 0.005
 STEPS_PER_TICK = 5
-TAU_NOISE_SIGMA = 0.2  # N m: the QDD spike's noise ceiling
+TAU_NOISE_SIGMA = 0.2  # INITIAL: N m, the QDD spike's noise ceiling
 COULOMB_NM = {"RS00": 0.1, "RS02": 0.2}  # INITIAL: MA2 fits the real friction
 VISCOUS_NMS = 0.02  # INITIAL: N m s/rad
 TIP_RADIUS = 0.008  # INITIAL: a fingertip-sized sphere at grasp_center
