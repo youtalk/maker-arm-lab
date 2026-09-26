@@ -12,6 +12,7 @@ parameter file replaces the URDF here later.
 
 from __future__ import annotations
 
+import json
 import math
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
@@ -145,6 +146,17 @@ def arm_bodies(
 
 def urdf_bodies(urdf: Path = VENDORED_URDF, jaw_fraction: float = JAW_FRACTION) -> list[Body]:
     return arm_bodies(urdf_inertials(urdf), urdf, jaw_fraction)
+
+
+def housing_bodies(
+    path: Path = HOUSING_ASSET, urdf: Path = VENDORED_URDF, jaw_fraction: float = JAW_FRACTION
+) -> list[Body]:
+    """The housing study's mass model (tracking design section 3), jaws lumped as for the URDF."""
+    data = json.loads(path.read_text())
+    inertials = {
+        name: _freeze(b["mass"], b["com"], b["inertia"]) for name, b in data["bodies"].items()
+    }
+    return arm_bodies(inertials, urdf, jaw_fraction)
 
 
 def scaled(bodies: Sequence[Body], factor: float) -> list[Body]:
