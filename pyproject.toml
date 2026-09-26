@@ -30,7 +30,7 @@ dev = [
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu" }]
-maker-arm-rs = { git = "https://github.com/youtalk/maker-arm-rs", subdirectory = "bindings/maker-arm-py", rev = "e1541514c5dfef872ad9e8503e92819eaabd1540" }
+maker-arm-rs = { git = "https://github.com/youtalk/maker-arm-rs", subdirectory = "bindings/maker-arm-py", rev = "6141b84eb30c9c8ed042c10f426ee9a8a498eafc" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
