@@ -12,6 +12,7 @@ import torch
 
 from maker_arm_lab.core import desk_boxes, grasp, layout, loop, oracle, parts, perception
 from maker_arm_lab.core.heap_oracle import HeapOracle
+from maker_arm_lab.core.hold import HoldDetector
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
@@ -177,6 +178,51 @@ def test_a_perceived_release_completes_only_once_the_jaws_open():
     assert cycle.release_over is None
 
 
+def test_the_release_gap_completes_a_release_10_mm_past_the_gap_at_the_holds_end():
+    """MS7d L2: the MS7c rule still completes a release, a new hold still cancels it, and with
+    the switch off (``gap`` None) the rule is MS7c's."""
+    cycle = loop.Cycle(ordinal=1, target=0, start_step=100, stowed_before=set())
+    end = 0.016
+    assert not loop.perceived_release(cycle, True, False, True, 0.3, end)  # the hold ends
+    assert cycle.release_gap0 == end
+    assert not loop.perceived_release(cycle, False, False, False, 0.3, end + 0.0099)
+    assert loop.perceived_release(cycle, False, False, False, 0.3, end + 0.0101)
+    assert cycle.release_over is True
+    loop.perceived_release(cycle, True, False, False, 0.3, end)
+    assert not loop.perceived_release(cycle, False, True, False, 0.3, 0.04)  # a new hold
+    assert cycle.release_over is None
+    loop.perceived_release(cycle, True, False, False, 0.3, end)
+    assert loop.perceived_release(cycle, False, False, False, loop.SELECT_OPEN_FRACTION, end)
+    loop.perceived_release(cycle, True, False, False, 0.3)  # the switch off
+    assert not loop.perceived_release(cycle, False, False, False, 0.3)
+    assert loop.perceived_release(cycle, False, False, False, loop.SELECT_OPEN_FRACTION)
+
+
+def test_rearm_stop_clears_after_a_hold_with_no_lift_and_keeps_a_lifted_one():
+    """MS7d L8 on the real detector. Jaws stalled 10 mm wide on a shut command read a hold, and
+    jaws shut on the command end it. A hold with no lift turns the stop flag on and its end
+    clears it once, with a spent ``dwell_close`` armed again from a dwell of 0. A new hold turns
+    it on again, and the end of a lifted hold keeps it and the spent close."""
+    d = HoldDetector()
+    c = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
+    c.latched, c.dwell = -1, loop.DWELL_STEPS  # dwell_close fired and is spent
+
+    def feed(gap, z=0.05):
+        cleared = []
+        for _ in range(8):
+            d.update(gap, 0.0, z)
+            cleared.append(loop.rearm_stop(c, d))
+        return sum(cleared)
+
+    assert feed(0.010) == 0 and d.holding and c.stop
+    assert feed(0.0) == 1 and not c.stop and (c.rearms, c.latched, c.dwell) == (1, 0, 0)
+    assert feed(0.010) == 0 and c.stop
+    feed(0.010, z=0.05 + oracle.LIFT_MIN_RISE)
+    assert d.lifted
+    c.latched = -1  # the second close is spent too
+    assert feed(0.0) == 0 and not d.holding and c.stop and (c.rearms, c.latched) == (1, -1)
+
+
 def test_over_box_reads_each_boxs_yawed_footprint():
     _, (h, _, _) = desk_boxes.stow_region(2)  # the footprint is square
     boxes = [(0.10, 0.20, 0.0), (0.10, -0.20, math.pi / 4)]
@@ -199,13 +245,39 @@ def test_the_class_at_lift_serves_the_box_of_the_class_drawn_for_the_part_in_the
         return "slope" if cls == "tall" else cls  # a confusion on tall parts
 
     # Nothing between the jaws (a false lift): no draw, the row stays.
-    assert loop.lift_class_box(None, classify, boxes, 0) == (None, None) and draws == []
+    assert loop.lift_class_box(None, classify, boxes, 0) == (None, None, None) and draws == []
     # The served box already fits the drawn class: no switch.
-    assert loop.lift_class_box("wide", classify, boxes, 0) == ("wide", None)
+    assert loop.lift_class_box("wide", classify, boxes, 0) == ("wide", "wide", None)
     # Another class, or a confused one: the box of the class drawn, not of the true one.
-    assert loop.lift_class_box("narrow", classify, boxes, 0) == ("narrow", 1)
-    assert loop.lift_class_box("tall", classify, boxes, 0) == ("slope", 2)
+    assert loop.lift_class_box("narrow", classify, boxes, 0) == ("narrow", "narrow", 1)
+    assert loop.lift_class_box("tall", classify, boxes, 0) == ("slope", "slope", 2)
     assert draws == ["wide", "narrow", "tall"]
+
+
+def test_class_views_draws_a_third_view_only_when_the_wrist_disagrees_with_the_overhead():
+    """MS7d L5: a wrist class equal to the overhead one is taken with no third view; otherwise
+    the vote of the three views is taken and serves its box."""
+    boxes = {"slope": 2, "tall": 3, "narrow": 1, "wide": 0}
+    thirds = []
+
+    def third(cls):
+        thirds.append(cls)
+        return "tall"
+
+    def box(seen, drawn):
+        return loop.lift_class_box("tall", lambda cls: drawn, boxes, 0, seen=seen, third=third)
+
+    assert box("slope", "slope") == ("slope", "slope", 2) and thirds == []
+    assert box("tall", "slope") == ("slope", "tall", 3) and thirds == ["tall"]  # sides with seen
+    assert box("wide", "slope") == ("slope", "tall", 3)  # a split: the third view
+    assert loop.lift_class_box(None, None, boxes, 0, seen="wide", third=third) == (None,) * 3
+
+
+def test_the_vote_takes_the_class_two_views_share_and_the_third_on_a_split():
+    assert loop.voted_class(("wide", "slope", "wide")) == "wide"
+    assert loop.voted_class(("wide", "slope", "slope")) == "slope"
+    assert loop.voted_class(("wide", "wide", "tall")) == "wide"
+    assert loop.voted_class(("wide", "slope", "tall")) == "tall"
 
 
 def test_the_tool_is_clear_of_the_tray_40_mm_off_its_footprint_at_the_rim():
@@ -246,6 +318,104 @@ def test_the_selector_skips_the_destination_grade_when_it_knows_no_destination()
     assert sel._candidates(scene).all() and graded == [1]
 
 
+def _in_box(pose, u, v, z):
+    """A world point at (u, v) in the box frame, height z."""
+    x, y, yaw = pose
+    c, s = math.cos(yaw), math.sin(yaw)
+    return (x + c * u - s * v, y + s * u + c * v, z)
+
+
+def test_box_filter_xy_tests_the_outer_footprint_plus_the_margin_and_not_z():
+    """MS7d L1. Part 0 rests on box 2's floor, seen 5 mm low: under the grader's region, whose
+    lower face is the floor, so the MS7c filter lets it back in. Parts 1 and 2 lie 20 mm and
+    4 mm off the outer wall of box 3, yawed 0.6 rad: only the first clears the 5 mm margin.
+    Part 3 lies on the open desk."""
+    z = parts.make_part("brick", 2, 4).size[2] / 2
+    _, hy = desk_boxes.outer_half(len(FIXED))
+    positions = [
+        _in_box(FIXED[2], 0.0, -0.035, desk_boxes.DESK_BOX_WALL + z - 0.005),
+        _in_box(FIXED[3], 0.0, hy + 0.020, z),
+        _in_box(FIXED[3], 0.0, hy + 0.004, z),
+        (0.2, 0.0, z),
+    ]
+    scene = oracle.SceneSnapshot(
+        brick_pos=torch.tensor(positions),
+        brick_yaw=torch.zeros(4),
+        brick_lin_vel=torch.zeros(4, 3),
+        pick_point=torch.tensor([0.3, 0.0, 0.1]),
+        brick_quat=torch.tensor([[1.0, 0.0, 0.0, 0.0]] * 4),
+    )
+    sel = HeapOracle(
+        layout.DEFAULT_BIN_LAYOUT, [PARTS[0]] * 4, 0, oracle.nominal_draw(), boxes=FIXED
+    )
+    sel.knows_destinations = False
+    assert sel._candidates(scene).tolist() == [True, True, True, True]
+    sel.box_filter_xy = True
+    assert sel._candidates(scene).tolist() == [False, True, False, True]
+
+
+ROW = [0.2, 0.0, 0.005, math.cos(0.3), math.sin(0.3), 0.016, 0.005]
+"""A served target row (``target_context``): centre, closing axis at 0.3 rad, width, half
+height."""
+
+
+def test_a_wrist_look_is_due_on_entering_the_snap_window_and_again_only_after_leaving_it():
+    """MS7d L4: the window is the snap window, and a look fires once per stay in it."""
+    cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
+    top = ROW[2] + ROW[6]
+    high = [0.2, 0.0, top + loop.SQUARE_ABOVE + 0.001]
+    inside = [0.2 + loop.SNAP_RADIUS - 0.001, 0.0, top + 0.02]
+    wide = [0.2 + loop.SNAP_RADIUS + 0.001, 0.0, top]
+    path = [high, inside, inside, ROW[:3], wide, inside, high, inside]
+    due = [loop.look_due(cycle, pick, ROW) for pick in path]
+    assert due == [False, True, False, False, False, True, False, True]
+    cycle.in_window = False
+    assert not loop.look_due(cycle, ROW[:3], [*ROW[:5], 0.0, ROW[6]])  # no live row
+
+
+def test_the_wrist_row_moves_the_centre_and_turns_the_heading_by_the_folded_yaw_error():
+    """MS7d L4: the serving row takes the look's centre and turns by the look's yaw minus the
+    detection's, folded into a quarter turn; z, width and half height stay, and so does the
+    selected row it was built from."""
+    row = np.array(ROW, dtype=np.float32)
+    kept = row.copy()
+    quarter = math.pi / 4
+    for err, turn in (
+        (0.05, 0.05),
+        (-0.05, -0.05),
+        (math.pi + 0.05, 0.05),
+        (quarter + 0.01, -quarter + 0.01),
+    ):
+        out = loop.wrist_row(row, (0.203, -0.002, 1.0 + err), 1.0)
+        assert out[:2] == [0.203, -0.002]
+        assert [out[2], *out[5:]] == [float(v) for v in (row[2], row[5], row[6])]
+        assert math.atan2(out[4], out[3]) == pytest.approx(0.3 + turn, abs=1e-6)
+    assert np.array_equal(row, kept)
+
+
+def test_the_force_window_reads_the_wrist_looks_serving_row():
+    """MS7d L4 with L6 and L7: after a wrist look the force sensor's snap window reads the
+    serving row, as ``pick_snap`` does, and not the row served at selection."""
+    windows = []
+
+    class Sensor:
+        def update(self, window):
+            windows.append(window)
+            return 0.0
+
+    class Env:
+        def arm_torques(self, i):
+            return ()
+
+    st = loop.EnvState(selector=None)
+    st.cycle = loop.Cycle(ordinal=1, target=0, start_step=0, stowed_before=set())
+    moved = [ROW[0] + 2 * loop.SNAP_RADIUS, *ROW[1:]]
+    for serving in (None, moved):
+        st.cycle.serving_row = serving
+        loop._pick_forces(Env(), [Sensor()], [st], [ROW], [moved[:3]], [False])
+    assert windows == [False, True]
+
+
 # -- the rollout --------------------------------------------------------------------------------
 
 
@@ -276,6 +446,170 @@ def test_perceived_needs_a_policy_desk_boxes_and_a_row_and_refuses_the_truth_swi
         _rollout(bare, rig, still, perceived=True)
     bare.close()
     assert err.value.reason == "perceived"
+
+
+PERCEIVED_ONLY = (
+    "box_filter_xy",
+    "release_gap",
+    "rearm_hold",
+    "box_walls",
+    "marker_bias",
+    "wrist_fix",
+    "class_views",
+)
+"""The MS7d switches that need ``perceived``; ``hold_force`` and ``force_cap`` do not."""
+
+
+def test_the_ms7d_switches_need_perceived_before_a_step():
+    env, rig = _env_and_rig()
+    served = _served(env)
+    for name in PERCEIVED_ONLY:
+        with pytest.raises(loop.EvalFailure) as err:
+            _rollout(env, rig, _Still(), **{name: True})
+        assert err.value.reason == name
+    env.close()
+    assert served == []
+
+
+def test_the_release_gap_selects_at_once_after_a_perceived_release(monkeypatch):
+    """MS7d L2: after a cycle that ended ``placed`` or ``dropped`` the loop selects at once, as
+    after a non-release end; with the switch off it waits for the full gap as in MS7c. The
+    teacher drives as the policy and places its parts. The census records that no target lay
+    in a box when it was selected."""
+    real, after_stow = loop.release_ready, []
+
+    def spy(opening, waited, after):
+        after_stow.append(after)
+        return real(opening, waited, after)
+
+    monkeypatch.setattr(loop, "release_ready", spy)
+    for gap in (False, True):
+        after_stow.clear()
+        env, rig = _env_and_rig()
+        _place(env, SPREAD)
+        payload = _rollout(
+            env,
+            rig,
+            _Teacher(env, rig.oracle_factory),
+            perceived=True,
+            select_at_release=True,
+            release_gap=gap,
+        )
+        env.close()
+        ep = payload["episodes"][0]
+        assert ep["cycle_reasons"][:2] == ["placed", "placed"] and ep["bricks_stowed"] == 3, ep
+        assert after_stow and set(after_stow) == {not gap}, after_stow
+        assert [row["target_in_box"] for row in ep["cycle_census"]] == [False] * 3
+        assert payload["inference"]["loop"]["release_gap"] is gap
+
+
+class _ScriptedHold:
+    """A hold detector that reads nothing: it holds on the rollout's steps 10 to 14 and never
+    lifts, so its hold ends with no lift on step 15."""
+
+    def __init__(self):
+        self.t = -1
+        self.holding = self.lifted = self.started = self.lift_started = False
+        self.ended = self.lost = self.blocked = False
+
+    def update(self, measured_gap, commanded_gap, pick_z, entry=True):
+        self.t += 1
+        was, self.holding = self.holding, 10 <= self.t < 15
+        self.started, self.ended = self.holding and not was, was and not self.holding
+
+
+SERVING_RULES = ("squared_roll", "snap_shift", "snap_hold", "gated_gap")
+
+
+def test_rearm_hold_serves_the_rules_again_after_a_hold_with_no_lift(monkeypatch):
+    """MS7d L8 in the rollout, on the still policy and a scripted detector. ``dwell_close``
+    fires after a dwell of 5 steps (at any pose here), and its close is spent 3 steps later.
+    The hold on steps 10 to 14 turns the stop flag on from step 11. Latched (the switch off),
+    it stays on to the budget. With the switch on, the hold's end clears it: the four serving
+    rules read no stop from step 16 on, and ``dwell_close`` fires once more, at step 20, and
+    not a third time. The census's hold fields are the latched run's. The switch refuses
+    ``contact_hold``. Every other MS7d switch on, ``wrist_fix``'s serving row included, leaves
+    the rules' stop flag as it is."""
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 60)
+    monkeypatch.setattr(loop, "DWELL_STEPS", 5)
+    monkeypatch.setattr(loop, "CLOSE_LATCH_STEPS", 3)
+    monkeypatch.setattr(loop, "HoldDetector", _ScriptedHold)
+    monkeypatch.setattr(loop, "dwell_count", lambda n, *args, held=False: 0 if held else n + 1)
+    stops = []
+
+    def spy(name, real):
+        def rule(*args, held=False):
+            stops.append((name, held))
+            return real(*args, held=held)
+
+        return rule
+
+    for name in SERVING_RULES:
+        monkeypatch.setattr(loop, name, spy(name, getattr(loop, name)))
+    serving = dict.fromkeys(("square_wrist", "pick_snap", "close_gate", "dwell_close"), True)
+    others = {name: True for name in MS7D_ON if name != "rearm_hold"}
+    for extra, rearm in [(e, r) for e in ({}, others) for r in (False, True)]:
+        stops.clear()
+        env, rig = _env_and_rig(budget=1)
+        _place(env, SPREAD)
+        if rearm:
+            with pytest.raises(loop.EvalFailure) as err:
+                _rollout(env, rig, _Still(), perceived=True, rearm_hold=True, contact_hold=True)
+            assert err.value.reason == "rearm_hold"
+        payload = _rollout(
+            env, rig, _Still(), budget=1, perceived=True, rearm_hold=rearm, **serving, **extra
+        )
+        env.close()
+        want = [False] * 11 + [True] * 5 + [not rearm] * 44
+        for name in SERVING_RULES:
+            assert [held for n, held in stops if n == name] == want, (rearm, name)
+        ep = payload["episodes"][0]
+        row = ep["cycle_census"][0]
+        assert ep["cycle_reasons"] == ["budget"], ep
+        hold = (row["hold_detected"], row["lift_detected"], row["first_hold_at"])
+        assert hold == (True, False, 10)
+        assert (row["dwell_closes"], row["rearms"]) == (1 + rearm, int(rearm))
+        assert payload["perception"]["rearms"] == int(rearm)
+
+
+def test_the_box_walls_join_the_selectors_walls_only_with_the_switch(monkeypatch):
+    """MS7d L9: with the switch off the selector ranks against the tray walls alone and the
+    payload has no box-wall counts; with it on the walls of the perceived boxes follow the
+    tray's. On three parts in the middle of the tray, far from every box, nothing else changes."""
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
+    walls, runs = [], {}
+    real = loop._perceived_scene
+
+    def spy(st, env, rig, i, k):
+        walls.append(st.selector.walls)
+        return real(st, env, rig, i, k)
+
+    monkeypatch.setattr(loop, "_perceived_scene", spy)
+    for on in (False, True):
+        walls.clear()
+        env, rig = _env_and_rig(budget=3, tray=True)
+        _place(env, SPREAD)
+        runs[on] = _rollout(env, rig, _Still(), budget=3, perceived=True, box_walls=on)
+        boxes = env.perceived_box_poses[0].copy()
+        env.close()
+        expected = grasp.tray_walls() + (desk_boxes.box_walls(boxes, 4) if on else ())
+        assert walls and all(w == expected for w in walls)
+    off, on = runs[False], runs[True]
+    assert off["episodes"][0]["cycles"] == 3 and on["episodes"] == off["episodes"]
+    assert on["perception"] == {**off["perception"], "box_wall_rakes": 0, "box_wall_refusals": 0}
+    assert [p["inference"]["loop"]["box_walls"] for p in (off, on)] == [False, True]
+
+
+def test_the_census_reads_the_graders_any_box_region():
+    """``TruthReads.boxed``, the read behind ``target_in_box``: a part on box 0's floor and one
+    on box 3's are in a box, whoever's box it is, and a part on the desk is not."""
+    env, _ = _env_and_rig()
+    floor = desk_boxes.DESK_BOX_WALL + 0.006
+    _place(env, [(*FIXED[0][:2], floor, 0.0), (*FIXED[3][:2], floor, 0.3), (0.2, 0.0, 0.006, 0.0)])
+    boxed = loop.truth_reads(env, True).boxed
+    assert loop.truth_reads(env, False).boxed is None
+    env.close()
+    assert boxed.tolist() == [[True, True, False]]
 
 
 def test_the_row_marker_and_box_are_the_detections_at_selection_and_stay_frozen(monkeypatch):
@@ -313,22 +647,76 @@ def test_the_row_marker_and_box_are_the_detections_at_selection_and_stay_frozen(
     assert ep["done_reason"] == "no_candidate"
     assert payload["perception"] == {
         "perceived": True,
-        "noise_scales": "pos=1,heading=1,size=1,box=1,miss=1,class=1",
+        "noise_scales": perception.format_scales(perception.parse_scales("")),
         "contact_hold": False,
         "selections": 9,
         "wrong_overhead_class": payload["perception"]["wrong_overhead_class"],
         "lifts_classified": 0,
         "wrong_wrist_class": 0,
+        "third_views": 0,
+        "votes_changed": 0,
+        "wrong_voted_class": 0,
         "lifts_empty": 0,
         # The still tool stands 15 mm off the tray footprint: the empty selection looks again
         # for the retreat wait's cap, 15 steps at this budget, before it ends the episode.
         "look_again_waits": 1,
         "look_again_steps": int(loop.SELECT_WAIT_FRACTION * 40),
         "look_again_found": 0,
+        "rearms": 0,
     }
     recorded = payload["inference"]["loop"]
     assert (recorded["perceived"], recorded["contact_hold"]) == (True, False)
     assert recorded["noise_scales"] == payload["perception"]["noise_scales"]
+
+
+def test_the_marker_bias_correction_reaches_the_row_and_the_marker(monkeypatch):
+    """MS7d L3. With ``tool`` at 0 the first look reads the episode bias, so each selection's
+    target is the ``Perceiver``'s detection minus that bias, and so are the row and the frozen
+    marker served for its cycle. Every perceive call looks once, and the estimate error reads
+    0. With the switch off the loop builds no ``MarkerBias`` and the payload carries no marker
+    count."""
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 40)
+    raw, perceive = [], perception.Perceiver.perceive
+
+    def spy(self, truth):
+        raw.append((self.bias, perceive(self, truth)))
+        return raw[-1][1]
+
+    monkeypatch.setattr(perception.Perceiver, "perceive", spy)
+    env, rig = _env_and_rig(budget=3)
+    _place(env, SPREAD)
+    served, states = _served(env), _selections(monkeypatch)
+    payload = _rollout(
+        env,
+        rig,
+        _Still(),
+        budget=3,
+        perceived=True,
+        select_at_release=True,
+        marker_bias=True,
+        noise_scales={"tool": 0.0},
+    )
+    env.close()
+    ep, seen = payload["episodes"][0], payload["perception"]
+    assert ep["cycle_reasons"] == ["budget"] * 3, ep
+    assert len(states) == len(raw) == seen["marker_looks"] > 3
+    assert seen["marker_error_mm"] == pytest.approx(0.0, abs=1e-9)
+    assert payload["inference"]["loop"]["marker_bias"] is True
+    for j, target in enumerate(ep["cycle_targets"]):
+        bias, before = raw[j]
+        assert math.hypot(*bias[:2]) > 1e-4
+        fixed = next(d for d in states[j].detections if d.sim_index == target)
+        was = next(d for d in before.detections if d.sim_index == target)
+        assert fixed.centre == pytest.approx([c - b for c, b in zip(was.centre, bias)], abs=1e-12)
+        for row, _, marker, _, _ in served[40 * j : 40 * (j + 1)]:
+            assert np.allclose(row[:3], fixed.centre, atol=1e-6)
+            assert np.allclose(marker.numpy(), fixed.centre, atol=1e-6)
+    monkeypatch.setattr(perception, "MarkerBias", _raises("MarkerBias"))
+    env, rig = _env_and_rig(budget=1)
+    _place(env, SPREAD)
+    payload = _rollout(env, rig, _Still(), budget=1, perceived=True, select_at_release=True)
+    env.close()
+    assert set(loop.MARKER_COUNTS).isdisjoint(payload["perception"])
 
 
 def test_a_part_missed_at_every_call_or_under_the_tool_is_never_selected(monkeypatch):
@@ -446,8 +834,13 @@ def test_the_class_at_lift_classifies_each_lift_and_a_placed_stow_counts(monkeyp
     episode's end every placed part rests in its own box, so each placed cycle counts as a
     stow. The last part lands before the jaws open, so the env's success ends that cycle
     stowed. At a class scale that always confuses, every overhead and wrist class is wrong and
-    the teacher still stows."""
-    for scale, wrong in ((0.0, 0), (1000.0, 3)):
+    the teacher still stows. Under ``class_views`` at a persistent share of 1 (rho 2) every part
+    is persistent: all its views name one wrong class, so no vote changes the wrist class. At a
+    share of 0 (rho 0) every view is wrong on its own draws, so the wrist and the overhead
+    disagree on some parts, and the vote draws a third view on those."""
+    rows = ((0.0, 1.0, False), (1000.0, 1.0, False), (1000.0, 2.0, True), (1000.0, 0.0, True))
+    for scale, rho, views in rows:
+        wrong = 3 if scale else 0
         env, rig = _env_and_rig()
         _place(env, SPREAD)
         payload = _rollout(
@@ -455,8 +848,9 @@ def test_the_class_at_lift_classifies_each_lift_and_a_placed_stow_counts(monkeyp
             rig,
             _Teacher(env, rig.oracle_factory),
             perceived=True,
-            noise_scales={"class": scale},
+            noise_scales={"class": scale, "rho": rho},
             select_at_release=True,
+            class_views=views,
         )
         env.close()
         ep, seen = payload["episodes"][0], payload["perception"]
@@ -466,6 +860,14 @@ def test_the_class_at_lift_classifies_each_lift_and_a_placed_stow_counts(monkeyp
         assert ep["bricks_stowed"] == 3 and payload["cycles_per_stowed"] == pytest.approx(1.0)
         assert (seen["lifts_classified"], seen["lifts_empty"]) == (3, 0), seen
         assert seen["wrong_wrist_class"] == wrong and seen["wrong_overhead_class"] == wrong
+        thirds, changed, wrong_voted = (
+            seen[name] for name in ("third_views", "votes_changed", "wrong_voted_class")
+        )
+        assert wrong_voted == (wrong if views else 0), seen
+        if rho == 0.0:
+            assert 0 < thirds <= 3 and changed <= thirds, seen
+        else:
+            assert thirds == changed == 0, seen
 
 
 def test_credit_placed_credits_a_stowed_part_once_to_its_last_placed_cycle():
@@ -481,6 +883,90 @@ def test_credit_placed_credits_a_stowed_part_once_to_its_last_placed_cycle():
     assert st.outcomes == [False, False, True, False, True]
     assert st.classes == ["lifted_lost", "lifted_lost", "stowed", "lifted_lost", "stowed"]
     assert st.stowed_parts == [1, 0]
+
+
+def _wrist_rollout(wrist_fix, scales, spies=()):
+    """The teacher drives the three spread parts under ``pick_snap`` and ``square_wrist``, with
+    ``wrist_fix`` on or off. ``spies`` are (name, wrapper) pairs set on ``loop`` for the run.
+    Returns the payload and ``_served``'s rows."""
+    env, rig = _env_and_rig()
+    _place(env, SPREAD)
+    served = _served(env)
+    with pytest.MonkeyPatch.context() as mp:
+        for name, wrap in spies:
+            mp.setattr(loop, name, wrap(env, getattr(loop, name)))
+        payload = _rollout(
+            env,
+            rig,
+            _Teacher(env, rig.oracle_factory),
+            perceived=True,
+            pick_snap=True,
+            square_wrist=True,
+            wrist_fix=wrist_fix,
+            noise_scales=scales,
+        )
+    env.close()
+    return payload, served
+
+
+def test_a_wrist_look_that_misses_keeps_the_overhead_row_as_with_the_switch_off():
+    """MS7d L4: when every look misses, the loop serves exactly what it serves with the switch
+    off, the payload adds only the wrist counts, and the Perceiver's draws are untouched."""
+    scales = {"wrist_miss": 1000.0}
+    (off, off_served), (on, on_served) = (_wrist_rollout(w, scales) for w in (False, True))
+    assert len(on_served) == len(off_served) > 0
+    for (row, box, marker, _, action), b in zip(off_served, on_served):
+        assert np.array_equal(row, b[0]) and np.array_equal(box, b[1]) and torch.equal(action, b[4])
+        assert torch.equal(marker.nan_to_num(), b[2].nan_to_num())
+    assert on["episodes"][0]["cycle_reasons"] == off["episodes"][0]["cycle_reasons"]
+    seen = on["perception"]
+    assert seen["wrist_looks"] >= 3 and seen["wrist_misses"] == seen["wrist_looks"], seen
+    assert seen["wrist_covered"] == seen["wrist_shift_mm"] == seen["wrist_turn_deg"] == 0
+    assert {k: v for k, v in seen.items() if k not in loop.WRIST_COUNTS} == off["perception"]
+    assert not set(loop.WRIST_COUNTS) & set(off["perception"])
+
+
+def test_a_wrist_look_at_zero_noise_snaps_to_the_true_centre_and_leaves_the_policy_row():
+    """MS7d L4, with ``wrist`` and ``wrist_bias`` at 0: after a look the row ``pick_snap``
+    reads is centred on the target's true centre at the look, and nothing else moves; the
+    policy's row stays the detection at selection, where the frozen marker stands."""
+    events = []
+
+    def look_spy(env, real):
+        def spy(env_, rig, i, b):
+            got = real(env_, rig, i, b)
+            true = env.scene[f"brick_{b}"].data.root_pos_w[i] - env.scene.env_origins[i]
+            events.append(("look", got, true[:2].tolist()))
+            return got
+
+        return spy
+
+    def snap_spy(env, real):
+        def spy(cmd, pick, row, *args, **kwargs):
+            events.append(("snap", [float(v) for v in row], env.context_target[0].tolist()))
+            return real(cmd, pick, row, *args, **kwargs)
+
+        return spy
+
+    scales = {"wrist": 0.0, "wrist_bias": 0.0, "wrist_miss": 0.0}
+    payload, served = _wrist_rollout(
+        True, scales, [("wrist_look_truth", look_spy), ("snap_shift", snap_spy)]
+    )
+    seen = payload["perception"]
+    assert seen["wrist_looks"] >= 3 and seen["wrist_misses"] == seen["wrist_covered"] == 0, seen
+    assert seen["wrist_shift_mm"] > 0.0
+    last, snapped = None, 0
+    for kind, got, other in events:
+        if kind == "look":
+            assert got[:2] == pytest.approx(other, abs=1e-6) and got[3] is False
+            last = got[:2]
+        elif got[:2] != other[:2]:  # the serving row moved off the policy's row: a look's
+            assert tuple(got[:2]) == last and [got[2], *got[5:]] == [other[2], *other[5:]]
+            snapped += 1
+    assert snapped > 0
+    for row, _, marker, _, _ in served:
+        if not marker.isnan().any():
+            assert np.allclose(row[:3], marker.numpy(), atol=1e-6)
 
 
 # -- the no-truth test ------------------------------------------------------------------------
@@ -521,6 +1007,7 @@ def _garbage_reads(env, per_part, gen):
         quat=quat / quat.norm(dim=-1, keepdim=True),
         held=torch.randint(-1, k, (n,), generator=gen),
         resting_box=torch.randint(-1, 4, (n, k), generator=gen) if per_part else None,
+        boxed=torch.rand(n, k, generator=gen) < 0.5 if per_part else None,
     )
 
 
@@ -579,8 +1066,39 @@ def _rake_scene(monkeypatch):
     return env, rig, _Still(), 4, switches
 
 
+MS7D_ON = {
+    "box_filter_xy": True,
+    "release_gap": True,
+    "rearm_hold": True,
+    "box_walls": True,
+    "marker_bias": True,
+    "wrist_fix": True,
+    "class_views": True,
+    "hold_force": True,
+    "force_cap": True,
+}
+"""All nine MS7d switches: the no-truth test runs with them off and on."""
+
+
+def test_every_ms7d_switch_at_once_runs_the_teacher_scene_to_its_end(monkeypatch):
+    """The nine MS7d levers together at the nominal knobs on the perceived teacher scene: the
+    teacher stows every part, one classified lift a cycle, the marker, the wrist and the force
+    sensor act, and the payload records every switch, each lever's counts and the torque
+    block."""
+    env, rig, policy, budget, switches = _teacher_scene(monkeypatch)
+    payload = _rollout(env, rig, policy, budget=budget, perceived=True, **switches, **MS7D_ON)
+    env.close()
+    ep, seen, torque = payload["episodes"][0], payload["perception"], payload["torque"]
+    assert ep["done_reason"] == "all_stowed" and seen["lifts_classified"] == ep["cycles"], ep
+    assert {name: payload["inference"]["loop"][name] for name in MS7D_ON} == MS7D_ON
+    assert set(loop.BOX_WALL_COUNTS + loop.MARKER_COUNTS + loop.WRIST_COUNTS) <= set(seen)
+    assert seen["marker_looks"] > 0 and seen["wrist_looks"] > 0, seen
+    assert torque["hold_force"] and torque["force_cap"] and torque["approach_force"]["steps"] > 0
+
+
+@pytest.mark.parametrize("ms7d", [{}, MS7D_ON])
 @pytest.mark.parametrize("scene", [_teacher_scene, _rake_scene])
-def test_no_decision_reads_the_truth(scene, monkeypatch):
+def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):
     """MS7c design section 10: under perceived no decision path reads the truth.
 
     Every truth read of the loop goes through one of three accessors: ``perception_truth``
@@ -597,11 +1115,13 @@ def test_no_decision_reads_the_truth(scene, monkeypatch):
     must read neither ``snapshot`` nor the contacts either.
     """
     env, rig, policy, budget, switches = scene(monkeypatch)
+    switches |= ms7d
     served = _served(env)
     first = _rollout(env, rig, policy, budget=budget, perceived=True, **switches)
     env.close()
 
     env, rig, policy, budget, switches = scene(monkeypatch)
+    switches |= ms7d
     blind = _served(env)
     metric_calls, gen = [], torch.Generator().manual_seed(7)
 

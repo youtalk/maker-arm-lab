@@ -90,6 +90,41 @@ the tool is clear of the tray or the look has waited the retreat wait's cap
 moves it away and looks again before it calls the heap empty. While it waits, the rows and the
 marker stay, the policy drives, and every step perceives again.
 
+Nine MS7d switches (MS7d design section 4), all off by default so the MS7c protocol stays
+reproducible, and all recorded in the payload's ``inference`` block. Two are loop fixes under
+``perceived``: ``box_filter_xy`` (L1) tests only the x and y of a detection against each
+perceived box's outer footprint in the selector's candidate filter
+(``HeapOracle.box_filter_xy``), and ``release_gap`` (L2) also completes a perceived release
+at the gap measured when the hold ended plus ``RELEASE_OPEN_M`` (``perceived_release``).
+``rearm_hold`` (L8) clears the serving rules' stop flag after a hold that ends with no lift
+(``rearm_stop``). ``box_walls`` (L9) adds the perceived desk boxes' walls to the grasp model
+and the rake (``desk_boxes.box_walls``). ``marker_bias`` (L3) takes the gripper marker's
+estimate of the camera bias off every detection (``perception.MarkerBias``). ``wrist_fix``
+(L4) gives the serving rules the row of a wrist look in the snap window
+(``perception.WristCamera``, ``wrist_row``), whose truth read is the decision accessor
+``wrist_look_truth``. ``class_views`` (L5) votes on the class at lift with a third view under
+a correlated class error (``perception.ClassViews``, ``voted_class``). ``hold_force`` (L6)
+lets a hold enter only under a pick-point force bar (``HoldDetector.update``'s ``entry``).
+``force_cap`` (L7) holds the arm at its measured pose on a step over the force cap
+(``FORCE_CAP_N``). Every cycle's census also records ``target_in_box``, a metric read: whether
+the target's true centre lay in a true box region, any box, when it was selected.
+
+``rearm_hold`` (L8, MS7d design section 4.2) gives the serving rules a stop flag of their own
+(``Cycle.stop``, ``rearm_stop``): the detector's hold turns it on as before, and a hold that
+ends with no lift turns it off, so ``square_wrist``, ``pick_snap``, ``close_gate`` and
+``dwell_close`` act again, and a spent ``dwell_close`` may fire once more. The census's
+``hold_detected``, ``lift_detected`` and ``first_hold_at`` stay as they were; ``rearms``
+counts the clears. It refuses ``contact_hold``, whose flag reads the contacts.
+
+``hold_force`` (L6) and ``force_cap`` (L7) read the pick-point force (``core.torque``) that the
+env's arm torques give (``env.arm_torques``, MuJoCo only), with or without ``perceived``. The
+member stands for the motors' own torque reports, as the FK pick point stands for the joint
+encoders, so under ``perceived`` it is a sensor read and not a truth accessor. L6 lets the hold
+detector enter a hold only on a step whose force is under ``HOLD_FORCE_MAX_N``, and never ends
+one; L7 replaces the arm command of a step whose force is over ``FORCE_CAP_N`` with the measured
+arm joint positions, whoever drives. The payload's ``torque`` block counts what they did
+(``TORQUE_COUNTS``).
+
 With ``policy=None`` the oracle rig drives every cycle through the same takeover entry the
 DAgger mode uses (``OracleRig.resume(i, target=...)``): the preflight's driver and the
 loop's own end-to-end check. A takeover holds the env until the rig hands it back at
@@ -107,6 +142,7 @@ import random
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field, replace
+from functools import partial
 
 import torch
 
@@ -115,7 +151,7 @@ from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.dagger_loop import DECLINE_COOLDOWN, trigger_reason
 from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _nearest_brick_cm
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
-from maker_arm_lab.core.global_ik import fold_to_half_turn
+from maker_arm_lab.core.global_ik import fold_to_half_turn, wrap_to_pi
 from maker_arm_lab.core.heap_oracle import (
     CANDIDATE_MAX_Z,
     MAX_RAKES,
@@ -124,6 +160,7 @@ from maker_arm_lab.core.heap_oracle import (
 )
 from maker_arm_lab.core.hold import HoldDetector, agreement, commanded_gap
 from maker_arm_lab.core.parts import PART_CLASSES, part_class
+from maker_arm_lab.core.quat import quat_apply
 from maker_arm_lab.core.stowed import (
     _brick_states,
     env_heap_bin_centers,
@@ -131,6 +168,7 @@ from maker_arm_lab.core.stowed import (
     parts_resting_box,
     per_brick_stowed,
 )
+from maker_arm_lab.core.torque import FORCE_CAP_N, HOLD_FORCE_MAX_N, ForceSensor, force_summary
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_REGEX,
     GRIPPER_JOINT_NAMES,
@@ -240,6 +278,11 @@ def release_ready(open_fraction: float, waited: int, after_stow: bool) -> bool:
 RELEASE_ENDS = ("stowed", "released", "placed", "dropped")
 """The cycle ends a release makes; ``release_ready`` waits for the jaws' full gap after them.
 ``placed`` and ``dropped`` are ``perceived``'s (``perceived_cycle_end``)."""
+RELEASE_OPEN_M = 0.010  # INITIAL: the MS7d isolation row R1 measures it
+"""m: ``release_gap`` (L2) completes a perceived release once the measured jaw gap is this much
+wider than it was when the hold ended (MS7d design section 4.2). The MS7c rule alone waited
+for ``SELECT_OPEN_FRACTION`` of the full gap, and 107 of candidate 3's cycles ran to the step
+budget in that wait, 101 of them with the part already in a box."""
 
 
 def released_after_lift(cycle: Cycle, open_fraction: float, held: int) -> bool:
@@ -570,6 +613,46 @@ def snap_hold(cmd, pick, row, shift, descending: bool, held: bool = False) -> bo
     return descending and float(pick[2]) > floor + SNAP_Z_TOL
 
 
+def snap_window(pick, row) -> bool:
+    """Is the pick point inside ``pick_snap``'s window of the served ``row``: a live row (width
+    over 0), within ``SNAP_RADIUS`` of its centre in xy and under its top plus ``SQUARE_ABOVE``?
+    ``row`` None is no row. At each entry the force sensor takes its snap tare and
+    ``wrist_fix`` a wrist look (``look_due``). Pure."""
+    if row is None or float(row[5]) <= 0.0:
+        return False
+    near = math.hypot(float(pick[0]) - float(row[0]), float(pick[1]) - float(row[1]))
+    return near <= SNAP_RADIUS and float(pick[2]) < float(row[2]) + float(row[6]) + SQUARE_ABOVE
+
+
+def look_due(cycle: Cycle, pick, row) -> bool:
+    """``wrist_fix``: does the loop take a wrist look on this step (the MS7d design's L4 model)?
+
+    The look window is ``snap_window`` of the serving row ``row`` at the measured pick point
+    ``pick``. A look fires on the step the pick point enters the window, so once per stay: it
+    must leave and come back for the next. Pure except for ``cycle.in_window``, the last step's
+    read."""
+    inside = snap_window(pick, row)
+    due = inside and not cycle.in_window
+    cycle.in_window = inside
+    return due
+
+
+def wrist_row(row, look, seen_yaw: float) -> list[float]:
+    """``wrist_fix``: the serving row after a wrist look that found the target. Pure.
+
+    ``row`` is the target row served at selection (``target_context``), ``look`` the look's
+    (x, y, yaw) and ``seen_yaw`` the heading of the target detection's body x axis at
+    selection. The centre x and y become the look's, and the closing axis heading (``row[3]``,
+    ``row[4]`` = cos, sin) turns by the measured yaw error ``look yaw - seen_yaw``, folded into
+    [-pi/4, pi/4): a box part's grasp axes repeat every quarter turn, and the error is a few
+    degrees. The z, the width and the half height stay."""
+    turn = wrap_to_pi(4.0 * (look[2] - seen_yaw)) / 4.0
+    heading = math.atan2(float(row[4]), float(row[3])) + turn
+    out = [float(v) for v in row]
+    out[0], out[1], out[3], out[4] = look[0], look[1], math.cos(heading), math.sin(heading)
+    return out
+
+
 DWELL_STEPS = 150
 """Control steps the pick point may wait at grasp height with the jaws open before
 ``dwell_close`` closes them. The rung 2 arm B 300k traces of 2026-09-24 (draws 1 and 3 of
@@ -665,6 +748,25 @@ def cycle_close_below(selector, scene, target: int) -> float:
     return float(min(selector.parts[target].size[:2]))
 
 
+def box_wall_refusals(selector, scene, target: int) -> int:
+    """``box_walls`` (MS7d L9): the grasps on ``target`` that a desk box wall alone refuses,
+    the ones ``grasp.candidate_grasps`` finds against the tray walls and not against every wall
+    of the selector. Read at a selection, so a read shows how often the lever turned a grasp
+    off a box wall. Pure."""
+    args = (
+        target,
+        selector.sizes[target],
+        scene.brick_pos[target],
+        scene.brick_quat[target],
+        oracle.PICK_TILT_RAD,
+        selector.parts[target].closing_axes,
+    )
+    tray = [w for w in selector.walls if not w.box]
+    return len(grasp.candidate_grasps(*args, tray)) - len(
+        grasp.candidate_grasps(*args, selector.walls)
+    )
+
+
 def refreshed_row(row, selector, scene, target: int) -> list[float]:
     """``row_refresh``: the target row after the teacher's REOPEN refresh. The part's live
     centre and the grasp re-ranked on it (``target_context``); when nothing ranks any more the
@@ -728,7 +830,7 @@ class Cycle:
     snap_held_steps: int = 0  # steps ``pick_snap`` held the jaws at the landing gap
     dwell: int = 0  # consecutive steps at grasp height with open jaws (``dwell_count``)
     latched: int = 0  # ``dwell_close``: 0 not fired, > 0 steps the close has run, -1 spent
-    dwell_closes: int = 0  # times ``dwell_close`` fired in the cycle (at most one)
+    dwell_closes: int = 0  # times ``dwell_close`` fired (at most 1 + ``rearms``)
     adopted: int = -1  # the lifted non-target part ``adopt_held`` served the box of, else -1
     grace_steps: int = 0  # steps ``budget_ends_cycle``'s carry grace kept the cycle open
     # The MS7c hold census: the proprioceptive detector (``hold.HoldDetector``) on this
@@ -737,6 +839,8 @@ class Cycle:
     lift_detected: bool = False  # and read a lift on at least one
     first_hold_at: int | None = None  # steps into the cycle at its first detected hold
     first_held_at: int | None = None  # steps into the cycle at the first contact-held step
+    stop: bool = False  # ``rearm_hold``: the serving rules' stop flag (``rearm_stop``)
+    rearms: int = 0  # and the times it cleared after a hold with no lift
     # ``perceived``: the target's detection at selection, the failure memory's position.
     target_xy: tuple | None = None  # m, its perceived centre xy
     seen_class: str | None = None  # its class perceived overhead
@@ -744,6 +848,17 @@ class Cycle:
     # ``perceived_release``: a lifted hold ended over a box (True) or off one (False), and the
     # jaws have not yet opened to ``SELECT_OPEN_FRACTION``; None with no release under way.
     release_over: bool | None = None
+    release_gap0: float | None = None  # m, ``release_gap``: the measured jaw gap at that end
+    # ``wrist_fix``: the heading of the detection's body x axis at selection, the row the
+    # serving rules read after a wrist look (None before the first, ``wrist_row``), and whether
+    # the pick point was in the look window on the last step (``look_due``).
+    seen_yaw: float = 0.0
+    serving_row: list | None = None
+    in_window: bool = False
+    # The MS7d census: the target's true centre lay in a true box region, any box, at the
+    # selection (``TruthReads.boxed``); None without desk boxes. A metric read only.
+    target_in_box: bool | None = None
+    hold_blocked: int = 0  # MS7d L6: hold entries the force gate refused in the cycle
 
 
 @dataclass
@@ -772,10 +887,13 @@ class EnvState:
     # ``perceived``: this env's perception, its failure memory and rake counter by position,
     # and the ``PERCEPTION_COUNTS``.
     perceiver: perception.Perceiver | None = None
+    marker: perception.MarkerBias | None = None  # ``marker_bias``: the camera bias estimate
     fail_mem: perception.PositionMemory = field(default_factory=perception.PositionMemory)
     rake_mem: perception.PositionMemory = field(default_factory=perception.PositionMemory)
     counts: Counter = field(default_factory=Counter)
     look_since: int | None = None  # the step a streak of empty selections began (look_again)
+    wrist: perception.WristCamera | None = None  # ``wrist_fix``: this env's wrist look
+    forces: list[float] = field(default_factory=list)  # MS7d: N, each approach step's force
 
 
 def _layout_of(rig, i: int):
@@ -828,7 +946,12 @@ def cycle_end(
 
 
 def perceived_release(
-    cycle: Cycle, lost: bool, regrasped: bool, over_now: bool, open_fraction: float
+    cycle: Cycle,
+    lost: bool,
+    regrasped: bool,
+    over_now: bool,
+    open_fraction: float,
+    gap: float | None = None,
 ) -> bool:
     """``perceived``: does a release complete on this step? The hold detector's lifted hold
     ending (``lost``) starts one and keeps ``over_now``, the ``over_box`` test of the FK pick
@@ -837,12 +960,18 @@ def perceived_release(
     proprioceptive read ``released_after_lift`` makes. Ending the cycle on the hold's end
     instead switched the target row while the part was still pinched: the next chunk closed
     the jaws again at about 14 mm and carried wide parts off the box (MS7c ledger,
-    2026-09-24). Pure except for ``cycle.release_over``."""
+    2026-09-24). ``gap`` is ``release_gap``'s (None: off), the measured jaw gap: kept in
+    ``cycle.release_gap0`` at the hold's end, and a gap ``RELEASE_OPEN_M`` wider than that
+    completes the release too. Pure except for ``cycle.release_over`` and ``release_gap0``."""
     if lost:
         cycle.release_over = over_now
+        cycle.release_gap0 = gap
     elif regrasped:
         cycle.release_over = None
-    return cycle.release_over is not None and open_fraction >= SELECT_OPEN_FRACTION
+    if cycle.release_over is None:
+        return False
+    opened = gap is not None and gap >= cycle.release_gap0 + RELEASE_OPEN_M
+    return open_fraction >= SELECT_OPEN_FRACTION or opened
 
 
 def perceived_cycle_end(cycle: Cycle, step: int, released: bool, over: bool) -> str | None:
@@ -895,20 +1024,57 @@ def over_box(xy, boxes) -> bool:
     return bool(checker.in_boxes(point, frames, torch.tensor(half)).any())
 
 
-def lift_class_box(wrist_cls, classify, class_to_box: dict, served: int):
+def voted_class(views) -> str:
+    """``class_views``: the class that two of three views share, the third view's on a split.
+    Pure. The loop draws a third view only when the first two disagree, and then this is always
+    the third view: it sides with one of the two or splits three ways."""
+    first, second, third = views
+    return first if first in (second, third) else third
+
+
+def lift_class_box(wrist_cls, classify, class_to_box: dict, served: int, seen=None, third=None):
     """``perceived``: the class-at-lift rule (MS7c design section 6), the stand-in for the
     MS7b wrist classifier, which replaces ``adopt_held``.
 
     Read on the hold detector's lift in a policy-driven cycle. ``wrist_cls`` is the class of
     the part between the jaws (``wrist_class``; None with nothing there, a false lift),
     ``classify`` draws the perceived class from it (``Perceiver.classify``), ``class_to_box``
-    maps a class to its box and ``served`` is the box served now. Returns the drawn class
-    (None: nothing drawn) and the box to serve (None: keep ``served``)."""
+    maps a class to its box and ``served`` is the box served now. ``class_views`` (MS7d design,
+    the L5 vote) passes ``seen``, the overhead class of the selection, and ``third``, which
+    draws a third view of the same part (a second wrist look during the carry,
+    ``ClassViews.view``): a wrist class equal to ``seen`` is taken, and any other takes
+    ``voted_class`` of the three. Returns the drawn wrist class (None: nothing drawn), the
+    class taken and the box to serve (None: keep ``served``)."""
     if wrist_cls is None:
-        return None, None
+        return None, None, None
     drawn = classify(wrist_cls)
-    box = class_to_box[drawn]
-    return drawn, None if box == served else box
+    taken = drawn
+    if third is not None and drawn != seen:
+        taken = voted_class((seen, drawn, third(wrist_cls)))
+    box = class_to_box[taken]
+    return drawn, taken, None if box == served else box
+
+
+def rearm_stop(cycle: Cycle, detector: HoldDetector) -> bool:
+    """``rearm_hold`` (L8): update the serving rules' stop flag ``cycle.stop`` from this step's
+    ``detector``, and say whether it cleared. The hold census calls it after the serving rules,
+    so they read it one step late, as they read ``hold_detected`` and ``lift_detected``.
+
+    A detected hold or lift turns the flag on, as the latched rule does. A hold that ends with
+    no lift (``ended`` and not ``lost``: a finger pressed on the desk, a tray wall or a box,
+    or a grip that slipped before the lift) turns it off, so ``square_wrist``, ``pick_snap``,
+    ``close_gate`` and ``dwell_close`` act again, and a spent ``dwell_close`` (``latched``
+    -1) may fire once more, its dwell counted from 0. A close still running keeps running. A
+    lifted hold that ends (a release or a drop) keeps the flag. On MS7c candidate 3 the latched
+    flag was on with no lift in 503 of 3517 cycles, a median 522 steps before the cycle
+    ended, and the policy's own wrist roll was served at once near the ground (MS7d design
+    section 2, D8). Pure except for ``cycle.stop``, ``rearms``, ``latched`` and ``dwell``."""
+    if cycle.stop and detector.ended and not detector.lost:
+        cycle.stop, cycle.dwell, cycle.latched = False, 0, max(cycle.latched, 0)
+        cycle.rearms += 1
+        return True
+    cycle.stop = cycle.stop or detector.holding or detector.lifted
+    return False
 
 
 def census_step(
@@ -1019,6 +1185,8 @@ CENSUS_EXPORT = (
     "lift_detected",
     "first_hold_at",
     "first_held_at",
+    "target_in_box",
+    "rearms",
 )
 """The ``Cycle`` fields each episode's ``cycle_census`` row exports, plus the two is_target
 flags of ``first_held`` and ``last_held``. Observation only, never the metric."""
@@ -1117,6 +1285,7 @@ class TruthReads:
     quat: torch.Tensor  # (N,K,4) part orientations (w, x, y, z)
     held: torch.Tensor  # (N,) the part both jaws press at HELD_MIN_FORCE, -1 for none
     resting_box: torch.Tensor | None  # (N,K) with desk boxes: the box each part rests in, or -1
+    boxed: torch.Tensor | None  # (N,K) with desk boxes: in any box, moving or not, the grader's
 
 
 def truth_reads(env, per_part: bool) -> TruthReads:
@@ -1134,6 +1303,7 @@ def truth_reads(env, per_part: bool) -> TruthReads:
         ).to("cpu"),
         held=held_brick_from_forces(left, right, min_force=HELD_MIN_FORCE).to("cpu"),
         resting_box=parts_resting_box(env).to("cpu") if per_part else None,
+        boxed=parts_in_desk_boxes(env).to("cpu") if per_part else None,
     )
 
 
@@ -1152,13 +1322,48 @@ def perception_truth(env, rig, i: int) -> perception.Truth:
     )
 
 
-def wrist_class(env, i: int) -> str | None:
+def wrist_class(env, i: int) -> tuple[str | None, int]:
     """``perceived``: the one truth read a decision makes after a lift, the stand-in for the
-    MS7b wrist camera. The class of the part both jaws press (the contacts), or None."""
+    MS7b wrist camera. The class of the part both jaws press (the contacts) and its index, or
+    (None, -1). Only ``perception.ClassViews`` reads the index, to find the part's own error
+    model; no decision does."""
     left = env.scene["finger_left_brick"].data.force_matrix_w[i : i + 1].norm(dim=-1).squeeze(1)
     right = env.scene["finger_right_brick"].data.force_matrix_w[i : i + 1].norm(dim=-1).squeeze(1)
     b = int(checker.held_brick_from_forces(left, right, min_force=HELD_MIN_FORCE)[0])
-    return None if b < 0 else part_class(env.parts[b])
+    return (None, b) if b < 0 else (part_class(env.parts[b]), b)
+
+
+def wrist_look_truth(env, rig, i: int, b: int) -> tuple[float, float, float, bool]:
+    """``wrist_fix``: the one truth read of a wrist look, the stand-in for the wrist camera
+    (MS7d L4). Part ``b``'s live centre x and y, the heading of its body x axis in the world
+    xy plane (``PerceivedState.scene``'s convention), and whether another part covers its
+    centre from above (``perception.covered``, the overhead camera's rule). A decision
+    accessor like ``perception_truth``, which it reads: the no-truth test leaves both alone."""
+    t = perception_truth(env, rig, i)
+    pos, quat, sizes = (torch.as_tensor(v, dtype=torch.float32) for v in (t.pos, t.quat, t.sizes))
+    x_axis = quat_apply(quat[b], torch.tensor([1.0, 0.0, 0.0]))
+    yaw = math.atan2(float(x_axis[1]), float(x_axis[0]))
+    return float(pos[b, 0]), float(pos[b, 1]), yaw, perception.covered(pos, quat, sizes, b)
+
+
+def _wrist_look(st: EnvState, env, rig, i: int, pick, row) -> None:
+    """``wrist_fix``: take a wrist look at the cycle's target if ``look_due`` says so, and set
+    the serving row from it (``wrist_row``). ``row`` is the target row served at selection. A
+    miss or a covered target keeps the serving row as it is."""
+    c = st.cycle
+    if not look_due(c, pick, row if c.serving_row is None else c.serving_row):
+        return
+    x, y, yaw, covered = wrist_look_truth(env, rig, i, c.target)
+    look = st.wrist.look((x, y), yaw, covered)
+    st.counts["wrist_looks"] += 1
+    st.counts["wrist_covered"] += covered
+    st.counts["wrist_misses"] += look is None and not covered
+    if look is None:
+        return
+    c.serving_row = wrist_row(row, look, c.seen_yaw)
+    st.counts["wrist_shift_mm"] += 1e3 * math.hypot(look[0] - row[0], look[1] - row[1])
+    turn = math.atan2(c.serving_row[4], c.serving_row[3]) - math.atan2(row[4], row[3])
+    st.counts["wrist_turn_deg"] += abs(math.degrees(wrap_to_pi(turn)))
 
 
 PERCEPTION_COUNTS = (
@@ -1166,22 +1371,78 @@ PERCEPTION_COUNTS = (
     "wrong_overhead_class",
     "lifts_classified",
     "wrong_wrist_class",
+    "third_views",
+    "votes_changed",
+    "wrong_voted_class",
     "lifts_empty",
     "look_again_waits",
     "look_again_steps",
     "look_again_found",
+    "rearms",
 )
 """The payload's ``perception`` counts: targets selected on a detection, the targets whose
-overhead class was wrong, the lifts classified, the wrong wrist classes, the lifts with no
-part between the jaws, and ``look_again``'s streaks that waited, steps spent waiting and
-streaks that ended in a target or a rake."""
+overhead class was wrong, the lifts classified, the wrong wrist classes, ``class_views``'s
+third views, votes that changed the wrist class and wrong classes taken after the vote (0 with
+the switch off, where the wrist class is taken), the lifts with no part between the jaws,
+``look_again``'s streaks that waited, steps spent waiting and streaks that ended in a target or
+a rake, and ``rearm_hold``'s stop flag clears."""
+BOX_WALL_COUNTS = ("box_wall_rakes", "box_wall_refusals")
+"""``box_walls``'s counts, in the ``perception`` block only with the switch on: the rakes off a
+desk box wall (``Push.box_wall``) and the grasps on the selected targets that a box wall alone
+refused (``box_wall_refusals``)."""
+MARKER_COUNTS = ("marker_looks", "marker_error_mm")
+"""``marker_bias``'s ``perception`` counts, in the payload only with the switch on: the looks at
+the gripper marker, one per perceive call, and over the selections the sum of the estimate's xy
+distance to the true bias in mm (``MarkerBias.error_mm``, a metric read), so over
+``selections`` it is the mean error the selected rows carried."""
+WRIST_COUNTS = ("wrist_looks", "wrist_misses", "wrist_covered", "wrist_shift_mm", "wrist_turn_deg")
+"""``wrist_fix``'s counts, which join the ``perception`` block only with the switch on: the
+wrist looks, those that missed and those whose target another part covered, and over the
+looks that found it, the sums of the serving row's xy move (mm) and heading turn (degrees),
+both against the row at selection."""
+TORQUE_COUNTS = ("force_capped", "hold_blocked", "hold_blocked_cycles")
+"""The ``torque`` block's counts under ``hold_force`` or ``force_cap``: the steps L7 held the arm,
+the hold entries L6 refused (one per confirmed run of the jaw-gap rule) and the cycles with one."""
+
+
+def _pick_forces(env, sensors, states, rows, picks, done) -> list[float]:
+    """MS7d L6 and L7: each live env's pick-point force at the top of the step, N (0 for a done
+    env). The window is ``snap_window`` of the row ``pick_snap`` reads while a cycle is open:
+    the served row, or after a wrist look ``wrist_fix``'s ``Cycle.serving_row``. The force of
+    an approach step (the cycle's open to its first close) joins ``EnvState.forces``."""
+    forces = [0.0] * len(sensors)
+    for i, sensor in enumerate(sensors):
+        if bool(done[i]):
+            continue
+        c = states[i].cycle
+        row = None if c is None or rows is None else rows[i]
+        if c is not None and c.serving_row is not None:
+            row = c.serving_row
+        window = snap_window(picks[i], row)
+        forces[i] = sensor.update(*env.arm_torques(i), window)
+        if c is not None and c.first_close_at is None:
+            states[i].forces.append(forces[i])
+    return forces
+
+
+def _count_blocked(st: EnvState) -> None:
+    """MS7d L6: book a hold entry the force gate refused, and its cycle's first."""
+    st.counts["hold_blocked"] += 1
+    if st.cycle is not None:
+        st.cycle.hold_blocked += 1
+        st.counts["hold_blocked_cycles"] += st.cycle.hold_blocked == 1
 
 
 def _perceived_scene(st: EnvState, env, rig, i: int, k: int):
     """``perceived``: perceive env ``i`` and hand the selector the detections: the scene with
     one slot per part (``PerceivedState.scene``), the perceived sizes and closing axes, and the
-    failure and rake counts by position. Returns the state and the scene."""
+    failure and rake counts by position. Returns the state and the scene. Under
+    ``marker_bias`` every centre is first corrected by the gripper marker's estimate."""
     state = st.perceiver.perceive(perception_truth(env, rig, i))
+    if st.marker is not None:
+        st.marker.look(rig.pick_point(i).tolist())
+        state = st.marker.correct(state)
+        st.counts["marker_looks"] += 1
     sel = st.selector
     sel.parts = state.parts(k)
     sel.sizes = torch.tensor([p.size for p in sel.parts], dtype=torch.float32)
@@ -1263,6 +1524,15 @@ def rollout(
     perceived: bool = False,
     noise_scales: dict | None = None,
     contact_hold: bool = False,
+    box_filter_xy: bool = False,
+    release_gap: bool = False,
+    rearm_hold: bool = False,
+    box_walls: bool = False,
+    marker_bias: bool = False,
+    wrist_fix: bool = False,
+    class_views: bool = False,
+    hold_force: bool = False,
+    force_cap: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1281,6 +1551,9 @@ def rollout(
     flag's contact fallback. It needs a policy, desk boxes, the continuous gripper and a served
     target row, and refuses the switches that read the truth (``takeover``,
     ``scripted_place``, ``row_refresh``).
+    The nine MS7d switches are the module docstring's; all but ``hold_force`` and
+    ``force_cap`` need ``perceived``. Those two need the env's ``arm_torques``, and a
+    ``hold_trace`` row then carries the force too.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1351,6 +1624,23 @@ def rollout(
         ):
             if on:
                 raise EvalFailure("perceived", f"{name} reads the truth")
+    ms7d = {
+        "box_filter_xy": bool(box_filter_xy),
+        "release_gap": bool(release_gap),
+        "rearm_hold": bool(rearm_hold),
+        "box_walls": bool(box_walls),
+        "marker_bias": bool(marker_bias),
+        "wrist_fix": bool(wrist_fix),
+        "class_views": bool(class_views),
+        "hold_force": bool(hold_force),
+        "force_cap": bool(force_cap),
+    }
+    for name, on in ms7d.items():
+        # The hold calibration runs the teacher with --hold_force, and the cap binds every driver.
+        if on and not perceived and name not in ("hold_force", "force_cap"):
+            raise EvalFailure(name, "changes a perceived decision: it needs perceived")
+    if rearm_hold and contact_hold:
+        raise EvalFailure("rearm_hold", "clears the detector's flag; contact_hold reads contacts")
     limits = robot.data.joint_pos_limits[:, arm_ids, :].to("cpu")
     tracker = RolloutTracker(num_envs, k)
     recorder = getattr(env, "recorder", None)
@@ -1379,6 +1669,12 @@ def rollout(
                 f"the selector spends {st.selector.cycle_budget} cycles, the loop {cycle_budget}",
             )
     scales = {**perception.parse_scales(""), **(noise_scales or {})}  # a knob not named is 1
+    sensors = None  # MS7d L6 and L7: one pick-point force sensor per env
+    if hold_force or force_cap:
+        if getattr(env, "arm_torques", None) is None:
+            name = "hold_force" if hold_force else "force_cap"
+            raise EvalFailure(name, "needs the env's arm torques (arm_torques, MuJoCo only)")
+        sensors = [ForceSensor(run_seed, i, scales) for i in range(num_envs)]
     if perceived:
         # The episode's perception per env. The box poses are the last truth the setup reads:
         # the perceived ones replace them in the served row, the selector's any-box filter and
@@ -1389,10 +1685,21 @@ def rollout(
         for i, st in enumerate(states):
             st.perceiver = perception.Perceiver(run_seed, i, scales)
             st.perceiver.reset_episode(poses[i])
+            if marker_bias:
+                st.marker = perception.MarkerBias(st.perceiver, run_seed, i)
+            if class_views:
+                st.perceiver.views = perception.ClassViews(run_seed, i, scales, k)
             poses[i] = st.perceiver.box_poses
             st.selector.boxes = st.perceiver.box_poses
             st.selector.failure_scope = "part"
             st.selector.knows_destinations = False
+            st.selector.box_filter_xy = box_filter_xy
+            if box_walls:
+                # L9: the grasp model and the rake also read the perceived boxes' walls.
+                boxes = st.perceiver.box_poses
+                st.selector.walls += desk_boxes.box_walls(boxes, len(boxes))
+            if wrist_fix:
+                st.wrist = perception.WristCamera(run_seed, i, scales)
         env.perceived_box_poses = poses
         for i in range(num_envs):
             env.set_context_box(i, 0)  # the reset served box 0's true pose
@@ -1421,6 +1728,7 @@ def rollout(
         "perceived": bool(perceived),
         "noise_scales": perception.format_scales(scales) if perceived else "",
         "contact_hold": bool(contact_hold),
+        **ms7d,
     }
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
@@ -1439,12 +1747,13 @@ def rollout(
         if (time.monotonic() - started) / 60.0 > max_wall_minutes:
             raise EvalFailure("wall_clock", f"exceeded {max_wall_minutes} min at step {step}")
         truth = truth_reads(env, per_part)
-        per_brick, in_bin, pos, speed, held = (
+        per_brick, in_bin, pos, speed, held, boxed = (
             truth.per_brick,
             truth.in_bin,
             truth.pos,
             truth.speed,
             truth.held,
+            truth.boxed,
         )
         tracker.latch_pre_step(per_brick)
         if per_part:
@@ -1453,14 +1762,19 @@ def rollout(
             final_box[live] = truth.resting_box[live]
         openings = policy_state(robot.data.joint_pos)[:, 6].to("cpu")
         gaps = robot.data.joint_pos[:, jaw_ids].sum(dim=-1).to("cpu")  # m, measured jaw gap
-        boxed = parts_in_desk_boxes(env).to("cpu") if per_part and not perceived else None
         # The hold detector reads this step's proprioception first: the jaw gap measured now,
         # the gap the last step's command asked for and the FK pick point. ``perceived``
         # decides on its state and events below; otherwise only the census reads it.
         top_picks = [rig.pick_point(i).to("cpu") for i in range(num_envs)]
+        forces = [0.0] * num_envs  # N, the pick-point force, read under L6 or L7 only
+        if sensors is not None:
+            forces = _pick_forces(env, sensors, states, ctx_target, top_picks, tracker.done)
         for i, d in enumerate(detectors):
             if not bool(tracker.done[i]):
-                d.update(float(gaps[i]), gap_cmd[i], float(top_picks[i][2]))
+                gate = not hold_force or forces[i] < HOLD_FORCE_MAX_N  # L6's entry gate
+                d.update(float(gaps[i]), gap_cmd[i], float(top_picks[i][2]), gate)
+                if d.blocked:
+                    _count_blocked(states[i])
         # 1. Grade and select on the envs the loop holds: episode live, rig idle.
         for i in range(num_envs):
             if bool(tracker.done[i]) or not rig.idle[i]:
@@ -1470,7 +1784,8 @@ def rollout(
             if st.cycle is not None and perceived:
                 c, d = st.cycle, detectors[i]
                 over = d.lost and over_box(top_picks[i][:2], st.perceiver.box_poses)
-                released = perceived_release(c, d.lost, d.started, over, float(openings[i]))
+                gap = float(gaps[i]) if release_gap else None
+                released = perceived_release(c, d.lost, d.started, over, float(openings[i]), gap)
                 reason = perceived_cycle_end(c, step, released, bool(c.release_over))
                 # The carry grace keeps a cycle open while the detector holds.
                 grace = not budget_ends_cycle(step - c.start_step, d.holding, c.grace_steps)
@@ -1513,8 +1828,12 @@ def rollout(
             if st.idle_since is not None:
                 opening = float(openings[i])
                 if select_at_release:
+                    # ``release_gap`` ended a perceived release on the opening already: the
+                    # wait for the full gap would add back the steps it cut.
+                    last = st.reasons[-1]
+                    gapped = release_gap and last in ("placed", "dropped")
                     ready = release_ready(
-                        opening, step - st.idle_since, st.reasons[-1] in RELEASE_ENDS
+                        opening, step - st.idle_since, last in RELEASE_ENDS and not gapped
                     )
                 else:
                     ready = select_ready(
@@ -1544,6 +1863,7 @@ def rollout(
                 # caps), then selects again.
                 st.selector._end_push()
                 st.rakes += 1
+                st.counts["box_wall_rakes"] += rake.box_wall
                 overrides = {}
                 if perceived:
                     # Booked where the part was perceived; the rig's takeover reads the hold
@@ -1585,6 +1905,7 @@ def rollout(
                 heading=None if chosen is None else float(chosen.heading),
                 wait_steps=waited,
                 wait_capped=waited >= int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET),
+                target_in_box=None if boxed is None else bool(boxed[i, target]),
             )
             if perceived:
                 # The row, the frozen marker and the box of the class perceived overhead all
@@ -1592,11 +1913,16 @@ def rollout(
                 seen = next(d for d in state.detections if d.sim_index == target)
                 st.cycle.target_xy = seen.centre[:2]
                 st.cycle.seen_class = seen.cls
+                st.cycle.seen_yaw = float(scene.brick_yaw[target])
                 st.cycle.box = class_to_box[i][seen.cls]
                 env.marker_points[i] = torch.tensor(seen.centre)
                 env.set_context_box(i, st.cycle.box)
                 st.counts["selections"] += 1
                 st.counts["wrong_overhead_class"] += seen.cls != true_classes[target]
+                if box_walls:
+                    st.counts["box_wall_refusals"] += box_wall_refusals(st.selector, scene, target)
+                if st.marker is not None:
+                    st.counts["marker_error_mm"] += st.marker.error_mm()
             else:
                 env.target_part[i] = target
                 if per_part:
@@ -1662,17 +1988,23 @@ def rollout(
         if policy_action is not None:
             idle = torch.tensor(rig.idle)
             action_cpu[idle] = policy_action[idle]
-            if close_gate or squeeze_floor or square_wrist or pick_snap or dwell_close:
+            if close_gate or squeeze_floor or square_wrist or pick_snap or dwell_close or wrist_fix:
                 for i, st in enumerate(states):
                     if st.cycle is None or not rig.idle[i] or bool(tracker.done[i]):
                         continue
-                    row = ctx_target[i]  # CONTEXT_TARGET_NAMES: z at 2, width at 5, half height 6
+                    c = st.cycle
+                    if wrist_fix:
+                        _wrist_look(st, env, rig, i, picks[i], ctx_target[i])
+                    # CONTEXT_TARGET_NAMES: z at 2, width at 5, half height 6. ``wrist_fix``
+                    # serves the last wrist look's row; the policy keeps ``ctx_target``'s.
+                    row = ctx_target[i] if c.serving_row is None else c.serving_row
                     width = float(row[5])
                     gap = float(action_cpu[i, 6])
                     # ``census_step`` and the hold census run after this block, so the fields
                     # read the steps before this one: no hold and no lift so far in the cycle.
-                    c = st.cycle
-                    if perceived and not contact_hold:
+                    if rearm_hold:  # it needs perceived and refuses contact_hold
+                        held_so_far = c.stop  # the detector's, cleared by a hold with no lift
+                    elif perceived and not contact_hold:
                         held_so_far = c.hold_detected or c.lift_detected  # the detector's
                     else:
                         held_so_far = c.held_steps > 0 or c.max_rise >= oracle.LIFT_MIN_RISE
@@ -1795,15 +2127,25 @@ def rollout(
                 if rig.idle[i] and detectors[i].lift_started:
                     # The class at lift: the box follows the class drawn for the part between
                     # the jaws, the target or not; nothing between them keeps the row.
-                    true_cls = wrist_class(env, i)
-                    drawn, box = lift_class_box(
-                        true_cls, st.perceiver.classify, class_to_box[i], c.box
+                    true_cls, part = wrist_class(env, i)
+                    views = st.perceiver.views  # ``class_views``: a third view on a disagreement
+                    drawn, taken, box = lift_class_box(
+                        true_cls,
+                        partial(st.perceiver.classify, part=part),
+                        class_to_box[i],
+                        c.box,
+                        seen=c.seen_class,
+                        third=None if views is None else partial(views.view, part),
                     )
                     if drawn is None:
                         st.counts["lifts_empty"] += 1
                     else:
                         st.counts["lifts_classified"] += 1
                         st.counts["wrong_wrist_class"] += drawn != true_cls
+                        if views is not None:
+                            st.counts["third_views"] += drawn != c.seen_class
+                            st.counts["votes_changed"] += taken != drawn
+                            st.counts["wrong_voted_class"] += taken != true_cls
                     if box is not None:
                         c.box = box
                         env.set_context_box(i, box)
@@ -1835,10 +2177,13 @@ def rollout(
                     c.first_hold_at = step - c.start_step
                 c.hold_detected = c.first_hold_at is not None
                 c.lift_detected = c.lift_detected or d.lifted
+                if rearm_hold:
+                    st.counts["rearms"] += rearm_stop(c, d)
             if hold_trace is not None:
                 rise = float(pos[i, h, 2] - c.start_z[h]) if h >= 0 and c is not None else 0.0
                 ordinal_i = -1 if c is None else c.ordinal
-                hold_trace.append([i, step, ordinal_i, gap, gap_cmd[i], pick_z, h, rise])
+                row = [i, step, ordinal_i, gap, gap_cmd[i], pick_z, h, rise]
+                hold_trace.append(row if sensors is None else row + [forces[i]])
         arm_clamped, overshoot = clamp_arm_actions(action_cpu[:, :6], limits)
         tracker.record_clamps(overshoot)
         clamped = torch.cat([arm_clamped, action_cpu[:, 6:7]], dim=-1)
@@ -1848,6 +2193,12 @@ def rollout(
             if parked is not None:
                 clamped[tracker.done] = parked[tracker.done]
             parked = clamped.clone()
+        if force_cap:
+            for i in range(num_envs):
+                if forces[i] > FORCE_CAP_N:
+                    # MS7d L7: the arm holds still where it is; the gripper command passes.
+                    clamped[i, :6] = robot.data.joint_pos[i, :6]
+                    states[i].counts["force_capped"] += 1
         last_roll = clamped[:, WRIST_ROLL_INDEX].clone()
         gap_cmd = [commanded_gap(float(g), gripper_mode) for g in clamped[:, 6]]
         if step == max_steps - 1 and recorder is not None:
@@ -1974,6 +2325,11 @@ def rollout(
                 **boxes,
             }
         )
+        if sensors is not None:
+            episodes[-1]["torque"] = {
+                **{name: st.counts[name] for name in TORQUE_COUNTS},
+                "approach_force": force_summary(st.forces),
+            }
     steps_total = sum(e["steps"] for e in episodes)
     cycles_total = sum(e["cycles"] for e in episodes)
     stowed_total = sum(e["bricks_stowed"] for e in episodes)
@@ -2017,9 +2373,26 @@ def rollout(
             "perceived": switches["perceived"],
             "noise_scales": switches["noise_scales"],
             "contact_hold": switches["contact_hold"],
-            **{name: sum(st.counts[name] for st in states) for name in PERCEPTION_COUNTS},
+            **{
+                name: sum(st.counts[name] for st in states)
+                for name in PERCEPTION_COUNTS
+                + (BOX_WALL_COUNTS if box_walls else ())
+                + (MARKER_COUNTS if marker_bias else ())
+                + (WRIST_COUNTS if wrist_fix else ())
+            },
         },
     }
+    if sensors is not None:
+        payload["torque"] = {
+            "hold_force": bool(hold_force),
+            "force_cap": bool(force_cap),
+            "hold_force_max_n": HOLD_FORCE_MAX_N,
+            "force_cap_n": FORCE_CAP_N,
+            "torque": scales["torque"],
+            "torque_k": scales["torque_k"],
+            **{name: sum(st.counts[name] for st in states) for name in TORQUE_COUNTS},
+            "approach_force": force_summary([f for st in states for f in st.forces]),
+        }
     return payload
 
 

@@ -20,7 +20,7 @@ import random
 from collections.abc import Sequence
 
 from maker_arm_lab.core import layout
-from maker_arm_lab.core.grasp import polygon_distance
+from maker_arm_lab.core.grasp import Wall, polygon_distance
 from maker_arm_lab.core.parts import PART_CLASSES, Part, part_class
 
 DESK_BOX_INTERIOR_ONE = (0.11, 0.11, 0.06)  # INITIAL: rung 1, one box takes all 50 parts
@@ -104,6 +104,11 @@ over the band (40 trials each): (0.12, 0.0, 0.15) planned 23 times, and (0.15, 0
 (0.18, 0.0, 0.14) and (0.20, 0.0, 0.12) all 40, in 10 to 61 steps. The nearest of the three
 to the arm keeps the most of the heap in the overhead frame."""
 DRAW_TRIES = 5000
+BOX_FILTER_MARGIN_M = 0.005  # INITIAL: the MS7d isolation row R1 measures it
+"""m: ``in_outer_footprint`` grows every box's outer footprint by this on each side (MS7d
+design section 4.2, L1). The perceived candidate filter tested a detection's 3D centre against
+the grader's region, whose lower face is the box floor, so a z error of a few mm under a part
+at rest in its box put it back among the candidates: 92 cycles of MS7c candidate 3."""
 
 
 def interior(n: int) -> tuple[float, float, float]:
@@ -130,6 +135,19 @@ def stow_region(n: int) -> tuple[float, tuple[float, float, float]]:
     return DESK_BOX_WALL + h / 2, (ix / 2, iy / 2, h / 2)
 
 
+def in_outer_footprint(xy, poses, n: int, margin: float = BOX_FILTER_MARGIN_M) -> bool:
+    """Does the point ``xy`` lie in the outer footprint (interior plus wall) of any of these
+    box ``poses`` (``n`` on the desk), grown by ``margin`` on every side, in each box's own
+    frame? Its height does not count. Pure."""
+    hx, hy = outer_half(n)
+    for x, y, yaw in poses:
+        dx, dy = float(xy[0]) - float(x), float(xy[1]) - float(y)
+        c, s = math.cos(yaw), math.sin(yaw)
+        if abs(c * dx + s * dy) <= hx + margin and abs(c * dy - s * dx) <= hy + margin:
+            return True
+    return False
+
+
 def box_geoms(n: int) -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
     """(name, centre, size) of the floor and the four walls, in the box's own frame."""
     ix, iy, iz = interior(n)
@@ -142,6 +160,29 @@ def box_geoms(n: int) -> list[tuple[str, tuple[float, float, float], tuple[float
         ("wall_py", (0.0, iy / 2 + w / 2, wall_z), (ix, w, iz)),
         ("wall_ny", (0.0, -iy / 2 - w / 2, wall_z), (ix, w, iz)),
     ]
+
+
+def box_walls(poses: Sequence[Sequence[float]], n: int) -> tuple[Wall, ...]:
+    """The four walls of each box at these ``poses`` (``n`` on the desk) for the grasp model,
+    as ``grasp.tray_walls`` gives the tray's (MS7d design section 4.2, L9). Each footprint is
+    the wall's ``box_geoms`` rectangle turned by the box yaw, the top is the rim, the heading
+    runs along the wall's length, ``outward`` points away from the box centre, and no wall
+    leans. ``Wall.box`` marks them. Pure."""
+    walls = []
+    for x, y, yaw in poses:
+        c, s = math.cos(yaw), math.sin(yaw)
+        for name, (u, v, _), size in box_geoms(n):
+            if name == "floor":
+                continue
+            hu, hv = size[0] / 2, size[1] / 2
+            footprint = tuple(
+                (x + c * (u + a) - s * (v + b), y + s * (u + a) + c * (v + b))
+                for a, b in ((hu, hv), (-hu, hv), (-hu, -hv), (hu, -hv))
+            )
+            out = math.atan2(s * u + c * v, c * u - s * v)
+            normal = (math.cos(out), math.sin(out))
+            walls.append(Wall(footprint, out + math.pi / 2, rim_z(n), normal, box=True))
+    return tuple(walls)
 
 
 def corners(pose: Sequence[float], n: int) -> list[tuple[float, float]]:

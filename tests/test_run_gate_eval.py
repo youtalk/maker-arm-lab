@@ -1108,7 +1108,8 @@ def test_the_perceived_flags_reach_the_heap_client_and_key_the_cache(tmp_path):
     on = ["--perceived", "--noise_scales", "heading=2", "--contact_hold"]
     cfg = ge._build_cfg(ge._parse_args(argv + heap + on))
     cmd = ge._eval_command(cfg, draw)
-    canonical = "pos=1,heading=2,size=1,box=1,miss=1,class=1"
+    canonical = "pos=1,heading=2,size=1,box=1,miss=1,class=1,"
+    canonical += "tool=1,wrist=1,wrist_bias=1,wrist_miss=1,rho=1,torque=1,torque_k=1"
     assert "--perceived" in cmd and "--contact_hold" in cmd
     assert cmd[cmd.index("--noise_scales") + 1] == canonical  # forwarded canonical
     found = ge.loop_switches(cfg.client_flags)
@@ -1146,6 +1147,59 @@ def test_the_perceived_flags_reach_the_heap_client_and_key_the_cache(tmp_path):
     for missing in (heap[:5] + heap[7:], heap[:7]):  # no desk boxes, the binary gripper
         with pytest.raises(ValueError, match="--perceived needs"):
             ge._build_cfg(ge._parse_args(argv + missing + ["--perceived"]))
+
+
+def test_the_ms7d_switches_and_knobs_reach_the_heap_client_and_key_the_cache(tmp_path):
+    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
+    argv += ["--threshold", "0.7", "--seed", "1"]
+    heap = ["--backend", "mujoco", "--heap_k", "50", "--tray", "--desk_boxes", "4"]
+    heap += ["--gripper", "continuous", "--perceived"]
+    draw = ge.make_eval_draws(1, 1)[0]
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    nominal = ge.noise_scales_key("")
+    base = {name: False for name in ge.LOOP_SWITCHES} | {"perceived": True, "noise_scales": nominal}
+    path = tmp_path / "gate" / "eval_000.json"
+    path.parent.mkdir()
+
+    def hit(cfg, loop):
+        payload = _heap_payload(
+            draw, tray=True, desk_boxes=4, gripper="continuous", inference={**served, "loop": loop}
+        )
+        path.write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    plain = ge._build_cfg(ge._parse_args(argv + heap))
+    assert not {f"--{name}" for name in ge.MS7D_LEVERS} & set(ge._eval_command(plain, draw))
+    assert hit(plain, base)
+    for name in ge.MS7D_LEVERS:
+        cfg = ge._build_cfg(ge._parse_args(argv + heap + [f"--{name}"]))
+        assert f"--{name}" in ge._eval_command(cfg, draw)
+        assert ge.loop_switches(cfg.client_flags) == base | {name: True, "rake_cap": 0}
+        assert (
+            hit(cfg, base | {name: True})
+            and not hit(cfg, base)
+            and not hit(plain, base | {name: True})
+        )
+    for knob in ("tool", "wrist", "wrist_bias", "wrist_miss", "rho", "torque", "torque_k"):
+        scales = ge.noise_scales_key(f"{knob}=2")
+        assert f"{knob}=2" in scales.split(",")
+        cfg = ge._build_cfg(ge._parse_args(argv + heap + ["--noise_scales", f"{knob}=2"]))
+        cmd = ge._eval_command(cfg, draw)
+        assert cmd[cmd.index("--noise_scales") + 1] == scales
+        assert hit(cfg, base | {"noise_scales": scales}) and not hit(cfg, base), knob
+    # An MS7c payload recorded the six MS7c knobs only: a gate on the MS7d code refuses it.
+    assert not hit(plain, base | {"noise_scales": "pos=1,heading=1,size=1,box=1,miss=1,class=1"})
+    off = heap[:-1]  # no --perceived
+    for name in ge.MS7D_LEVERS:
+        with pytest.raises(ValueError, match=f"--{name} needs --heap_k"):
+            ge._build_cfg(ge._parse_args(argv + ["--backend", "isaac", f"--{name}"]))
+        if name in ("hold_force", "force_cap"):  # the teacher's hold calibration runs L6
+            assert f"--{name}" in ge._eval_command(
+                ge._build_cfg(ge._parse_args(argv + off + [f"--{name}"])), draw
+            )
+        else:
+            with pytest.raises(ValueError, match=f"--{name} needs --perceived"):
+                ge._build_cfg(ge._parse_args(argv + off + [f"--{name}"]))
 
 
 def test_the_supervisors_copy_of_the_scales_parse_matches_the_perception_module():

@@ -126,6 +126,7 @@ class Push:
     part: int | None = None  # the raked part; None is the densest-cell push
     heading: float | None = None  # a rake's sweep direction
     jaw: float | None = None  # the closing axis the legs square to; None holds the jaws
+    box_wall: bool = False  # a rake off a desk box wall (``grasp.Wall.box``, MS7d L9)
 
 
 @dataclass(frozen=True)
@@ -214,6 +215,10 @@ class HeapOracle(oracle.EnvOracle):
         # no part's destination, so ``_candidates`` skips ``_stowed``; its any-box filter on
         # the perceived boxes already drops a stowed part.
         self.knows_destinations = True
+        # True under the heap loop's --perceived --box_filter_xy (MS7d L1): the any-box filter
+        # tests a detection's x and y against each box's outer footprint, not its noisy 3D
+        # centre against the grader's region, whose lower face is the box floor.
+        self.box_filter_xy = False
         # The rake's caps and its start rule; the heap loop's --rake_cap and --rake_crowd
         # raise them on its selectors (MS7a rake prototype), the teacher keeps these.
         self.rake_part_cap = RAKE_PART_CAP
@@ -299,8 +304,13 @@ class HeapOracle(oracle.EnvOracle):
         if self.boxes:
             # A part in any box, its own or another, is out of play: the grasp model knows no
             # walls, and a part in another box is the class branch's wrong_box, not a target.
-            boxes, half = self._box_tensor()
-            boxed = checker.in_boxes(scene.brick_pos.unsqueeze(0), boxes, half)[0].any(-1)
+            if self.box_filter_xy:
+                n = len(self.boxes)
+                xy = scene.brick_pos[:, :2].tolist()
+                boxed = [desk_boxes.in_outer_footprint(p, self.boxes, n) for p in xy]
+            else:
+                boxes, half = self._box_tensor()
+                boxed = checker.in_boxes(scene.brick_pos.unsqueeze(0), boxes, half)[0].any(-1)
             done |= {b for b in range(self.num_bricks) if bool(boxed[b])}
         mask = torch.zeros(self.num_bricks, dtype=torch.bool)
         self.out_of_reach = 0
@@ -484,7 +494,7 @@ class HeapOracle(oracle.EnvOracle):
             )
             if segment is not None:
                 start, end, heading = segment
-                return Push(start, end, part=b, heading=heading, jaw=heading)
+                return Push(start, end, part=b, heading=heading, jaw=heading, box_wall=wall.box)
         return None
 
     def _push_yaw(self) -> float | None:

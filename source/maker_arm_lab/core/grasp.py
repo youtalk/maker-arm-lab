@@ -108,13 +108,15 @@ class Wall:
     """A static wall the jaws must not land on: its top-down footprint at the desk, its
     direction of length (rad, a line, so ``heading`` and ``heading + pi`` are the same wall)
     and its top. A leaning wall (``lean`` = tan of its tilt off vertical) stands
-    ``lean * h`` further along ``outward`` at height h than its footprint at the desk."""
+    ``lean * h`` further along ``outward`` at height h than its footprint at the desk. ``box``
+    marks a desk box wall (``desk_boxes.box_walls``, MS7d L9), which ``hugs_wall`` skips."""
 
     footprint: tuple[tuple[float, float], ...]
     heading: float
     top: float
     outward: tuple[float, float] = (0.0, 0.0)
     lean: float = 0.0
+    box: bool = False
 
 
 def tray_walls(lean_deg: float = 0.0) -> tuple[Wall, ...]:
@@ -165,12 +167,16 @@ def hugs_wall(
     pos: torch.Tensor, heading: float, width: float, half_height: float, walls: Sequence[Wall]
 ) -> bool:
     """Is this grasp within its finger reach of a wall that stands in its grip band, with
-    its closing axis along that wall (``wall_allows``'s band, from the passing side)?"""
+    its closing axis along that wall (``wall_allows``'s band, from the passing side)?
+
+    A desk box wall (``Wall.box``) never counts: WALL_MAX_GRASP_WIDTH was driven on the tray
+    walls only, and MS7d L9 lets a box wall refuse a grasp, not add a wide one."""
     band = float(pos[2]) + half_height - MIN_GRIP_OVERLAP
     xy = (float(pos[0]), float(pos[1]))
     near = landing_half_gap(width) + TIP_THICKNESS + WALL_BAND_MARGIN
     return any(
-        wall.top > band
+        not wall.box
+        and wall.top > band
         and polygon_distance([xy], wall_at(wall, band)) < near
         and along_wall(heading, wall)
         for wall in walls

@@ -48,6 +48,20 @@ def test_the_heap_client_takes_the_gripper_flag():
     assert '"--gripper"' in text and "gripper_mode=args.gripper" in text
 
 
+MS7D = (
+    "box_filter_xy",
+    "release_gap",
+    "rearm_hold",
+    "box_walls",
+    "marker_bias",
+    "wrist_fix",
+    "class_views",
+    "hold_force",
+    "force_cap",
+)
+PERCEIVED_ONLY = MS7D[:-2]  # hold_force and force_cap run without --perceived too
+
+
 def test_the_heap_client_takes_the_protocol_switches():
     text = SCRIPT.read_text()
     for name in (
@@ -68,11 +82,24 @@ def test_the_heap_client_takes_the_protocol_switches():
         "perceived",
         "noise_scales",
         "contact_hold",
+        *MS7D,
     ):
         assert f'"--{name}"' in text and f"{name}=args.{name}" in text
 
 
 PERCEIVED = ["--perceived", "--desk_boxes", "4", "--gripper", "continuous"]
+
+
+def _run(argv):
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "source"), "MUJOCO_GL": "disable"}  # CI has no GL
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *argv],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=300,
+        check=False,
+    )
 
 
 @pytest.mark.parametrize(
@@ -85,18 +112,11 @@ PERCEIVED = ["--perceived", "--desk_boxes", "4", "--gripper", "continuous"]
         ["--noise_scales", "heading=2"],
         [*PERCEIVED, "--noise_scales", "bogus=1"],
         [*PERCEIVED, "--noise_scales", "heading=-1"],
+        *([f"--{name}"] for name in PERCEIVED_ONLY),
     ],
 )
 def test_the_perceived_flags_refuse_a_bad_combination_with_the_token(argv):
-    env = {**os.environ, "PYTHONPATH": str(ROOT / "source"), "MUJOCO_GL": "disable"}  # CI has no GL
-    out = subprocess.run(
-        [sys.executable, str(SCRIPT), *argv],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=300,
-        check=False,
-    )
+    out = _run(argv)
     assert out.returncode == 2, out.stderr
     assert out.stdout.strip().splitlines() == [out.stdout.strip()]  # one token line
     assert out.stdout.startswith('EVAL_FAIL {"reason": "usage"'), out.stdout

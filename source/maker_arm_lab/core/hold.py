@@ -17,6 +17,12 @@ as a hold, and it gates entry only. Exit: the excess or the width condition fail
 point rises ``min_rise`` above its height at the step the hold began, latched until the hold
 ends. Lost: a hold ends while lifted (a drop in the carry, or the release).
 
+MS7d L6 (``hold_force``) adds an entry gate: on a step whose pick-point force is over the bar
+(``core.torque``) the gate refuses a new hold (``blocked``), and the confirm run keeps counting,
+so the hold enters on the first step the gate opens with the jaw-gap rule still met. A true
+hold that closes with a finger pressed on the floor then enters at the lift, which takes the
+finger off. The gate never ends a hold that has begun, and without it the detector is MS7c's.
+
 ``agreement`` scores the detector against the contact census per cycle and ``meets_bar`` is the
 pre-registered bar. ``cycle_rows`` rebuilds those census rows from a per-step trace
 (``loop.rollout(hold_trace=...)``) at any thresholds, for the calibration sweep. The detector
@@ -56,10 +62,13 @@ TRACE_FIELDS = (
     "pick_z",
     "held",
     "rise",
+    "force",
 )
 """One ``hold_trace`` row: the env, the loop step, the cycle ordinal (-1 between cycles), the
 measured and commanded gaps (m), the pick point z (m), the contact-held part (-1 for none) and
-its rise above the cycle's start height (m, 0.0 with none held or no cycle)."""
+its rise above the cycle's start height (m, 0.0 with none held or no cycle). The ninth, the
+pick-point force (N, ``core.torque``), is there only when the rollout measured it (MS7d L6 or
+L7); a row without it has the first eight."""
 
 
 def commanded_gap(raw: float, gripper_mode: str) -> float:
@@ -73,8 +82,8 @@ def commanded_gap(raw: float, gripper_mode: str) -> float:
 
 class HoldDetector:
     """One env's hold state. ``update`` once per control step; after it, ``holding`` and
-    ``lifted`` are the state and ``started``, ``lift_started``, ``ended`` and ``lost`` the
-    events of that step."""
+    ``lifted`` are the state and ``started``, ``lift_started``, ``ended``, ``lost`` and
+    ``blocked`` the events of that step."""
 
     def __init__(
         self,
@@ -102,13 +111,17 @@ class HoldDetector:
         self.fails = 0  # consecutive steps an exit condition failed during the hold
         self.start_z = 0.0  # m, the pick point z at the step the hold began
         self.holding = self.lifted = False
-        self.started = self.lift_started = self.ended = self.lost = False
+        self.started = self.lift_started = self.ended = self.lost = self.blocked = False
 
-    def update(self, measured_gap: float, commanded_gap: float, pick_z: float) -> None:
+    def update(
+        self, measured_gap: float, commanded_gap: float, pick_z: float, entry: bool = True
+    ) -> None:
         """One step: ``measured_gap`` read at the top of the step, ``commanded_gap`` the gap the
         previous step's command asked for (the measurement answers it), ``pick_z`` the FK
-        pick point height, all in m."""
-        self.started = self.lift_started = self.ended = self.lost = False
+        pick point height, all in m. ``entry`` is the L6 gate, open by default: closed, it
+        refuses a new hold on this step, and ``blocked`` marks the step a run first confirmed
+        and was refused."""
+        self.started = self.lift_started = self.ended = self.lost = self.blocked = False
         self.gaps.append(measured_gap)
         gripping = measured_gap - commanded_gap >= self.min_excess and measured_gap >= self.min_gap
         if self.holding:
@@ -122,7 +135,9 @@ class HoldDetector:
         full = len(self.gaps) == self.stable_steps
         still = full and max(self.gaps) - min(self.gaps) <= self.stable
         self.run = self.run + 1 if gripping and still else 0
-        if self.run >= self.confirm_steps:
+        if self.run >= self.confirm_steps and not entry:
+            self.blocked = self.run == self.confirm_steps
+        elif self.run >= self.confirm_steps:
             self.holding = self.started = True
             self.run = self.fails = 0
             self.start_z = pick_z
@@ -180,17 +195,19 @@ def meets_bar(summary: dict) -> bool:
     return all(r >= b for r, b in zip(rates, bars)) and offset <= BAR_OFFSET_STEPS
 
 
-def cycle_rows(trace, **thresholds) -> list[dict]:
+def cycle_rows(trace, force_max: float | None = None, **thresholds) -> list[dict]:
     """Replay ``HoldDetector(**thresholds)`` over one rollout's ``hold_trace`` rows (lists in
     ``TRACE_FIELDS`` order, in step order) and rebuild each cycle's census row: the truth's
     ``held_steps``, ``max_rise`` (rounded as the census rounds it) and ``first_held_at``, and
     the detector's ``hold_detected``, ``lift_detected`` and ``first_hold_at``. At the default
-    thresholds the rows equal the rollout's own census. Pure."""
+    thresholds the rows equal the rollout's own census. ``force_max`` (N, None: no gate) gates
+    each entry on the rows' force column as L6 does live, so a trace read with ``hold_force``
+    replays at another bar; it needs the ninth column. Pure."""
     detectors: dict[int, HoldDetector] = {}
     cycles: dict[tuple[int, int], dict] = {}
-    for env, step, ordinal, gap, cmd, pick_z, held, rise in trace:
+    for env, step, ordinal, gap, cmd, pick_z, held, rise, *force in trace:
         d = detectors.setdefault(env, HoldDetector(**thresholds))
-        d.update(gap, cmd, pick_z)
+        d.update(gap, cmd, pick_z, force_max is None or force[0] < force_max)
         if ordinal < 0:
             continue
         c = cycles.setdefault(

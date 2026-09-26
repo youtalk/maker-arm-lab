@@ -5,7 +5,12 @@ Torch and stdlib only. Behind the heap loop's ``--perceived`` switch, the loop's
 ``PerceivedState`` instead of the simulator truth (MS7c design section 4). In simulation that
 state is the truth passed through noise and failure models, one knob each (``KNOBS``). A knob
 is a scale on a nominal value: 0 turns that model off and 1 is the nominal. Every nominal is
-``# INITIAL:``, and MS5a measures it on real frames.
+``# INITIAL:``, and MS5a measures it on real frames. The seven MS7d knobs (``tool`` to
+``torque_k``, the MS7d design's new knobs) are in ``KNOBS`` so that ``all``, the payload and the
+gate cache carry them, and the ``Perceiver`` draws nothing for them. ``MarkerBias`` reads
+``tool`` (L3), ``WristCamera`` reads ``wrist``, ``wrist_bias`` and ``wrist_miss`` (L4),
+``ClassViews`` reads ``rho`` (L5) and ``core.torque.ForceSensor`` reads ``torque`` and
+``torque_k`` (L6, L7).
 
 Two structural rules hold at every scale, zero included: a part whose centre another part
 covers from above is not seen, and neither is a part under the tool
@@ -22,7 +27,7 @@ from __future__ import annotations
 import math
 import random
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -30,8 +35,23 @@ from maker_arm_lab.core import grasp, oracle
 from maker_arm_lab.core.parts import BOX_AXES, PART_CLASSES, SLOPE_AXES, Part
 from maker_arm_lab.core.quat import quat_apply, quat_mul
 
-KNOBS = ("pos", "heading", "size", "box", "miss", "class")
-"""The knob names, in the order ``format_scales`` writes them."""
+KNOBS = (
+    "pos",
+    "heading",
+    "size",
+    "box",
+    "miss",
+    "class",
+    "tool",
+    "wrist",
+    "wrist_bias",
+    "wrist_miss",
+    "rho",
+    "torque",
+    "torque_k",
+)
+"""The knob names, in the order ``format_scales`` writes them: the six MS7c knobs, then the
+seven of MS7d."""
 EXTRA_KNOBS = ("pos_z",)
 """Diagnostic multipliers that ``all`` leaves alone and ``format_scales`` writes only when not
 1: ``pos_z`` scales the z axis of the position bias and noise on top of ``pos``, to split the
@@ -53,8 +73,26 @@ BOX_YAW_SIGMA_RAD = math.radians(2.0)  # INITIAL: MS5a measures it on real frame
 MISS_PROBABILITY = 0.05  # INITIAL: MS5a measures it on real frames
 # Class: a wrong class per classification, the MS7b classifier gate of 0.97.
 CLASS_ERROR_PROBABILITY = 0.03  # INITIAL: MS5a measures it on real frames
+CLASS_PERSISTENT_SHARE = 0.5  # INITIAL: MS5a measures it on real parts, across views
+"""``ClassViews`` (L5): the share of the class error that is persistent, the same wrong class in
+every view of a part, at the ``rho`` knob's 1 (a scale of 2 gives a share of 1). No
+measurement yet (MS7d design, the knob table)."""
+TOOL_SIGMA_M = 0.001  # INITIAL: MS5a measures it on real frames
+"""m: the ``tool`` knob's nominal, the noise per look on the gripper marker (``MarkerBias``) on
+each of x, y and z: a fiducial of known size on the gripper, seen at about 0.6 m."""
 # Structural rule 2: the arm hides a part this close to the tool (xy) from the overhead camera.
 TOOL_OCCLUSION_RADIUS_M = 0.040  # INITIAL: MS5a measures it on real frames
+# Wrist look (MS7d L4, ``WristCamera``): the 224 px wrist frame covers about 0.14 m at the look
+# height, about 0.6 mm per pixel, and the camera mount's hand-eye calibration adds a bias.
+WRIST_SIGMA_M = 0.0005  # INITIAL: MS5a measures it on real frames
+"""m: the noise per wrist look on the target's centre x and y (knob ``wrist``)."""
+WRIST_YAW_SIGMA_RAD = math.radians(2.0)  # INITIAL: MS5a measures it on real frames
+"""rad: the noise per wrist look on the target's yaw (knob ``wrist``)."""
+WRIST_BIAS_SIGMA_M = 0.0005  # INITIAL: MS5a measures it on real frames
+"""m: the hand-eye bias per episode on every wrist look, x and y (knob ``wrist_bias``)."""
+WRIST_MISS_PROBABILITY = 0.05  # INITIAL: MS5a measures it on real frames
+"""A wrist look that finds nothing: the fingers and the neighbours in the frame (knob
+``wrist_miss``)."""
 # PositionMemory: ten sigmas of the per-detection xy noise.
 ASSOCIATION_RADIUS_M = 0.015  # INITIAL: the MS7c reads check it
 PARKED_CENTRE = (3.0, 0.0, 1.0)
@@ -165,23 +203,34 @@ class Truth:
     tool_xy: tuple[float, float]  # the tool point the arm hides parts around
 
 
+def covered(
+    pos: torch.Tensor, quat: torch.Tensor, sizes: torch.Tensor, b: int, radius=None
+) -> bool:
+    """Structural rule 1: does part ``b``'s centre lie inside the footprint of a part whose
+    centre is higher? ``radius`` is ``grasp.neighbor_extents``'s first result, computed here
+    when None. The overhead camera (``_hidden``) and L4's wrist look both read it."""
+    if radius is None:
+        radius, _ = grasp.neighbor_extents(sizes, quat)
+    centres = pos.tolist()
+    x, y, z = centres[b]
+    for c, (cx, cy, cz) in enumerate(centres):
+        if cz <= z or math.hypot(x - cx, y - cy) > float(radius[c]):
+            continue  # c is the part itself, lower, or too far to reach b's centre
+        if grasp.polygon_distance([(x, y)], grasp.footprint(sizes[c], pos[c], quat[c])) < 0:
+            return True
+    return False
+
+
 def _hidden(pos: torch.Tensor, quat: torch.Tensor, sizes: torch.Tensor, tool_xy) -> set[int]:
     """The parts the two structural rules remove: a part within TOOL_OCCLUSION_RADIUS_M of the
     tool in xy, and a part whose centre lies inside the footprint of a part whose centre is
-    higher."""
+    higher (``covered``)."""
     radius, _ = grasp.neighbor_extents(sizes, quat)
-    centres = pos.tolist()
     hidden = set()
-    for b, (x, y, z) in enumerate(centres):
-        if math.hypot(x - tool_xy[0], y - tool_xy[1]) < TOOL_OCCLUSION_RADIUS_M:
+    for b, (x, y, _) in enumerate(pos.tolist()):
+        near_tool = math.hypot(x - tool_xy[0], y - tool_xy[1]) < TOOL_OCCLUSION_RADIUS_M
+        if near_tool or covered(pos, quat, sizes, b, radius):
             hidden.add(b)
-            continue
-        for c, (cx, cy, cz) in enumerate(centres):
-            if cz <= z or math.hypot(x - cx, y - cy) > float(radius[c]):
-                continue  # c is the part itself, lower, or too far to reach b's centre
-            if grasp.polygon_distance([(x, y)], grasp.footprint(sizes[c], pos[c], quat[c])) < 0:
-                hidden.add(b)
-                break
     return hidden
 
 
@@ -207,6 +256,7 @@ class Perceiver:
         self.rng = random.Random(f"perceive:{run_seed}:{env_index}")
         self._bias = (0.0, 0.0, 0.0)
         self._box_poses: tuple[tuple[float, float, float], ...] = ()
+        self.views: ClassViews | None = None  # ``class_views`` (L5): the per-part class model
 
     @property
     def box_poses(self) -> tuple[tuple[float, float, float], ...]:
@@ -245,15 +295,15 @@ class Perceiver:
             )
         self._box_poses = tuple(poses)
 
-    def classify(self, true_cls: str) -> str:
+    def classify(self, true_cls: str, part: int | None = None) -> str:
         """One classification: the true class, or at the class knob's rate one of the other
-        three, uniformly. Always two draws."""
+        three, uniformly. Always two draws. Under ``views`` a classification of part ``part``
+        goes through that part's model (``ClassViews.view``) on the same two draws."""
+        if self.views is not None and part is not None:
+            return self.views.view(part, true_cls, self.rng)
         fires = self.rng.random() < min(1.0, CLASS_ERROR_PROBABILITY * self.scales["class"])
         pick = self.rng.random()
-        if not fires:
-            return true_cls
-        others = [c for c in PART_CLASSES if c != true_cls]
-        return others[int(pick * len(others))]
+        return _other_class(true_cls, pick) if fires else true_cls
 
     def perceive(self, truth: Truth) -> PerceivedState:
         """Every part's draws in index order, then the structural rules and the miss, then the
@@ -273,7 +323,7 @@ class Perceiver:
             dyaw = s["heading"] * HEADING_SIGMA_RAD * self._gauss()
             dsize = [s["size"] * SIZE_SIGMA_M * self._gauss() for _ in range(3)]
             missed = self.rng.random() < miss
-            cls = self.classify(truth.classes[b])
+            cls = self.classify(truth.classes[b], b)
             if missed or b in hidden:
                 continue
             dsize[int(grasp.body_axes_world(quat[b])[:, 2].abs().argmax())] *= 2.0
@@ -288,6 +338,133 @@ class Perceiver:
                 )
             )
         return PerceivedState(detections, self._box_poses)
+
+
+class MarkerBias:
+    """``marker_bias`` (MS7d L3): the episode's position bias, estimated from a marker on the
+    gripper and taken off every detection.
+
+    At each perceive call the overhead camera also reads one fixed point on the gripper, a
+    fiducial of known geometry. Its world point is the FK pick point, which the loop computes
+    from the joint encoders (``rig.pick_point``). The look is that point plus the camera's
+    episode bias (``Perceiver.bias``, the one every detection carries) plus the ``tool`` noise,
+    ``TOOL_SIGMA_M`` on each axis. The estimate is the mean of look minus FK point over the
+    episode's looks so far, and ``correct`` subtracts it from every detection's centre. The box
+    poses stay: MS7c models their bias apart from the camera's. A real camera error is not a
+    pure translation, so on a rig the estimate removes it only near the gripper.
+
+    One per env and episode (the heap loop runs one episode per env). Its generator is its
+    own, seeded like the ``Perceiver``'s, so the ``Perceiver``'s stream is the same with the
+    switch on or off. Every look draws three values whatever the scale, so ``tool`` rows pair.
+    """
+
+    def __init__(self, perceiver: Perceiver, run_seed: int, env_index: int):
+        self.perceiver = perceiver
+        self.rng = random.Random(f"marker:{run_seed}:{env_index}")
+        self.looks = 0
+        self._sum = (0.0, 0.0, 0.0)
+
+    @property
+    def estimate(self) -> tuple[float, float, float]:
+        """The running bias estimate (x, y, z), zero before the first look."""
+        return tuple(s / max(self.looks, 1) for s in self._sum)
+
+    def look(self, fk_point) -> None:
+        """One look at the marker, whose FK position is ``fk_point`` (x, y, z)."""
+        tool = self.perceiver.scales["tool"]
+        noise = [tool * TOOL_SIGMA_M * self.rng.gauss(0.0, 1.0) for _ in range(3)]
+        seen = [p + b + n for p, b, n in zip(fk_point, self.perceiver.bias, noise)]
+        self._sum = tuple(s + (v - p) for s, v, p in zip(self._sum, seen, fk_point))
+        self.looks += 1
+
+    def correct(self, state: PerceivedState) -> PerceivedState:
+        """``state`` with the estimate subtracted from every detection's centre."""
+        est = self.estimate
+        moved = [
+            replace(d, centre=tuple(c - e for c, e in zip(d.centre, est))) for d in state.detections
+        ]
+        return replace(state, detections=moved)
+
+    def error_mm(self) -> float:
+        """A metric read, never a decision's: the estimate's xy distance to the true bias, mm."""
+        (ex, ey, _), (bx, by, _) = self.estimate, self.perceiver.bias
+        return 1000.0 * math.hypot(ex - bx, ey - by)
+
+
+class WristCamera:
+    """One env's wrist look (MS7d L4, the MS7d design's wrist look model): the target's centre
+    x and y and its yaw as the wrist camera reports them on the final approach.
+
+    Its own generator, seeded ``wrist:{run_seed}:{env_index}``, so the ``Perceiver``'s stream
+    keeps its draws. The camera is built per episode and draws the episode's hand-eye bias
+    (x, y) first. The loop knows the tool pose from FK, so a look carries no overhead camera
+    bias. The draws are PAIRED as the ``Perceiver``'s are: every ``look`` draws 1 miss and 3
+    noise values whatever the scales and whether it finds the part.
+    """
+
+    def __init__(self, run_seed: int, env_index: int, scales: dict[str, float] | None = None):
+        self.scales = {**dict.fromkeys(KNOBS + EXTRA_KNOBS, 1.0), **(scales or {})}
+        self.rng = random.Random(f"wrist:{run_seed}:{env_index}")
+        sigma = self.scales["wrist_bias"] * WRIST_BIAS_SIGMA_M
+        self.bias = (sigma * self.rng.gauss(0.0, 1.0), sigma * self.rng.gauss(0.0, 1.0))
+
+    def look(self, xy, yaw: float, hidden: bool) -> tuple[float, float, float] | None:
+        """One look at a part whose true centre is ``xy`` and whose body x axis heads ``yaw``:
+        None at the ``wrist_miss`` rate or when another part covers its centre (``hidden``),
+        else the centre plus the episode bias and the noise, and the yaw plus the noise."""
+        s = self.scales
+        missed = self.rng.random() < min(1.0, WRIST_MISS_PROBABILITY * s["wrist_miss"])
+        dx, dy, dyaw = (self.rng.gauss(0.0, 1.0) for _ in range(3))
+        if missed or hidden:
+            return None
+        return (
+            float(xy[0]) + self.bias[0] + s["wrist"] * WRIST_SIGMA_M * dx,
+            float(xy[1]) + self.bias[1] + s["wrist"] * WRIST_SIGMA_M * dy,
+            float(yaw) + s["wrist"] * WRIST_YAW_SIGMA_RAD * dyaw,
+        )
+
+
+def _other_class(true_cls: str, pick: float) -> str:
+    """The wrong class a uniform draw ``pick`` in [0, 1) names among the other three."""
+    others = [c for c in PART_CLASSES if c != true_cls]
+    return others[int(pick * len(others))]
+
+
+class ClassViews:
+    """``class_views`` (MS7d design, the L5 model): one env's correlated class error.
+
+    A real classifier errs alike on the views of one part, so the MS7c model, which draws each
+    view apart at p, is optimistic for a vote. Here p is ``CLASS_ERROR_PROBABILITY`` times the
+    ``class`` knob and the share is ``CLASS_PERSISTENT_SHARE`` times the ``rho`` knob, both
+    capped at 1. The rollout runs one episode per env, so the constructor is the episode's
+    reset: each part draws once whether it is persistent, at share times p, and a fixed wrong
+    class, uniformly from the other three. Every view of a persistent part returns that class.
+    Any other part is wrong at ``rate`` q = p (1 - share) / (1 - share p), so a single view
+    still errs at p; at a share of 0, q is p and a view is the MS7c classification, draw for
+    draw. The generator is seeded like the ``Perceiver``'s, from the name ``class_views``, and
+    every part and every view draws twice whatever the scales, so knob rows stay paired.
+    """
+
+    def __init__(self, run_seed: int, env_index: int, scales: dict[str, float], num_parts: int):
+        p = min(1.0, CLASS_ERROR_PROBABILITY * scales["class"])
+        share = min(1.0, CLASS_PERSISTENT_SHARE * scales["rho"])
+        self.rate = 0.0 if share * p >= 1.0 else p * (1.0 - share) / (1.0 - share * p)
+        self.rng = random.Random(f"class_views:{run_seed}:{env_index}")
+        draws = [(self.rng.random(), self.rng.random()) for _ in range(num_parts)]
+        # Per part: the draw that names its fixed wrong class, or None if it is not persistent.
+        self.persistent = [pick if u < share * p else None for u, pick in draws]
+
+    def view(self, part: int, true_cls: str, rng: random.Random | None = None) -> str:
+        """One view of part ``part``, whose class is ``true_cls``: two draws from ``rng``, this
+        generator when None. ``Perceiver.classify`` passes its own, so its stream keeps two
+        draws a classification; the third view at a lift draws from this one."""
+        rng = self.rng if rng is None else rng
+        fires = rng.random() < self.rate
+        pick = rng.random()
+        fixed = self.persistent[part]
+        if fixed is not None:
+            return _other_class(true_cls, fixed)
+        return _other_class(true_cls, pick) if fires else true_cls
 
 
 class PositionMemory:
