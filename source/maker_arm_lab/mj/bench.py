@@ -3,8 +3,9 @@
 The plant is the vendored URDF on the scene's compiler block and Z-up mount: gravity on, no
 gravcomp, the jaws held at the adapter's lumped opening (their joints removed), a 1 ms
 implicitfast step, and the RobStride MIT law applied at every physics step from a command
-held for its 5 ms tick. Only a massless fingertip sphere at grasp_center collides, with the
-sim's contact settings. The controller at tick k sees the state and the applied torque 1 ms
+held for its 5 ms tick. Only a massless fingertip sphere at grasp_center collides. Its
+contacts take the sim's CONTACT_SOLREF and MuJoCo's defaults for everything else (not the
+sim's desk solimp and solmix, elliptic cone, impratio or noslip). The controller at tick k sees the state and the applied torque 1 ms
 after tick k-1's command went out (the MIT reply), with Gaussian torque noise.
 
 Four rungs drive it: B0 (the profile PD, the upstream behavior), B1 (B0 plus the exact

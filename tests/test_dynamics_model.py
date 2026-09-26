@@ -109,9 +109,9 @@ def test_rnea_matches_mujoco_inverse_dynamics_algorithm():
 def test_rnea_matches_mujoco_inverse_dynamics_adapter():
     """RNEA parity against ``mj_inverse`` for the adapter's own URDF-derived inertias.
 
-    MuJoCo's compiler stores each inertia as principal moments plus a rotation (the scene
-    also sets balanceinertia), so its tensor differs from the URDF's by up to about 1e-4
-    relative per element. The measured worst torque difference is about 5.7e-8 N m.
+    MuJoCo's compiler stores each inertia as principal moments plus a rotation, so its
+    tensor differs from the URDF's by up to about 1e-4 relative per element. The scene's
+    balanceinertia changes no body of this URDF. The measured worst torque difference is about 5.7e-8 N m.
     """
     m, d = _mj()
     qpos = _addr(m, urdf_prep.ARM_JOINT_NAMES, "qposadr")
