@@ -247,4 +247,114 @@ This document does not list that run's numbers. Task 11 records the official run
 
 ## 11. Result
 
-Pending the gate run.
+Task 11 ran the gate on 2026-09-26 with seed 20260925. The command was:
+
+```
+uv run --no-sync python scripts/mj_track_bench.py --out ~/data/maker-arm-tracking/gate-20260925.json
+```
+
+The full JSON lives at `~/data/maker-arm-tracking/gate-20260925.json`. It has the keys
+`initial`, `tau_th`, `press_depth_m`, `setup`, `results`, `report`, `gate` and `pass`.
+
+### Verdict
+
+The suite printed `BENCH_FAIL`. Two of the ten gated bars failed: the exact model's overshoot
+and the exact model's press force. The other eight bars passed.
+
+### Deadbands (`tau_th`, N m, joints `link_002_joint` to `link_007_joint`)
+
+| model | J1 | J2 | J3 | J4 | J5 | J6 |
+|---|---|---|---|---|---|---|
+| exact | 0.8009 | 0.7688 | 0.6381 | 0.5585 | 0.4730 | 0.6348 |
+| housing | 0.7676 | 1.4808 | 1.1621 | 0.6683 | 0.4799 | 0.6356 |
+| exact x0.7 (report only) | 0.8644 | 2.2290 | 1.7937 | 0.6123 | 0.4784 | 0.6357 |
+| exact x1.3 (report only) | 0.7456 | 2.1857 | 1.6665 | 0.7353 | 0.4843 | 0.6337 |
+
+### Press depth
+
+The closed-form check found `d = 0.0010193 m` (about 1.02 mm) on the exact model.
+
+### Gate table (rung A, "rel" and "band" rows read against B1 on the exact model)
+
+| model | metric | value | reference | bar | pass |
+|---|---|---|---|---|---|
+| exact | static sag (mm) | 8.10e-10 | 9.29e-10 | <= 1 mm | true |
+| exact | sway after the stop (mm) | 0.1648 | 1.0738 | <= 0.3x B1 | true |
+| exact | overshoot past the final pose (mm) | 0.3575 | 0.5710 | <= 0.3x B1 | **false** |
+| exact | false-yield tip drift (mm) | 0.0 | 0.0 | <= 1 mm | true |
+| exact | wall force 0.3 s after contact (N) | 10.428 | 62.981 | <= 0.5x B1 | true |
+| exact | wall force peak (N) | 70.625 | 80.880 | <= B1 | true |
+| exact | press force below the deadband (N) | 1.1269 | 1.4809 | B1 +- 20% | **false** |
+| housing | sway after the stop (mm) | 0.1593 | 1.0738 | <= 0.5x B1 | true |
+| housing | false-yield tip drift (mm) | 0.0 | 0.0 | <= 3 mm | true |
+| housing | growing oscillation | false | false | none | true |
+
+For the overshoot row, rung A's tip travels 0.3575 mm past its final pose on the exact model.
+B1's own overshoot is 0.5710 mm, so the bar sits at 0.1713 mm (0.3 times B1). Rung A's number is
+about twice the bar.
+
+For the press force row, rung A holds the tip at 1.1269 N of contact force below the deadband on
+the exact model. The B1 +- 20% band around the reference of 1.4809 N runs from 1.1847 N to
+1.7771 N. Rung A's value sits under the lower edge of that band.
+
+### Report rows
+
+B0 (profile PD, exact model):
+
+| metric | value |
+|---|---|
+| static sag, worst of 4 poses (mm) | 19.586 |
+| static sag by pose (mm) | desk 16.227, reach 19.586, hover 15.000, release 15.042 |
+| sway after the stop (mm) | 1.038 |
+| overshoot past the final pose (mm) | 0.0 |
+| wall force peak / 0.3 s after contact (N) | 73.273 / 62.002 |
+| press force below the deadband (N) | 17.072 |
+| false-yield tip drift (mm) | 0.0 |
+| growing oscillation | false |
+
+F (the full controller without the observer, the admittance, the gate or the error clamp):
+
+| model | static sag (mm) | sway (mm) | overshoot (mm) | wall force peak / 0.3 s (N) | press force (N) | false yield (mm) | growing |
+|---|---|---|---|---|---|---|---|
+| exact | 8.10e-10 | 0.1648 | 0.3575 | 74.352 / 62.794 | 1.1269 | 0.0 | false |
+| housing | 3.189 | 0.1593 | 0.9559 | 73.910 / 62.900 | 0.0 | 0.0 | false |
+
+Scenario 3, policy-like transport (chunk sway and chunk overshoot, one chunk for the whole leg):
+
+| model / rung | chunk sway (mm) | chunk overshoot (mm) |
+|---|---|---|
+| exact / B0 | 1.028 | 0.0 |
+| exact / B1 | 1.062 | 0.0 |
+| exact / F | 0.1617 | 0.0 |
+| exact / A | 0.1617 | 0.0 |
+| housing / F | 0.1554 | 0.0 |
+| housing / A | 0.1554 | 0.0 |
+| exact x0.7 / A | 0.2656 | 0.0 |
+| exact x1.3 / A | 0.2195 | 0.0 |
+
+Mass sweep, plus or minus 30 percent on the exact model, rung A:
+
+| sweep | static sag (mm) | sway (mm) | overshoot (mm) | wall force peak / 0.3 s (N) | press force (N) |
+|---|---|---|---|---|---|
+| x0.7 | 5.811 | 0.2646 | 0.0 | 76.647 / 9.931 | 5.177 |
+| x1.3 | 5.828 | 0.2232 | 1.425 | 72.774 / 9.853 | 0.0 |
+
+Housing static sag (report only, rung F and A agree): 3.189 mm, worst of 4 poses. By pose: desk
+2.270 mm, reach 3.189 mm, hover 2.653 mm, release 2.389 mm.
+
+Machine A T1 (`scripts/track_timing.py`, report row, not the Thor):
+
+```
+TIMING_OK {"ticks": 100000, "p50_us": 2.808, "p99_us": 11.896, "max_us": 361.732, "bar_us": 100.0}
+```
+
+Machine A soak, one minute, no FIFO and no CPU pin (`scripts/track_soak.py --minutes 1`, report row):
+
+```
+SOAK_OK {"pass": true, "enabled": true, "minutes_requested": 1.0, "elapsed_s": 60.0002, "rt": null, "telemetry": {"max_interval": 0.006174, "late_ticks": 0, "gaps": 0}}
+```
+
+### Thor rows
+
+T1 (`update()` p99 on the Thor) and T2 b (largest tick interval under load, FIFO and pin) are
+pending the owner's Thor session.
