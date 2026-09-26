@@ -308,7 +308,7 @@ dev = [
 dev = [
     { name = "gymnasium", specifier = ">=1.0" },
     { name = "h5py", specifier = ">=3.11" },
-    { name = "maker-arm-rs", git = "https://github.com/youtalk/maker-arm-rs?subdirectory=bindings%2Fmaker-arm-py&rev=e1541514c5dfef872ad9e8503e92819eaabd1540" },
+    { name = "maker-arm-rs", git = "https://github.com/youtalk/maker-arm-rs?subdirectory=bindings%2Fmaker-arm-py&rev=6141b84eb30c9c8ed042c10f426ee9a8a498eafc" },
     { name = "mujoco", specifier = ">=3.3" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=12.3.0" },
@@ -321,7 +321,7 @@ dev = [
 [[package]]
 name = "maker-arm-rs"
 version = "0.1.0"
-source = { git = "https://github.com/youtalk/maker-arm-rs?subdirectory=bindings%2Fmaker-arm-py&rev=e1541514c5dfef872ad9e8503e92819eaabd1540#e1541514c5dfef872ad9e8503e92819eaabd1540" }
+source = { git = "https://github.com/youtalk/maker-arm-rs?subdirectory=bindings%2Fmaker-arm-py&rev=6141b84eb30c9c8ed042c10f426ee9a8a498eafc#6141b84eb30c9c8ed042c10f426ee9a8a498eafc" }
 
 [[package]]
 name = "markupsafe"
