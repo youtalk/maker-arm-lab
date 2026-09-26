@@ -127,12 +127,14 @@ actually flies. "Level" in "level release" names the jaw-plane roll, not the too
    0.3 s after first contact. If the tip never touches the wall, the run is a bench defect and
    the suite raises.
 5. Press: the tip descends onto the desk plane over the tray center, at `GRASP_TILT_RAD`. The
-   contact height `z_c` is `TIP_RADIUS` (the sphere touches `z = 0`). A bisection finds the
-   first depth `d`, in `[0, 0.05]` m to a tolerance of `1e-5` m. At that depth, the press
-   torque reaches 0.7 of the deadband at some joint, under B1 with the exact model's
-   calibrated `tau_th`. The plan is `n = ceil((0.03 + d) / 0.003)` equally spaced waypoints, at
-   most 3 mm apart, from `z_c + 0.03` m down to `z_c - d`. The waypoints are solved as one
-   continuous IK chain, the same continuity rule the oracle's own path solver uses. The solve
+   contact height `z_c` is `TIP_RADIUS` (the sphere touches `z = 0`). Depth `d` comes from a
+   closed-form check, with no physics rollout. Let `q_c` be the IK solution at `z_c` and `q_d`
+   be the IK solution at `z_c - d`. A bisection finds the first `d`, in `[0, 0.05]` m to a
+   tolerance of `1e-5` m, where `max_j kp_j |q_d - q_c|_j / tau_th_j` reaches 0.7. This check
+   uses the exact model's calibrated `tau_th`. The plan is `n = ceil((0.03 + d) / 0.003)`
+   equally spaced waypoints, at most 3 mm apart, from `z_c + 0.03` m down to `z_c - d`. The
+   waypoints are solved as one continuous IK chain, the same continuity rule the oracle's own
+   path solver uses. The solve
    is seeded from a standalone solve of the top waypoint. The plan walks that chain with a
    minimum-jerk timing law, at the base pace. Start at rest on the first waypoint, push at
    `t0 = 0.5 s`, run to the last row's time plus 1.0 s. Metric: the contact force 0.5 s into
@@ -156,7 +158,8 @@ housing model.
 ## 7. Calibration rule
 
 This rule is fixed before the gate run. It runs on rung A with `tau_th = infinity`, so the
-observer has no deadband. It runs separately for the exact model and the housing model:
+observer has no deadband. It runs separately for the exact model, the housing model, and each
+mass-sweep model, each with its own `tau_th`:
 
 - Run the calibration walk (its own seed, disjoint from every gate walk) from the hover pose,
   pushed at `t0 = 0.5 s`, to the last row's time plus 1.0 s. Read `max|r_j|` over every tick,
