@@ -50,7 +50,6 @@ OSC_WINDOW_S, OSC_FLOOR = 0.5, 0.02  # rad/s
 MASS_SWEEP = (0.7, 1.3)
 SEED = 20260925
 SMOKE_S = 0.5
-GATED_SCENARIOS = ("1", "2", "4", "5", "6")  # scenario 3 is a report row
 # TrackingParams' INITIAL defaults in maker-arm-rs (crates/maker-arm/src/tracking.rs), copied
 # for the record because the binding has no getter. A test pins the copy against the build.
 TRACKING_INITIAL = {
@@ -409,7 +408,9 @@ def _metrics(go, s) -> dict:
         metrics, traces = scenario(go, s)
         out.update(metrics)
         grow[name] = any(growing(t) for t in traces)
-    return {**out, "growing_by_scenario": grow, "growing": any(grow[n] for n in GATED_SCENARIOS)}
+    # The growing-oscillation bar reads every scenario, 3 included; only its sway and
+    # overshoot are report rows.
+    return {**out, "growing_by_scenario": grow, "growing": any(grow.values())}
 
 
 def run_suite(seed=SEED, smoke=False) -> dict:

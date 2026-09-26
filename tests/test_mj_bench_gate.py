@@ -70,6 +70,21 @@ def test_growing_needs_a_rising_envelope_above_the_floor():
     assert not bg.growing(_trace(t, np.zeros((400, 3)), dq=tiny))
 
 
+def test_a_scenario_3_only_oscillation_fails_the_growing_row(monkeypatch):
+    t = np.arange(1, 401) * 0.005
+    grow = np.zeros((400, 6))
+    grow[:, 0] = 0.01 * np.exp(3 * t) * np.sin(20 * t)
+    quiet, rising = _trace(t, np.zeros((400, 3))), _trace(t, np.zeros((400, 3)), dq=grow)
+
+    def stub(name):
+        return lambda go, s: ({}, [rising if name == "3" else quiet])
+
+    monkeypatch.setattr(bg, "SCENARIOS", {n: stub(n) for n in ("1", "2", "3", "4", "5", "6")})
+    m = bg._metrics(None, None)
+    assert m["growing"] is True
+    assert m["growing_by_scenario"] == {n: n == "3" for n in ("1", "2", "3", "4", "5", "6")}
+
+
 def test_poses_and_walks_are_reachable_and_deterministic(ik):
     p = bg.poses(ik)
     assert set(p) == {"desk", "reach", "hover", "release"}
