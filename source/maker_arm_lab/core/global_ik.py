@@ -32,7 +32,6 @@ throughout, when every defect it found needed a GPU round to see.
 from __future__ import annotations
 
 import math
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +43,7 @@ from maker_arm_lab.assets.urdf_prep import (
     MOUNT_RPY,
     VENDORED_URDF,
     arm_joint_limits,
+    chain_links,
 )
 from maker_arm_lab.robots.frames import JAW_AXIS_BODY, TOOL_AXIS_BODY
 
@@ -294,30 +294,12 @@ class GlobalIK:
         self.upper = torch.tensor([hi for _, hi in limits], dtype=torch.float64)
         self._kin = Kinematics(
             mount_rpy=tuple(MOUNT_RPY),
-            links=self._load_chain(urdf),
+            links=chain_links(_CHAIN, urdf),
             lower=self.lower.tolist(),
             upper=self.upper.tolist(),
             tool_axis=tuple(TOOL_AXIS_BODY),
             jaw_axis=tuple(JAW_AXIS_BODY),
         )
-
-    @staticmethod
-    def _load_chain(urdf: Path) -> list[tuple[tuple, tuple, tuple | None]]:
-        """The chain's joints as ``(xyz, rpy, axis)`` per URDF joint, ``axis`` None when fixed."""
-        root = ET.parse(urdf).getroot()
-        joints = {j.get("name"): j for j in root.findall("joint")}
-        out = []
-        for name in _CHAIN:
-            joint = joints[name]
-            origin, axis = joint.find("origin"), joint.find("axis")
-            out.append(
-                (
-                    tuple(float(v) for v in origin.get("xyz").split()),
-                    tuple(float(v) for v in origin.get("rpy").split()),
-                    tuple(float(v) for v in axis.get("xyz").split()) if axis is not None else None,
-                )
-            )
-        return out
 
     # -- forward kinematics ---------------------------------------------------
     def fk_batch(self, q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

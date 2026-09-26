@@ -11,6 +11,7 @@ maker-arm-rs (spec section 4.1) holds on the derived file too.
 import copy
 import math
 import xml.etree.ElementTree as ET
+from collections.abc import Sequence
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -91,3 +92,25 @@ def write_zup_urdf(src: Path, dst: Path, mount_rpy: tuple[float, float, float] =
     dst.parent.mkdir(parents=True, exist_ok=True)
     tree.write(dst, encoding="unicode", xml_declaration=True)
     return dst
+
+
+def chain_links(
+    names: Sequence[str], urdf: Path = VENDORED_URDF
+) -> list[tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...] | None]]:
+    """The named joints as ``(xyz, rpy, axis)``, ``axis`` None for a fixed joint, in order.
+
+    The chain format ``maker_arm_rs.Kinematics`` and ``maker_arm_rs.Dynamics`` take.
+    """
+    joints = _joints(ET.parse(urdf).getroot())
+    out = []
+    for name in names:
+        joint = joints[name]
+        origin, axis = joint.find("origin"), joint.find("axis")
+        out.append(
+            (
+                tuple(float(v) for v in origin.get("xyz").split()),
+                tuple(float(v) for v in origin.get("rpy").split()),
+                tuple(float(v) for v in axis.get("xyz").split()) if axis is not None else None,
+            )
+        )
+    return out
