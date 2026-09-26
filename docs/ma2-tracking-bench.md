@@ -345,16 +345,146 @@ Housing static sag (report only, rung F and A agree): 3.189 mm, worst of 4 poses
 Machine A T1 (`scripts/track_timing.py`, report row, not the Thor):
 
 ```
-TIMING_OK {"ticks": 100000, "p50_us": 2.808, "p99_us": 11.896, "max_us": 361.732, "bar_us": 100.0}
+TIMING_OK {"ticks": 100000, "p50_us": 2.808, "p99_us": 11.896, "max_us": 361.732, "uname": {"system": "Linux", "node": "machine-a", "release": "7.0.0-31-generic", "version": "#31~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Mon Aug 10 09:38:02 UTC 2", "machine": "x86_64", "processor": "x86_64"}, "python": "3.12.3", "bar_us": 100.0}
 ```
 
 Machine A soak, one minute, no FIFO and no CPU pin (`scripts/track_soak.py --minutes 1`, report row):
 
 ```
-SOAK_OK {"pass": true, "enabled": true, "minutes_requested": 1.0, "elapsed_s": 60.0002, "rt": null, "telemetry": {"max_interval": 0.006174, "late_ticks": 0, "gaps": 0}}
+SOAK_OK {"pass": true, "enabled": true, "minutes_requested": 1.0, "elapsed_s": 60.000179280061275, "rt": null, "telemetry": {"max_interval": 0.006173641000000174, "late_ticks": 0, "gaps": 0}, "uname": {"system": "Linux", "node": "machine-a", "release": "7.0.0-31-generic", "version": "#31~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Mon Aug 10 09:38:02 UTC 2", "machine": "x86_64", "processor": "x86_64"}}
 ```
 
 ### Thor rows
 
 T1 (`update()` p99 on the Thor) and T2 b (largest tick interval under load, FIFO and pin) are
 pending the owner's Thor session.
+
+### Erratum and analysis
+
+This subsection comes from the final branch review, on 2026-09-26, after the official run. It
+holds exploratory checks outside the pre-registration. They do not change the recorded verdict:
+`BENCH_FAIL` stands. No bar, definition, INITIAL value or plant setting changes, and this
+document proposes no retune.
+
+The exploratory numbers come from runs of this branch's bench code with the official `tau_th`,
+seed 20260925 and maker-arm-rs 6141b84. Each item names the plant change that its run makes. The
+run scripts are not in the repository.
+
+#### Erratum
+
+1. Contact settings (section 3). Section 3 says that the fingertip sphere "uses the sim's own
+   contact settings". This is wrong. `mj/bench.py` applies only `CONTACT_SOLREF` (0.005, 1.0) to
+   the tip, the desk plane and the wall. It does not apply the sim's `DESK_SOLIMP` (0.99, 0.999,
+   0.001, 0.5, 2.0), `DESK_SOLMIX` (1e6), elliptic cone, `impratio` 10 or `noslip_iterations` 3.
+   The bench plant has the MuJoCo defaults for these: solimp (0.9, 0.95, 0.001, 0.5, 2.0), a
+   pyramidal cone, `impratio` 1 and no noslip iterations. With the sim's desk settings on the
+   press plant, B1's press force is 5.993 N, not 1.481 N. The plant of the official run does not
+   change.
+2. The exact model (section 4). Section 4 says that the exact model has "the same bodies the
+   plant uses". The bodies are the same, but the plant adds two terms that the exact model does
+   not have. The first term is the armature, `ARM_ARMATURE` = 0.02 kg m^2 per joint, and
+   `maker_arm_rs.Dynamics` has no armature term. The second term is the joint friction
+   (`COULOMB_NM` and `VISCOUS_NMS`), and the bench builds the exact model with zero friction. At
+   the hover pose, the diagonal of the rigid-body mass matrix is 0.0385, 0.1313, 0.0730, 0.0176,
+   0.0043 and 0.00057 kg m^2 (J1 to J6). The armature is 0.52, 0.15, 0.27, 1.13, 4.66 and 35.0
+   times these values. With the torque noise off, the largest |r| per joint of the exact model
+   is 0.18 to 0.52 N m on the calibration walk. It is 0.21 to 0.62 N m on the gate walk. The
+   exact deadband is 0.47 to 0.80 N m, so the model error alone takes a large part of it.
+3. The INITIAL table (section 9). The "measured by" column says MA2 for `TIP_RADIUS`,
+   `DESK_BOX_RELEASE_Z` and `CHUNK_SIGMA`. MA2 identifies the arm's model and friction, and it
+   does not measure these three. They are bench and scene choices. The table also leaves out
+   `TAU_NOISE_SIGMA` (0.2 N m, `mj/bench.py`), the torque noise of the bench. The risk table of
+   the tracking design treats this noise as INITIAL. The code now marks it `# INITIAL:`, and its
+   value does not change.
+4. The inertia wording (section 4). Section 4 says that "the scene also sets `balanceinertia`"
+   and that the tensor "therefore" differs from the URDF. MuJoCo's principal-axis storage causes
+   the difference. `balanceinertia` changes no body of this URDF: a compile with it off gives
+   the same `body_inertia`, `body_iquat` and `body_mass`. The 5.7e-8 N m figure stands. A stray
+   line break in scenario 5 of section 6 is cosmetic only.
+
+#### What the two failed bars show
+
+On the exact model, rungs A and F give the same value on every gated row except the two wall
+rows. The only other difference is the scenario 3 chunk sway, 0.161733 mm on A against 0.161725
+mm on F. In the official press run, the gate of A stays at 1.0 and its admittance offset stays
+at 0.0. Its largest |r| reaches 0.756 of `tau_th`, at J3. So the contact side (the observer, the
+admittance, the gate and the clamp) has no effect on the two failed rows. Both failures come
+from the motion side that F also runs, the reference filter and the feed-forward, on this plant.
+
+Overshoot. The overshoot of A is a real transient. It peaks at t = 1.73 s, 30 ms after the last
+row at t = 1.70 s. At the end of the run, 0.0555 mm of it remains. The overshoot of B1 peaks at
+t = 1.79 s. Without the INITIAL joint Coulomb friction of the plant, A reads 0.0545 mm and B1
+reads 0.1803 mm, a ratio of 0.30. The bar for that run is 0.0541 mm, so A still misses it, by
+less than 0.001 mm. The friction multiplies A by 6.6 and B1 by 3.2. So most of the 0.3575 mm of
+A comes from the INITIAL Coulomb friction, which the exact model does not have.
+The risk table of the tracking design answers the INITIAL plant values with relative bars on the
+same plant. This row shows that a relative bar does not remove that risk.
+
+Press. The press row asks whether A goes soft below the deadband. It does not, because the
+contact side never acts. A reads 1.1269 N, and F reads the same value to the last digit. The gap
+to B1 comes from the friction between the tip and the desk:
+
+- The tip slides on the desk during the hold. From the last row to the end of the run, it moves
+  2.304 mm across the desk on B1 and 0.591 mm on A.
+- The force falls through the probe time. From the probe (0.5 s into the hold) to the end of the
+  run, B1 falls from 1.481 N to 1.179 N. A falls from 1.127 N to 1.007 N.
+- The verdict depends on the probe time. A/B1 is 0.761 at 0.5 s into the hold (fail), 0.818 at
+  0.75 s (pass) and 0.854 at the end of the run (pass).
+- With a frictionless contact between the tip and the desk, A/B1 is 1.029 (0.807 N against 0.784
+  N), inside the band.
+- With a frictionless contact and no joint Coulomb friction, B1 holds 0.762 N at 0.25, 0.5, 0.75
+  and 1.0 s into the hold. A holds 0.784 to 0.790 N at these times, and A/B1 is 1.031.
+- Without the joint Coulomb friction but with the contact friction, A/B1 is 0.620 (1.1114 N
+  against 1.7927 N), outside the band.
+- With the sim's own desk contact settings (erratum item 1), A/B1 is 0.393 (2.353 N against
+  5.993 N).
+
+These runs point to the friction between the tip and the desk. During the landing, the contact
+friction locks in a sideways load along the desk. The size of that load depends on how each rung
+lands. The deadband behavior, which the design meant this row to test, is not the cause.
+
+#### Report-only notes
+
+Wall scenario: a wrist crawl that no metric reports. On rung A and the exact model, the tip
+first touches the wall at t = 1.100 s. The gate starts to close at t = 1.110 s. It reaches 0.0 at
+t = 1.125 s and stays at 0.0 to the end of the run. The wall does not block J6 (the wrist roll).
+J6 falls up to 0.448 rad behind its reference, at t = 1.590 s. From t = 1.3 s to t = 2.5 s, it
+crawls at 0.356 to 0.361 rad/s. Its lag drops under 0.03 rad only at t = 2.805 s. The error
+clamp limits this crawl: with the full clamp error, the PD drives J6 at most
+`(kp e_max - F_c) / (kd + viscous)` = `(30 x 0.03 - 0.1) / (2.0 + 0.02)` = 0.396 rad/s. The
+growing row reads false, because the late peak of 0.3600 rad/s is below the early peak of 0.3607
+rad/s. Both peaks are 18 times the 0.02 rad/s floor. The housing model shows the same crawl
+(0.3583 and 0.3590 rad/s). If the real arm acts like the bench, a fingertip touch during a carry
+can stall the wrist for over a second.
+
+Scenario 3 has no chunk switch. The transport leg has 37 rows and `CHUNK` is 50, so scenario 3
+runs one chunk, as section 6 states. Its chunk overshoot reads 0.0 on every run. So scenario 3
+tests one constant offset and no chunk switch.
+
+Housing and x1.3 rows. On the housing model and the x1.3 sweep, the overshoot is mostly a static
+offset along the travel direction. The gravity error of the model causes this offset.
+On housing A, 0.756 mm of the 0.956 mm overshoot remains at the end of the run. On x1.3 A, 1.285
+mm of the 1.425 mm overshoot remains. The press rows of these runs read 0.0 N because the tip
+never touches the desk. The lowest point of the tip sphere stays 1.550 mm above the desk on the
+housing model (F and A). It stays 3.319 mm above the desk on x1.3 A. The press depth is 1.02 mm.
+
+#### Questions for the owner
+
+- Do you want new press and overshoot definitions in a later, pre-registered gate?
+- Do you want an armature term, a per-joint diagonal, in `maker_arm_rs.Dynamics`?
+- Do you want a per-joint gate and clamp, so that the joints that a contact does not block keep
+  their plan?
+
+#### Reproducibility recheck
+
+The recheck ran on 2026-09-26 with maker-arm-rs 6141b84 (`feat/tracking`) and the lab code of
+this branch at commit 3c3d8ff. The command was:
+
+```
+uv run --no-sync python scripts/mj_track_bench.py --out ~/data/maker-arm-tracking/gate-20260925-recheck.json
+```
+
+It printed the same `BENCH_FAIL` token line as the official run, byte for byte. The recheck
+JSON, `~/data/maker-arm-tracking/gate-20260925-recheck.json`, is byte-identical to the official
+JSON: 437 values compared, no difference. So the fixed builds reproduce the official numbers.
+This recheck is not a new verdict.
