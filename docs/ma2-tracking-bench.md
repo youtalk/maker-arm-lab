@@ -356,8 +356,57 @@ SOAK_OK {"pass": true, "enabled": true, "minutes_requested": 1.0, "elapsed_s": 6
 
 ### Thor rows
 
-T1 (`update()` p99 on the Thor) and T2 b (largest tick interval under load, FIFO and pin) are
-pending the owner's Thor session.
+The Thor procedure ran on 2026-09-26 on the Jetson Thor, from lab main 212c768 with maker-arm-rs
+pinned at 6141b84. The owner ran the `sudo` steps (power mode, clocks and the rtprio file) at
+the machine and logged in again. `ulimit -r` then read 80.
+
+- `uname -a`: `Linux thor 6.8.12-tegra #1 SMP PREEMPT Tue Dec 30 15:40:41 PST 2025
+  aarch64 aarch64 aarch64 GNU/Linux` (L4T R38.4).
+- `nvpmodel -q`: `NV Power Mode: MAXN`, mode 0, with `jetson_clocks` on.
+
+Both Thor bars pass.
+
+| metric | value | bar | pass |
+|---|---|---|---|
+| `update()` p99 (T1) | 26.815 us | <= 100 us | true |
+| largest tick interval, FIFO 80 pinned to CPU 5, 10 min under load (T2 b) | 5.1792 ms | <= 10 ms | true |
+
+The Thor rows do not change the bench verdict above. That verdict covers the ten `BARS` rows
+only.
+
+The load was `stress-ng --cpu 14`, version 0.22.01, built from source because the Thor has no
+package for it. Each soak started 3 s after its own `stress-ng`, and each `stress-ng` stopped
+after its soak ended.
+
+T1, on an idle host:
+
+```
+TIMING_OK {"ticks": 100000, "p50_us": 8.175, "p99_us": 26.815, "max_us": 283.537, "uname": {"system": "Linux", "node": "thor", "release": "6.8.12-tegra", "version": "#1 SMP PREEMPT Tue Dec 30 15:40:41 PST 2025", "machine": "aarch64", "processor": "aarch64"}, "python": "3.12.3", "bar_us": 100.0}
+```
+
+T2 run a, default scheduling, report row:
+
+```
+SOAK_OK {"pass": true, "enabled": true, "minutes_requested": 10.0, "elapsed_s": 600.0001368839999, "rt": null, "telemetry": {"max_interval": 0.02503484399999678, "late_ticks": 28310, "gaps": 1}, "uname": {"system": "Linux", "node": "thor", "release": "6.8.12-tegra", "version": "#1 SMP PREEMPT Tue Dec 30 15:40:41 PST 2025", "machine": "aarch64", "processor": "aarch64"}}
+```
+
+T2 run b, `--rt 80:5`, gated:
+
+```
+SOAK_OK {"pass": true, "enabled": true, "minutes_requested": 10.0, "elapsed_s": 600.00010643, "rt": [80, 5], "telemetry": {"max_interval": 0.0051791570000006, "late_ticks": 0, "gaps": 0}, "uname": {"system": "Linux", "node": "thor", "release": "6.8.12-tegra", "version": "#1 SMP PREEMPT Tue Dec 30 15:40:41 PST 2025", "machine": "aarch64", "processor": "aarch64"}}
+```
+
+Run a shows why the loop needs the RT option on the Thor. Under the same load, default scheduling
+let about 24 % of the roughly 120 000 ticks run late (over 7.5 ms), and one gap reached 25.0 ms.
+With FIFO and the pin, no tick ran late, and the largest interval sat 0.18 ms over the 5 ms
+period.
+
+Extra report row, not in the pre-registered procedure: `cyclictest -p 80 -a 5 -t 1 -i 5000 -D
+5m -q` on CPU 5 under the same load read a maximum latency of 34 us and an average of 2 us. The
+run had no access to `/dev/cpu_dma_latency`, so CPU idle states stayed enabled.
+
+No ACT run on the Thor exists yet, so the ACT-load soak is still open. The raw files are in
+`~/data/maker-arm-tracking/thor-20260926/`.
 
 ### Erratum and analysis
 
