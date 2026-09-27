@@ -110,5 +110,6 @@ class ConduitSubscriber:
 
     def close(self) -> None:
         self._executor.shutdown()
+        self._thread.join(timeout=2.0)
         self._node.destroy_node()
         rclpy.try_shutdown()
