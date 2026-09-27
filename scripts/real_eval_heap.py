@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import random
+import signal
 import sys
 import traceback
 from dataclasses import asdict
@@ -263,29 +264,53 @@ def release(arm, mode: str, stdin=None) -> None:
 
 
 def main(argv=None) -> int:
+    """Run one episode. Ctrl-C ends the episode (``interrupted``); from then on, through the
+    closers, the token and the release prompt, a Ctrl-C only says the arm still holds: an
+    escaping ``KeyboardInterrupt`` would skip the token and ``os._exit``, and dropping the SDK
+    arm at interpreter exit disables the motors without the typed ``RELEASE``."""
     args = parse_args(argv)
     world: dict = {}
+    episode = [True]
+
+    def on_sigint(signum, frame):
+        if episode[0]:
+            episode[0] = False
+            raise KeyboardInterrupt
+        note = "the arm still holds; type RELEASE to disable the motors"
+        print(f"Ctrl-C: {note if world.get('arm') else 'the run is closing'}.", file=sys.stderr)
+
+    previous = signal.signal(signal.SIGINT, on_sigint)
+    try:
+        return _run(args, world, episode)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def _run(args, world: dict, episode: list) -> int:
     code, token = 1, None
     try:
-        build_world(args, world)
-        from maker_arm_lab.core import loop, perception
+        try:
+            build_world(args, world)
+            from maker_arm_lab.core import loop, perception
 
-        wall = args.max_wall_minutes or default_wall_minutes(world["budget"], args.dilation)
-        payload = loop.rollout(
-            world["env"],
-            world["rig"],
-            world["policy"],
-            run_seed=args.run_seed,
-            layout_seed=args.layout_seed,
-            permutation=(0, 1, 2, 3),
-            cycle_budget=world["budget"],
-            max_wall_minutes=wall,
-            perceived=True,
-            noise_scales=perception.parse_scales("all=0"),
-            **SERVED_SWITCHES,
-        )
-        payload["real"] = real_block(args, world)
-        token, code = "EVAL_OK " + json.dumps(payload), 0
+            wall = args.max_wall_minutes or default_wall_minutes(world["budget"], args.dilation)
+            payload = loop.rollout(
+                world["env"],
+                world["rig"],
+                world["policy"],
+                run_seed=args.run_seed,
+                layout_seed=args.layout_seed,
+                permutation=(0, 1, 2, 3),
+                cycle_budget=world["budget"],
+                max_wall_minutes=wall,
+                perceived=True,
+                noise_scales=perception.parse_scales("all=0"),
+                **SERVED_SWITCHES,
+            )
+            payload["real"] = real_block(args, world)
+            token, code = "EVAL_OK " + json.dumps(payload), 0
+        finally:
+            episode[0] = False
     except EvalFailure as err:
         token = "EVAL_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail})
     except KeyboardInterrupt:

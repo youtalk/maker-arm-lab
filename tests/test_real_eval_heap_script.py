@@ -6,6 +6,7 @@ import io
 import json
 import math
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -49,7 +50,20 @@ class _Unread:
         raise AssertionError("release read the input")
 
 
-def _fake_world(monkeypatch, rollout):
+class _Operator:
+    """The operator at the prompt: presses Ctrl-C (a real SIGINT) before typing each line, and
+    records how often the arm was stopped when each line was read."""
+
+    def __init__(self, arm, lines):
+        self.arm, self.lines, self.stops_seen = arm, list(lines), []
+
+    def readline(self):
+        os.kill(os.getpid(), signal.SIGINT)
+        self.stops_seen.append(self.arm.stops)
+        return self.lines.pop(0) if self.lines else ""
+
+
+def _fake_world(monkeypatch, rollout, closer=None):
     env, arm, _ = make_env()
     closed = []
 
@@ -63,7 +77,7 @@ def _fake_world(monkeypatch, rollout):
             sheet={"class_to_box": [0, 1, 2, 3]},
             config=RigConfig(),
             worker_id="fake",
-            closers=[lambda: closed.append(1)],
+            closers=[lambda: closed.append(1), *([closer] if closer else [])],
         )
 
     monkeypatch.setattr(real_eval_heap, "build_world", build)
@@ -107,8 +121,13 @@ def test_release_waits_for_the_typed_word_or_eof():
     assert real_eval_heap.release(None, "prompt", stdin=_Unread()) is None
 
 
-def test_an_interrupt_holds_prints_one_token_and_releases_on_typed_release(monkeypatch, capsys):
+@pytest.mark.parametrize("how", ["raised", "signalled"])
+def test_an_interrupt_holds_prints_one_token_and_releases_on_typed_release(
+    monkeypatch, capsys, how
+):
     def interrupted(*args, **kwargs):
+        if how == "signalled":
+            os.kill(os.getpid(), signal.SIGINT)
         raise KeyboardInterrupt
 
     _, arm, closed = _fake_world(monkeypatch, interrupted)
@@ -151,7 +170,42 @@ def test_a_finished_episode_prints_ok_with_the_real_block_and_releases(
     assert arm.holds == 0 and arm.stops == 1
 
 
-def test_without_ros_a_run_on_the_sdk_simulator_fails_with_one_token(tmp_path):
+@pytest.mark.parametrize("finish", ["tripped", "finished"])
+def test_a_ctrl_c_after_the_episode_keeps_the_arm_held_until_the_typed_release(
+    monkeypatch, capsys, finish
+):
+    """Review Focus 3: a Ctrl-C in the teardown (here in a closer, then at the prompt) neither
+    costs the token nor disables the motors; only the typed RELEASE does."""
+
+    def tripped(env, *args, **kwargs):
+        env.trip("tick", "a late tick")
+
+    def finished(env, *args, **kwargs):
+        return {"episodes": [], "steps_run": 0}
+
+    def interrupting_closer():
+        os.kill(os.getpid(), signal.SIGINT)
+        closed.append("after the Ctrl-C")
+
+    rollout = tripped if finish == "tripped" else finished
+    _, arm, closed = _fake_world(monkeypatch, rollout, closer=interrupting_closer)
+    operator = _Operator(arm, ["no\n", "RELEASE\n", "later\n"])
+    monkeypatch.setattr(sys, "stdin", operator)
+    before = signal.getsignal(signal.SIGINT)
+    code = real_eval_heap.main(ARGS)
+    captured = capsys.readouterr()
+    tokens = _tokens(captured.out)
+    assert len(tokens) == 1 and closed == ["after the Ctrl-C", 1]
+    if finish == "tripped":
+        assert code == 1 and '"watchdog_tick"' in tokens[0] and arm.holds == 1
+    else:
+        assert code == 0 and tokens[0].startswith("EVAL_OK ") and arm.holds == 0
+    assert operator.stops_seen == [0, 0] and operator.lines == ["later\n"]
+    assert arm.stops == 1 and "the arm still holds" in captured.err
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_on_the_sdk_simulator_without_a_stream_a_run_fails_with_one_token(tmp_path):
     sheet = tmp_path / "s.json"
     sheet.write_text(json.dumps(episode_sheet(20265000, 0)))
     code, lines = _run(
