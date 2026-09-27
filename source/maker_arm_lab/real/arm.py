@@ -113,7 +113,11 @@ class SdkArm:
         return cls(arm, dynamics, **kwargs)
 
     def start(self) -> ArmReading:
-        """Enable, start tracking and wait for the loop's first snapshot."""
+        """Enable, start tracking and wait for the loop's first snapshot.
+
+        If ``start_tracking`` raises after ``enable`` succeeds, the session is left enabled
+        with no loop running it; the caller must still call ``stop()`` to disable the motors.
+        """
         self.arm.enable()
         self.arm.start_tracking(self.tracking, rt=self.rt)
         deadline = time.monotonic() + FIRST_TICK_TIMEOUT_S
@@ -150,7 +154,12 @@ class SdkArm:
         return self.tracking.telemetry()
 
     def hold(self) -> None:
-        """Swap in the SDK's hold at the current pose (torque stays on)."""
+        """Swap in the SDK's hold at the current pose (torque stays on).
+
+        Ends this session's use of ``self.tracking``: from the loop's next tick, ``push``
+        raises RuntimeError and ``now`` returns None. There is no resuming this ``Tracking``
+        short of ``stop()`` and a fresh session.
+        """
         self.arm.hold_now()
 
     def stop(self) -> None:

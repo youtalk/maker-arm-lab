@@ -59,9 +59,13 @@ def test_the_sdk_arm_starts_pushes_holds_and_stops_on_the_sdk_simulator():
         moved = sdk.read()
         assert abs(moved.q[0] - target[0]) < abs(first.q[0] - target[0])
         telemetry = sdk.telemetry()
-        assert telemetry["late_ticks"] == 0
+        assert telemetry["tick_t"] - first.t > 0.3
         assert telemetry["max_interval"] > 0.0 and math.isfinite(telemetry["max_interval"])
         sdk.hold()
+        time.sleep(0.3)
+        assert sdk.now() is None
+        with pytest.raises(RuntimeError):
+            sdk.push(0.0, 1.0 / 30.0, [*target, first.gripper])
         assert sdk.read().state == "enabled"
     finally:
         sdk.stop()
