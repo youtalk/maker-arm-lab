@@ -5,7 +5,9 @@ import subprocess
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "lerobot_stack" / "setup_lerobot_env.sh"
-THOR_INDEX = "https://pypi.jetson-ai-lab.io/sbsa/cu130/+simple/"
+# PyTorch's cu130 index: its aarch64 wheels carry sm_110 kernels and pull their CUDA
+# libraries as pip dependencies (the Jetson AI Lab SBSA build needs system NVPL and cuDSS).
+THOR_INDEX = "https://download.pytorch.org/whl/cu130"
 
 
 def _pin(text: str, name: str) -> tuple[int, ...]:
@@ -14,7 +16,7 @@ def _pin(text: str, name: str) -> tuple[int, ...]:
     return tuple(int(v) for v in found.group(1).split("."))
 
 
-def test_the_thor_branch_installs_torch_from_the_sbsa_index_before_lerobot():
+def test_the_thor_branch_installs_torch_from_the_cu130_index_before_lerobot():
     text = SCRIPT.read_text()
     assert THOR_INDEX in text
     assert text.index(THOR_INDEX) < text.index('"lerobot==0.5.1"')

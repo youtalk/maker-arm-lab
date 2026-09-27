@@ -4,11 +4,15 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 uv venv .venv --python 3.12
-# MS5 serves the policy on the Jetson Thor (aarch64, CUDA 13, sm_110), whose GPU PyPI's
-# aarch64 torch is not built for. The Jetson AI Lab SBSA index is; 2.10.0 and 0.25.0 are the
-# newest there inside lerobot 0.5.1's bounds (torch < 2.11, torchvision < 0.26). They go in
-# first, so the lerobot install below finds them satisfied and keeps them.
-THOR_INDEX="https://pypi.jetson-ai-lab.io/sbsa/cu130/+simple/"
+# MS5 serves the policy on the Jetson Thor (aarch64, CUDA 13, sm_110). PyTorch's own cu130
+# index carries aarch64 wheels built with sm_110 kernels, and they declare their CUDA
+# libraries (the nvidia-*-cu13 packages) as pip dependencies, so the venv needs nothing from
+# the system. The Jetson AI Lab SBSA build of the same version links against system NVPL
+# (libnvpl_lapack_lp64_gomp.so.0) and cuDSS (libcudss.so.0), which JetPack does not ship
+# and which need root to install. 2.10.0 and 0.25.0 are the newest inside lerobot 0.5.1's
+# bounds (torch < 2.11, torchvision < 0.26); the index's +cu130 local versions satisfy the
+# pins. They go in first, so the lerobot install below finds them satisfied and keeps them.
+THOR_INDEX="https://download.pytorch.org/whl/cu130"
 on_thor=false
 if [[ "$(uname -m)" == "aarch64" && -e /etc/nv_tegra_release ]]; then
     on_thor=true
