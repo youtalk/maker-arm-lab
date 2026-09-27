@@ -5,7 +5,7 @@ import math
 import pytest
 
 from maker_arm_lab.real import latency
-from maker_arm_lab.real.frames import Arrival
+from maker_arm_lab.real.frames import Arrival, relay
 
 
 def _arrivals(n, period_ms=33.3, latency_ms=80.0, skip=()):
@@ -67,3 +67,24 @@ def test_photon_summary_takes_half_a_frame_off_the_mean():
 
 def test_the_clock_offset_is_the_stamp_mean_less_the_photon_latency():
     assert latency.clock_offset_ms(130.0, 93.35) == 36.65
+
+
+def test_a_message_that_raises_is_dropped_and_reported_and_the_next_one_still_arrives():
+    """MS5 final review M3: a corrupt Conduit message must not end the executor's thread."""
+    got, errors = [], []
+
+    def convert(msg):
+        if msg == "corrupt":
+            raise ValueError("not a JPEG")
+        return msg.upper()
+
+    def callback(frame):
+        if frame == "REFUSED":
+            raise RuntimeError("the source refused it")
+        got.append(frame)
+
+    call = relay("jpeg", convert, callback, lambda key, err: errors.append((key, str(err))))
+    for msg in ("a", "corrupt", "refused", "b"):
+        call(msg)
+    assert got == ["A", "B"]
+    assert errors == [("jpeg", "not a JPEG"), ("jpeg", "the source refused it")]

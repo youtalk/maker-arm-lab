@@ -14,6 +14,21 @@ from dataclasses import dataclass
 import numpy as np
 
 
+def relay(key: str, convert, callback, on_error):
+    """One topic's subscription callback: ``callback(convert(msg))``. An exception in either
+    (a corrupt JPEG, a skewed K, a wrong depth encoding) drops that message and goes to
+    ``on_error(key, err)``, so one bad message cannot end the executor's thread. ``on_error``
+    must not raise."""
+
+    def call(msg) -> None:
+        try:
+            callback(convert(msg))
+        except Exception as err:  # noqa: BLE001 -- the executor's thread must keep spinning
+            on_error(key, err)
+
+    return call
+
+
 @dataclass(frozen=True)
 class Arrival:
     stamp_ns: int  # the header stamp: the ARKit capture time, on the iPhone's clock

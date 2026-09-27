@@ -11,9 +11,10 @@ which matches a reliable publisher as well as a best-effort one.
 rclpy loads in the lab's uv venv (Python 3.12, numpy 2) with ROS 2 Jazzy sourced and PyYAML
 installed (``uv sync --group real``); checked on the Jetson Thor 2026-09-26. The middleware is
 the environment's ``RMW_IMPLEMENTATION``, which must match the Conduit build's transport. A
-callback that raises ends the executor's thread; the frames then stop and the loop's
-frame-age watchdog holds the arm. The CPU suite never imports this module
-(``tests/test_real_ros_boundary.py``).
+message whose conversion or callback raises is dropped (``real.frames.relay``): the executor
+keeps spinning, ``failures`` counts it, ``error`` keeps the last one and ``on_error`` hears
+of it, so a consumer that stops getting frames can name the cause. The CPU suite never
+imports this module (``tests/test_real_ros_boundary.py``).
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo as CameraInfoMsg
 from sensor_msgs.msg import CompressedImage, Image
 
-from maker_arm_lab.real.frames import Arrival, CameraInfo, DepthFrame, JpegFrame
+from maker_arm_lab.real.frames import Arrival, CameraInfo, DepthFrame, JpegFrame, relay
 
 NAMESPACE = "/conduit"
 TOPICS = {
@@ -65,12 +66,9 @@ def _info(msg) -> CameraInfo:
     return CameraInfo(at, int(msg.width), int(msg.height), k, msg.header.frame_id)
 
 
-def _relay(convert, callback):
-    return lambda msg: callback(convert(msg))
-
-
 class ConduitSubscriber:
-    """Subscribes to each topic it has a callback for and spins them on a daemon thread."""
+    """Subscribes to each topic it has a callback for and spins them on a daemon thread.
+    ``on_error(key, err)`` hears of every dropped message; it must not raise."""
 
     def __init__(
         self,
@@ -80,8 +78,12 @@ class ConduitSubscriber:
         on_info=None,
         on_depth=None,
         on_depth_info=None,
+        on_error=None,
         node_name: str = "maker_arm_lab_conduit",
     ):
+        self.failures = 0
+        self.error: str | None = None
+        self._on_error = on_error
         if not rclpy.ok():
             rclpy.init()
         self._node = rclpy.create_node(node_name)
@@ -97,12 +99,18 @@ class ConduitSubscriber:
                 self._node.create_subscription(
                     msg_type,
                     f"{ns}/{TOPICS[key]}",
-                    _relay(convert, callback),
+                    relay(key, convert, callback, self._failed),
                     qos_profile_sensor_data,
                 )
         self._executor = SingleThreadedExecutor()
         self._executor.add_node(self._node)
         self._thread = threading.Thread(target=self._executor.spin, name="conduit", daemon=True)
+
+    def _failed(self, key: str, err: Exception) -> None:
+        self.failures += 1
+        self.error = f"{key}: {type(err).__name__}: {err}"
+        if self._on_error is not None:
+            self._on_error(key, err)
 
     def start(self) -> ConduitSubscriber:
         self._thread.start()

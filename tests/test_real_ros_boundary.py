@@ -69,3 +69,19 @@ def test_the_topics_are_the_conduit_contract():
         "depth": "camera/wide/depth/image_raw",
         "depth_info": "camera/wide/depth/camera_info",
     }
+
+
+def test_every_subscription_goes_through_the_guarded_relay():
+    """MS5 final review M3: each callback is ``frames.relay``, which catches, so one bad
+    message cannot end the executor's thread."""
+    calls = [
+        node
+        for node in ast.walk(ast.parse(ROS_PY.read_text()))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "create_subscription"
+    ]
+    assert calls
+    for call in calls:
+        callback = call.args[2]
+        assert isinstance(callback, ast.Call) and ast.unparse(callback.func) == "relay"
