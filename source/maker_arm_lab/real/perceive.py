@@ -45,8 +45,11 @@ from maker_arm_lab.real.rig import fold_box_yaw, label_boxes
 
 PERCEPTION_STACK = Path(__file__).resolve().parents[3] / "perception_stack"
 WORKER_TIMEOUT_MS = 2000
-"""A worker call with no reply within this holds the arm; the perception tick cap (1 s)
-usually trips first."""
+"""A worker call with no reply within this holds the arm. The perception tick cap (1 s) does
+not cut a call short: ``RealEnv.step`` checks it only after the tick's calls return, so a
+hung worker blocks the loop for up to this long per call (and a tick can carry parts,
+marker, wrist and lift calls) while the arm plays its last ``Tracking`` row, which holds
+still but is not the SDK's hold."""
 
 
 def _load_protocol():
