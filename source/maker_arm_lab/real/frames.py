@@ -62,3 +62,11 @@ class CameraInfo:
     height: int
     k: tuple[float, ...]  # row-major 3x3
     frame_id: str
+
+
+@dataclass(frozen=True)
+class FrameBundle:
+    """What one worker request sends: its header's camera blocks and its arrays."""
+
+    header: dict
+    arrays: dict
