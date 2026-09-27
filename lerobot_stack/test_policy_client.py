@@ -196,3 +196,22 @@ def test_a_step_records_the_servers_policy_time_and_the_round_trip():
         client.close()
     finally:
         shutdown()
+
+
+def test_an_error_reply_clears_the_last_policy_time():
+    def policy(state, wrist, overhead, context=None):
+        return np.zeros((state.shape[0], *ACTION_SHAPE), dtype="float32")
+
+    endpoint, shutdown = _serve(policy_fn=policy, reset_fn=lambda: None, policy_id="fake:err")
+    try:
+        client = ServerPolicy(endpoint, recv_timeout_ms=10_000)
+        client.step(*_obs(1))
+        assert client.last_policy_ms is not None
+        state, wrist, overhead = _obs(1)
+        state[:, 6] = 2.0  # not an opening fraction: the server replies with an error
+        with pytest.raises(RuntimeError, match="server error"):
+            client.step(state, wrist, overhead)
+        assert client.last_policy_ms is None and client.last_rtt_ms is not None
+        client.close()
+    finally:
+        shutdown()

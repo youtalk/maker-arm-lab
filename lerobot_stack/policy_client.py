@@ -78,6 +78,9 @@ class ServerPolicy:
         )
         header, out = policy_protocol.recv_message(self._socket)
         self.last_rtt_ms = 1e3 * (time.perf_counter() - started)
+        # Cleared before the type check, so an error reply never leaves the previous step's
+        # time behind for a reader that catches the exception.
+        self.last_policy_ms = None
         if header.get("type") != "action":
             raise RuntimeError(f"server error: {header}")
         self.last_policy_ms = header.get("policy_ms")
