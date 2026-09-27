@@ -38,6 +38,7 @@ ldraw = [
 
 # MS5 on the Jetson Thor: rclpy (from /opt/ros/jazzy) needs PyYAML in this interpreter.
 real = [
+    "opencv-python-headless>=4.9",
     "pyyaml>=6.0",
 ]
 
