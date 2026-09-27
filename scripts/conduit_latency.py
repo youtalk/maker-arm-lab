@@ -13,8 +13,9 @@ Runs under the lab's uv venv with ROS 2 Jazzy sourced and the ``real`` group ins
 each switch in the mean brightness of ``--roi`` (x0,y0,x1,y1 in the published JPEG's pixels).
 The switch time is taken when the command returns; its run time is reported as the switch
 window. The stamp latency of the same frames gives the session's clock offset. Prints
-``LATENCY_OK`` or ``LATENCY_FAIL`` with a JSON summary on every exit path and exits through
-``os._exit``.
+``LATENCY_OK`` or ``LATENCY_FAIL`` with a JSON summary on every exit path, a Ctrl-C
+included (``{"reason": "interrupted"}``), and exits through ``os._exit``. Messages the
+subscriber dropped (a callback that raised) are counted in ``dropped`` with the last error.
 """
 
 from __future__ import annotations
@@ -118,10 +119,16 @@ def run_stamp(args) -> dict:
     out = {k: latency.stamp_summary(v) for k, v in got.items() if v}
     missing = [k for k, v in got.items() if not v]
     out["seconds"] = args.seconds
+    out.update(dropped(sub))
     out["pass"] = not missing
     if missing:
         out["reason"] = f"no frames on {missing}"
     return out
+
+
+def dropped(sub) -> dict:
+    """The messages the subscriber dropped because a callback raised, and the last error."""
+    return {"dropped": sub.failures, "dropped_error": sub.error}
 
 
 def run_photon(args) -> dict:
@@ -152,7 +159,7 @@ def run_photon(args) -> dict:
     with lock:
         got = list(samples)
     if len(got) < 10:
-        return {"pass": False, "reason": f"only {len(got)} frames arrived"}
+        return {"pass": False, "reason": f"only {len(got)} frames arrived", **dropped(sub)}
     values = [v for _, v, _ in got]
     threshold = 0.5 * (latency.percentile(values, 10) + latency.percentile(values, 90))
     seen = latency.transitions([(t, v) for t, v, _ in got], threshold)
@@ -169,6 +176,7 @@ def run_photon(args) -> dict:
         threshold=round(threshold, 1),
         stamp_latency_ms=stamp,
         clock_offset_ms=None if c2a is None else latency.clock_offset_ms(stamp["mean"], c2a),
+        **dropped(sub),
     )
     # A light the camera misses more than one switch in five is not a read.
     out["pass"] = len(delays) >= 0.8 * len(switches)
@@ -186,6 +194,9 @@ def main(argv=None) -> int:
         token = "LATENCY_OK " if summary["pass"] else "LATENCY_FAIL "
         print(token + json.dumps(summary), flush=True)
         return 0 if summary["pass"] else 1
+    except KeyboardInterrupt:
+        print("LATENCY_FAIL " + json.dumps({"reason": "interrupted"}), flush=True)
+        return 1
     except Exception as exc:  # noqa: BLE001 -- every failure must still print a token
         print("LATENCY_FAIL " + json.dumps({"reason": f"{type(exc).__name__}: {exc}"}), flush=True)
         traceback.print_exc()

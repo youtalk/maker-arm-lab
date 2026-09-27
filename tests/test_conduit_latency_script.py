@@ -4,6 +4,7 @@ import ast
 import importlib.util
 import io
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -48,6 +49,42 @@ def test_a_usage_error_prints_the_fail_token():
 def test_without_ros_the_stamp_mode_fails_with_a_token():
     code, lines = _run("stamp", "--seconds", "0.1")
     assert code == 1 and lines[-1].startswith("LATENCY_FAIL ")
+
+
+def test_an_interrupt_prints_one_interrupted_token(monkeypatch, capsys):
+    def interrupted(args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(conduit_latency, "run_stamp", interrupted)
+    assert conduit_latency.main(["stamp"]) == 1
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert lines == ['LATENCY_FAIL {"reason": "interrupted"}']
+
+
+def test_a_ctrl_c_in_the_stamp_wait_prints_one_token_and_exits_through_os_exit():
+    """MS5 final review I3: a real SIGINT during the 300 s wait, in a child that runs the
+    script's own ``__main__`` line with the ROS subscriber replaced by a sleep."""
+    child = (
+        "import importlib.util, os, sys, time\n"
+        f"spec = importlib.util.spec_from_file_location('m', {str(SCRIPT)!r})\n"
+        "m = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(m)\n"
+        "def wait(args):\n"
+        "    print('READY', flush=True)\n"
+        "    time.sleep(args.seconds)\n"
+        "m.run_stamp = wait\n"
+        "os._exit(m.main(['stamp', '--seconds', '60']))\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "AMENT_PREFIX_PATH")}
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child], stdout=subprocess.PIPE, text=True, env=env
+    )
+    assert proc.stdout.readline().strip() == "READY"
+    proc.send_signal(signal.SIGINT)
+    out, _ = proc.communicate(timeout=30)
+    assert proc.returncode == 1
+    tokens = [line for line in out.splitlines() if line.startswith("LATENCY_")]
+    assert tokens == ['LATENCY_FAIL {"reason": "interrupted"}']
 
 
 def test_roi_brightness_reads_only_the_roi():
