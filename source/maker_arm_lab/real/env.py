@@ -40,6 +40,9 @@ the age of the view the policy reads. A frame that fails either check trips befo
 copied into ``obs_buf``, so the policy never reads a stale view. The perception backend reads
 the frames observed at the step (``overhead_frame``, ``wrist_frame``); the policy may read
 newer ones, which is harmless because the arm holds its last row during the perception tick.
+The one exception is ``class_views``' third wrist view (MS7d L5), a second look at the part
+between the jaws: it reads the newest wrist frame (``wrist_frame(latest=True)``) under the
+same age check, so it is not the frame the lift call classified.
 
 Frame age, a declared decision: ``FRAME_AGE_CAP_S`` counts from a frame's arrival on this
 host's monotonic clock, not from its capture stamp. A capture-stamp age needs the
@@ -368,20 +371,23 @@ class RealEnv:
         """Check both latest frames' ages, then copy their views into ``obs_buf``; return the
         two ``Latest``. A frame that fails trips before anything is copied."""
         now = time.monotonic_ns()
-        frames = []
-        for name, source in (("overhead", self.overhead_source), ("wrist", self.wrist_source)):
-            latest = source.frames.get()
-            if latest is None:
-                self.trip("frame", f"no {name} frame")
-            age = (now - latest.arrival_mono_ns) / 1e9
-            if age > FRAME_AGE_CAP_S:
-                error = getattr(source, "error", None)
-                self.trip("frame", f"the {name} frame is {1e3 * age:.0f} ms old ({error})")
-            frames.append(latest)
-        overhead, wrist = frames
+        overhead = self._fresh("overhead", self.overhead_source, now)
+        wrist = self._fresh("wrist", self.wrist_source, now)
         self._overhead[0] = overhead.view
         self._wrist[0] = wrist.view
         return overhead, wrist
+
+    def _fresh(self, name: str, source, now: int):
+        """``source``'s latest frame, or a trip if it has none or it is older than
+        ``FRAME_AGE_CAP_S`` at ``now`` (monotonic ns)."""
+        latest = source.frames.get()
+        if latest is None:
+            self.trip("frame", f"no {name} frame")
+        age = (now - latest.arrival_mono_ns) / 1e9
+        if age > FRAME_AGE_CAP_S:
+            error = getattr(source, "error", None)
+            self.trip("frame", f"the {name} frame is {1e3 * age:.0f} ms old ({error})")
+        return latest
 
     def stamp_markers(self) -> None:
         """Observe the latest frames again (the frame-age watchdog at the policy call; the
@@ -423,8 +429,12 @@ class RealEnv:
         have read a newer one (``stamp_markers``)."""
         return self.overhead_source.bundle(self._overhead_latest)
 
-    def wrist_frame(self) -> np.ndarray:
-        """The wrist frame observed at the last step, the camera's own resolution."""
+    def wrist_frame(self, latest: bool = False) -> np.ndarray:
+        """The wrist frame observed at the last step, the camera's own resolution. ``latest``
+        reads the newest frame instead (``class_views``' third view), which trips like the
+        step's check if it is older than ``FRAME_AGE_CAP_S``."""
+        if latest:
+            return self._fresh("wrist", self.wrist_source, time.monotonic_ns()).raw
         return self._wrist_latest.raw
 
     def wrist_camera_header(self) -> dict:

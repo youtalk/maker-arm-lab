@@ -16,9 +16,10 @@ here those reads take the rig's frames, not the simulator's truth:
   measures, ``perception_protocol``), not the tag's centre.
 - ``wrist_look`` returns the frozen marker point, the selection's perceived centre, as the
   look's prior; ``RealWrist.look`` finds the target near it in the wrist frame.
-- ``lift_class`` classifies the part between the jaws in the wrist frame; the perceiver's
-  ``classify`` returns that class as it is, and ``RealClassViews.view`` takes a fresh wrist
-  frame for the third view.
+- ``lift_class`` classifies the part between the jaws in the wrist frame observed at the
+  step; the perceiver's ``classify`` returns that class as it is. ``RealClassViews.view``
+  classifies the newest wrist frame for the third view (``env.wrist_frame(latest=True)``,
+  age-checked, so a stale frame holds the arm), not the frame the lift call used.
 
 No noise is drawn: the knob scales the loop passes are not read, and the caller runs the loop
 at ``all=0`` so that ``core.torque.ForceSensor`` adds none either. The truth metrics
@@ -241,13 +242,17 @@ class RealWrist:
 
 
 class RealClassViews:
-    """``perception.ClassViews``' surface: a third view is a fresh wrist classification."""
+    """``perception.ClassViews``' surface: a third view is a classification of the newest
+    wrist frame. The lift call classified the frame observed at the step; the loop asks for
+    the third view in the same iteration, so reading that frame again would repeat the lift's
+    class and the vote would never override it (MS7d L5)."""
 
     def __init__(self, backend: RealPerception):
         self.backend = backend
 
     def view(self, part: int, true_cls: str, rng=None) -> str:
-        cls, _ = self.backend.lift_class(self.backend.env, 0)
+        env = self.backend.env
+        cls, _ = self.backend.classify_wrist(env, env.wrist_frame(latest=True))
         return true_cls if cls is None else cls
 
 
@@ -281,8 +286,13 @@ class RealPerception:
         return x, y, math.nan, False
 
     def lift_class(self, env, i: int):
+        return self.classify_wrist(env, env.wrist_frame())
+
+    def classify_wrist(self, env, frame):
+        """The ``lift`` call on one wrist frame: (class, 0), or (None, -1) on a miss. The
+        camera pose is the last step's FK; the arm holds its last row meanwhile."""
         header = {"camera": env.wrist_camera_header()}
-        reply, _ = self.request("lift", header, {"wrist_rgb": env.wrist_frame()})
+        reply, _ = self.request("lift", header, {"wrist_rgb": frame})
         cls = reply.get("cls")
         if cls is None:
             return None, -1

@@ -14,7 +14,7 @@ from maker_arm_lab.real.frames import FrameBundle
 from maker_arm_lab.real.pacing import TickLog
 from maker_arm_lab.real.perceive import RealPerception, WorkerClient, proto
 from maker_arm_lab.real.rig import episode_sheet
-from real_fakes import FakeWorker
+from real_fakes import FakeWorker, make_env
 
 CAMERA = proto.camera_header(
     (300.0, 0.0, 320.0, 0.0, 300.0, 240.0, 0.0, 0.0, 1.0), (640, 480), (0.3, 0.0, 0.7), (0, 1, 0, 0)
@@ -46,8 +46,8 @@ class _StubEnv:
         jpeg = np.frombuffer(b"\xff\xd8\xff\xd9", dtype=np.uint8)
         return FrameBundle({"camera": CAMERA, "depth_camera": None}, {"rgb_jpeg": jpeg})
 
-    def wrist_frame(self):
-        return np.zeros((224, 224, 3), dtype=np.uint8)
+    def wrist_frame(self, latest=False):
+        return np.full((224, 224, 3), 200 if latest else 0, dtype=np.uint8)
 
     def wrist_camera_header(self):
         return CAMERA
@@ -209,6 +209,30 @@ def test_the_lift_class_and_the_third_view_come_from_the_wrist_frame(rig_parts):
     assert backend.perceiver(1, 0, {}).classify("tall", part=0) == "tall"
     worker.lift_cls = None
     assert backend.lift_class(env, 0) == (None, -1) and views.view(0, "wide") == "wide"
+
+
+def test_the_third_view_classifies_a_newer_wrist_frame_than_the_lift():
+    """MS5 final review I2: the lift call reads the frame observed at the step; the third view
+    reads the newest frame under the same age check, so the L5 vote is a second look."""
+    env, arm, _ = make_env()
+    worker = FakeWorker(lift_cls="tall")
+    backend = RealPerception(env, WorkerClient(worker.endpoint), env.cfg.num_bricks)
+    try:
+        wrist = env.wrist_source
+        assert backend.lift_class(env, 0) == ("tall", 0)
+        wrist.raw = np.full((224, 224, 3), 200, dtype=np.uint8)  # a frame arrives meanwhile
+        worker.lift_cls = "narrow"
+        assert backend.class_views(1, 0, {}, 4).view(0, "wide") == "narrow"
+        lifts = [arrays["wrist_rgb"] for kind, _, arrays in worker.requests if kind == "lift"]
+        assert [int(a[0, 0, 0]) for a in lifts] == [60, 200]
+        wrist.age_s = 0.5
+        with pytest.raises(EvalFailure) as err:
+            backend.class_views(1, 0, {}, 4).view(0, "wide")
+        assert err.value.reason == "watchdog_frame" and arm.holds == 1
+        assert worker.kinds().count("lift") == 2
+    finally:
+        backend.client.close()
+        worker.close()
 
 
 def test_an_unknown_lift_class_holds_the_arm(rig_parts):
