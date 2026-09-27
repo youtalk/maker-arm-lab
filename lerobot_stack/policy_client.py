@@ -5,6 +5,8 @@ round-trip have CPU tests against the real PolicyServer (lerobot_stack/test_poli
 the eval script only adds the Isaac loop around it.
 """
 
+import time
+
 import numpy as np
 import zmq
 
@@ -41,6 +43,9 @@ class ServerPolicy:
         self.context_dim: int = int(header.get("context_dim", 0))
         self.action_space: str = str(header.get("action_space", "absolute"))
         self.gripper: str = str(header.get("gripper", "binary"))
+        # MS5 design P1: the last step's server time in the policy call and round trip, ms.
+        self.last_policy_ms: float | None = None
+        self.last_rtt_ms: float | None = None
         self.reset()
 
     def reset(self) -> None:
@@ -67,12 +72,15 @@ class ServerPolicy:
             arrays[policy_protocol.ANCHOR_KEY] = anchor
         if replan is not None:
             arrays[policy_protocol.REPLAN_KEY] = np.asarray(replan, dtype=bool)
+        started = time.perf_counter()
         policy_protocol.send_message(
             self._socket, {"type": "step", "batch": int(state.shape[0])}, arrays
         )
         header, out = policy_protocol.recv_message(self._socket)
+        self.last_rtt_ms = 1e3 * (time.perf_counter() - started)
         if header.get("type") != "action":
             raise RuntimeError(f"server error: {header}")
+        self.last_policy_ms = header.get("policy_ms")
         action = out["action"]
         if (
             action.shape != (state.shape[0], *policy_protocol.ACTION_SHAPE)

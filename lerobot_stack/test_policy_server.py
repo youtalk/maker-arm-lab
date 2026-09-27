@@ -235,6 +235,13 @@ def test_reset_calls_reset_fn(server):
     assert header["type"] == "reset_ack" and calls["reset"] == 1
 
 
+def test_the_action_reply_carries_the_servers_policy_time(server):
+    req, _ = server
+    header, arrays = _rpc(req, {"type": "step", "batch": 1}, _obs(1))
+    assert header["type"] == "action" and arrays["action"].shape == (1, 7)
+    assert isinstance(header["policy_ms"], float) and header["policy_ms"] >= 0.0
+
+
 def test_no_overrides_is_a_noop():
     assert resolve_inference_overrides(None, None, chunk_size=100) == {}
 

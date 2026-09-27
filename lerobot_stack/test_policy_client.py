@@ -1,6 +1,7 @@
 """The eval client against the real PolicyServer, over a loopback socket."""
 
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -178,3 +179,20 @@ def test_client_sends_the_replan_flag_only_when_given():
     client.close()
     shutdown()
     assert seen == [None, [True, False]]
+
+
+def test_a_step_records_the_servers_policy_time_and_the_round_trip():
+    def slow_policy(state, wrist, overhead, context=None):
+        time.sleep(0.01)
+        return np.zeros((state.shape[0], *ACTION_SHAPE), dtype="float32")
+
+    endpoint, shutdown = _serve(policy_fn=slow_policy, reset_fn=lambda: None, policy_id="fake:slow")
+    try:
+        client = ServerPolicy(endpoint, recv_timeout_ms=10_000)
+        assert client.last_policy_ms is None and client.last_rtt_ms is None
+        client.step(*_obs(1))
+        assert client.last_policy_ms >= 10.0
+        assert client.last_rtt_ms >= client.last_policy_ms
+        client.close()
+    finally:
+        shutdown()
