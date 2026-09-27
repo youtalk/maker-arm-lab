@@ -2008,6 +2008,45 @@ def wrist_look_truth(env, rig, i: int, b: int) -> tuple[float, float, float, boo
     return float(pos[b, 0]), float(pos[b, 1]), yaw, perception.covered(pos, quat, sizes, b)
 
 
+class SimPerception:
+    """The simulator's perception backend (MS5 design P2): the ``core.perception`` models on
+    this module's three truth accessors.
+
+    ``rollout`` builds its perception models and reads what feeds them through
+    ``backend_of(env)``, so an env that carries its own backend (the real rig's
+    ``real.perceive.RealPerception``) replaces all seven members together. Each member looks
+    its target up when called, so a test that patches ``loop.perception_truth`` or
+    ``perception.Perceiver`` still reaches the loop.
+    """
+
+    def perceiver(self, run_seed: int, i: int, scales: dict, class_names=BASE_CLASSES):
+        return perception.Perceiver(run_seed, i, scales, class_names)
+
+    def marker(self, perceiver, run_seed: int, i: int):
+        return perception.MarkerBias(perceiver, run_seed, i)
+
+    def class_views(self, run_seed: int, i: int, scales: dict, k: int, class_names=BASE_CLASSES):
+        return perception.ClassViews(run_seed, i, scales, k, class_names)
+
+    def wrist(self, run_seed: int, i: int, scales: dict):
+        return perception.WristCamera(run_seed, i, scales)
+
+    def overhead(self, env, rig, i: int):
+        """The input of one ``perceive`` call."""
+        return perception_truth(env, rig, i)
+
+    def wrist_look(self, env, rig, i: int, b: int):
+        return wrist_look_truth(env, rig, i, b)
+
+    def lift_class(self, env, i: int):
+        return wrist_class(env, i)
+
+
+def backend_of(env):
+    """``env.perception_backend`` when the env carries one, else ``SimPerception()``."""
+    return getattr(env, "perception_backend", None) or SimPerception()
+
+
 def _wrist_look(st: EnvState, env, rig, i: int, pick, row) -> None:
     """``wrist_fix``: take a wrist look at the cycle's target if ``look_due`` says so, and set
     the serving row from it (``wrist_row``). ``row`` is the target row served at selection. A
@@ -2015,7 +2054,7 @@ def _wrist_look(st: EnvState, env, rig, i: int, pick, row) -> None:
     c = st.cycle
     if not look_due(c, pick, row if c.serving_row is None else c.serving_row):
         return
-    x, y, yaw, covered = wrist_look_truth(env, rig, i, c.target)
+    x, y, yaw, covered = backend_of(env).wrist_look(env, rig, i, c.target)
     look = st.wrist.look((x, y), yaw, covered)
     st.counts["wrist_looks"] += 1
     st.counts["wrist_covered"] += covered
@@ -2125,7 +2164,7 @@ def _perceived_scene(st: EnvState, env, rig, i: int, k: int):
     one slot per part (``PerceivedState.scene``), the perceived sizes and closing axes, and the
     failure and rake counts by position. Returns the state and the scene. Under
     ``marker_bias`` every centre is first corrected by the gripper marker's estimate."""
-    state = st.perceiver.perceive(perception_truth(env, rig, i))
+    state = st.perceiver.perceive(backend_of(env).overhead(env, rig, i))
     if st.marker is not None:
         st.marker.look(rig.pick_point(i).tolist())
         state = st.marker.correct(state)
@@ -2532,6 +2571,7 @@ def rollout(
             )
     scales = {**perception.parse_scales(""), **(noise_scales or {})}  # a knob not named is 1
     wave3 = perceived and takeover is not None  # MS7f wave 3, the module docstring's DAgger mode
+    backend = backend_of(env)  # MS5 design P2: the rig's perception, or the simulator's
     sensors = None  # MS7d L6 and L7: one pick-point force sensor per env
     if hold_force or force_cap:
         if getattr(env, "arm_torques", None) is None:
@@ -2546,14 +2586,14 @@ def rollout(
         poses = env.desk_box_poses.copy()
         drawn = bool(getattr(env, "box_draw", 0))  # MS7e: each box's size is perceived too
         for i, st in enumerate(states):
-            st.perceiver = perception.Perceiver(run_seed, i, scales, class_names)
+            st.perceiver = backend.perceiver(run_seed, i, scales, class_names)
             st.perceiver.reset_episode(poses[i], env.desk_box_sizes[i] if drawn else ())
             if wave3 and getattr(rig, "perceivers", None) is not None:
                 rig.perceivers[i] = st.perceiver  # a takeover records this perception
             if marker_bias:
-                st.marker = perception.MarkerBias(st.perceiver, run_seed, i)
+                st.marker = backend.marker(st.perceiver, run_seed, i)
             if class_views:
-                st.perceiver.views = perception.ClassViews(run_seed, i, scales, k, class_names)
+                st.perceiver.views = backend.class_views(run_seed, i, scales, k, class_names)
             poses[i] = st.perceiver.box_poses
             st.selector.boxes = st.perceiver.box_poses
             st.selector.box_sizes = st.perceiver.box_sizes
@@ -2568,7 +2608,7 @@ def rollout(
                 boxes, sizes = st.perceiver.box_poses, st.perceiver.box_sizes
                 st.selector.walls += desk_boxes.box_walls(boxes, sizes)
             if wrist_fix:
-                st.wrist = perception.WristCamera(run_seed, i, scales)
+                st.wrist = backend.wrist(run_seed, i, scales)
         env.perceived_box_poses = poses
         for i in range(num_envs):
             env.set_context_box(i, 0)  # the reset served box 0's true pose
@@ -3185,7 +3225,7 @@ def rollout(
                 if lift_now:
                     # The class at lift: the box follows the class drawn for the part between
                     # the jaws, the target or not; nothing between them keeps the row.
-                    true_cls, part = wrist_class(env, i)
+                    true_cls, part = backend.lift_class(env, i)
                     views = st.perceiver.views  # ``class_views``: a third view on a disagreement
                     lighter = {
                         c: desk_boxes.lighter_box(own, st.box_load)
