@@ -52,7 +52,7 @@ pythonpath = ["source"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["source", "tests", "scripts", "lerobot_stack"]
+src = ["source", "tests", "scripts", "lerobot_stack", "perception_stack"]
 # Vendored third-party files are not ours to lint or format.
 extend-exclude = ["assets/vendor"]
 
