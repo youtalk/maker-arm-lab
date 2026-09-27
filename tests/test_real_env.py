@@ -235,6 +235,23 @@ def test_an_arm_fault_or_a_stopped_loop_holds_and_never_pushes_again():
     assert err.value.reason == "watchdog_arm" and arm.pushes == [] and arm.holds == 1
 
 
+class _ClocklessArm(FakeArm):
+    """Alive and enabled, so ``_check_arm`` passes, but the SDK loop has no clock."""
+
+    def now(self):
+        return None
+
+
+def test_a_loop_clock_that_stops_holds_and_pushes_nothing():
+    """MS5 final review M4: the ``now() is None`` branch of ``step``."""
+    clock = FakeClock()
+    env, arm, _ = make_env(clock=clock, arm=_ClocklessArm(clock))
+    with pytest.raises(EvalFailure) as err:
+        env.step(_action())
+    assert err.value.reason == "watchdog_arm" and "stopped ticking" in err.value.detail
+    assert arm.pushes == [] and arm.holds == 1
+
+
 class _FailingPushArm(FakeArm):
     def push(self, due, dt, row):
         raise RuntimeError("the tracking session was held")
