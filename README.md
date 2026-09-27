@@ -39,6 +39,8 @@ source/maker_arm_lab/
                      hold, torque, dynamics_model, overlay
   mj/                MuJoCo backend: env, scene, recorder, depth, context_names;
                      bench and bench_gate (the MA2 tracking bench)
+  real/              MS5 real rig: env (RealEnv), arm (maker_arm_rs Tracking), perceive, sources,
+                     camera_model, rig, pacing, frames, latency; ros.py is the only rclpy import
   tasks/manager_based/lego_sort/
                      Isaac env cfgs and the five task ids, mdp/, datagen, oracle_runtime
                      (OracleRig), vision
@@ -48,6 +50,7 @@ assets/housing_mass_model.json         housing mass model for maker_arm_rs.Dynam
 assets/usd/                            generated maker_arm.usd, NOT committed
 lerobot_stack/                         LeRobot venv: HDF5 conversion, policy protocol and server,
                                        ACT train wrapper, part classifier trainer
+perception_stack/                      perception worker wire format (numpy + stdlib only)
 scripts/                               setup, smokes, checks, generation, eval clients, supervisors
 tests/                                 CPU-only pytest (no isaaclab import at collection time)
 docs/                                  milestone reports
@@ -441,7 +444,7 @@ uv run python scripts/conduit_latency.py photon --on_cmd '<light on>' --off_cmd 
     --roi 900,600,1020,720 --cycles 30 --out ~/data/maker-arm-ms5/p7/photon.json   # LATENCY_OK
 ```
 
-The rig's geometry and session settings are one JSON file, `real.rig.RigConfig` (`--rig`; the default is the nominal config). Most fields are calibrated already; five are placeholders a named step still measures: `overhead_pos`, `overhead_quat`, `wrist_rot` (the hand-eye rotation) and `wrist_device` wait on A2, and `tracking_params` waits on A1. `PICK_FLOOR_MARGIN_M` in `real/env.py` and the gripper motor's linear angle-to-opening map in `real/arm.py` are placeholders the same way, on A0 and A1 respectively.
+The rig's geometry and session settings are one JSON file, `real.rig.RigConfig` (`--rig`; the default is the nominal config). Five fields are placeholders a named step still measures: `overhead_pos`, `overhead_quat`, `wrist_rot` (the hand-eye rotation) and `wrist_device` wait on A2, and `tracking_params` waits on A1. `overhead_k` and `overhead_size` may stay unset, because Conduit's camera info supplies them. `wrist_k` and `wrist_size` are not calibrated yet: unset, the wrist source expects the simulated 224x224 view, so a real UVC camera needs both set, or every frame of another size is dropped and the frame-age watchdog holds the arm. `PICK_FLOOR_MARGIN_M` in `real/env.py` and the gripper motor's linear angle-to-opening map in `real/arm.py` are placeholders the same way, on A0 and A1 respectively.
 
 `real_eval_heap.py --release` controls what happens to the motors once the token is printed: `prompt` (the default) holds the arm until the operator types `RELEASE` or closes stdin, and a Ctrl-C at the prompt only re-asks — it never releases; `now` disables at once, for the SDK simulator and tests. A Ctrl-C during the episode itself ends it (`EVAL_FAIL reason=interrupted`) and holds the arm the same way a watchdog would, through the same prompt.
 
