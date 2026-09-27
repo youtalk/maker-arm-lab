@@ -36,8 +36,8 @@ source/maker_arm_lab/
   core/              isaaclab-free logic: layout, oracle, global_ik, trajectory, grader (stowed,
                      checker), gate, trace, profile; heap teacher (parts, grasp, heap_oracle);
                      loops (batch_loop, eval_loop, dagger_loop, loop); desk_boxes, perception,
-                     hold, torque, dynamics_model
-  mj/                MuJoCo backend: env, scene, recorder, overlay, depth, context_names;
+                     hold, torque, dynamics_model, overlay
+  mj/                MuJoCo backend: env, scene, recorder, depth, context_names;
                      bench and bench_gate (the MA2 tracking bench)
   tasks/manager_based/lego_sort/
                      Isaac env cfgs and the five task ids, mdp/, datagen, oracle_runtime

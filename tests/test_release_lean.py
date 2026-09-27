@@ -12,11 +12,11 @@ import mujoco
 import numpy as np
 import pytest
 
-from maker_arm_lab.core import batch_loop, cameras, desk_boxes, layout, oracle, parts
+from maker_arm_lab.core import batch_loop, cameras, desk_boxes, layout, oracle, overlay, parts
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.quat import quat_mul
 from maker_arm_lab.core.stowed import per_brick_stowed
-from maker_arm_lab.mj import overlay, scene
+from maker_arm_lab.mj import scene
 from maker_arm_lab.mj.env import HEAP_PARK_X, MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import LEAN_AZIMUTH, OracleRig
 from test_mj_heap_oracle import _place

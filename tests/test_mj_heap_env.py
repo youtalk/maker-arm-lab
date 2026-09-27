@@ -9,10 +9,9 @@ import numpy as np
 import pytest
 import torch
 
-from maker_arm_lab.core import cameras, layout, parts
+from maker_arm_lab.core import cameras, layout, overlay, parts
 from maker_arm_lab.core.heap_oracle import STOW_HALF_EXTENTS
 from maker_arm_lab.core.layout import sample_run_draw
-from maker_arm_lab.mj import overlay
 from maker_arm_lab.mj.context_names import CONTEXT_BOX_NAMES, CONTEXT_DIMS, CONTEXT_TARGET_NAMES
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.mj.recorder import ShardRecorder

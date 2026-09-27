@@ -79,7 +79,7 @@ import mujoco
 import numpy as np
 import torch
 
-from maker_arm_lab.core import cameras, layout, oracle, perception
+from maker_arm_lab.core import cameras, layout, oracle, overlay, perception
 from maker_arm_lab.core import parts as _parts
 from maker_arm_lab.core.batch_loop import (
     add_batch_arguments,
@@ -98,7 +98,6 @@ from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.hold import HoldDetector, commanded_gap
 from maker_arm_lab.core.loop import CARRY_VIEW_STEPS
-from maker_arm_lab.mj import overlay
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.robots.frames import GRIPPER_JOINT_NAMES
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
