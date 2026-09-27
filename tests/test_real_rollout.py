@@ -1,8 +1,10 @@
 """MS5 design section 10: the unchanged heap loop runs on RealEnv under the MS7d served
 switches, and no decision on the rig reads a truth accessor."""
 
+import importlib.util
 import math
 import random
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -16,7 +18,6 @@ from maker_arm_lab.real.rig import episode_sheet
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 from real_fakes import FakeWorker, make_env
 from test_perceived_loop import (
-    MS7D_ON,
     TRUTH_DECISION_READS,
     _garbage_reads,
     _raises,
@@ -24,21 +25,14 @@ from test_perceived_loop import (
     _TruthlessEnv,
 )
 
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "real_eval_heap.py"
+spec = importlib.util.spec_from_file_location("real_eval_heap", SCRIPT)
+real_eval_heap = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(real_eval_heap)
+
 BUDGET = 3
-SERVED = {
-    "select_at_release": True,
-    "replan_on_switch": True,
-    "squeeze_floor": True,
-    "square_wrist": True,
-    "scripted_rake": True,
-    "part_failures": True,
-    "pick_snap": True,
-    "dwell_close": True,
-    "adopt_held": True,
-    "park_done": True,
-    "rake_turn": True,
-    **MS7D_ON,
-}
+SERVED = real_eval_heap.SERVED_SWITCHES
+"""The switches the rig serves: the eval client's one definition (``SERVED_SWITCHES``)."""
 SIZE = make_part("brick", 2, 4).size
 SPREAD = [(0.195, -0.045, 0.3), (0.195, 0.0, -0.8), (0.195, 0.045, 1.2)]
 SHEET = episode_sheet(20265000, 0)
