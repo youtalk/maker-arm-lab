@@ -36,6 +36,11 @@ ldraw = [
     "trimesh>=4.0",
 ]
 
+# MS5 on the Jetson Thor: rclpy (from /opt/ros/jazzy) needs PyYAML in this interpreter.
+real = [
+    "pyyaml>=6.0",
+]
+
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu" }]
 maker-arm-rs = { git = "https://github.com/youtalk/maker-arm-rs", subdirectory = "bindings/maker-arm-py", rev = "6141b84eb30c9c8ed042c10f426ee9a8a498eafc" }
