@@ -1,4 +1,4 @@
-"""MS5 design P1: the LeRobot venv's Thor path pins a CUDA 13 torch inside lerobot's bounds."""
+"""MS5 design P1: both Thor venvs pin one CUDA 13 torch inside lerobot's bounds."""
 
 import re
 import subprocess
@@ -36,3 +36,52 @@ def test_the_thor_branch_checks_cuda_on_sm_110():
 
 def test_the_script_parses():
     subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
+
+
+PERCEPTION = Path(__file__).resolve().parents[1] / "perception_stack" / "setup_perception_env.sh"
+BOTH = (SCRIPT, PERCEPTION)
+
+
+def _pin_text(text: str, name: str) -> str:
+    found = re.findall(rf'"{name}==([0-9.]+)"', text)
+    assert len(found) == 1, f"{name} is pinned {len(found)} times"
+    return found[0]
+
+
+def test_the_perception_venv_pins_the_same_torch_from_the_same_index():
+    lerobot, perception = SCRIPT.read_text(), PERCEPTION.read_text()
+    for name in ("torch", "torchvision"):
+        assert _pin_text(perception, name) == _pin_text(lerobot, name)
+    assert THOR_INDEX in perception
+    indexes = [
+        set(re.findall(r"https://download\.pytorch\.org/whl/\w+", t)) for t in (lerobot, perception)
+    ]
+    assert indexes[0] == indexes[1] == {THOR_INDEX}
+
+
+def test_the_perception_script_parses():
+    subprocess.run(["bash", "-n", str(PERCEPTION)], check=True)
+
+
+def test_both_scripts_rebuild_the_venv_on_a_rerun():
+    for script in BOTH:
+        venv = [ln for ln in script.read_text().splitlines() if ln.startswith("uv venv")]
+        assert venv == ["uv venv --clear .venv --python 3.12"], script.name
+
+
+def test_both_scripts_warn_about_and_unset_a_cuda_ld_library_path():
+    for script in BOTH:
+        text = script.read_text()
+        guard = text.index('[[ ":${LD_LIBRARY_PATH:-}:" == *cuda* ]]')
+        assert text.index("warning: LD_LIBRARY_PATH", guard) < text.index(
+            "unset LD_LIBRARY_PATH", guard
+        )
+        assert "env -u LD_LIBRARY_PATH" in text
+        # the unset precedes the venv's own checks, so setup succeeds from a JetPack shell
+        assert text.index("unset LD_LIBRARY_PATH") < text.index('.venv/bin/python -c "')
+
+
+def test_both_checks_run_a_cuda_matmul_on_sm_110():
+    for script in BOTH:
+        text = script.read_text()
+        assert "(11, 0)" in text and "x @ x" in text, script.name
