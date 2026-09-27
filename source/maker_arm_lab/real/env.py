@@ -30,7 +30,16 @@ context's camera row is that camera's pose and the marker projects through it.
 
 Every step checks the watchdogs of MS5 design section 8. One that trips calls ``trip``: the
 arm holds (``arm.hold``) and ``EvalFailure("watchdog_<reason>")`` ends the run; a step after
-that raises at once and pushes nothing.
+that raises at once and pushes nothing. The arm's state is checked before the push, so a
+faulted arm or a stopped SDK loop gets no row, and a push that raises holds the same way.
+
+Frame age is checked at every policy call. ``step`` observes both frames after its tick, and
+``stamp_markers``, which ``core.loop`` calls right before every policy call, observes them
+again: a perception tick may run up to 1 s between the two, so only the second check bounds
+the age of the view the policy reads. A frame that fails either check trips before it is
+copied into ``obs_buf``, so the policy never reads a stale view. The perception backend reads
+the frames observed at the step (``overhead_frame``, ``wrist_frame``); the policy may read
+newer ones, which is harmless because the arm holds its last row during the perception tick.
 
 Frame age, a declared decision: ``FRAME_AGE_CAP_S`` counts from a frame's arrival on this
 host's monotonic clock, not from its capture stamp. A capture-stamp age needs the
@@ -88,7 +97,9 @@ from maker_arm_lab.robots.frames import (
 )
 
 FRAME_AGE_CAP_S = 0.300
-"""MS5 design section 8: a frame older than this (since its arrival) at a policy call holds."""
+"""MS5 design section 8: a frame older than this (since its arrival) at a policy call holds.
+Checked when ``step`` observes the frames and again in ``stamp_markers``, right before the
+policy call."""
 PICK_FLOOR_MARGIN_M = 0.005  # INITIAL: A0 sets it on the real desk
 """m under the desk plane the FK pick point may reach before the floor watchdog holds."""
 FIRST_FRAME_TIMEOUT_S = 5.0
@@ -310,10 +321,14 @@ class RealEnv:
         )
         target = [float(v) for v in arm[0]]
         grip = _profile.gripper_angle(self.profile, float(fraction[0]))
+        self._check_arm(self.arm.read())
         now = self.arm.now()
         if now is None:
             self.trip("arm", "the SDK loop stopped ticking")
-        self.arm.push(now + self.period, self.period, [*target, grip])
+        try:
+            self.arm.push(now + self.period, self.period, [*target, grip])
+        except Exception as err:  # noqa: BLE001 -- trip raises EvalFailure("watchdog_arm")
+            self.trip("arm", f"the push failed: {type(err).__name__}: {err}")
         self._targets.append(target)
         tick = self.ticks.close(self.pacer.wait())
         self._steps += 1
@@ -324,11 +339,15 @@ class RealEnv:
         truncated = torch.tensor([self._steps >= self.max_episode_length])
         return None, None, torch.zeros(1, dtype=torch.bool), truncated, {}
 
-    def _refresh(self, reading) -> None:
+    def _check_arm(self, reading) -> None:
+        """Trip unless the SDK loop has a snapshot, runs the controller and still ticks."""
         if reading is None:
             self.trip("arm", "no arm snapshot")
         if reading.state != "enabled" or not reading.alive:
             self.trip("arm", f"the arm is {reading.state} (fault {reading.fault})")
+
+    def _refresh(self, reading) -> None:
+        self._check_arm(reading)
         self._reading = reading
         per_jaw = jaw_fraction(self.profile, reading.gripper) * GRIPPER_OPEN_POS
         data = self.scene["robot"].data
@@ -343,9 +362,11 @@ class RealEnv:
         pick = pick_point(self.ik, reading.q)
         if pick[2] < self.rig.desk_z - PICK_FLOOR_MARGIN_M:
             self.trip("floor", f"the FK pick point is at z {pick[2]:.4f} m")
-        self._observe_images()
+        self._overhead_latest, self._wrist_latest = self._observe_images()
 
-    def _observe_images(self) -> None:
+    def _observe_images(self) -> tuple:
+        """Check both latest frames' ages, then copy their views into ``obs_buf``; return the
+        two ``Latest``. A frame that fails trips before anything is copied."""
         now = time.monotonic_ns()
         frames = []
         for name, source in (("overhead", self.overhead_source), ("wrist", self.wrist_source)):
@@ -357,13 +378,18 @@ class RealEnv:
                 error = getattr(source, "error", None)
                 self.trip("frame", f"the {name} frame is {1e3 * age:.0f} ms old ({error})")
             frames.append(latest)
-        self._overhead_latest, self._wrist_latest = frames
-        self._overhead[0] = self._overhead_latest.view
-        self._wrist[0] = self._wrist_latest.view
+        overhead, wrist = frames
+        self._overhead[0] = overhead.view
+        self._wrist[0] = wrist.view
+        return overhead, wrist
 
     def stamp_markers(self) -> None:
-        """Stamp the frozen marker into the overhead frame about to be observed, projected
-        through the nominal camera the view emulates. A second stamp writes the same pixels."""
+        """Observe the latest frames again (the frame-age watchdog at the policy call; the
+        sources warp on arrival, so this is a copy), then stamp the frozen marker into the
+        overhead view, projected through the nominal camera the view emulates. ``core.loop``
+        calls it right before every policy call. A second stamp on the same frames writes the
+        same pixels."""
+        self._observe_images()
         if not bool(self.marker_points[0].isfinite().all()):
             return
         uv = camera_model.project(self._sim_camera, self._sim_pose, self.marker_points[0].tolist())
@@ -393,10 +419,12 @@ class RealEnv:
     # -- what the perception backend reads -------------------------------------------------
 
     def overhead_frame(self) -> FrameBundle:
-        """The worker's view of the frame the policy last saw."""
+        """The worker's view of the overhead frame observed at the last step. The policy may
+        have read a newer one (``stamp_markers``)."""
         return self.overhead_source.bundle(self._overhead_latest)
 
     def wrist_frame(self) -> np.ndarray:
+        """The wrist frame observed at the last step, the camera's own resolution."""
         return self._wrist_latest.raw
 
     def wrist_camera_header(self) -> dict:

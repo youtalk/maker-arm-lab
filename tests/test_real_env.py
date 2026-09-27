@@ -18,7 +18,7 @@ from maker_arm_lab.core.torque import pick_force
 from maker_arm_lab.real import camera_model
 from maker_arm_lab.real.rig import RigConfig
 from maker_arm_lab.robots.frames import ARM_JOINT_REGEX, GRIPPER_OPEN_POS, JAW_FULL_GAP, TOOL_BODY
-from real_fakes import HOME, FakeArm, FakeClock, FakeOverhead, make_env
+from real_fakes import HOME, FakeArm, FakeClock, FakeOverhead, FakeWrist, make_env
 
 PERIOD = 1.0 / 30.0
 
@@ -133,17 +133,63 @@ def test_the_wrist_camera_sits_on_its_mount():
     assert header["size"] == [224, 224]
 
 
+def _images(env):
+    return {k: v.clone() for k, v in env.obs_buf["images"].items()}
+
+
+def _same_images(env, before):
+    return all(torch.equal(env.obs_buf["images"][k], v) for k, v in before.items())
+
+
 def test_a_stale_overhead_frame_holds_the_arm():
     overhead = FakeOverhead()
     env, arm, _ = make_env(overhead=overhead)
+    before = _images(env)
     overhead.age_s = 0.5
+    overhead.view = np.full((224, 224, 3), 200, dtype=np.uint8)
     with pytest.raises(EvalFailure) as err:
         env.step(_action())
     assert err.value.reason == "watchdog_frame" and arm.holds == 1
+    assert _same_images(env, before)
     pushes = len(arm.pushes)
     with pytest.raises(EvalFailure):
         env.step(_action())
     assert len(arm.pushes) == pushes and arm.holds == 1
+
+
+def test_a_stale_wrist_frame_holds_the_arm_and_the_policy_never_sees_it():
+    wrist = FakeWrist()
+    env, arm, _ = make_env(wrist=wrist)
+    before = _images(env)
+    wrist.age_s = 0.5
+    wrist.view = np.full((224, 224, 3), 200, dtype=np.uint8)
+    with pytest.raises(EvalFailure) as err:
+        env.step(_action())
+    assert err.value.reason == "watchdog_frame" and arm.holds == 1
+    assert _same_images(env, before)
+
+
+def test_a_frame_stale_at_the_policy_call_holds_before_the_policy_reads_it():
+    overhead = FakeOverhead()
+    env, arm, _ = make_env(overhead=overhead)
+    env.step(_action())
+    before = _images(env)
+    # A perception tick between the step and the policy call lets the frame age past the cap.
+    overhead.age_s = 0.5
+    overhead.view = np.full((224, 224, 3), 200, dtype=np.uint8)
+    with pytest.raises(EvalFailure) as err:
+        env.stamp_markers()
+    assert err.value.reason == "watchdog_frame" and arm.holds == 1
+    assert _same_images(env, before)
+
+
+def test_the_policy_call_reads_the_newest_fresh_frame():
+    overhead = FakeOverhead()
+    env, _, _ = make_env(overhead=overhead)
+    env.step(_action())
+    overhead.view = np.full((224, 224, 3), 200, dtype=np.uint8)
+    env.stamp_markers()
+    assert int(env.obs_buf["images"]["overhead_rgb"][0, 0, 0, 0]) == 200
 
 
 def test_a_tick_over_its_cap_holds_but_a_perception_tick_has_a_second():
@@ -171,12 +217,26 @@ def test_an_arm_fault_or_a_stopped_loop_holds_and_never_pushes_again():
     arm.state = "fault"
     with pytest.raises(EvalFailure) as err:
         env.step(_action())
-    assert err.value.reason == "watchdog_arm" and arm.holds == 1
+    assert err.value.reason == "watchdog_arm" and arm.pushes == [] and arm.holds == 1
     env, arm, _ = make_env()
     arm.alive = False
     with pytest.raises(EvalFailure) as err:
         env.step(_action())
     assert err.value.reason == "watchdog_arm" and arm.pushes == [] and arm.holds == 1
+
+
+class _FailingPushArm(FakeArm):
+    def push(self, due, dt, row):
+        raise RuntimeError("the tracking session was held")
+
+
+def test_a_push_that_raises_holds_the_arm():
+    clock = FakeClock()
+    env, arm, _ = make_env(clock=clock, arm=_FailingPushArm(clock))
+    with pytest.raises(EvalFailure) as err:
+        env.step(_action())
+    assert err.value.reason == "watchdog_arm" and arm.holds == 1
+    assert "RuntimeError" in str(err.value)
 
 
 def test_a_pick_point_under_the_desk_holds_the_arm():
