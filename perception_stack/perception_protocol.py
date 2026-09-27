@@ -19,9 +19,13 @@ and ``quat`` (w, x, y, z)). World is the arm's base frame.
 
 A detection is ``{centre: [x, y, z], quat: [w, x, y, z], size: [3 extents along the body
 axes], cls: one of PART_CLASSES, score}``, in the worker's order of preference. ``marker`` is
-the gripper tag's world point; ``wrist`` finds the part nearest ``prior`` in the wrist frame
-and returns its centre and the heading of its body x axis; ``lift`` classifies the part
-between the jaws. ``depth_camera`` is null when no depth came with the frame. Errors reply
+the FK pick point (between the jaws, ``grasp_center``) as the gripper tag shows it: the
+detected tag pose composed with the tag-to-pick-point offset that A2 measures, in world
+coordinates. It is not the tag's own centre: the client subtracts the FK pick point from it
+(``perception.MarkerBias``'s rule), so any other point would bias every detection by the
+tag's mount offset. ``wrist`` finds the part nearest ``prior`` in the wrist frame and returns
+its centre and the heading of its body x axis; ``lift`` classifies the part between the
+jaws. ``depth_camera`` is null when no depth came with the frame. Errors reply
 ``{type: error, error, message}``. ``rgb_jpeg`` is the JPEG as a 1-D uint8 array, ``depth``
 (H, W) uint16 millimetres (0 invalid), ``wrist_rgb`` (H, W, 3) uint8.
 """

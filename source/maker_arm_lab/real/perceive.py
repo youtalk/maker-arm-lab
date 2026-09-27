@@ -11,7 +11,9 @@ here those reads take the rig's frames, not the simulator's truth:
 - ``RealPerceiver.reset_episode`` perceives the boxes and labels them
   (``real.rig.label_boxes``); anything but two boxes a side holds the arm.
 - ``RealMarker`` looks for the gripper tag in the frame the last perceive call sent and keeps
-  the running mean of look minus FK point, as ``perception.MarkerBias`` does.
+  the running mean of look minus FK point, as ``perception.MarkerBias`` does. The worker's
+  ``point`` is the FK pick point as the tag shows it (the tag pose plus the offset A2
+  measures, ``perception_protocol``), not the tag's centre.
 - ``wrist_look`` returns the frozen marker point, the selection's perceived centre, as the
   look's prior; ``RealWrist.look`` finds the target near it in the wrist frame.
 - ``lift_class`` classifies the part between the jaws in the wrist frame; the perceiver's
@@ -180,7 +182,14 @@ class RealPerceiver:
 
 class RealMarker:
     """``perception.MarkerBias``'s surface: the gripper tag, looked for in the frame of the
-    last perceive call."""
+    last perceive call.
+
+    The worker's ``point`` is the pick point as the tag shows it: the detected tag pose
+    composed with the tag-to-pick-point offset that A2 measures. ``look`` subtracts the FK
+    pick point (``rig.pick_point``) from it, which is ``MarkerBias``'s definition of the
+    marker's world point, so the estimate is the camera's bias alone. A worker that returned
+    the tag's own centre would add the tag's mount offset to the estimate, and ``correct``
+    would move every detection by it."""
 
     def __init__(self, backend: RealPerception, perceiver: RealPerceiver):
         self.backend, self.perceiver = backend, perceiver
