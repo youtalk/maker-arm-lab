@@ -157,6 +157,16 @@ def test_a_stale_overhead_frame_holds_the_arm():
     assert len(arm.pushes) == pushes and arm.holds == 1
 
 
+def test_a_stale_frame_trip_names_the_sources_last_drop():
+    """MS5 final review M3: the detail carries why the frames stopped, not "(None)"."""
+    overhead = FakeOverhead()
+    env, _, _ = make_env(overhead=overhead)
+    overhead.age_s, overhead.error = 0.5, "jpeg: UnidentifiedImageError: cannot identify"
+    with pytest.raises(EvalFailure) as err:
+        env.step(_action())
+    assert err.value.reason == "watchdog_frame" and "UnidentifiedImageError" in err.value.detail
+
+
 def test_a_stale_wrist_frame_holds_the_arm_and_the_policy_never_sees_it():
     wrist = FakeWrist()
     env, arm, _ = make_env(wrist=wrist)

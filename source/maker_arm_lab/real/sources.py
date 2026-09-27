@@ -6,11 +6,15 @@ takes the Conduit messages: ``real.ros.ConduitSubscriber`` calls it on its execu
 tests call it directly. The first camera info builds the overhead warp unless the rig gave a
 calibrated camera; later ones only record how far fx drifted (ARKit refocuses). Each JPEG is
 decoded at the warp's DCT reduction and warped. A JPEG before any camera model, or of another
-size than the camera's, is dropped (``dropped``, ``error``). ``bundle`` hands the worker the
-raw JPEG, the depth frame of the same capture stamp (else the latest) and both cameras; the
-depth shares the RGB frame's pose (one ARKit frame, one optical frame). ``UvcWrist`` reads a
-V4L2 camera with OpenCV on its own thread and warps each frame to the simulated wrist view.
-OpenCV comes from the ``real`` group and is imported only there.
+size than the camera's, is dropped (``dropped``, ``error``); so is a message whose
+conversion or callback raised (``on_error``, which ``real.ros.ConduitSubscriber`` calls), so
+the frame-age watchdog names the cause. ``bundle`` hands the worker the raw JPEG, the depth
+frame of the same capture stamp (else the latest) and both cameras; the depth shares the RGB
+frame's pose (one ARKit frame, one optical frame). ``UvcWrist`` reads a V4L2 camera with
+OpenCV on its own thread and warps each frame to the simulated wrist view; ``WristFrames``
+checks each frame against the camera first, and a frame of another size (a camera that
+ignored the requested size) is dropped the same way. OpenCV comes from the ``real`` group and
+is imported only there.
 """
 
 from __future__ import annotations
@@ -97,6 +101,11 @@ class ConduitOverhead:
     def on_depth(self, frame: DepthFrame) -> None:
         self._depths.append(frame)
 
+    def on_error(self, key: str, err: Exception) -> None:
+        """A Conduit message dropped because its conversion or callback raised."""
+        self.dropped += 1
+        self.error = f"{key}: {type(err).__name__}: {err}"
+
     def on_jpeg(self, frame: JpegFrame) -> None:
         warp, camera = self.warp, self.camera
         if warp is None:
@@ -122,21 +131,48 @@ class ConduitOverhead:
         return FrameBundle(header, arrays)
 
 
-class UvcWrist:
-    """A V4L2 wrist camera: ``camera`` is its raw frame's pinhole; ``warp`` None means the
-    camera already serves the simulated 224x224 wrist view."""
+class WristFrames:
+    """The wrist camera's frames: ``camera`` is its raw frame's pinhole; ``warp`` None means
+    the camera already serves the simulated 224x224 wrist view. A frame that is not
+    ``camera``'s size, or whose warp raises, is dropped (``dropped``, ``error``)."""
+
+    def __init__(self, camera: Pinhole, warp: ViewWarp | None):
+        self.camera, self.warp = camera, warp
+        self.frames = LatestFrame()
+        self.dropped = 0
+        self.error: str | None = None
+
+    def on_frame(self, rgb: np.ndarray, arrival_mono_ns: int) -> None:
+        want = (self.camera.height, self.camera.width, 3)
+        if rgb.shape != want:
+            self.dropped += 1
+            self.error = (
+                f"a {rgb.shape[1]}x{rgb.shape[0]} wrist frame for a "
+                f"{self.camera.width}x{self.camera.height} camera"
+            )
+            return
+        try:
+            view = rgb if self.warp is None else self.warp.apply(rgb)
+        except Exception as err:  # noqa: BLE001 -- the capture thread must keep running
+            self.dropped += 1
+            self.error = f"wrist warp: {type(err).__name__}: {err}"
+            return
+        self.frames.put(Latest(view, rgb, arrival_mono_ns, None))
+
+
+class UvcWrist(WristFrames):
+    """A V4L2 wrist camera, read with OpenCV on its own thread."""
 
     def __init__(self, device: str, camera: Pinhole, warp: ViewWarp | None):
         import cv2
 
+        super().__init__(camera, warp)
         self._cv2 = cv2
         self._cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
         if not self._cap.isOpened():
             raise RuntimeError(f"cannot open the wrist camera {device}")
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, camera.width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, camera.height)
-        self.camera, self.warp = camera, warp
-        self.frames = LatestFrame()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="wrist", daemon=True)
 
@@ -151,9 +187,7 @@ class UvcWrist:
                 time.sleep(0.005)
                 continue
             arrival = time.monotonic_ns()
-            rgb = np.ascontiguousarray(bgr[:, :, ::-1])
-            view = rgb if self.warp is None else self.warp.apply(rgb)
-            self.frames.put(Latest(view, rgb, arrival, None))
+            self.on_frame(np.ascontiguousarray(bgr[..., ::-1]), arrival)
 
     def close(self) -> None:
         self._stop.set()

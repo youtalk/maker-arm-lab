@@ -119,6 +119,7 @@ def open_sources(rig, namespace: str, closers: list):
         on_info=overhead.on_info,
         on_depth=overhead.on_depth,
         on_depth_info=overhead.on_depth_info,
+        on_error=overhead.on_error,
     ).start()
     closers.append(subscriber.close)
     if rig.wrist_k is None:

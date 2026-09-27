@@ -10,9 +10,16 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from maker_arm_lab.real.camera_model import Pinhole, overhead_warp, sim_overhead
-from maker_arm_lab.real.frames import Arrival, CameraInfo, DepthFrame, JpegFrame
-from maker_arm_lab.real.sources import ConduitOverhead, Latest, LatestFrame, decode_jpeg
+from maker_arm_lab.core.cameras import WRIST_FOV_DEG
+from maker_arm_lab.real.camera_model import Pinhole, overhead_warp, sim_overhead, wrist_warp
+from maker_arm_lab.real.frames import Arrival, CameraInfo, DepthFrame, JpegFrame, relay
+from maker_arm_lab.real.sources import (
+    ConduitOverhead,
+    Latest,
+    LatestFrame,
+    WristFrames,
+    decode_jpeg,
+)
 
 REAL = Pinhole(640, 480, 312.8, 312.8, 320.0, 240.0)
 POSE = sim_overhead()[1]
@@ -83,6 +90,39 @@ def test_a_frame_of_another_size_is_dropped_with_an_error():
     src = ConduitOverhead(POSE, camera=REAL)
     src.on_jpeg(_frame(_jpeg(_image(shape=(300, 400, 3)))))
     assert src.frames.get() is None and "400x300" in src.error
+
+
+def test_a_corrupt_message_is_dropped_with_its_cause_and_the_next_frame_still_lands():
+    """MS5 final review M3: through ``frames.relay``, as ``real.ros`` wires it, a JPEG that
+    does not decode is counted and named; the executor thread would keep spinning."""
+    src = ConduitOverhead(POSE, camera=REAL)
+    call = relay("jpeg", lambda msg: msg, src.on_jpeg, src.on_error)
+    call(_frame(b"\xff\xd8 not a jpeg"))
+    assert src.frames.get() is None and src.dropped == 1
+    assert src.error.startswith("jpeg: UnidentifiedImageError")
+    call(_frame(_jpeg(_image()), stamp=9))
+    assert src.frames.get().stamp_ns == 9
+
+
+def test_a_wrist_frame_of_the_camera_size_is_warped_to_the_view():
+    camera = Pinhole(640, 480, 400.0, 400.0, 320.0, 240.0)
+    warp = wrist_warp(camera)
+    src = WristFrames(camera, warp)
+    rgb = _image()
+    src.on_frame(rgb, 7)
+    latest = src.frames.get()
+    assert np.array_equal(latest.view, warp.apply(rgb)) and latest.raw is rgb
+    assert latest.arrival_mono_ns == 7 and src.dropped == 0
+
+
+@pytest.mark.parametrize("warped", [False, True])
+def test_a_wrist_frame_of_another_size_is_dropped_with_an_error(warped):
+    """MS5 final review M2: a UVC camera that ignored the requested size."""
+    camera = Pinhole(640, 480, 400.0, 400.0, 320.0, 240.0) if warped else Pinhole.sim(WRIST_FOV_DEG)
+    src = WristFrames(camera, wrist_warp(camera) if warped else None)
+    src.on_frame(_image(shape=(720, 1280, 3)), 1)
+    assert src.frames.get() is None and src.dropped == 1
+    assert f"1280x720 wrist frame for a {camera.width}x{camera.height}" in src.error
 
 
 def test_the_bundle_carries_the_jpeg_the_depth_of_its_stamp_and_both_cameras():
