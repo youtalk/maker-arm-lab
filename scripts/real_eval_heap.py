@@ -277,7 +277,10 @@ def main(argv=None) -> int:
             episode[0] = False
             raise KeyboardInterrupt
         note = "the arm still holds; type RELEASE to disable the motors"
-        print(f"Ctrl-C: {note if world.get('arm') else 'the run is closing'}.", file=sys.stderr)
+        # os.write, not print: a SIGINT inside a sys.stderr write (a traceback in a closer,
+        # the prompt) would re-enter its buffer and raise RuntimeError past os._exit.
+        text = f"Ctrl-C: {note if world.get('arm') else 'the run is closing'}.\n"
+        os.write(2, text.encode())
 
     previous = signal.signal(signal.SIGINT, on_sigint)
     try:
@@ -311,13 +314,16 @@ def _run(args, world: dict, episode: list) -> int:
             token, code = "EVAL_OK " + json.dumps(payload), 0
         finally:
             episode[0] = False
+    # Each branch sets code = 1: a Ctrl-C can land after the EVAL_OK assignment, before the
+    # inner finally, and the exit code must still agree with the token.
     except EvalFailure as err:
-        token = "EVAL_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail})
+        token, code = "EVAL_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), 1
     except KeyboardInterrupt:
         token = "EVAL_FAIL " + json.dumps({"reason": "interrupted", "detail": "Ctrl-C"})
+        code = 1
     except Exception as err:  # noqa: BLE001 -- any uncaught error must still print a token
         detail = f"{err}\n{traceback.format_exc()}"
-        token = "EVAL_FAIL " + json.dumps({"reason": "exception", "detail": detail})
+        token, code = "EVAL_FAIL " + json.dumps({"reason": "exception", "detail": detail}), 1
     if code != 0:
         hold(world)
     for close in reversed(world.get("closers", [])):

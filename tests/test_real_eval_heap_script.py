@@ -170,9 +170,44 @@ def test_a_finished_episode_prints_ok_with_the_real_block_and_releases(
     assert arm.holds == 0 and arm.stops == 1
 
 
+class _InterruptedOnClear(list):
+    """``episode``: a Ctrl-C lands as the inner ``finally`` clears it, after the EVAL_OK
+    assignment (the narrow window of MS5 final review M1)."""
+
+    def __setitem__(self, index, value):
+        super().__setitem__(index, value)
+        raise KeyboardInterrupt
+
+
+def test_a_ctrl_c_after_the_ok_assignment_exits_1_with_the_fail_token(
+    monkeypatch, capsys, tmp_path
+):
+    def finished(env, *args, **kwargs):
+        return {"episodes": [], "steps_run": 0}
+
+    _, arm, closed = _fake_world(monkeypatch, finished)
+    out = tmp_path / "e.json"
+    args = real_eval_heap.parse_args([*ARGS, "--release", "now", "--out", str(out)])
+    code = real_eval_heap._run(args, {}, _InterruptedOnClear([True]))
+    tokens = _tokens(capsys.readouterr().out)
+    assert code == 1 and len(tokens) == 1 and '"interrupted"' in tokens[0]
+    assert not out.exists() and arm.holds == 1 and arm.stops == 1 and closed == [1]
+
+
+def test_the_sigint_handler_writes_its_note_with_os_write():
+    """A print to sys.stderr inside the handler can re-enter an interrupted stderr write."""
+    handler = next(
+        n
+        for n in ast.walk(ast.parse(SCRIPT.read_text()))
+        if isinstance(n, ast.FunctionDef) and n.name == "on_sigint"
+    )
+    calls = {ast.unparse(n.func) for n in ast.walk(handler) if isinstance(n, ast.Call)}
+    assert "os.write" in calls and "print" not in calls
+
+
 @pytest.mark.parametrize("finish", ["tripped", "finished"])
 def test_a_ctrl_c_after_the_episode_keeps_the_arm_held_until_the_typed_release(
-    monkeypatch, capsys, finish
+    monkeypatch, capfd, finish
 ):
     """Review Focus 3: a Ctrl-C in the teardown (here in a closer, then at the prompt) neither
     costs the token nor disables the motors; only the typed RELEASE does."""
@@ -193,7 +228,7 @@ def test_a_ctrl_c_after_the_episode_keeps_the_arm_held_until_the_typed_release(
     monkeypatch.setattr(sys, "stdin", operator)
     before = signal.getsignal(signal.SIGINT)
     code = real_eval_heap.main(ARGS)
-    captured = capsys.readouterr()
+    captured = capfd.readouterr()
     tokens = _tokens(captured.out)
     assert len(tokens) == 1 and closed == ["after the Ctrl-C", 1]
     if finish == "tripped":
