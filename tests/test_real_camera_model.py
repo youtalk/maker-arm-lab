@@ -1,0 +1,174 @@
+"""MS5 design P2: pinholes, poses, the homographies and the warp to the simulator's views."""
+
+import copy
+import math
+import random
+
+import numpy as np
+import pytest
+
+from maker_arm_lab.core import overlay
+from maker_arm_lab.real.camera_model import (
+    Pinhole,
+    Pose,
+    ViewWarp,
+    matrix_quat,
+    overhead_warp,
+    plane_homography,
+    project,
+    quat_matrix,
+    rotation_homography,
+    sim_overhead,
+)
+from test_mj_heap_env import _can_render
+
+REAL_F = 240.0 / math.tan(math.radians(37.5))  # a 4:3 camera with a 75 degree vertical view
+
+
+def _rz(deg):
+    c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def _real_camera(roll_deg=90.0, f=REAL_F):
+    """A 640x480 camera at the simulator's overhead centre, turned ``roll_deg`` about its own
+    optical axis."""
+    _, sim_pose = sim_overhead()
+    return Pinhole(640, 480, f, f, 320.0, 240.0), Pose(sim_pose.rot @ _rz(roll_deg), sim_pose.pos)
+
+
+def test_from_k_reads_a_camera_info_k_and_refuses_skew():
+    cam = Pinhole.from_k(640, 480, (500.0, 0.0, 320.0, 0.0, 510.0, 240.0, 0.0, 0.0, 1.0))
+    assert (cam.fx, cam.fy, cam.cx, cam.cy) == (500.0, 510.0, 320.0, 240.0)
+    with pytest.raises(ValueError):
+        Pinhole.from_k(640, 480, (500.0, 1.0, 320.0, 0.0, 510.0, 240.0, 0.0, 0.0, 1.0))
+
+
+def test_the_sim_pinhole_has_the_mujoco_fovy():
+    assert Pinhole.sim(60.0).fov_deg() == pytest.approx((60.0, 60.0))
+
+
+def test_quaternions_round_trip_through_matrices():
+    rng = random.Random(3)
+    for _ in range(50):
+        q = np.array([rng.gauss(0, 1) for _ in range(4)])
+        q = q / np.linalg.norm(q) * (1 if q[0] >= 0 else -1)
+        assert matrix_quat(quat_matrix(q)) == pytest.approx(tuple(q), abs=1e-9)
+
+
+def test_projection_matches_the_overlays_mujoco_convention():
+    cam, pose = sim_overhead()
+    mujoco_mat = (pose.rot @ np.diag([1.0, -1.0, -1.0])).reshape(9)
+    for point in [(0.3, 0.0, 0.0), (0.25, 0.1, 0.02), (0.1, -0.2, 0.0)]:
+        want = overlay.project_point(pose.pos, mujoco_mat, 60.0, 224, 224, np.array(point))
+        assert project(cam, pose, point) == pytest.approx(want)
+
+
+def test_the_sim_overhead_puts_plus_x_up_and_plus_y_left():
+    cam, pose = sim_overhead()
+    u0, v0 = project(cam, pose, (0.30, 0.0, 0.0))
+    _, v_far = project(cam, pose, (0.40, 0.0, 0.0))
+    u_left, _ = project(cam, pose, (0.30, 0.10, 0.0))
+    assert v_far < v0 and u_left < u0
+
+
+def test_the_plane_homography_maps_desk_points_between_the_cameras():
+    sim, sim_pose = sim_overhead()
+    real, real_pose = _real_camera()
+    h = plane_homography(real, real_pose, sim, sim_pose)
+    for point in [(0.30, 0.05, 0.0), (0.2, -0.1, 0.0), (0.45, 0.2, 0.0)]:
+        u, v = project(sim, sim_pose, point)
+        x = h @ np.array([u, v, 1.0])
+        assert (x[0] / x[2], x[1] / x[2]) == pytest.approx(project(real, real_pose, point))
+
+
+def test_the_rotation_homography_of_one_camera_is_the_scaled_identity():
+    sim = Pinhole.sim(70.0)
+    h = rotation_homography(sim, sim)
+    assert h / h[2, 2] == pytest.approx(np.eye(3))
+
+
+def _dot_image(camera, pose, point, value=250):
+    image = np.full((camera.height, camera.width, 3), 20, dtype=np.uint8)
+    u, v = project(camera, pose, point)
+    image[round(v) - 3 : round(v) + 4, round(u) - 3 : round(u) + 4] = value
+    return image
+
+
+def test_the_warp_lands_a_desk_dot_where_the_simulator_sees_it():
+    real, real_pose = _real_camera()
+    point = (0.30, 0.05, 0.0)
+    view = overhead_warp(real, real_pose).apply(_dot_image(real, real_pose, point))
+    # The warped dot is a plateau several pixels wide, so its argmax is a corner of it; read
+    # its position as the centroid of the intensity above the background (20).
+    weight = np.clip(view[..., 0].astype(float) - 20.0, 0.0, None)
+    rows, cols = np.mgrid[0 : view.shape[0], 0 : view.shape[1]]
+    u = float((weight * (cols + 0.5)).sum() / weight.sum())
+    v = float((weight * (rows + 0.5)).sum() / weight.sum())
+    su, sv = project(*sim_overhead(), point)
+    assert abs(u - su) <= 1.5 and abs(v - sv) <= 1.5
+
+
+def test_a_half_resolution_decode_warps_to_the_same_view():
+    real, real_pose = _real_camera()
+    # A smooth pattern with a 24 px period: a 2x2 block mean keeps it (1 px features would
+    # not survive it). The correct scaling reads a mean diff of about 1.8; sampling the half
+    # decode half a source pixel off reads about 7.3, forgetting the pixel-centre offset
+    # about 14.
+    rows, cols = np.mgrid[0:480, 0:640]
+    wave = np.sin(2 * np.pi * cols / 24) * np.cos(2 * np.pi * rows / 24)
+    image = np.repeat((110 + 90 * wave).astype(np.uint8)[..., None], 3, axis=2)
+    half = image.reshape(240, 2, 320, 2, 3).mean(axis=(1, 3)).astype(np.uint8)
+    warp = overhead_warp(real, real_pose)
+    diff = np.abs(warp.apply(image).astype(int) - warp.apply(half).astype(int))
+    assert diff.mean() < 4.0
+
+
+def test_a_narrow_camera_leaves_the_uncovered_view_black():
+    real, real_pose = _real_camera(roll_deg=0.0, f=REAL_F * 2.0)
+    warp = overhead_warp(real, real_pose)
+    view = warp.apply(np.full((480, 640, 3), 128, dtype=np.uint8))
+    assert 0.0 < warp.coverage < 1.0
+    assert tuple(view[0, 0]) == (0, 0, 0) and tuple(view[112, 112]) == (128, 128, 128)
+
+
+def test_jpeg_reduce_keeps_a_source_pixel_per_sample_point():
+    real, real_pose = _real_camera()
+    assert overhead_warp(real, real_pose).jpeg_reduce() == 1  # about 360 px across the view
+    big = Pinhole(1920, 1440, 3.0 * REAL_F, 3.0 * REAL_F, 960.0, 720.0)
+    warp = overhead_warp(big, real_pose)  # about 1080 px across it
+    assert warp.jpeg_reduce() == 2
+    assert warp.source_span / 2 >= warp.size * warp.supersample > warp.source_span / 4
+
+
+@pytest.mark.skipif(not _can_render(), reason="no MuJoCo GL context on this host")
+def test_the_warp_of_a_wider_4_3_render_matches_the_native_224_view():
+    import mujoco
+
+    from maker_arm_lab.core.layout import sample_run_draw
+    from maker_arm_lab.mj import scene
+    from maker_arm_lab.mj.env import MjLegoSortEnv
+
+    env = MjLegoSortEnv(1, sample_run_draw(random.Random(3)), cameras=True)
+    env.reset(seed=1)
+    model, data = env.models[0], env.datas[0]
+    cam = model.camera("overhead").id
+    native = mujoco.Renderer(model, 224, 224)
+    native.update_scene(data, camera=cam)
+    want = native.render()
+    wide = copy.copy(model)
+    wide.cam_fovy[cam] = 75.0
+    wide.vis.global_.offwidth, wide.vis.global_.offheight = 640, 480
+    big = mujoco.Renderer(wide, 480, 640)
+    big.update_scene(data, camera=cam)
+    frame = big.render()
+    pos, rot = scene.overhead_camera_pose(env.episode_draws[0])
+    pose = Pose.from_pos_quat(pos, rot)
+    real = Pinhole(640, 480, REAL_F, REAL_F, 320.0, 240.0)
+    got = ViewWarp(plane_homography(real, pose, Pinhole.sim(60.0), pose), (640, 480)).apply(frame)
+    native.close()
+    big.close()
+    env.close()
+    # One camera centre, so the homography is exact at every depth; what is left is resampling.
+    # If this fails, save both images and look before touching the bound.
+    assert np.abs(got.astype(int) - want.astype(int)).mean() < 8.0
