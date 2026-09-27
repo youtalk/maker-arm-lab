@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from maker_arm_lab.core import overlay
+from maker_arm_lab.core.cameras import WRIST_FOV_DEG
 from maker_arm_lab.real.camera_model import (
     Pinhole,
     Pose,
@@ -19,6 +20,7 @@ from maker_arm_lab.real.camera_model import (
     quat_matrix,
     rotation_homography,
     sim_overhead,
+    wrist_warp,
 )
 from test_mj_heap_env import _can_render
 
@@ -28,6 +30,11 @@ REAL_F = 240.0 / math.tan(math.radians(37.5))  # a 4:3 camera with a 75 degree v
 def _rz(deg):
     c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
     return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def _rx(deg):
+    c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
 
 
 def _real_camera(roll_deg=90.0, f=REAL_F):
@@ -86,6 +93,50 @@ def test_the_rotation_homography_of_one_camera_is_the_scaled_identity():
     sim = Pinhole.sim(70.0)
     h = rotation_homography(sim, sim)
     assert h / h[2, 2] == pytest.approx(np.eye(3))
+
+
+def test_the_rotation_homography_follows_a_turned_camera_and_its_transpose_does_not():
+    """A real wrist camera turned by ``turn`` (its axes in the simulated camera's frame, what
+    ``RigConfig.wrist_rot`` holds) against the simulated one at the same centre.
+    ``real_eval_heap.open_sources`` passes ``turn.T`` as ``rot_real_from_sim``; the transposed
+    rotation must not map the same points."""
+    sim = Pinhole.sim(WRIST_FOV_DEG)
+    real = Pinhole(640, 480, 400.0, 410.0, 330.0, 236.0)
+    sim_pose = Pose(_rz(-30.0) @ _rx(150.0), np.array([0.2, -0.1, 0.3]))
+    turn = _rz(12.0) @ _rx(7.0)
+    real_pose = Pose(sim_pose.rot @ turn, sim_pose.pos)
+    offsets = [(0.03, -0.02, 0.15), (-0.05, 0.04, 0.25), (0.0, 0.0, 0.1), (0.06, 0.05, 0.2)]
+    points = [sim_pose.pos + sim_pose.rot @ np.array(o) for o in offsets]
+
+    def maps(h) -> bool:
+        for point in points:
+            u, v = project(sim, sim_pose, point)
+            x = h @ np.array([u, v, 1.0])
+            got, want = np.array(x[:2] / x[2]), np.array(project(real, real_pose, point))
+            if not np.allclose(got, want, atol=1e-6):
+                return False
+        return True
+
+    assert maps(rotation_homography(real, sim, turn.T))
+    assert maps(wrist_warp(real, quat_matrix(matrix_quat(turn)).T).h)
+    assert not maps(rotation_homography(real, sim, turn))
+
+
+@pytest.mark.parametrize(
+    "shape", [(480, 640), (480, 640, 4), (480, 640, 1), (360, 640, 3), (240, 640, 3)]
+)
+def test_the_warp_refuses_a_frame_it_would_mis_sample(shape):
+    """Not 3-channel, or a height that does not follow the width by the source's aspect."""
+    warp = overhead_warp(*_real_camera())
+    with pytest.raises(ValueError):
+        warp.apply(np.zeros(shape, dtype=np.uint8))
+
+
+def test_the_warp_takes_a_reduced_decode_that_rounds_up():
+    """A JPEG draft rounds each side up: 1001x751 at 1/8 decodes to 126x94."""
+    camera = Pinhole(1001, 751, 600.0, 600.0, 500.5, 375.5)
+    warp = ViewWarp(np.eye(3), (camera.width, camera.height))
+    assert warp.apply(np.zeros((94, 126, 3), dtype=np.uint8)).shape == (224, 224, 3)
 
 
 def _dot_image(camera, pose, point, value=250):

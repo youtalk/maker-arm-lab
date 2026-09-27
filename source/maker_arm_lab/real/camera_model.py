@@ -189,11 +189,20 @@ class ViewWarp:
         return next((r for r in (8, 4, 2) if self.source_span / r >= need), 1)
 
     def apply(self, image: np.ndarray) -> np.ndarray:
-        """The (size, size, C) uint8 view of an (H, W, C) uint8 frame. ``image`` may be a
+        """The (size, size, 3) uint8 view of an (H, W, 3) uint8 frame. ``image`` may be a
         uniformly reduced decode of the source frame (a JPEG draft): the sample points scale
-        with its width."""
+        with its width. Raises ValueError on a frame that is not 3-channel or whose height
+        does not follow its width by the source's aspect ratio (within the one pixel a
+        reduced decode rounds), which would otherwise sample the wrong pixels silently."""
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError(f"expected an (H, W, 3) frame, got shape {image.shape}")
         h_img, w_img = image.shape[:2]
         scale = w_img / self.source_size[0]
+        if abs(h_img - self.source_size[1] * scale) >= 1.0:
+            raise ValueError(
+                f"a {w_img}x{h_img} frame is not a uniform scale of the "
+                f"{self.source_size[0]}x{self.source_size[1]} source"
+            )
         x = self._su * scale - 0.5
         y = self._sv * scale - 0.5
         x0, y0 = np.floor(x).astype(np.int64), np.floor(y).astype(np.int64)
