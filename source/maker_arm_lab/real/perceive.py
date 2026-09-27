@@ -62,6 +62,16 @@ def _load_protocol():
 proto = _load_protocol()
 
 
+def _finite(values, n: int) -> bool:
+    """Whether ``values`` is an ``n``-long sequence of finite numbers: a marker point or a
+    wrist look that fails this is a malformed reply, not a miss."""
+    return (
+        isinstance(values, list | tuple)
+        and len(values) == n
+        and all(isinstance(v, int | float) and math.isfinite(v) for v in values)
+    )
+
+
 def camera_block(camera, pos, quat) -> dict:
     """The wire's camera block for a ``camera_model.Pinhole`` at ``pos`` and ``quat``."""
     k = (camera.fx, 0.0, camera.cx, 0.0, camera.fy, camera.cy, 0.0, 0.0, 1.0)
@@ -89,6 +99,8 @@ class WorkerClient:
             reply, out = proto.recv_message(self._socket)
         except zmq.Again as err:
             raise WorkerError(f"{kind}: no reply within the timeout") from err
+        except ValueError as err:
+            raise WorkerError(f"{kind}: malformed reply frame: {err}") from err
         expected = {"hello": "hello_ack", "shutdown": "shutdown_ack"}.get(kind, kind)
         if reply.get("type") != expected:
             raise WorkerError(f"{kind}: {reply}")
@@ -135,8 +147,8 @@ class RealPerceiver:
         env's blind (NaN) poses and ``true_sizes`` the MS7e box draw's sizes; neither is read."""
         frame = self.backend.env.overhead_frame()
         reply, _ = self.backend.request("boxes", frame.header, frame.arrays)
-        poses = [(x, y, fold_box_yaw(yaw)) for x, y, yaw in reply.get("poses", [])]
         try:
+            poses = [(x, y, fold_box_yaw(yaw)) for x, y, yaw in reply.get("poses", [])]
             self._box_poses = tuple(label_boxes(poses))
         except ValueError as err:
             self.backend.env.trip("boxes", str(err))
@@ -188,6 +200,9 @@ class RealMarker:
         if point is None:
             self.misses += 1
             return
+        if not _finite(point, 3):
+            self.backend.env.trip("perception", f"marker point {point!r}")
+            return
         self._sum = tuple(s + (float(v) - float(p)) for s, v, p in zip(self._sum, point, fk_point))
         self.looks += 1
 
@@ -208,7 +223,12 @@ class RealWrist:
         header = {"camera": env.wrist_camera_header(), "prior": [float(xy[0]), float(xy[1])]}
         reply, _ = self.backend.request("wrist", header, {"wrist_rgb": env.wrist_frame()})
         look = reply.get("look")
-        return None if look is None else tuple(float(v) for v in look)
+        if look is None:
+            return None
+        if not _finite(look, 3):
+            env.trip("perception", f"wrist look {look!r}")
+            return None
+        return tuple(float(v) for v in look)
 
 
 class RealClassViews:

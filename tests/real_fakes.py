@@ -31,7 +31,9 @@ class FakeClock:
 class FakeWorker:
     """An in-process perception worker on a loopback port. It answers each request from what
     the test set (``wrist="prior"`` echoes the prior with yaw 0) and keeps every request.
-    ``delay_s`` delays every reply but the hello's."""
+    ``delay_s`` delays every reply but the hello's. Setting ``malformed_reply`` true after
+    construction makes every reply but the hello's an unparseable frame, for the client's
+    frame-level error path."""
 
     def __init__(
         self, boxes=(), detections=(), marker=None, wrist="prior", lift_cls="wide", delay_s=0.0
@@ -39,6 +41,7 @@ class FakeWorker:
         self.boxes = [list(b) for b in boxes]
         self.detections = list(detections)
         self.marker, self.wrist, self.lift_cls, self.delay_s = marker, wrist, lift_cls, delay_s
+        self.malformed_reply = False
         self.requests: list[tuple[str, dict, dict]] = []
         self._socket = zmq.Context.instance().socket(zmq.REP)
         port = self._socket.bind_to_random_port("tcp://127.0.0.1")
@@ -72,7 +75,10 @@ class FakeWorker:
                 break
             if kind != "hello":
                 time.sleep(self.delay_s)
-            proto.send_message(self._socket, self._reply(kind, header))
+            if kind != "hello" and self.malformed_reply:
+                self._socket.send_multipart([b"not json"])
+            else:
+                proto.send_message(self._socket, self._reply(kind, header))
         self._socket.close(0)
 
     def kinds(self) -> list[str]:

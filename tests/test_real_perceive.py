@@ -113,6 +113,14 @@ def test_anything_but_two_boxes_a_side_holds_the_arm(rig_parts):
     assert err.value.reason == "watchdog_boxes" and env.holds == 1
 
 
+def test_a_box_pose_that_is_not_three_numbers_holds_the_arm(rig_parts):
+    bad = [[0.1, 0.2], [0.2, 0.2, 0.0], [0.1, -0.2, 0.0], [0.2, -0.2, 0.0]]
+    _, env, backend = rig_parts(boxes=bad)
+    with pytest.raises(EvalFailure) as err:
+        backend.perceiver(1, 0, {}).reset_episode(None)
+    assert err.value.reason == "watchdog_boxes" and env.holds == 1
+
+
 def test_detections_past_the_slots_are_dropped_in_worker_order(rig_parts):
     _, env, backend = rig_parts(slots=3, detections=[det(0.16 + 0.01 * k, 0.0) for k in range(5)])
     perceiver = backend.perceiver(1, 0, {})
@@ -158,6 +166,17 @@ def test_a_marker_miss_leaves_the_estimate(rig_parts):
     assert (marker.looks, marker.misses, marker.estimate) == (0, 1, (0.0, 0.0, 0.0))
 
 
+@pytest.mark.parametrize("bad_point", [[0.2, math.nan, 0.1], [0.2, 0.02]])
+def test_a_malformed_marker_reply_holds_the_arm(rig_parts, bad_point):
+    _, env, backend = rig_parts(detections=[det(0.2, 0.0)], marker=bad_point)
+    perceiver = backend.perceiver(1, 0, {})
+    marker = backend.marker(perceiver, 1, 0)
+    perceiver.perceive(backend.overhead(env, _Rig(), 0))
+    with pytest.raises(EvalFailure) as err:
+        marker.look([0.2, 0.0, 0.1])
+    assert err.value.reason == "watchdog_perception" and env.holds == 1
+
+
 def test_the_wrist_look_is_found_near_the_frozen_marker(rig_parts):
     worker, env, backend = rig_parts(wrist=[0.203, 0.031, 0.4])
     env.marker_points[0] = torch.tensor([0.2, 0.03, 0.0057])
@@ -172,6 +191,14 @@ def test_the_wrist_look_is_found_near_the_frozen_marker(rig_parts):
 def test_a_wrist_miss_is_none(rig_parts):
     _, _, backend = rig_parts(wrist=None)
     assert backend.wrist(1, 0, {}).look((0.2, 0.03), math.nan, False) is None
+
+
+@pytest.mark.parametrize("bad_look", [[0.2, math.nan, 0.4], [0.2, 0.03]])
+def test_a_malformed_wrist_reply_holds_the_arm(rig_parts, bad_look):
+    _, env, backend = rig_parts(wrist=bad_look)
+    with pytest.raises(EvalFailure) as err:
+        backend.wrist(1, 0, {}).look((0.2, 0.03), math.nan, False)
+    assert err.value.reason == "watchdog_perception" and env.holds == 1
 
 
 def test_the_lift_class_and_the_third_view_come_from_the_wrist_frame(rig_parts):
@@ -193,6 +220,14 @@ def test_an_unknown_lift_class_holds_the_arm(rig_parts):
 
 def test_a_worker_timeout_holds_the_arm(rig_parts):
     _, env, backend = rig_parts(timeout_ms=100, delay_s=0.5)
+    with pytest.raises(EvalFailure) as err:
+        backend.perceiver(1, 0, {}).reset_episode(None)
+    assert err.value.reason == "watchdog_perception" and env.holds == 1
+
+
+def test_an_unparseable_reply_frame_holds_the_arm(rig_parts):
+    worker, env, backend = rig_parts()
+    worker.malformed_reply = True
     with pytest.raises(EvalFailure) as err:
         backend.perceiver(1, 0, {}).reset_episode(None)
     assert err.value.reason == "watchdog_perception" and env.holds == 1
