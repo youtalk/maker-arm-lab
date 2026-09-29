@@ -1,0 +1,130 @@
+{
+ "id": "11211",
+ "title": "Brick 1 x 2 with Two Studs on One Side",
+ "size": [
+  0.016,
+  0.008,
+  0.0096
+ ],
+ "closing_axes": [
+  0,
+  2
+ ],
+ "closing_axes_reason": "y runs through the two side studs, which a real jaw meets 1.6 mm early",
+ "hulls": [
+  [
+   [
+    -0.008,
+    -0.004,
+    -0.0048
+   ],
+   [
+    -0.008,
+    -0.004,
+    0.0048
+   ],
+   [
+    -0.008,
+    0.004,
+    -0.0048
+   ],
+   [
+    0.008,
+    -0.004,
+    -0.0048
+   ],
+   [
+    -0.008,
+    0.004,
+    0.0048
+   ],
+   [
+    0.008,
+    -0.004,
+    0.0048
+   ],
+   [
+    0.008,
+    0.004,
+    -0.0048
+   ],
+   [
+    0.008,
+    0.004,
+    0.0048
+   ]
+  ]
+ ],
+ "hull_volumes": [
+  1.2288e-06
+ ],
+ "studs": [
+  {
+   "base": [
+    -0.004,
+    -0.004,
+    0.0008
+   ],
+   "axis": [
+    0.0,
+    -1.0,
+    0.0
+   ],
+   "height": 0.0016,
+   "radius": 0.0024001
+  },
+  {
+   "base": [
+    0.004,
+    -0.004,
+    0.0008
+   ],
+   "axis": [
+    0.0,
+    -1.0,
+    0.0
+   ],
+   "height": 0.0016,
+   "radius": 0.0024001
+  },
+  {
+   "base": [
+    0.004,
+    0.0,
+    0.0048
+   ],
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "height": 0.0016,
+   "radius": 0.0024001
+  },
+  {
+   "base": [
+    -0.004,
+    0.0,
+    0.0048
+   ],
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "height": 0.0016,
+   "radius": 0.0024001
+  }
+ ],
+ "source": {
+  "file": "11211.dat",
+  "author": "Magnus Forsberg [MagFors]",
+  "license": "Licensed under CC BY 4.0 : see CAreadme.txt",
+  "update": "Part UPDATE 2012-03",
+  "files": 11,
+  "triangles": {
+   "collision": 196,
+   "visual": 532
+  }
+ }
+}
