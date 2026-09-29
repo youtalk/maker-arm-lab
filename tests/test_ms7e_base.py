@@ -99,21 +99,6 @@ def _args(**kw):
     return argparse.Namespace(**{**base, "layout_seed": 20285000, **kw})
 
 
-def _ldraw():
-    """Stand-ins for the eight LDraw parts, which this commit does not build."""
-    size = (0.0158, 0.0078, parts.BRICK_HEIGHT)
-    return [parts.Part(f"ldraw_{i}", "ldraw", 1, 2, size, True, 0.003) for i in parts.LDRAW_IDS]
-
-
-def _catalog(keys):
-    """The catalog of these family keys, the LDraw stand-ins in LDraw's place."""
-    out = parts.catalog([k for k in keys if k != "ldraw"])
-    if "ldraw" in keys:
-        at = 29 + sum(p.family == "round" for p in out)
-        out[at:at] = _ldraw()
-    return out
-
-
 def test_with_every_switch_off_the_catalog_split_heap_and_classes_are_ms7ds():
     assert [p.name for p in parts.catalog()] == MS7D_CATALOG
     assert [p.name for p in parts.split(parts.catalog(), 20260915)[1]] == MS7D_HELDOUT
@@ -187,12 +172,12 @@ def test_the_perceiver_draws_as_ms7d_with_the_base_classes():
 def test_every_family_combination_keeps_the_seven_base_heldout_parts():
     for n in range(len(parts.FAMILY_KEYS) + 1):
         for keys in itertools.combinations(parts.FAMILY_KEYS, n):
-            _, held = parts.split(_catalog(keys), 20260915)
+            _, held = parts.split(parts.catalog(keys), 20260915)
             assert [p.name for p in held if p.family in ("brick", "slope")] == MS7D_HELDOUT, keys
 
 
 def test_each_new_family_holds_out_a_fifth_rounded_up_whatever_else_joins():
-    everything = _catalog(tuple(parts.FAMILY_KEYS))
+    everything = parts.catalog(tuple(parts.FAMILY_KEYS))
     sizes = Counter(p.family for p in everything)
     assert sizes == {"brick": 23, "slope": 6, "round": 4, "ldraw": 8, "plate": 6, "tile": 4}
     _, held = parts.split(everything, 20260915)
@@ -203,13 +188,13 @@ def test_each_new_family_holds_out_a_fifth_rounded_up_whatever_else_joins():
     # Each new family shuffles on its own generator: a family adopted between two waves moves
     # no part of another across the split.
     for keys in (("flat",), ("round", "flat"), ("ldraw", "flat")):
-        _, alone = parts.split(_catalog(keys), 20260915)
+        _, alone = parts.split(parts.catalog(keys), 20260915)
         flat = [p.name for p in alone if p.family in parts.FLAT_FAMILIES]
         assert flat == [p.name for p in held if p.family in parts.FLAT_FAMILIES], keys
 
 
 def test_the_eight_class_table_classes_every_part():
-    everything = _catalog(tuple(parts.FAMILY_KEYS))
+    everything = parts.catalog(tuple(parts.FAMILY_KEYS))
     classes = Counter(parts.part_class(p) for p in everything)
     assert classes == {
         "slope": 6,
@@ -244,8 +229,9 @@ def test_the_catalog_appends_the_families_in_order_and_the_index_pins_the_full_o
         assert parts.catalog_index(name) == k
     with pytest.raises(ValueError, match="unknown family"):
         parts.catalog(("cone",))
-    with pytest.raises(ValueError, match="LDraw"):
-        parts.catalog(("ldraw",))
+    assert [p.name for p in parts.catalog(("ldraw",))[29:]] == [
+        f"ldraw_{i}" for i in parts.LDRAW_IDS
+    ]
     with pytest.raises(ValueError):
         parts.make_part("ldraw", 1, 2)
 

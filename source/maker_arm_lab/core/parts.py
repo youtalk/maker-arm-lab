@@ -25,14 +25,23 @@ script refuses it with its fail token.
 
 ``closing_axes`` names the body axes the jaws may close along. A box offers all three and
 ``core.grasp`` keeps the ones near the jaw plane; a slope offers only y (``SLOPE_AXES``).
+
+An LDraw part (``ldraw_part``) is read from ``assets/parts/<id>.json``, which
+``scripts/ldraw_parts.py`` wrote from the LDraw library: its size is the collision box, its
+collider is up to eight convex hulls (``Part.hulls``) and its studs are visual
+(``Part.stud_frames``). Its mass keeps the H2 rule, and each hull carries the share of it that
+its volume holds (MS7e design section 6.1).
 """
 
 from __future__ import annotations
 
+import functools
+import json
 import math
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 STUD_PITCH = 0.008
 FOOTPRINT_CLEARANCE = 0.0002  # a 1x1 is 7.8 mm across
@@ -56,7 +65,8 @@ READY_FAMILIES: frozenset[str] = frozenset({"round"})
 when it lands; ``--families`` with any other key is a usage error (MS7e design section 10.2)."""
 LDRAW_IDS = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")
 """The pre-registered LDraw parts, in catalog order (MS7e design section 6.5). Part names are
-``ldraw_<id>``; the LDraw track loads each from ``assets/parts/<id>.json``."""
+``ldraw_<id>``; ``ldraw_part`` loads each from ``assets/parts/<id>.json``."""
+LDRAW_DIR = Path(__file__).resolve().parents[3] / "assets" / "parts"
 FLAT_FAMILIES = ("plate", "tile")  # in the catalog only under ``--families flat``
 RETIRED_FAMILIES = ("round",)
 """The round bricks left the catalog on 2026-09-18 after the bare-desk ladder
@@ -114,6 +124,10 @@ class Part:
     mass: float  # kg
     hull: tuple[tuple[float, float, float], ...] | None = None  # slope vertices, part frame
     closing_axes: tuple[int, ...] = BOX_AXES  # body axes the jaws may close along
+    hulls: tuple[tuple[float, tuple[tuple[float, float, float], ...]], ...] = ()
+    """An LDraw part's convex hulls, part frame: (share of ``mass``, vertices) each."""
+    stud_frames: tuple[tuple[tuple[float, float, float], tuple[float, float, float]], ...] = ()
+    """An LDraw part's visual studs: (base on the face, outward unit axis) each."""
 
     @property
     def half_diagonal(self) -> float:
@@ -170,6 +184,30 @@ def make_part(family: str, nx: int, ny: int, nz: int = 1) -> Part:
     )
 
 
+@functools.cache
+def ldraw_part(part_id: str) -> Part:
+    """The LDraw part ``part_id`` from its JSON file (module docstring). ``nx`` and ``ny`` are
+    its footprint in studs; its studs are ``stud_frames``, so ``studs`` is False."""
+    rec = json.loads((LDRAW_DIR / f"{part_id}.json").read_text())
+    size = tuple(rec["size"])
+    total = sum(rec["hull_volumes"])
+    return Part(
+        name=f"ldraw_{part_id}",
+        family="ldraw",
+        nx=round(size[1] / STUD_PITCH),
+        ny=round(size[0] / STUD_PITCH),
+        size=size,
+        studs=False,
+        mass=part_mass(size),
+        closing_axes=tuple(rec["closing_axes"]),
+        hulls=tuple(
+            (v / total, tuple(tuple(p) for p in h))
+            for v, h in zip(rec["hull_volumes"], rec["hulls"])
+        ),
+        stud_frames=tuple((tuple(s["base"]), tuple(s["axis"])) for s in rec["studs"]),
+    )
+
+
 PART_CLASSES = ("slope", "tall", "narrow", "wide", "round", "special", "plate", "tile")
 """The eight sorting classes of MS7e (MS7e design section 5), in the order the class-to-box map
 lists them. The first four are MS7a's (``BASE_CLASSES``), each with a held-out part."""
@@ -219,9 +257,12 @@ def graspable(part: Part) -> bool:
 
 def _family_parts(family: str) -> list[Part]:
     """Every graspable part of one family, in catalog order."""
-    if family == "ldraw":
-        raise ValueError("no LDraw part is built on this commit (assets/parts/<id>.json)")
-    return [p for p in (make_part(family, *spec) for spec in _FAMILY_SPECS[family]) if graspable(p)]
+    made = (
+        [ldraw_part(i) for i in LDRAW_IDS]
+        if family == "ldraw"
+        else [make_part(family, *spec) for spec in _FAMILY_SPECS[family]]
+    )
+    return [p for p in made if graspable(p)]
 
 
 def catalog(families: Sequence[str] = ()) -> list[Part]:
@@ -250,10 +291,10 @@ def catalog_index(name: str) -> int:
 
 
 def _replayable() -> list[Part]:
-    """The catalog plus the flat and retired parts older shards were recorded with."""
+    """The catalog plus the flat, retired and LDraw parts other shards were recorded with."""
     flat = [make_part(f, nx, ny) for f in FLAT_FAMILIES for nx, ny in _BOX_FOOTPRINTS]
     retired = [make_part(*spec) for spec in _RETIRED]
-    return catalog() + [p for p in flat if graspable(p)] + retired
+    return catalog() + [p for p in flat if graspable(p)] + retired + _family_parts("ldraw")
 
 
 def split(parts: Sequence[Part], seed: int) -> tuple[list[Part], list[Part]]:
