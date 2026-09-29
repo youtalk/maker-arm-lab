@@ -21,8 +21,9 @@ and the control steps on which an arm geom touched a box.
     MUJOCO_GL=egl PYTHONPATH=$PWD/source .venv/bin/python scripts/mj_release_envelope_check.py \\
         --trials 2 --out /tmp/envelope.json
 
-``--interior X,Y,Z`` sizes every box (MS7e design section 4.4): the size floor ``BOX_MIN`` and
-the B2 envelope run the check with the box they certify.
+``--interior X,Y,Z`` sizes the box under test (MS7e design section 4.4), as the box draw does
+per episode: the size floor ``BOX_MIN`` and the B2 envelope run the check with the box they
+certify.
 
 Prints exactly one ``ENVELOPE_OK {json}`` or ``ENVELOPE_FAIL {json}`` line on every exit path,
 argparse errors included, and exits through ``os._exit``.
@@ -107,7 +108,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--interior",
         type=_triple,
         default=None,
-        help="X,Y,Z: every box's interior, m (MS7e design section 4.4); "
+        help="X,Y,Z: the interior of the box under test, m (MS7e design section 4.4), written "
+        "per trial as the box draw does (MjLegoSortEnv.place_desk_boxes); "
         "default: core.desk_boxes.interior(--desk_boxes)",
     )
     parser.add_argument("--out", type=str, default="", help="write the trial records here")
@@ -157,10 +159,10 @@ def _joint_margin(rig) -> float:
     return float(torch.minimum(q - rig.limits[:, 0], rig.limits[:, 1] - q).min())
 
 
-def run_trial(env, rig, part, pose, seed: int, part_yaw: float = 0.0) -> dict:
+def run_trial(env, rig, part, pose, seed: int, part_yaw: float = 0.0, interior=None) -> dict:
     env.reset(seed=seed)
     parked = [(PARK_BOX_X, 0.3 * j, 0.0) for j in range(1, env.desk_boxes)]
-    env.place_desk_boxes(0, [pose, *parked])
+    env.place_desk_boxes(0, [pose, *parked], [interior] if interior is not None else ())
     env.destination_bins[0] = 0  # the lone part goes to box 0 whatever the scene's map
     _place_part(env, part, part_yaw)
     rig.rearm([0])
@@ -213,10 +215,6 @@ def run_trial(env, rig, part, pose, seed: int, part_yaw: float = 0.0) -> dict:
 
 
 def run(args) -> dict:
-    if args.interior is not None:
-        # Every box of the scene, the grader and the teacher sizes itself through this one
-        # module function, so the override reaches them all before the env builds.
-        desk_boxes.interior = lambda n: args.interior
     (part,) = _parts.by_name([args.part])
     draw = layout.sample_run_draw(random.Random(args.seed))
     env = MjLegoSortEnv(
@@ -242,6 +240,7 @@ def run(args) -> dict:
             episode_draw,
             rng=rng,
             boxes=env.desk_box_poses[i],
+            box_sizes=env.desk_box_sizes[i],
         )
 
     rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)
@@ -256,7 +255,9 @@ def run(args) -> dict:
                     for k in range(args.trials):
                         trial_seed += 1
                         part_yaw = math.radians(args.part_yaws[k % len(args.part_yaws)])
-                        trials.append(run_trial(env, rig, part, pose, trial_seed, part_yaw))
+                        trials.append(
+                            run_trial(env, rig, part, pose, trial_seed, part_yaw, args.interior)
+                        )
                     point = {
                         "x": x,
                         "y": sign * ay,
@@ -286,7 +287,7 @@ def run(args) -> dict:
         "part_yaws": args.part_yaws,
         "gripper": args.gripper,
         "desk_boxes": args.desk_boxes,
-        "interior": list(desk_boxes.interior(args.desk_boxes)),
+        "interior": list(args.interior or desk_boxes.interior(args.desk_boxes)),
         "release_z": desk_boxes.DESK_BOX_RELEASE_Z,
         "trials": n,
         "landed": sum(p["landed"] for p in points),
