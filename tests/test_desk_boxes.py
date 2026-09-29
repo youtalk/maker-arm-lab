@@ -89,7 +89,7 @@ def test_four_boxes_draw_a_class_permutation_and_one_box_takes_every_class():
     assert desk_boxes.class_map(rng, 1) == (0, 0, 0, 0) and rng.getstate() == state
     heap = [parts.make_part("slope", 1, 2), parts.make_part("brick", 1, 2, 5)]
     heap += [parts.make_part("brick", 1, 6), parts.make_part("brick", 2, 3)]
-    # PART_CLASSES order: slope, tall, narrow, wide.
+    # BASE_CLASSES order: slope, tall, narrow, wide.
     assert desk_boxes.part_destinations(heap, (2, 0, 3, 1)) == [2, 0, 3, 1]
     assert desk_boxes.part_destinations(heap * 2, (0, 0, 0, 0)) == [0] * 8
 

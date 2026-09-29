@@ -159,7 +159,7 @@ from maker_arm_lab.core.heap_oracle import (
     target_context,
 )
 from maker_arm_lab.core.hold import HoldDetector, agreement, commanded_gap
-from maker_arm_lab.core.parts import PART_CLASSES, part_class
+from maker_arm_lab.core.parts import BASE_CLASSES, FAMILIES, part_class
 from maker_arm_lab.core.quat import quat_apply
 from maker_arm_lab.core.stowed import (
     _brick_states,
@@ -1222,6 +1222,7 @@ def box_census(
     classes: list[str],
     census: list[dict],
     num_boxes: int,
+    class_names=BASE_CLASSES,
 ) -> dict:
     """The desk-box rows of one episode's end (MS7a design, the census). Pure.
 
@@ -1229,8 +1230,9 @@ def box_census(
     own box) and ``resting_box`` the box each part rests in at the end, or -1. A part at rest in
     a box that is not its own is a wrong-box part, and the last ``lifted_lost`` cycle that held
     it becomes ``wrong_box`` in ``classes``, in place (``census`` rows hold ``last_held``).
-    Returns the rows: parts stowed and parts in total per class and per box, and the wrong-box
-    parts.
+    Returns the rows: parts stowed and parts in total per class (every one of the active
+    ``class_names``), per family of the heap (MS7e design section 8.1) and per box, the
+    wrong-box parts and the episode's box count.
     """
     wrong = [
         b
@@ -1242,13 +1244,22 @@ def box_census(
             if classes[j] == "lifted_lost" and census[j].get("last_held") == b:
                 classes[j] = "wrong_box"
                 break
-    by_class = {c: {"stowed": 0, "total": 0} for c in PART_CLASSES}
+    by_class = {c: {"stowed": 0, "total": 0} for c in class_names}
+    present = {p.family for p in parts}
+    by_family = {f: {"stowed": 0, "total": 0} for f in FAMILIES if f in present}
     by_box = [{"stowed": 0, "total": 0} for _ in range(num_boxes)]
     for b, part in enumerate(parts):
-        for row in (by_class[part_class(part)], by_box[int(destination[b])]):
+        rows = (by_class[part_class(part)], by_family[part.family], by_box[int(destination[b])])
+        for row in rows:
             row["total"] += 1
             row["stowed"] += int(bool(stowed[b]))
-    return {"stowed_by_class": by_class, "stowed_by_box": by_box, "wrong_box_parts": len(wrong)}
+    return {
+        "stowed_by_class": by_class,
+        "stowed_by_family": by_family,
+        "stowed_by_box": by_box,
+        "wrong_box_parts": len(wrong),
+        "box_count": num_boxes,
+    }
 
 
 def resting_out_of_reach(pos, speed: float, held: bool, bl, stow_half_xy, in_box=None) -> bool:
@@ -1592,10 +1603,11 @@ def rollout(
     ctx_target = getattr(env, "context_target", None)
     # MS7a desk boxes: one destination box per part, and the served box part follows the target.
     per_part = torch.as_tensor(env.destination_bins).dim() == 2
+    class_names = getattr(env, "class_names", BASE_CLASSES)  # the active class list (MS7e)
     if per_part:
         # The loop runs one episode per env: its truth, before an env's own end resets it.
         destination = torch.as_tensor(env.destination_bins).clone().to("cpu")
-        class_to_box = [dict(zip(PART_CLASSES, map(int, row))) for row in env.class_to_box]
+        class_to_box = [dict(zip(class_names, map(int, row))) for row in env.class_to_box]
         final_box = torch.full((num_envs, k), -1, dtype=torch.long)
     if adopt_held and not per_part:
         raise EvalFailure("adopt_held", "needs desk boxes: a part's own box is the one it adopts")
@@ -1683,12 +1695,12 @@ def rollout(
         lean = float(getattr(env, "tray_lean_deg", 0.0)) if getattr(env, "tray", False) else 0.0
         poses = env.desk_box_poses.copy()
         for i, st in enumerate(states):
-            st.perceiver = perception.Perceiver(run_seed, i, scales)
+            st.perceiver = perception.Perceiver(run_seed, i, scales, class_names)
             st.perceiver.reset_episode(poses[i])
             if marker_bias:
                 st.marker = perception.MarkerBias(st.perceiver, run_seed, i)
             if class_views:
-                st.perceiver.views = perception.ClassViews(run_seed, i, scales, k)
+                st.perceiver.views = perception.ClassViews(run_seed, i, scales, k, class_names)
             poses[i] = st.perceiver.box_poses
             st.selector.boxes = st.perceiver.box_poses
             st.selector.failure_scope = "part"
@@ -2300,6 +2312,7 @@ def rollout(
                 st.classes,
                 st.census,
                 env.desk_boxes,
+                class_names,
             )
             boxes["class_to_box"] = class_to_box[i]
         episodes.append(
@@ -2397,13 +2410,25 @@ def rollout(
 
 
 def _sum_box_rows(episodes: list[dict]) -> dict:
-    """The payload's desk-box rows: every episode's class and box rows and wrong-box parts."""
-    by_class = {c: {"stowed": 0, "total": 0} for c in PART_CLASSES}
+    """The payload's desk-box rows: every episode's class, family and box rows, its parts per
+    box count (the episode's own count, MS7e design section 8.1) and its wrong-box parts."""
+    by_class: dict[str, dict] = {}
+    by_family: dict[str, dict] = {}
+    by_count: dict[str, dict] = {}
     by_box: list[dict] = []
     for ep in episodes:
-        for c, row in ep["stowed_by_class"].items():
-            for key in ("stowed", "total"):
-                by_class[c][key] += row[key]
+        count_rows = {
+            str(ep["box_count"]): {"stowed": ep["bricks_stowed"], "total": ep["num_bricks"]}
+        }
+        for table, rows in (
+            (by_class, ep["stowed_by_class"]),
+            (by_family, ep["stowed_by_family"]),
+            (by_count, count_rows),
+        ):
+            for name, row in rows.items():
+                total = table.setdefault(name, {"stowed": 0, "total": 0})
+                for key in ("stowed", "total"):
+                    total[key] += row[key]
         for m, row in enumerate(ep["stowed_by_box"]):
             if m == len(by_box):
                 by_box.append({"stowed": 0, "total": 0})
@@ -2411,6 +2436,8 @@ def _sum_box_rows(episodes: list[dict]) -> dict:
                 by_box[m][key] += row[key]
     return {
         "stowed_by_class": by_class,
+        "stowed_by_family": by_family,
+        "stowed_by_box_count": dict(sorted(by_count.items(), key=lambda kv: int(kv[0]))),
         "stowed_by_box": by_box,
         "wrong_box_parts": sum(ep["wrong_box_parts"] for ep in episodes),
         "wrong_box_cycles": sum(ep["cycle_classes"].count("wrong_box") for ep in episodes),

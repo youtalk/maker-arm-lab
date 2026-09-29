@@ -23,7 +23,7 @@ from test_mj_heap_oracle import PARTS, _place
 ZERO = perception.parse_scales("all=0")
 
 
-def _env_and_rig(part_list=PARTS, budget=4, tray=False):
+def _env_and_rig(part_list=PARTS, budget=4, tray=False, class_names=parts.BASE_CLASSES):
     draw = sample_run_draw(random.Random(5))
     draw["slot_colors"] = (0, 1, 2, 3)
     env = MjLegoSortEnv(
@@ -36,6 +36,7 @@ def _env_and_rig(part_list=PARTS, budget=4, tray=False):
         gripper_mode="continuous",
         context="camera_box_target",
         episode_length_s=loop.episode_length_s(budget),
+        class_names=class_names,
     )
     env.reset(seed=11)
     env.place_desk_boxes(0, FIXED)
@@ -634,7 +635,7 @@ def test_the_row_marker_and_box_are_the_detections_at_selection_and_stay_frozen(
     assert not np.allclose(boxes, true_boxes)  # the box knob's episode bias
     for j, target in enumerate(ep["cycle_targets"]):
         seen = next(d for d in states[j].detections if d.sim_index == target)
-        box = boxes[class_to_box[parts.PART_CLASSES.index(seen.cls)]]
+        box = boxes[class_to_box[parts.BASE_CLASSES.index(seen.cls)]]
         for row, box_row, marker, marked, _ in served[40 * j : 40 * (j + 1)]:
             assert np.allclose(row[:3], seen.centre, atol=1e-6)
             assert np.allclose(marker.numpy(), seen.centre, atol=1e-6) and marked == -1
@@ -1031,8 +1032,8 @@ TRUTH_DECISION_READS = (
 """The loop's truth reads besides the three accessors: what its decisions read before MS7c."""
 
 
-def _teacher_scene(monkeypatch):
-    env, rig = _env_and_rig()
+def _teacher_scene(monkeypatch, class_names=parts.BASE_CLASSES):
+    env, rig = _env_and_rig(class_names=class_names)
     _place(env, SPREAD)
     switches = {
         "select_at_release": True,
@@ -1045,6 +1046,12 @@ def _teacher_scene(monkeypatch):
         "park_done": True,
     }
     return env, rig, _Teacher(env, rig.oracle_factory), 4, switches
+
+
+def _eight_class_scene(monkeypatch):
+    """The teacher scene under the eight MS7e classes, the one MS7e switch this commit builds
+    into the loop (MS7e design section 10.2)."""
+    return _teacher_scene(monkeypatch, parts.PART_CLASSES)
 
 
 def _rake_scene(monkeypatch):
@@ -1097,7 +1104,7 @@ def test_every_ms7d_switch_at_once_runs_the_teacher_scene_to_its_end(monkeypatch
 
 
 @pytest.mark.parametrize("ms7d", [{}, MS7D_ON])
-@pytest.mark.parametrize("scene", [_teacher_scene, _rake_scene])
+@pytest.mark.parametrize("scene", [_teacher_scene, _rake_scene, _eight_class_scene])
 def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):
     """MS7c design section 10: under perceived no decision path reads the truth.
 
@@ -1148,7 +1155,7 @@ def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):
         assert ep[key] == blind_ep[key], key
     assert first["perception"] == second["perception"]
     assert first["perception"]["selections"] > 0
-    if scene is _teacher_scene:
-        assert "placed" in ep["cycle_reasons"] and first["perception"]["lifts_classified"] > 0
-    else:
+    if scene is _rake_scene:
         assert ep["rakes"] >= 1 and "budget" in ep["cycle_reasons"], ep
+    else:
+        assert "placed" in ep["cycle_reasons"] and first["perception"]["lifts_classified"] > 0

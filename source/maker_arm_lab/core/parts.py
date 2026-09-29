@@ -17,6 +17,12 @@ the 31.8 mm grasps slide off one side (section 5). They stay constructible so a 
 with them still replays through ``by_name``. Tall bricks (two, three and five bricks high)
 took their place. Round bricks (cylinders) came and went the same day (``RETIRED_FAMILIES``).
 
+MS7e (MS7e design sections 5 and 6) brings three families back one at a time: round, LDraw
+and flat (plates and tiles, no 4-wide part). ``catalog(families)`` adds a family only when a
+``FAMILY_KEYS`` key names it, so with no key the catalog, the split and the four classes are
+MS7d's. A key whose behaviour is not in the commit is not in ``READY_FAMILIES``, and every
+script refuses it with its fail token.
+
 ``closing_axes`` names the body axes the jaws may close along. A box offers all three and
 ``core.grasp`` keeps the ones near the jaw plane; a slope offers only y (``SLOPE_AXES``).
 """
@@ -40,8 +46,18 @@ MASS_FLOOR_KG = 0.0005  # solver health on 1x1 plates (0.12 g solid)
 # 7 mm under the 52.4 mm per-jaw travel; the full gap is 104.8 mm (robots.frames.JAW_FULL_GAP)
 MAX_GRASP_WIDTH = 0.045
 HELDOUT_FRACTION = 0.2
-FAMILIES = ("brick", "slope")
-FLAT_FAMILIES = ("plate", "tile")  # constructible for replays, not in the catalog
+FAMILIES = ("brick", "slope", "round", "ldraw", "plate", "tile")
+"""Catalog order. The MS7e families come after brick and slope, so ``split`` draws the base
+split unchanged (MS7e design section 5)."""
+FAMILY_KEYS = {"round": ("round",), "ldraw": ("ldraw",), "flat": ("plate", "tile")}
+"""The keys ``--families`` accepts, and the families each brings into the catalog."""
+READY_FAMILIES: frozenset[str] = frozenset()
+"""The ``FAMILY_KEYS`` keys whose behaviour is in this commit. Each family track adds its key
+when it lands; ``--families`` with any other key is a usage error (MS7e design section 10.2)."""
+LDRAW_IDS = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")
+"""The pre-registered LDraw parts, in catalog order (MS7e design section 6.5). Part names are
+``ldraw_<id>``; the LDraw track loads each from ``assets/parts/<id>.json``."""
+FLAT_FAMILIES = ("plate", "tile")  # in the catalog only under ``--families flat``
 RETIRED_FAMILIES = ("round",)
 """The round bricks left the catalog on 2026-09-18 after the bare-desk ladder
 (~/data/maker-arm-ms6/j, rung b3): a cylinder on its side rolls when a jaw touches it, so
@@ -59,6 +75,15 @@ _TALL_BRICKS = ((1, 1, 3), (1, 2, 2), (1, 2, 3), (1, 2, 5), (2, 2, 3))
 # the two wedges lifted 26 of 47 times on the bare-desk read (~/data/maker-arm-ms6/i/rA).
 # They stay constructible for replays, with every round brick (RETIRED_FAMILIES).
 _SLOPE_FOOTPRINTS = tuple((nx, ny) for nx in (1, 2) for ny in (2, 3, 4))
+_FAMILY_SPECS = {
+    "brick": tuple((nx, ny, 1) for nx, ny in _BOX_FOOTPRINTS) + _TALL_BRICKS,
+    "slope": tuple((nx, ny, 1) for nx, ny in _SLOPE_FOOTPRINTS),
+    "round": ((1, 1, 1), (2, 2, 1), (2, 2, 2), (4, 4, 1)),
+    "plate": ((1, 2, 1), (1, 4, 1), (1, 6, 1), (2, 2, 1), (2, 4, 1), (2, 6, 1)),
+    "tile": ((1, 2, 1), (1, 4, 1), (2, 2, 1), (2, 4, 1)),
+}
+"""(nx, ny, nz) of each primitive family's parts, in catalog order (MS7e design sections 6.4
+and 6.6): round is the four retired round bricks, and no 4-wide flat part enters."""
 _RETIRED = (
     ("round", 1, 1, 1),
     ("round", 2, 2, 1),
@@ -126,7 +151,7 @@ def slope_hull(size: Sequence[float]) -> tuple[tuple[float, float, float], ...]:
 
 def make_part(family: str, nx: int, ny: int, nz: int = 1) -> Part:
     """``nz`` is the height in bricks; a round part is ``nx`` studs across and ``nx == ny``."""
-    known = FAMILIES + FLAT_FAMILIES + RETIRED_FAMILIES
+    known = tuple(_FAMILY_SPECS)
     if family not in known:
         raise ValueError(f"family must be one of {known}, got {family!r}")
     long_side, short_side = footprint(nx, ny)
@@ -145,17 +170,23 @@ def make_part(family: str, nx: int, ny: int, nz: int = 1) -> Part:
     )
 
 
-PART_CLASSES = ("slope", "tall", "narrow", "wide")
-"""The four sorting classes of MS7a (MS7a design, classes and the class map), in the order the
-class-to-box map lists them. Every class holds a held-out part, so a held-out heap fills all
-four boxes."""
+PART_CLASSES = ("slope", "tall", "narrow", "wide", "round", "special", "plate", "tile")
+"""The eight sorting classes of MS7e (MS7e design section 5), in the order the class-to-box map
+lists them. The first four are MS7a's (``BASE_CLASSES``), each with a held-out part."""
+BASE_CLASSES = PART_CLASSES[:4]
+"""The four MS7a classes: the active class list whenever every MS7e switch is off, so the class
+map and the perception's class draws are MS7d's."""
 
 
 def part_class(part: Part) -> str:
-    """The sorting class of ``part``: ``slope`` for a slope, ``tall`` for a brick taller than one
+    """The sorting class of ``part``: its family for a round part, a plate and a tile,
+    ``special`` for an LDraw part, ``slope`` for a slope, ``tall`` for a brick taller than one
     brick height, ``narrow`` for a one-height brick one stud wide and ``wide`` for a one-height
-    brick two or more studs wide. The catalog holds 6, 5, 8 and 10. A flat or retired part,
-    which only a replay builds, classes by its width like a one-height brick."""
+    brick two or more studs wide. The base catalog holds 6, 5, 8 and 10."""
+    if part.family in ("round", "plate", "tile"):
+        return part.family
+    if part.family == "ldraw":
+        return "special"
     if part.family == "slope":
         return "slope"
     if part.size[2] > BRICK_HEIGHT + 1e-9:
@@ -179,12 +210,36 @@ def graspable(part: Part) -> bool:
     return min(part.size[0], part.size[1]) <= MAX_GRASP_WIDTH
 
 
-def catalog() -> list[Part]:
-    """Every generator part that passes the graspability filter, in a fixed order."""
-    out = [make_part("brick", nx, ny) for nx, ny in _BOX_FOOTPRINTS]
-    out += [make_part("brick", nx, ny, nz) for nx, ny, nz in _TALL_BRICKS]
-    out += [make_part("slope", nx, ny) for nx, ny in _SLOPE_FOOTPRINTS]
-    return [p for p in out if graspable(p)]
+def _family_parts(family: str) -> list[Part]:
+    """Every graspable part of one family, in catalog order."""
+    if family == "ldraw":
+        raise ValueError("no LDraw part is built on this commit (assets/parts/<id>.json)")
+    return [p for p in (make_part(family, *spec) for spec in _FAMILY_SPECS[family]) if graspable(p)]
+
+
+def catalog(families: Sequence[str] = ()) -> list[Part]:
+    """Every generator part that passes the graspability filter, in a fixed order: brick and
+    slope (the MS7d catalog, 29 parts), then the families the ``FAMILY_KEYS`` keys in
+    ``families`` bring, in ``FAMILIES`` order."""
+    unknown = sorted(set(families) - set(FAMILY_KEYS))
+    if unknown:
+        raise ValueError(f"unknown family keys {unknown}; keys: {tuple(FAMILY_KEYS)}")
+    wanted = {"brick", "slope"} | {f for key in families for f in FAMILY_KEYS[key]}
+    return [p for f in FAMILIES if f in wanted for p in _family_parts(f)]
+
+
+def catalog_index(name: str) -> int:
+    """The part's index in the full MS7e order: the MS7d catalog (0 to 28), then round, LDraw,
+    plate and tile. An LDraw part needs no JSON for it. The lone-part table seeds a part's
+    trials at 20289000 plus this index (MS7e design section 8.4)."""
+    names = []
+    for f in FAMILIES:
+        names += (
+            [f"ldraw_{i}" for i in LDRAW_IDS]
+            if f == "ldraw"
+            else [p.name for p in _family_parts(f)]
+        )
+    return names.index(name)
 
 
 def _replayable() -> list[Part]:
@@ -199,6 +254,11 @@ def split(parts: Sequence[Part], seed: int) -> tuple[list[Part], list[Part]]:
 
     Both lists keep the catalog order, so a run's ``parts`` metadata reads the same way
     whatever the seed. Stratified so every family has a held-out ladder row (design 5).
+
+    Brick and slope shuffle on one generator, the MS6 split. Each MS7e family shuffles on its
+    own generator, seeded from ``seed`` and its name, so its held-out parts do not depend on
+    which other families join a run: a family adopted between two waves moves no part of a
+    later family across the split (MS7e design section 5).
     """
     rng = random.Random(seed)
     order = {p.name: k for k, p in enumerate(parts)}
@@ -206,7 +266,8 @@ def split(parts: Sequence[Part], seed: int) -> tuple[list[Part], list[Part]]:
     heldout: list[Part] = []
     for family in FAMILIES:
         members = [p for p in parts if p.family == family]
-        rng.shuffle(members)
+        own = rng if family in ("brick", "slope") else random.Random(f"{seed}:{family}")
+        own.shuffle(members)
         n_out = math.ceil(HELDOUT_FRACTION * len(members))
         heldout += members[:n_out]
         train += members[n_out:]

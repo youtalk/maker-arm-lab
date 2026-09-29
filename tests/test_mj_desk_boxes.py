@@ -13,7 +13,7 @@ import torch
 from maker_arm_lab.core import desk_boxes, layout, loop, oracle, parts
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
-from maker_arm_lab.core.parts import PART_CLASSES
+from maker_arm_lab.core.parts import BASE_CLASSES
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
@@ -162,8 +162,38 @@ def test_the_recorded_initial_state_carries_the_boxes_and_each_parts_destination
         assert np.allclose(init["desk_box_poses"][0], poses, atol=1e-6)
         assert init["destination_bin"][()].tolist() == destination
         assert init["class_to_box"][()].tolist() == class_map
-        assert json.loads(init["class_to_box"].attrs["names"]) == list(PART_CLASSES)
+        assert json.loads(init["class_to_box"].attrs["names"]) == list(BASE_CLASSES)
         assert f["data/demo_0/obs/context_box"].shape[1] == 3
+
+
+def test_the_eight_classes_size_the_class_map_and_the_recorded_names(tmp_path):
+    """MS7e design section 5: under an MS7e switch the env folds the eight classes onto its
+    boxes and the shard names them; a round part goes to its own class's box."""
+    heap = [*PARTS, parts.make_part("round", 2, 2)]
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(
+        1,
+        draw,
+        parts=heap,
+        cameras=False,
+        desk_boxes=4,
+        class_names=parts.PART_CLASSES,
+        export_dir=tmp_path,
+        export_all=True,
+        episode_length_s=0.2,
+    )
+    env.reset(seed=3)
+    class_map = env.class_to_box[0].tolist()
+    assert len(class_map) == 8 and sorted(class_map) == [0, 0, 1, 1, 2, 2, 3, 3]
+    assert env.destination_bins[0].tolist()[-1] == class_map[4]  # round, the fifth class
+    for _ in range(8):
+        env.step(_hold(env))
+    env.close()
+    with h5py.File(tmp_path / "shard.hdf5") as f:
+        init = f["data/demo_0/initial_state"]
+        assert json.loads(init["class_to_box"].attrs["names"]) == list(parts.PART_CLASSES)
+        assert init["class_to_box"][()].tolist() == class_map
 
 
 def _teacher_env_and_rig(n, poses, **env_kwargs):
@@ -327,6 +357,11 @@ def test_box_census_names_the_wrong_box_cycle_and_counts_per_class_and_box():
         {"stowed": 1, "total": 2},
         {"stowed": 0, "total": 0},
     ]
+    assert rows["stowed_by_family"] == {
+        "brick": {"stowed": 1, "total": 3},
+        "slope": {"stowed": 0, "total": 1},
+    }
+    assert rows["box_count"] == 4
 
 
 def test_a_part_carried_into_another_box_is_a_wrong_box_cycle_and_never_stowed():
@@ -360,6 +395,11 @@ def test_a_part_carried_into_another_box_is_a_wrong_box_cycle_and_never_stowed()
     assert ep["stowed_by_box"][1] == {"stowed": 0, "total": 3}
     assert ep["stowed_by_class"]["wide"] == {"stowed": 0, "total": 2}
     assert payload["wrong_box_parts"] == 3 and payload["wrong_box_cycles"] == 3
+    # MS7e design section 8.1: the rows per family and per box count.
+    families = {p.family for p in env.parts}
+    assert set(payload["stowed_by_family"]) == families and ep["box_count"] == 4
+    assert sum(r["total"] for r in payload["stowed_by_family"].values()) == 3
+    assert payload["stowed_by_box_count"] == {"4": {"stowed": 0, "total": 3}}
 
 
 def _lift_until(rig, env, part, rise):

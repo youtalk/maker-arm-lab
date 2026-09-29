@@ -32,7 +32,7 @@ from dataclasses import dataclass, replace
 import torch
 
 from maker_arm_lab.core import grasp, oracle
-from maker_arm_lab.core.parts import BOX_AXES, PART_CLASSES, SLOPE_AXES, Part
+from maker_arm_lab.core.parts import BASE_CLASSES, BOX_AXES, SLOPE_AXES, Part
 from maker_arm_lab.core.quat import quat_apply, quat_mul
 
 KNOBS = (
@@ -248,12 +248,19 @@ class Perceiver:
     a knob sweep compares on.
     """
 
-    def __init__(self, run_seed: int, env_index: int, scales: dict[str, float] | None = None):
+    def __init__(
+        self,
+        run_seed: int,
+        env_index: int,
+        scales: dict[str, float] | None = None,
+        classes: Sequence[str] = BASE_CLASSES,
+    ):
         unknown = set(scales or {}) - set(KNOBS + EXTRA_KNOBS)
         if unknown:
             raise ValueError(f"unknown perception knobs {sorted(unknown)}; knobs: {KNOBS}")
         self.scales = {**dict.fromkeys(KNOBS + EXTRA_KNOBS, 1.0), **(scales or {})}
         self.rng = random.Random(f"perceive:{run_seed}:{env_index}")
+        self.classes = tuple(classes)  # the active class list a wrong class is drawn from
         self._bias = (0.0, 0.0, 0.0)
         self._box_poses: tuple[tuple[float, float, float], ...] = ()
         self.views: ClassViews | None = None  # ``class_views`` (L5): the per-part class model
@@ -297,13 +304,13 @@ class Perceiver:
 
     def classify(self, true_cls: str, part: int | None = None) -> str:
         """One classification: the true class, or at the class knob's rate one of the other
-        three, uniformly. Always two draws. Under ``views`` a classification of part ``part``
+        active classes, uniformly. Always two draws. Under ``views`` a classification of part ``part``
         goes through that part's model (``ClassViews.view``) on the same two draws."""
         if self.views is not None and part is not None:
             return self.views.view(part, true_cls, self.rng)
         fires = self.rng.random() < min(1.0, CLASS_ERROR_PROBABILITY * self.scales["class"])
         pick = self.rng.random()
-        return _other_class(true_cls, pick) if fires else true_cls
+        return _other_class(true_cls, pick, self.classes) if fires else true_cls
 
     def perceive(self, truth: Truth) -> PerceivedState:
         """Every part's draws in index order, then the structural rules and the miss, then the
@@ -424,9 +431,10 @@ class WristCamera:
         )
 
 
-def _other_class(true_cls: str, pick: float) -> str:
-    """The wrong class a uniform draw ``pick`` in [0, 1) names among the other three."""
-    others = [c for c in PART_CLASSES if c != true_cls]
+def _other_class(true_cls: str, pick: float, classes: Sequence[str]) -> str:
+    """The wrong class a uniform draw ``pick`` in [0, 1) names among the other active
+    ``classes``: three with the MS7a classes, seven with MS7e's."""
+    others = [c for c in classes if c != true_cls]
     return others[int(pick * len(others))]
 
 
@@ -438,14 +446,22 @@ class ClassViews:
     ``class`` knob and the share is ``CLASS_PERSISTENT_SHARE`` times the ``rho`` knob, both
     capped at 1. The rollout runs one episode per env, so the constructor is the episode's
     reset: each part draws once whether it is persistent, at share times p, and a fixed wrong
-    class, uniformly from the other three. Every view of a persistent part returns that class.
-    Any other part is wrong at ``rate`` q = p (1 - share) / (1 - share p), so a single view
-    still errs at p; at a share of 0, q is p and a view is the MS7c classification, draw for
+    class, uniformly from the other active classes. Every view of a persistent part returns
+    that class. Any other part is wrong at ``rate`` q = p (1 - share) / (1 - share p), so a view
+    alone still errs at p; at a share of 0, q is p and a view is the MS7c classification, draw for
     draw. The generator is seeded like the ``Perceiver``'s, from the name ``class_views``, and
     every part and every view draws twice whatever the scales, so knob rows stay paired.
     """
 
-    def __init__(self, run_seed: int, env_index: int, scales: dict[str, float], num_parts: int):
+    def __init__(
+        self,
+        run_seed: int,
+        env_index: int,
+        scales: dict[str, float],
+        num_parts: int,
+        classes: Sequence[str] = BASE_CLASSES,
+    ):
+        self.classes = tuple(classes)
         p = min(1.0, CLASS_ERROR_PROBABILITY * scales["class"])
         share = min(1.0, CLASS_PERSISTENT_SHARE * scales["rho"])
         self.rate = 0.0 if share * p >= 1.0 else p * (1.0 - share) / (1.0 - share * p)
@@ -463,8 +479,8 @@ class ClassViews:
         pick = rng.random()
         fixed = self.persistent[part]
         if fixed is not None:
-            return _other_class(true_cls, fixed)
-        return _other_class(true_cls, pick) if fires else true_cls
+            return _other_class(true_cls, fixed, self.classes)
+        return _other_class(true_cls, pick, self.classes) if fires else true_cls
 
 
 class PositionMemory:
