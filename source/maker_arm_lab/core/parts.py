@@ -23,6 +23,12 @@ and flat (plates and tiles, no 4-wide part). ``catalog(families)`` adds a family
 MS7d's. A key whose behaviour is not in the commit is not in ``READY_FAMILIES``, and every
 script refuses it with its fail token.
 
+Neither flat mechanism of 2026-09-18 survives the continuous gripper, which holds the close at
+``grasp.close_gap`` instead of running the jaws shut: the MS7e lone-part table (2026-09-29,
+12 trials per flat part) lifted 120 of 120. What it lost, 34 of 120, was the release: the
+part dropped through the 5 mm desk box floor. The flat track's ``--deep_box_floor``
+(``desk_boxes.DESK_BOX_FLOOR_DEPTH``) stows 120 of 120.
+
 ``closing_axes`` names the body axes the jaws may close along. A box offers all three and
 ``core.grasp`` keeps the ones near the jaw plane; a slope offers only y (``SLOPE_AXES``).
 
@@ -60,7 +66,7 @@ FAMILIES = ("brick", "slope", "round", "ldraw", "plate", "tile")
 split unchanged (MS7e design section 5)."""
 FAMILY_KEYS = {"round": ("round",), "ldraw": ("ldraw",), "flat": ("plate", "tile")}
 """The keys ``--families`` accepts, and the families each brings into the catalog."""
-READY_FAMILIES: frozenset[str] = frozenset({"round", "ldraw"})
+READY_FAMILIES: frozenset[str] = frozenset({"round", "ldraw", "flat"})
 """The ``FAMILY_KEYS`` keys whose behaviour is in this commit. Each family track adds its key
 when it lands; ``--families`` with any other key is a usage error (MS7e design section 10.2)."""
 LDRAW_IDS = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")
