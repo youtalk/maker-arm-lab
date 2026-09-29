@@ -35,7 +35,8 @@ For each part the tool:
   solid matches every other part of the catalog, which is a solid box.
 * splits the filled mesh with CoACD into at most ``--max_hulls`` convex hulls, then scales the
   hulls per axis so that together they span the collision box exactly (the voxel surface lies
-  up to half a voxel outside the true one).
+  up to half a voxel outside the true one). A solid that fills ``CONVEX_FILL`` of its convex
+  hull is convex up to the voxel steps and keeps one hull (``CONVEX_FILL``).
 
 Prints exactly one ``LDRAW_OK {json}`` or ``LDRAW_FAIL {json}`` line on every exit path,
 argparse errors included, and exits through ``os._exit``.
@@ -60,6 +61,11 @@ LICENSE_URLS = {
 MAX_HULLS = 8  # INITIAL: design section 6.5; the steps-per-second check may drop it to 4
 HULL_VERTICES = 32  # CoACD's per-hull vertex cap; MuJoCo's support function walks them
 VOXEL_M = 0.0002  # 0.5 LDU: a 1.6 mm wall is 8 voxels, a 4.8 mm pin hole 24
+CONVEX_FILL = 0.97
+"""A solid that fills this share of its convex hull gets one hull. CoACD split 3660, a convex
+shape (it fills 0.9937 of its hull, the rest is voxel steps on the slope), into a top slab and
+a 4.1 mm wedge under it; the wedge passed through a 5 mm box floor at release on 4 of 8 lifts
+(lone-part table, 2026-09-29). The other parts fill 0.72 to 0.88 (arches, pin holes) or 1.0."""
 DECIMALS = 7  # 0.1 micrometer
 FACE_TOL_M = 1e-4  # a stud that passes the collision box by more stands out of it
 # LDraw (x, y, z) with -y up -> (x, z, -y): a proper rotation (det +1) that puts up on +z.
@@ -73,7 +79,7 @@ PARTS = {
     "3659": ((0, 1), "z puts one jaw in the arch opening under the thin bridge"),
     "87087": ((0, 2), "y runs through the side stud, which a real jaw meets 1.6 mm early"),
     "11211": ((0, 2), "y runs through the two side studs, which a real jaw meets 1.6 mm early"),
-    "3660": ((0,), "y and z put one jaw on the slope face (the front face is 1.6 mm tall)"),
+    "3660": ((0, 2), "y puts a jaw on the slope; z closes top on bottom strip, as a slope's z"),
 }
 """Part id -> (closing axes, reason). The axes are body axes after this tool's orientation."""
 
@@ -294,9 +300,10 @@ def build_part(lib: Library, part_id: str, max_hulls: int, seed: int) -> dict:
 
     solid, origin = fill_voxels(coll, -0.5 * size, 0.5 * size)
     mesh = trimesh.Trimesh(*voxel_faces(solid, origin), process=True)
+    convex = mesh.volume >= CONVEX_FILL * mesh.convex_hull.volume
     pieces = coacd.run_coacd(
         coacd.Mesh(mesh.vertices, mesh.faces),
-        max_convex_hull=max_hulls,
+        max_convex_hull=1 if convex else max_hulls,
         decimate=True,
         max_ch_vertex=HULL_VERTICES,
         seed=seed,
