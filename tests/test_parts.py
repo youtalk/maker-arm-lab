@@ -108,6 +108,15 @@ def test_stud_positions_lie_inside_the_footprint():
     assert parts.stud_positions(parts.make_part("slope", 2, 4)) == []
 
 
+def test_a_round_part_keeps_the_studs_on_its_disc():
+    """A round 4x4 has 12 studs, as LEGO's: the grid's corners stood past its rim."""
+    counts = {p.name: len(parts.stud_positions(p)) for p in parts._replayable()}
+    assert [counts[f"round_{n}"] for n in ("1x1", "2x2", "2x2x2", "4x4")] == [1, 4, 4, 12]
+    for p in parts._replayable():
+        if p.family != "round" and p.studs:
+            assert counts[p.name] == p.nx * p.ny, p.name
+
+
 def test_sample_parts_draws_with_replacement():
     pool = parts.catalog()[:3]
     drawn = parts.sample_parts(random.Random(0), pool, 10)

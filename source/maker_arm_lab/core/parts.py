@@ -195,14 +195,21 @@ def part_class(part: Part) -> str:
 
 
 def stud_positions(part: Part) -> list[tuple[float, float]]:
-    """(x, y) of every stud on the top face, part frame. Tiles and slopes have none."""
+    """(x, y) of every stud on the top face, part frame. Tiles and slopes have none.
+
+    A round part keeps the studs whose centre lies on its disc, so a round 4x4 has 12, as
+    LEGO's does. The four corner studs of the full grid stood 3.5 mm past its rim, and as
+    collision studs (MS7e design section 6.4) they held the part off the desk like cogs."""
     if not part.studs:
         return []
-    return [
+    grid = [
         (STUD_PITCH * (j - (part.ny - 1) / 2), STUD_PITCH * (i - (part.nx - 1) / 2))
         for j in range(part.ny)
         for i in range(part.nx)
     ]
+    if part.family == "round":
+        return [(x, y) for x, y in grid if math.hypot(x, y) < part.size[0] / 2]
+    return grid
 
 
 def graspable(part: Part) -> bool:
