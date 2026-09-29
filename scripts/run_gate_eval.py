@@ -105,7 +105,7 @@ class GateCfg:
 FAMILY_KEYS = ("round", "ldraw", "flat")
 """``core.parts.FAMILY_KEYS``'s keys, in order, copied because the supervisor imports no
 maker_arm_lab; the test pins it."""
-READY_FAMILIES: frozenset[str] = frozenset({"round"})
+READY_FAMILIES: frozenset[str] = frozenset({"round", "ldraw"})
 """``core.parts.READY_FAMILIES``, copied and pinned the same way: ``--families`` with another
 key is refused before a server starts (MS7e design section 10.2)."""
 UNBUILT_SWITCHES: tuple[str, ...] = ()
