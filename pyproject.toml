@@ -27,6 +27,14 @@ dev = [
     "ruff>=0.8",
     "torch>=2.7",
 ]
+# scripts/ldraw_parts.py only, run once on Machine A from a throwaway venv (its docstring).
+# CI and the runtime never install it: the runtime reads the committed JSON parts.
+ldraw = [
+    "coacd>=1.0.14",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "trimesh>=4.0",
+]
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu" }]
