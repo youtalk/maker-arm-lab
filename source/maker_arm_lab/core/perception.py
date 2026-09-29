@@ -147,6 +147,9 @@ class Detection:
     sim_index: int
     """The simulator's part index: only the metrics and the teacher-side recorder may read it;
     decisions never do."""
+    closing_axes: tuple[int, ...] = BOX_AXES
+    """The part's own closing axes, as its shape shows them. Only a ``special`` detection
+    grasps by them: each LDraw part has its own (MS7e design section 6.5)."""
 
 
 @dataclass
@@ -187,7 +190,9 @@ class PerceivedState:
                 d.size,
                 False,
                 0.0,
-                closing_axes=SLOPE_AXES if slope else BOX_AXES,
+                closing_axes=(
+                    SLOPE_AXES if slope else d.closing_axes if d.cls == "special" else BOX_AXES
+                ),
             )
         return tuple(out)
 
@@ -201,6 +206,7 @@ class Truth:
     sizes: torch.Tensor  # (K, 3) catalog extents along the body axes
     classes: Sequence[str]  # (K,) PART_CLASSES names
     tool_xy: tuple[float, float]  # the tool point the arm hides parts around
+    closing_axes: Sequence[tuple[int, ...]] = ()  # (K,) catalog closing axes; () is BOX_AXES
 
 
 def covered(
@@ -357,6 +363,7 @@ class Perceiver:
                     size=tuple(max(0.0, e + n) for e, n in zip(sizes[b].tolist(), dsize)),
                     cls=cls,
                     sim_index=b,
+                    closing_axes=truth.closing_axes[b] if truth.closing_axes else BOX_AXES,
                 )
             )
         return PerceivedState(detections, self._box_poses)

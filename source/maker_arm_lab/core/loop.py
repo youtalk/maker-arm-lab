@@ -1325,7 +1325,8 @@ def truth_reads(env, per_part: bool) -> TruthReads:
 def perception_truth(env, rig, i: int) -> perception.Truth:
     """``perceived``: the one truth read of a selection, what ``Perceiver.perceive`` turns into
     what the overhead camera reports. Every part's live centre and orientation, the catalog
-    sizes and classes, and the tool point the arm hides parts around (the FK pick point)."""
+    sizes, classes and closing axes, and the tool point the arm hides parts around (the FK pick
+    point)."""
     data = [env.scene[f"brick_{b}"].data for b in range(env.cfg.num_bricks)]
     origin = env.scene.env_origins[i]
     return perception.Truth(
@@ -1334,6 +1335,7 @@ def perception_truth(env, rig, i: int) -> perception.Truth:
         sizes=torch.tensor([p.size for p in env.parts]),
         classes=tuple(part_class(p) for p in env.parts),
         tool_xy=tuple(rig.pick_point(i)[:2].tolist()),
+        closing_axes=tuple(p.closing_axes for p in env.parts),
     )
 
 
