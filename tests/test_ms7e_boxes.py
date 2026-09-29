@@ -156,6 +156,47 @@ def test_a_part_dropped_on_the_floor_of_a_resized_box_comes_to_rest_on_it(size):
         assert rest == pytest.approx(W + part.size[2] / 2, abs=0.001), (u, v, rest)
 
 
+@pytest.mark.parametrize("size", [(0.12, 0.12, 0.05), (0.07, 0.09, 0.03)])
+def test_a_plate_tilted_onto_a_resized_deep_floor_rests_on_it(size):
+    """The flat track's deep floor (``--deep_box_floor``) composes with a resized box: a 3.2 mm
+    plate released at the carry's lean onto a grown or a shrunk floor stays on top of it."""
+    (plate,) = parts.by_name(["plate_2x4"])
+    env = MjLegoSortEnv(
+        1,
+        sample_run_draw(random.Random(1)),
+        parts=[plate, plate],
+        cameras=False,
+        desk_boxes=4,
+        deep_box_floor=True,
+        class_names=parts.PART_CLASSES,
+    )
+    env.reset(seed=1)
+    pose = (0.12, 0.19, 0.3)
+    env.place_desk_boxes(0, [pose], [size])
+    m, d, h = env.models[0], env.datas[0], env.handles
+    floor = m.geom("desk_box_0_floor").id
+    assert m.geom_pos[floor][2] - m.geom_size[floor][2] == pytest.approx(
+        -desk_boxes.DESK_BOX_FLOOR_DEPTH
+    )
+    lean = math.radians(19.5)
+    for k in range(6):
+        axis, yaw = 1.3 * k, 0.7 * k
+        tilt = np.array([math.cos(lean / 2), math.cos(axis) * math.sin(lean / 2), 0.0, 0.0])
+        tilt[2] = math.sin(axis) * math.sin(lean / 2)
+        quat = np.zeros(4)
+        mujoco.mju_mulQuat(quat, tilt, np.array([math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]))
+        u, v = (0.3 * size[0] / 2) * math.cos(yaw), (0.3 * size[1] / 2) * math.sin(yaw)
+        for b, xyz in enumerate((_in_box(pose, u, v, 0.10), (HEAP_PARK_X, 0.0, 0.0))):
+            adr = h.brick_qpos[b]
+            d.qpos[adr : adr + 3] = xyz
+            d.qpos[adr + 3 : adr + 7] = quat if b == 0 else (1.0, 0.0, 0.0, 0.0)
+            d.qvel[h.brick_dof[b] : h.brick_dof[b] + 6] = 0.0
+        mujoco.mj_forward(m, d)
+        mujoco.mj_step(m, d, nstep=360)
+        rest = float(d.qpos[h.brick_qpos[0] + 2])
+        assert rest == pytest.approx(W + parts.PLATE_HEIGHT / 2, abs=0.001), (k, rest)
+
+
 def test_the_perceiver_draws_each_boxs_size_after_every_pose():
     poses = [(0.1, 0.2, 0.3), (0.12, -0.2, -0.1)]
     sizes = [(0.07, 0.09, 0.03), (0.1, 0.08, 0.05)]

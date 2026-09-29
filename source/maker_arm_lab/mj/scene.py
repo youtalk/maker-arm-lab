@@ -577,8 +577,9 @@ def apply_bins(model: mujoco.MjModel, bl: layout.BinLayout, heap: bool = False) 
         model.geom_pos[model.geom(name).id] = center
 
 
-def apply_desk_box_size(model: mujoco.MjModel, j: int, size) -> None:
-    """Resize desk box ``j`` to interior ``size`` (the MS7e box draw, design section 4.2).
+def apply_desk_box_size(model: mujoco.MjModel, j: int, size, floor_depth: float = 0.0) -> None:
+    """Resize desk box ``j`` to interior ``size`` (the MS7e box draw, design section 4.2), its
+    floor reaching ``floor_depth`` under the desk top as the scene built it (``deep_box_floor``).
 
     Writes each geom's centre and size from ``desk_boxes.box_geoms``, then every bound the
     collision pipeline caches from them, which ``mj_setConst`` does not refresh (read off
@@ -587,7 +588,7 @@ def apply_desk_box_size(model: mujoco.MjModel, j: int, size) -> None:
     body's inertial frame. The tree keeps the compiled partition: a leaf is its geom's box and
     a node the union of its two children, and a child always follows its parent."""
     body = model.body(f"desk_box_{j}").id
-    for name, center, full in desk_boxes.box_geoms(size):
+    for name, center, full in desk_boxes.box_geoms(size, floor_depth):
         g = model.geom(f"desk_box_{j}_{name}").id
         half = np.asarray(full, dtype=float) / 2.0
         model.geom_pos[g] = center

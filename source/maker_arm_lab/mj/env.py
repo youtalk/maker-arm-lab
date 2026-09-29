@@ -656,7 +656,8 @@ class MjLegoSortEnv:
         """
         for j, size in enumerate(sizes):
             if not np.array_equal(self.desk_box_sizes[i, j], size):
-                scene.apply_desk_box_size(self.models[i], j, size)
+                depth = _boxes.DESK_BOX_FLOOR_DEPTH if self.deep_box_floor else 0.0
+                scene.apply_desk_box_size(self.models[i], j, size, depth)
                 self.desk_box_sizes[i, j] = size
         d = self.datas[i]
         for j, (x, y, yaw) in enumerate(poses):
