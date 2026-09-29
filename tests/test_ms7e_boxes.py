@@ -8,6 +8,7 @@ import pathlib
 import random
 import sys
 
+import h5py
 import mujoco
 import numpy as np
 import pytest
@@ -269,6 +270,27 @@ def test_the_recorded_scene_keeps_the_drawn_boxes():
     assert state["box_count"].tolist() == [n] and state["box_draw_rounds"].tolist() == [0]
     assert np.allclose(state["desk_box_sizes"], env.desk_box_sizes[0])
     assert "desk_box_sizes" not in _env()._initial_state(0)
+
+
+def test_a_recorded_box_draw_shard_keeps_each_boxs_interior(tmp_path):
+    env = _env(
+        box_draw=6,
+        class_names=parts.PART_CLASSES,
+        export_dir=tmp_path,
+        export_all=True,
+        episode_length_s=0.2,
+    )
+    env.reset(seed=3)
+    sizes, count = env.desk_box_sizes[0].copy(), int(env.box_count[0])
+    q = env.scene["robot"].data.joint_pos[:, :6].clone().float()
+    for _ in range(8):
+        env.step(torch.cat([q, torch.ones(1, 1)], dim=1))
+    env.close()
+    with h5py.File(tmp_path / "shard.hdf5") as f:
+        init = f["data/demo_0/initial_state"]
+        assert np.allclose(init["desk_box_sizes"][0], sizes, atol=1e-6)
+        assert init["box_count"][()].tolist() == [count]
+        assert init["box_draw_rounds"][()].tolist() == [0]
 
 
 if __name__ == "__main__":

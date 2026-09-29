@@ -26,6 +26,9 @@ consumers and are unchanged):
     initial_state/destination_bin (1,) i64      MS6 heap shards only; (K,) one box per part
         with desk boxes (MS7a)
     initial_state/desk_box_poses (1,M,3) f32    desk box shards only: each box's x, y, yaw
+    initial_state/desk_box_sizes (1,M,3) f32    box draw shards only (MS7e): each box's
+        interior; initial_state/box_count (1,) i64 the boxes on the desk (the rest are parked)
+        and initial_state/box_draw_rounds (1,) i64 the draw's extra size-draw rounds
     initial_state/class_to_box (C,) i64         desk box shards only: the box of each class,
         in the order of its JSON `names` attr (the env's class_names, the four
         core.parts.BASE_CLASSES unless an MS7e switch is on)
@@ -250,6 +253,12 @@ class ShardRecorder:
             init.create_dataset(
                 "desk_box_poses", data=state["desk_box_poses"][None].astype(np.float32)
             )
+        if "desk_box_sizes" in state:  # MS7e box draw
+            init.create_dataset(
+                "desk_box_sizes", data=state["desk_box_sizes"][None].astype(np.float32)
+            )
+            for key in ("box_count", "box_draw_rounds"):
+                init.create_dataset(key, data=state[key].astype(np.int64))
         if "class_to_box" in state:
             ds = init.create_dataset("class_to_box", data=state["class_to_box"].astype(np.int64))
             ds.attrs["names"] = json.dumps(list(self._class_names))
