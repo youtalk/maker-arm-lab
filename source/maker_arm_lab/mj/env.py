@@ -81,6 +81,7 @@ from maker_arm_lab.assets.urdf_prep import gripper_velocity_limit
 from maker_arm_lab.core import cameras, layout
 from maker_arm_lab.core import desk_boxes as _boxes
 from maker_arm_lab.core import profile as _profile
+from maker_arm_lab.core.cameras import OVERHEAD_B2_BACK_M
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.heap_oracle import STOW_HALF_EXTENTS
 from maker_arm_lab.core.parts import BASE_CLASSES, Part
@@ -279,6 +280,7 @@ class MjLegoSortEnv:
         box_draw: int = 0,
         box_unseen: str | None = None,
         deep_box_floor: bool = False,
+        release_lean: bool = False,
     ):
         # MS6 phase B design 5.4: "binary" is the raw >= 0 opens contract every corpus before
         # phase B was recorded with; "continuous" reads action[:, 6] as the jaw gap in meters.
@@ -317,6 +319,10 @@ class MjLegoSortEnv:
         if deep_box_floor and desk_boxes <= 0:
             raise ValueError("deep_box_floor deepens the desk box floors; it needs desk_boxes")
         self.deep_box_floor = deep_box_floor
+        # MS7e rung B2 (design section 4.5): the overhead camera's nominal x moves back so the
+        # boxes behind the side band stay in frame. The rig's own `release_lean` leans EXTEND.
+        self.release_lean = release_lean
+        self.camera_back = OVERHEAD_B2_BACK_M if release_lean else 0.0
         if self.parts is not None:
             # MS6 rework section 6: heap mode has one bin, at y = 0.0. Flatten the layout
             # this env starts with so self.bin_layouts, the built box, the release target and
@@ -397,6 +403,7 @@ class MjLegoSortEnv:
             tray=tray,
             tray_lean_deg=self.tray_lean_deg,
             deep_box_floor=deep_box_floor,
+            camera_back=self.camera_back,
         )
         self.models = [base_model] + [copy.copy(base_model) for _ in range(num_envs - 1)]
         self.datas = [mujoco.MjData(m) for m in self.models]
@@ -727,7 +734,7 @@ class MjLegoSortEnv:
             if not self.desk_boxes:  # desk boxes build no bins
                 scene.apply_bins(m, bl, heap=self.parts is not None)
             scene.apply_lighting(m, ep)
-            scene.apply_cameras(m, ep)
+            scene.apply_cameras(m, ep, self.camera_back)
         # Physics DR first: mj_setConst re-derives the model constants AT qpos0 and resets the
         # data to it, so it has to run before the pose below is written.
         if self.cfg.desk_color:
@@ -778,7 +785,7 @@ class MjLegoSortEnv:
         d.ctrl[list(h.arm_actuators)] = d.qpos[list(h.joint_qpos[:6])]
         d.ctrl[list(h.gripper_actuators)] = GRIPPER_OPEN_POS
         self._grip_ctrl[i] = GRIPPER_OPEN_POS
-        pos, rot = scene.overhead_camera_pose(self.episode_draws[i])
+        pos, rot = scene.overhead_camera_pose(self.episode_draws[i], self.camera_back)
         self.context_camera[i] = np.array([*pos, *rpy_from_quat(rot)], dtype=np.float32)
         if self.parts is not None:
             self.context_camera_box[i, :6] = self.context_camera[i]
@@ -917,7 +924,7 @@ class MjLegoSortEnv:
                             )
             if images and self.cameras:
                 if self.cfg.frame_jitter:
-                    pos, rot = scene.overhead_camera_pose(self.episode_draws[i])
+                    pos, rot = scene.overhead_camera_pose(self.episode_draws[i], self.camera_back)
                     jm, jd = FRAME_CAM_JITTER_M, FRAME_CAM_JITTER_DEG
                     dpos = [self._rng.uniform(-jm, jm) for _ in range(3)]
                     drot = [self._rng.uniform(-jd, jd) for _ in range(3)]

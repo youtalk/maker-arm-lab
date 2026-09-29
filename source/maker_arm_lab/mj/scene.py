@@ -273,6 +273,7 @@ def build_spec(
     tray: bool = False,
     tray_lean_deg: float = 0.0,
     deep_box_floor: bool = False,
+    camera_back: float = 0.0,
 ) -> mujoco.MjSpec:
     """The MjSpec for one run draw; ``compile_model`` turns it into a model and handles.
 
@@ -287,6 +288,8 @@ def build_spec(
     many open boxes on the desk, each a mocap body (``desk_box_<j>``) the env moves per
     episode. A static world geom cannot move: its collision bounds are compiled once, and a
     part dropped on a world geom moved by ``geom_pos`` fell through it (measured 2026-09-23).
+
+    ``camera_back`` moves the overhead camera's nominal x back (``overhead_camera_pose``).
     """
     if parts is not None:
         num_bricks = len(parts)
@@ -439,8 +442,7 @@ def build_spec(
 
     # Cameras (Isaac offsets are ROS-convention; see core.cameras).
     if cameras_on:
-        over_pos = [p + d for p, d in zip(cameras.OVERHEAD_CAM_POS, draw["overhead_cam_dpos"])]
-        over_rot = compose_offset_rot(cameras.OVERHEAD_CAM_ROT, draw["overhead_cam_drot_deg"])
+        over_pos, over_rot = overhead_camera_pose(draw, camera_back)
         spec.worldbody.add_camera(
             name="overhead",
             pos=over_pos,
@@ -550,12 +552,21 @@ def build_model(
     tray: bool = False,
     tray_lean_deg: float = 0.0,
     deep_box_floor: bool = False,
+    camera_back: float = 0.0,
 ) -> tuple[mujoco.MjModel, SceneHandles]:
     """One call for callers that do not need to edit the spec."""
     if parts is not None:
         num_bricks = len(parts)
     spec = build_spec(
-        draw, num_bricks, cameras_on, parts, num_desk_boxes, tray, tray_lean_deg, deep_box_floor
+        draw,
+        num_bricks,
+        cameras_on,
+        parts,
+        num_desk_boxes,
+        tray,
+        tray_lean_deg,
+        deep_box_floor=deep_box_floor,
+        camera_back=camera_back,
     )
     return compile_model(spec, num_bricks)
 
@@ -563,9 +574,14 @@ def build_model(
 # -- per-episode draws: the same numbers as build_spec, written into a compiled model ----------
 
 
-def overhead_camera_pose(draw: dict) -> tuple[list[float], tuple[float, float, float, float]]:
-    """The overhead camera's world position and ROS-convention quaternion for ``draw``."""
+def overhead_camera_pose(
+    draw: dict, back: float = 0.0
+) -> tuple[list[float], tuple[float, float, float, float]]:
+    """The overhead camera's world position and ROS-convention quaternion for ``draw``, with
+    its nominal x ``back`` m further back (``cameras.OVERHEAD_B2_BACK_M`` under MS7e B2)."""
     pos = [p + d for p, d in zip(cameras.OVERHEAD_CAM_POS, draw["overhead_cam_dpos"])]
+    if back:
+        pos[0] -= back
     rot = compose_offset_rot(cameras.OVERHEAD_CAM_ROT, draw["overhead_cam_drot_deg"])
     return pos, rot
 
@@ -626,11 +642,11 @@ def apply_lighting(model: mujoco.MjModel, draw: dict) -> None:
     model.geom_rgba[model.geom("floor").id, :3] = draw["floor_color"]
 
 
-def apply_cameras(model: mujoco.MjModel, draw: dict) -> None:
+def apply_cameras(model: mujoco.MjModel, draw: dict, camera_back: float = 0.0) -> None:
     """Move both cameras to ``draw``'s jitter. A model built without cameras is left alone."""
     if model.ncam == 0:
         return
-    pos, rot = overhead_camera_pose(draw)
+    pos, rot = overhead_camera_pose(draw, camera_back)
     c = model.camera("overhead").id
     model.cam_pos[c] = pos
     model.cam_quat[c] = quat_mul(rot, cameras.ROS_TO_MUJOCO_CAM)
