@@ -58,6 +58,9 @@ PARK_BOX_X = -0.6
 """Where the boxes not under test wait: behind the arm and off the desk."""
 EXTEND_STOP_M = 0.008
 """EXTEND's own stop tolerance (``EnvOracle.extend_goal``), read against the driven arm."""
+RETREAT_STOP_M = 0.01
+"""RETREAT's own stop tolerance (``EnvOracle.next_goal``). Reported, not a pass condition: a
+RETREAT that does not plan leaves the arm over the box, and the next HOVER solves globally."""
 SETTLE_STEPS = 60
 """Hold steps after RETREAT for a part still moving in the box."""
 MAX_STEPS = 3000
@@ -111,6 +114,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="X,Y,Z: the interior of the box under test, m (MS7e design section 4.4), written "
         "per trial as the box draw does (MjLegoSortEnv.place_desk_boxes); "
         "default: core.desk_boxes.interior(--desk_boxes)",
+    )
+    parser.add_argument(
+        "--release_lean",
+        action="store_true",
+        help="MS7e rung B2: EXTEND leans toward the box (OracleRig release_lean)",
     )
     parser.add_argument("--out", type=str, default="", help="write the trial records here")
     args = parser.parse_args(argv)
@@ -209,6 +217,7 @@ def run_trial(env, rig, part, pose, seed: int, part_yaw: float = 0.0, interior=N
     record["arm_box_contact_steps"] = touches
     record["abandoned"] = bool(rig.abandoned[0])
     record["extend_ok"] = record.get("extend_err_mm", math.inf) < 1000.0 * EXTEND_STOP_M
+    record["retreat_ok"] = record.get("retreat_err_mm", math.inf) < 1000.0 * RETREAT_STOP_M
     record["landed"] = bool(per_brick_stowed(env)[0, 0])
     record["ok"] = record["extend_ok"] and record["landed"]
     return record
@@ -243,7 +252,14 @@ def run(args) -> dict:
             box_sizes=env.desk_box_sizes[i],
         )
 
-    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)
+    rig = OracleRig(
+        env,
+        env.cfg.bin_layout,
+        oracle.OracleNoise(),
+        rng,
+        oracle_factory=factory,
+        release_lean=args.release_lean,
+    )
     points = []
     trial_seed = args.seed
     try:
@@ -264,6 +280,7 @@ def run(args) -> dict:
                         "yaw_deg": yaw_deg,
                         "landed": sum(t["landed"] for t in trials),
                         "extend_ok": sum(t["extend_ok"] for t in trials),
+                        "retreat_ok": sum(t["retreat_ok"] for t in trials),
                         "trials": trials,
                     }
                     points.append(point)
@@ -287,11 +304,13 @@ def run(args) -> dict:
         "part_yaws": args.part_yaws,
         "gripper": args.gripper,
         "desk_boxes": args.desk_boxes,
+        "release_lean": args.release_lean,
         "interior": list(args.interior or desk_boxes.interior(args.desk_boxes)),
         "release_z": desk_boxes.DESK_BOX_RELEASE_Z,
         "trials": n,
         "landed": sum(p["landed"] for p in points),
         "extend_ok": sum(p["extend_ok"] for p in points),
+        "retreat_ok": sum(p["retreat_ok"] for p in points),
         "points": points,
     }
 
