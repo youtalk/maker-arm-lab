@@ -11,6 +11,8 @@ import sys
 
 import pytest
 
+from maker_arm_lab.core import batch_loop, parts
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "mj_eval_heap.py"
 
@@ -125,3 +127,32 @@ def test_the_perceived_flags_refuse_a_bad_combination_with_the_token(argv):
 def test_the_heap_client_writes_the_hold_trace():
     text = SCRIPT.read_text()
     assert '"--hold_trace"' in text and "hold_trace=trace" in text
+
+
+SWITCH_ARGV = {"box_draw": ["--box_draw", "6"], "release_lean": ["--release_lean"]}
+SWITCH_ARGV["box_unseen"] = ["--box_unseen", "rim"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        *(["--families", k] for k in parts.FAMILY_KEYS if k not in parts.READY_FAMILIES),
+        *(SWITCH_ARGV[name] for name in batch_loop.UNBUILT_SWITCHES),
+        ["--families", "cone"],
+        ["--heap_family", "flat"],  # not among --families
+    ],
+)
+def test_an_ms7e_switch_not_built_on_this_commit_fails_with_the_token(argv):
+    """MS7e design section 10.2: a switch whose behaviour is not in the commit never runs as a
+    no-op. The cases follow ``parts.READY_FAMILIES`` and ``batch_loop.UNBUILT_SWITCHES``."""
+    out = _run(argv)
+    assert out.returncode == 2, out.stderr
+    assert out.stdout.strip().splitlines() == [out.stdout.strip()]  # one token line
+    assert out.stdout.startswith('EVAL_FAIL {"reason": "usage"'), out.stdout
+
+
+def test_the_heap_client_records_the_ms7e_switches_and_serves_the_active_classes():
+    text = SCRIPT.read_text()
+    assert "add_ms7e_arguments(parser)" in text and "check_ms7e(parser, args)" in text
+    assert 'payload["ms7e"] = ms7e_switches(args)' in text
+    assert "class_names=heap_classes(args)" in text

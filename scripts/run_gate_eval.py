@@ -93,6 +93,56 @@ class GateCfg:
     # MuJoCo only: extra flags handed to the eval client verbatim, e.g. the heap loop's
     # protocol switches. A cached payload must have run with the same switches.
     client_flags: tuple = ()
+    # MuJoCo heap only: the MS7e switches (MS7e design section 10.1), forwarded to the heap
+    # client and recorded in its payload's "ms7e" block; every one off is MS7d.
+    families: tuple = ()
+    box_draw: int = 0
+    release_lean: bool = False
+    box_unseen: str | None = None
+    heap_family: str | None = None
+
+
+FAMILY_KEYS = ("round", "ldraw", "flat")
+"""``core.parts.FAMILY_KEYS``'s keys, in order, copied because the supervisor imports no
+maker_arm_lab; the test pins it."""
+READY_FAMILIES: frozenset[str] = frozenset()
+"""``core.parts.READY_FAMILIES``, copied and pinned the same way: ``--families`` with another
+key is refused before a server starts (MS7e design section 10.2)."""
+UNBUILT_SWITCHES = ("box_draw", "release_lean", "box_unseen")
+"""``core.batch_loop.UNBUILT_SWITCHES``, copied and pinned the same way."""
+
+
+def families_key(text: str) -> tuple:
+    """``--families``: the canonical tuple the heap client records, the keys of ``FAMILY_KEYS``
+    in its order, once each (``core.batch_loop.families_arg``). Raises ValueError on an
+    unknown key."""
+    keys = [k.strip() for k in text.split(",") if k.strip()]
+    unknown = [k for k in keys if k not in FAMILY_KEYS]
+    if unknown:
+        raise ValueError(f"--families: unknown family keys {unknown}; keys: {FAMILY_KEYS}")
+    return tuple(k for k in FAMILY_KEYS if k in keys)
+
+
+MS7E_OFF = {
+    "families": [],
+    "box_draw": 0,
+    "release_lean": False,
+    "box_unseen": None,
+    "heap_family": None,
+}
+"""The "ms7e" block of a read with every MS7e switch off, what an MS7d payload ran with."""
+
+
+def ms7e_block(cfg: "GateCfg") -> dict:
+    """The payload's "ms7e" block a read with ``cfg`` records (``core.batch_loop.ms7e_switches``);
+    the cache matches on it."""
+    return {
+        "families": list(cfg.families),
+        "box_draw": cfg.box_draw,
+        "release_lean": cfg.release_lean,
+        "box_unseen": cfg.box_unseen,
+        "heap_family": cfg.heap_family,
+    }
 
 
 MS7D_LEVERS = {
@@ -300,9 +350,23 @@ def aggregate_gate(
     lo, hi = wilson_interval(bricks_stowed, bricks_total)
     # MS7a desk boxes: bricks_stowed counts parts at rest in their own box only (the grader),
     # and these rows say where the rest went. Absent on every payload without desk boxes.
+    # MS7e design section 8.1 adds the rows per family and per box count; an MS7d payload
+    # has no family rows and four boxes in every episode.
     boxed = [ep for ep in episodes if "stowed_by_class" in ep]
     box_rows = {}
     if boxed:
+        by_family: dict[str, dict] = {}
+        by_count: dict[str, dict] = {}
+        for ep in boxed:
+            count = {"stowed": ep["bricks_stowed"], "total": ep["num_bricks"]}
+            for table, rows in (
+                (by_family, ep.get("stowed_by_family", {})),
+                (by_count, {str(ep.get("box_count", len(ep["stowed_by_box"]))): count}),
+            ):
+                for name, row in rows.items():
+                    total = table.setdefault(name, {"stowed": 0, "total": 0})
+                    for k in ("stowed", "total"):
+                        total[k] += row[k]
         box_rows = {
             "stowed_by_class": {
                 c: {
@@ -310,6 +374,8 @@ def aggregate_gate(
                 }
                 for c in boxed[0]["stowed_by_class"]
             },
+            "stowed_by_family": by_family,
+            "stowed_by_box_count": dict(sorted(by_count.items(), key=lambda kv: int(kv[0]))),
             "stowed_by_box": [
                 {k: sum(ep["stowed_by_box"][m][k] for ep in boxed) for k in ("stowed", "total")}
                 for m in range(len(boxed[0]["stowed_by_box"]))
@@ -479,6 +545,16 @@ def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
                 prefix += ["--tray_lean", str(cfg.tray_lean)]
             if cfg.tray:
                 prefix.append("--tray")
+            if cfg.families:
+                prefix += ["--families", ",".join(cfg.families)]
+            if cfg.box_draw:
+                prefix += ["--box_draw", str(cfg.box_draw)]
+            if cfg.release_lean:
+                prefix.append("--release_lean")
+            if cfg.box_unseen:
+                prefix += ["--box_unseen", cfg.box_unseen]
+            if cfg.heap_family:
+                prefix += ["--heap_family", cfg.heap_family]
         prefix += list(cfg.client_flags)
     else:
         prefix = [
@@ -559,6 +635,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
             and payload.get("desk_boxes", 0) == cfg.desk_boxes
             and payload.get("tray", False) == cfg.tray
             and float(payload.get("tray_lean", 0.0)) == cfg.tray_lean
+            # A payload that predates the MS7e switches ran with every one off.
+            and payload.get("ms7e", MS7E_OFF) == ms7e_block(cfg)
         )
     # The served inference configuration is part of what a draw measured. An open-loop read
     # (the checkpoint's own n_action_steps) must never stand in for a temporal-ensemble read.
@@ -645,6 +723,7 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
         (p["inference"] for p in ordered if p.get("inference")), server_ready.get("inference", {})
     )
     results["policy_id"] = next((p.get("policy_id") for p in ordered), None)
+    results["ms7e"] = ms7e_block(cfg)
     results["draws"] = [
         {
             "process_index": d.process_index,
@@ -867,6 +946,38 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             help=f"MuJoCo heap only: forwarded to the heap client as --{name}, MS7d {lever}",
         )
     parser.add_argument(
+        "--families",
+        type=str,
+        default="",
+        help="MuJoCo heap only, MS7e: forwarded to the heap client as --families, the part "
+        f"families the catalog adds (a comma list of {', '.join(FAMILY_KEYS)})",
+    )
+    parser.add_argument(
+        "--box_draw",
+        type=int,
+        default=0,
+        help="MuJoCo heap only, MS7e: forwarded as --box_draw N, the per-episode box count "
+        "uniform from 4 to N; 0 is off",
+    )
+    parser.add_argument(
+        "--release_lean",
+        action="store_true",
+        help="MuJoCo heap only, MS7e B2: forwarded as --release_lean",
+    )
+    parser.add_argument(
+        "--box_unseen",
+        choices=("size", "rim"),
+        default=None,
+        help="MuJoCo heap only, MS7e: forwarded as --box_unseen, an unseen-box ladder row",
+    )
+    parser.add_argument(
+        "--heap_family",
+        choices=FAMILY_KEYS,
+        default=None,
+        help="MuJoCo heap only, MS7e: forwarded as --heap_family, a family heap read; the key "
+        "must be in --families",
+    )
+    parser.add_argument(
         "--client_flags",
         type=str,
         default="",
@@ -917,6 +1028,20 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError("--tray_lean leans the tray's walls: it needs --tray")
     if args.tray and args.heap_k <= 0:
         raise ValueError("--tray needs --heap_k > 0: the tray holds a heap")
+    families = families_key(args.families)
+    if any(getattr(args, name) for name in MS7E_OFF) and (
+        args.heap_k <= 0 or args.backend != "mujoco"
+    ):
+        raise ValueError("the MS7e switches need --heap_k > 0 and --backend mujoco")
+    unbuilt = [k for k in families if k not in READY_FAMILIES]
+    if unbuilt:
+        # The client's own usage error (MS7e design section 10.2), before a server starts.
+        raise ValueError(f"--families {','.join(unbuilt)} is not built on this commit")
+    for name in UNBUILT_SWITCHES:
+        if getattr(args, name):
+            raise ValueError(f"--{name} is not built on this commit")
+    if args.heap_family and args.heap_family not in families:
+        raise ValueError("--heap_family must name one of --families")
     if args.heap_k > 0:
         if args.backend != "mujoco":
             raise ValueError("--heap_k needs --backend mujoco: the Isaac env has no heap")
@@ -956,6 +1081,11 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         desk_boxes=args.desk_boxes,
         tray=args.tray,
         tray_lean=args.tray_lean,
+        families=families,
+        box_draw=args.box_draw,
+        release_lean=args.release_lean,
+        box_unseen=args.box_unseen,
+        heap_family=args.heap_family,
         client_flags=tuple(shlex.split(args.client_flags))
         + (("--scripted_place",) if args.scripted_place else ())
         + (("--scripted_rake",) if args.scripted_rake else ())

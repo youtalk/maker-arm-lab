@@ -14,6 +14,7 @@ campaign size.
 
 from __future__ import annotations
 
+import argparse
 import json
 import random
 import time
@@ -42,12 +43,113 @@ def heap_parts(args) -> list[_parts.Part] | None:
 
     The split is seeded by ``--parts_seed`` so the held-out set is reproducible, and the
     run's draw from it by ``--layout_seed``, so two lanes never share a part set (design H4).
+    The catalog holds the families ``--families`` names (MS7e). ``--heap_family KEY`` (a family
+    heap read, MS7e design section 6.3) draws K // 2 parts from that family's side of the split
+    and the rest from the split's other parts, then shuffles them, so the family's parts do
+    not all drop first, to the bottom of the heap.
     """
     if args.heap_k <= 0:
         return None
-    train, heldout = _parts.split(_parts.catalog(), args.parts_seed)
+    train, heldout = _parts.split(_parts.catalog(getattr(args, "families", ())), args.parts_seed)
     pool = {"train": train, "heldout": heldout, "all": train + heldout}[args.parts_split]
-    return _parts.sample_parts(random.Random(args.layout_seed), pool, args.heap_k)
+    rng = random.Random(args.layout_seed)
+    key = getattr(args, "heap_family", None)
+    if not key:
+        return _parts.sample_parts(rng, pool, args.heap_k)
+    own = [p for p in pool if p.family in _parts.FAMILY_KEYS[key]]
+    rest = [p for p in pool if p.family not in _parts.FAMILY_KEYS[key]]
+    half = args.heap_k // 2
+    heap = _parts.sample_parts(rng, own, half) + _parts.sample_parts(rng, rest, args.heap_k - half)
+    rng.shuffle(heap)
+    return heap
+
+
+def heap_classes(args) -> tuple[str, ...]:
+    """The active class list: the eight MS7e classes whenever ``--families`` names a family or
+    the box draw is on, else the four MS7a classes, so with every MS7e switch off the class
+    map and the perception's class draws are MS7d's (MS7e design section 5)."""
+    on = getattr(args, "families", ()) or getattr(args, "box_draw", 0)
+    return _parts.PART_CLASSES if on else _parts.BASE_CLASSES
+
+
+UNBUILT_SWITCHES = ("box_draw", "release_lean", "box_unseen")
+"""The MS7e switches whose behaviour is not in this commit: any value but off is a usage
+error. The boxes and release-lean tracks remove theirs as they land. The gate supervisor keeps
+a stdlib copy (``scripts/run_gate_eval.py``), pinned by a test."""
+
+
+def families_arg(text: str) -> tuple[str, ...]:
+    """``--families``: a comma list of ``parts.FAMILY_KEYS`` keys, in that order, once each."""
+    keys = [k.strip() for k in text.split(",") if k.strip()]
+    unknown = [k for k in keys if k not in _parts.FAMILY_KEYS]
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"unknown family keys {unknown}; keys: {', '.join(_parts.FAMILY_KEYS)}"
+        )
+    return tuple(k for k in _parts.FAMILY_KEYS if k in keys)
+
+
+def add_ms7e_arguments(parser) -> None:
+    """The MS7e switches (MS7e design section 10.1), shared by the MuJoCo heap scripts. Each
+    defaults off, and off is MS7d."""
+    parser.add_argument(
+        "--families",
+        type=families_arg,
+        default=(),
+        help="MS7e: the part families the catalog and the split add to brick and slope, a "
+        f"comma list of {', '.join(_parts.FAMILY_KEYS)}; any family also turns on the eight "
+        "classes",
+    )
+    parser.add_argument(
+        "--box_draw",
+        type=int,
+        default=0,
+        help="MS7e B1/B2: draw the box count per episode, uniform from 4 to this; 0 is off",
+    )
+    parser.add_argument(
+        "--release_lean",
+        action="store_true",
+        help="MS7e B2: the release leg leans toward the box, the camera moves back and the "
+        "band widens",
+    )
+    parser.add_argument(
+        "--box_unseen",
+        choices=("size", "rim"),
+        default=None,
+        help="MS7e: the unseen-box ladder row's box draw (design section 8.3); off by default",
+    )
+    parser.add_argument(
+        "--heap_family",
+        choices=tuple(_parts.FAMILY_KEYS),
+        default=None,
+        help="MS7e family heap read: half of each heap from this family, half from the other "
+        "parts of the split; the key must be in --families",
+    )
+
+
+def check_ms7e(parser, args) -> None:
+    """Refuse an MS7e switch whose behaviour is not in this commit (MS7e design section 10.2)
+    with ``parser.error``, so the script prints its fail token instead of a no-op run."""
+    unbuilt = [k for k in args.families if k not in _parts.READY_FAMILIES]
+    if unbuilt:
+        parser.error(f"--families {','.join(unbuilt)} is not built on this commit")
+    for name in UNBUILT_SWITCHES:
+        if getattr(args, name):
+            parser.error(f"--{name} is not built on this commit")
+    if args.heap_family and args.heap_family not in args.families:
+        parser.error("--heap_family must name one of --families")
+
+
+def ms7e_switches(args) -> dict:
+    """The MS7e switch block a payload and a run's meta record, and the gate supervisor's cache
+    matches (``run_gate_eval.ms7e_block``). Every switch off is MS7d."""
+    return {
+        "families": list(getattr(args, "families", ())),
+        "box_draw": int(getattr(args, "box_draw", 0)),
+        "release_lean": bool(getattr(args, "release_lean", False)),
+        "box_unseen": getattr(args, "box_unseen", None),
+        "heap_family": getattr(args, "heap_family", None),
+    }
 
 
 def cycle_actor(orc) -> int:
@@ -168,6 +270,8 @@ def run_meta(
         "gripper": getattr(args, "gripper", "binary"),
         # MS7a design, desk boxes: 0 is the MS6 scene, the shelf's one heap bin.
         "desk_boxes": int(getattr(args, "desk_boxes", 0)),
+        # MS7e design section 10.1: the MS7e switches, every one off on an MS7d run.
+        "ms7e": ms7e_switches(args),
         # MS7c design section 7.1: the rows, the marker and the box row as recorded from the
         # perceived state at these knob scales; each episode counts its perceived selections
         # and its fallbacks (a target part the perception missed).

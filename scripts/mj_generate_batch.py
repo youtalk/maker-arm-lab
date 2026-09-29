@@ -34,7 +34,10 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 from maker_arm_lab.core import perception
 from maker_arm_lab.core.batch_loop import (
     add_batch_arguments,
+    add_ms7e_arguments,
     build_run,
+    check_ms7e,
+    heap_classes,
     heap_episode_length_s,
     heap_parts,
     make_induction,
@@ -76,6 +79,7 @@ class _TokenEmittingParser(argparse.ArgumentParser):
 def parse_args(argv=None) -> argparse.Namespace:
     parser = _TokenEmittingParser(description=__doc__)
     add_batch_arguments(parser)
+    add_ms7e_arguments(parser)
     parser.add_argument(
         "--perceived",
         action="store_true",
@@ -102,6 +106,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     for name in ("run_seed", "layout_seed"):
         if not (0 <= getattr(args, name) < 2**32):
             parser.error(f"--{name} is outside numpy's seed range (0 <= seed < 2**32)")
+    check_ms7e(parser, args)
     if args.perceived and (args.heap_k <= 0 or args.desk_boxes <= 0):
         parser.error(
             "--perceived records a heap sorted into desk boxes: it needs --heap_k > 0 "
@@ -140,6 +145,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         desk_boxes=args.desk_boxes,
         tray=args.tray,
         tray_lean_deg=args.tray_lean,
+        class_names=heap_classes(args),
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)
@@ -164,7 +170,8 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
     perceivers = None
     if args.perceived:  # MS7c design section 7.1: the teacher acts on the truth
         perceivers = [
-            perception.Perceiver(args.run_seed, i, args.noise_scales) for i in range(args.num_envs)
+            perception.Perceiver(args.run_seed, i, args.noise_scales, env.class_names)
+            for i in range(args.num_envs)
         ]
     rig = OracleRig(
         env,

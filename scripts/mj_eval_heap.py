@@ -27,7 +27,14 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lerobot_stack"))
 import policy_client
 from maker_arm_lab.core import oracle, perception
-from maker_arm_lab.core.batch_loop import PARTS_SPLITS, heap_parts
+from maker_arm_lab.core.batch_loop import (
+    PARTS_SPLITS,
+    add_ms7e_arguments,
+    check_ms7e,
+    heap_classes,
+    heap_parts,
+    ms7e_switches,
+)
 from maker_arm_lab.core.eval_loop import EvalFailure
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
@@ -101,6 +108,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="N desk boxes beside the arm replace the shelf and its heap bin (MS7a: 1 for "
         "rung 1, 4 for rung 2); 0 is the MS6 scene",
     )
+    add_ms7e_arguments(parser)
     parser.add_argument("--server", type=str, default="tcp://127.0.0.1:5555")
     parser.add_argument("--out", type=str, default="", help="write the EVAL_OK payload here too")
     parser.add_argument(
@@ -308,6 +316,7 @@ def parse_args(argv=None) -> argparse.Namespace:
             parser.error(f"--{name} is outside numpy's seed range (0 <= seed < 2**32)")
     if args.heap_k <= 0:
         parser.error("--heap_k must be positive: this client evaluates heap episodes only")
+    check_ms7e(parser, args)
     if args.desk_boxes < 0:
         parser.error("--desk_boxes must be 0 or more")
     if args.perceived:
@@ -378,6 +387,7 @@ def main(argv=None) -> int:
             desk_boxes=args.desk_boxes,
             tray=args.tray,
             tray_lean_deg=args.tray_lean,
+            class_names=heap_classes(args),
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
@@ -445,6 +455,7 @@ def main(argv=None) -> int:
         payload["desk_boxes"] = args.desk_boxes
         payload["tray"] = args.tray
         payload["tray_lean"] = args.tray_lean
+        payload["ms7e"] = ms7e_switches(args)
     except EvalFailure as err:
         print("EVAL_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True)
         return 1

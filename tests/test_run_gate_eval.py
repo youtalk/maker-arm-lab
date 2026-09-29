@@ -890,6 +890,9 @@ def test_the_gate_reports_desk_box_rows_and_counts_own_box_stows_only():
     assert rows["stowed_by_class"]["slope"] == {"stowed": 4, "total": 6}
     assert rows["stowed_by_box"][1] == {"stowed": 0, "total": 2}
     assert rows["wrong_box_parts"] == 2 and rows["wrong_box_cycles"] == 2
+    # An MS7d payload has no family rows, and its box count is the length of its box rows.
+    assert rows["stowed_by_family"] == {}
+    assert rows["stowed_by_box_count"] == {"2": {"stowed": 4, "total": 8}}
     six = ge.aggregate_gate([_payload(draw, [_episode(0)])], threshold=0.1)["secondary"]
     assert "stowed_by_class" not in six
 
@@ -1216,3 +1219,140 @@ def test_the_supervisors_copy_of_the_scales_parse_matches_the_perception_module(
             perception.parse_scales(bad)
         with pytest.raises(ValueError):
             ge.noise_scales_key(bad)
+
+
+# --- MS7e (MS7e design section 10.2) -----------------------------------------------------------
+
+MS7E_HEAP = ["--backend", "mujoco", "--heap_k", "50"]
+
+
+def test_the_supervisors_ms7e_copies_match_the_core_modules():
+    import argparse
+
+    from maker_arm_lab.core import batch_loop, parts
+
+    assert ge.FAMILY_KEYS == tuple(parts.FAMILY_KEYS)
+    assert ge.READY_FAMILIES == parts.READY_FAMILIES
+    assert ge.UNBUILT_SWITCHES == batch_loop.UNBUILT_SWITCHES
+    assert ge.MS7E_OFF == batch_loop.ms7e_switches(argparse.Namespace())
+    for text in ("", "flat", "flat,round", " ldraw , round,flat,round"):
+        assert ge.families_key(text) == batch_loop.families_arg(text), text
+    for bad in ("cone", "round,plate"):
+        with pytest.raises(ValueError):
+            ge.families_key(bad)
+        with pytest.raises(argparse.ArgumentTypeError):
+            batch_loop.families_arg(bad)
+    cfg = _cfg(Path(), Path(), families=("round",), box_draw=6, heap_family="round")
+    args = argparse.Namespace(families=("round",), box_draw=6, heap_family="round")
+    assert ge.ms7e_block(cfg) == batch_loop.ms7e_switches(args)
+
+
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        (["--families", "round"], "--families round is not built"),
+        (["--families", "flat,ldraw"], "--families ldraw,flat is not built"),
+        (["--families", "cone"], "unknown family keys"),
+        (["--box_draw", "6"], "--box_draw is not built"),
+        (["--release_lean"], "--release_lean is not built"),
+        (["--box_unseen", "size"], "--box_unseen is not built"),
+        (["--heap_family", "flat"], "--heap_family must name one of --families"),
+    ],
+)
+def test_an_unbuilt_ms7e_switch_is_a_gate_error_before_any_server(
+    monkeypatch, capsys, tmp_path, extra, message
+):
+    """The base commit's state, whatever the tracks have built since."""
+    monkeypatch.setattr(ge, "READY_FAMILIES", frozenset())
+    monkeypatch.setattr(ge, "UNBUILT_SWITCHES", ("box_draw", "release_lean", "box_unseen"))
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(_argv(tmp_path) + MS7E_HEAP + extra) == 2
+    out = capsys.readouterr()
+    assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and message in out.err
+
+
+def test_the_ms7e_switches_need_the_mujoco_heap(monkeypatch):
+    monkeypatch.setattr(ge, "READY_FAMILIES", frozenset(ge.FAMILY_KEYS))
+    with pytest.raises(ValueError, match="need --heap_k > 0"):
+        ge._build_cfg(ge._parse_args(_argv(Path()) + ["--families", "round"]))
+
+
+def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
+    tmp_path, monkeypatch
+):
+    """With every switch built, each reaches the heap client, and the cache refuses a payload
+    read with any other value. An MS7d payload (no block) ran with every switch off."""
+    monkeypatch.setattr(ge, "READY_FAMILIES", frozenset(ge.FAMILY_KEYS))
+    monkeypatch.setattr(ge, "UNBUILT_SWITCHES", ())
+    draw = ge.make_eval_draws(1, 1)[0]
+    argv = _argv(tmp_path / "gate") + MS7E_HEAP
+    plain = ge._build_cfg(ge._parse_args(argv))
+    assert plain.families == () and ge.ms7e_block(plain) == ge.MS7E_OFF
+    switches = ["--families", "flat,round", "--box_draw", "6", "--release_lean"]
+    switches += ["--box_unseen", "size", "--heap_family", "flat"]
+    cfg = ge._build_cfg(ge._parse_args(argv + switches))
+    cmd = ge._eval_command(cfg, draw)
+    at = cmd.index("--families")
+    assert cmd[at : at + 9] == ["--families", "round,flat", *switches[2:]]
+    block = ge.ms7e_block(cfg)
+    assert block == {
+        "families": ["round", "flat"],
+        "box_draw": 6,
+        "release_lean": True,
+        "box_unseen": "size",
+        "heap_family": "flat",
+    }
+    assert not {"--families", "--box_draw", "--release_lean"} & set(ge._eval_command(plain, draw))
+    path = tmp_path / "gate" / "eval_000.json"
+    path.parent.mkdir(parents=True)
+
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+
+    def hit(gate_cfg, **extra):
+        path.write_text(json.dumps(_heap_payload(draw, inference=served, **extra)))
+        return ge._cached_payload(gate_cfg, draw) is not None
+
+    assert hit(plain) and hit(plain, ms7e=ge.MS7E_OFF) and not hit(plain, ms7e=block)
+    assert hit(cfg, ms7e=block) and not hit(cfg) and not hit(cfg, ms7e=ge.MS7E_OFF)
+    for name, other in (
+        ("families", ["round"]),
+        ("box_draw", 8),
+        ("release_lean", False),
+        ("box_unseen", "rim"),
+        ("heap_family", "round"),
+    ):
+        assert not hit(cfg, ms7e=block | {name: other}), name
+    ledger = _fake_ledger(tmp_path)
+    boxes = _cfg(tmp_path, ledger, processes=1, backend="mujoco", heap_k=50, box_draw=6)
+    results = ge.run_gate(boxes, lambda d: _heap_payload(d), lambda: _FakeServer([]))
+    assert results["ms7e"] == ge.MS7E_OFF | {"box_draw": 6}
+
+
+def test_the_gate_sums_the_family_and_box_count_rows():
+    draw = ge.make_eval_draws(1, 20261400)[0]
+
+    def ep(families, count, stowed):
+        return dict(
+            _episode(stowed),
+            num_bricks=4,
+            cycles=4,
+            cycle_classes=[],
+            stowed_by_class={"round": {"stowed": 1, "total": 2}},
+            stowed_by_family=families,
+            stowed_by_box=[{"stowed": stowed, "total": 4}] + [{"stowed": 0, "total": 0}] * 3,
+            box_count=count,
+            wrong_box_parts=0,
+        )
+
+    a = ep({"brick": {"stowed": 1, "total": 2}, "round": {"stowed": 1, "total": 2}}, 5, 2)
+    b = ep({"round": {"stowed": 3, "total": 4}}, 4, 3)
+    rows = ge.aggregate_gate([_payload(draw, [a, b, a])], threshold=0.5)["secondary"]
+    assert rows["stowed_by_family"] == {
+        "brick": {"stowed": 2, "total": 4},
+        "round": {"stowed": 5, "total": 8},
+    }
+    assert rows["stowed_by_box_count"] == {
+        "4": {"stowed": 3, "total": 4},
+        "5": {"stowed": 4, "total": 8},
+    }
+    assert list(rows["stowed_by_box_count"]) == ["4", "5"]
