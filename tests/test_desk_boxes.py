@@ -420,12 +420,13 @@ def test_desk_boxes_is_a_batch_argument_recorded_in_run_meta():
     assert meta["desk_boxes"] == 4
 
 
-def test_the_envelope_check_prints_its_fail_token_on_a_usage_error():
+@pytest.mark.parametrize("argv", [["--band_x", "nope"], ["--interior", "0.07,0.07"]])
+def test_the_envelope_check_prints_its_fail_token_on_a_usage_error(argv):
     script = (
         pathlib.Path(__file__).resolve().parents[1] / "scripts" / "mj_release_envelope_check.py"
     )
     out = subprocess.run(
-        [sys.executable, str(script), "--band_x", "nope"],
+        [sys.executable, str(script), *argv],
         capture_output=True,
         text=True,
         check=False,

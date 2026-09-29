@@ -21,6 +21,9 @@ and the control steps on which an arm geom touched a box.
     MUJOCO_GL=egl PYTHONPATH=$PWD/source .venv/bin/python scripts/mj_release_envelope_check.py \\
         --trials 2 --out /tmp/envelope.json
 
+``--interior X,Y,Z`` sizes every box (MS7e design section 4.4): the size floor ``BOX_MIN`` and
+the B2 envelope run the check with the box they certify.
+
 Prints exactly one ``ENVELOPE_OK {json}`` or ``ENVELOPE_FAIL {json}`` line on every exit path,
 argparse errors included, and exits through ``os._exit``.
 """
@@ -72,6 +75,11 @@ def _pair(text: str) -> tuple[float, float]:
     return lo, hi
 
 
+def _triple(text: str) -> tuple[float, float, float]:
+    x, y, z = (float(v) for v in text.split(","))
+    return x, y, z
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     parser = _TokenEmittingParser(description=__doc__)
     parser.add_argument(
@@ -94,6 +102,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=1,
         help="boxes in the scene, which sizes the box (core.desk_boxes.interior); box 0 "
         "stands at the band point and the others wait off the desk",
+    )
+    parser.add_argument(
+        "--interior",
+        type=_triple,
+        default=None,
+        help="X,Y,Z: every box's interior, m (MS7e design section 4.4); "
+        "default: core.desk_boxes.interior(--desk_boxes)",
     )
     parser.add_argument("--out", type=str, default="", help="write the trial records here")
     args = parser.parse_args(argv)
@@ -198,6 +213,10 @@ def run_trial(env, rig, part, pose, seed: int, part_yaw: float = 0.0) -> dict:
 
 
 def run(args) -> dict:
+    if args.interior is not None:
+        # Every box of the scene, the grader and the teacher sizes itself through this one
+        # module function, so the override reaches them all before the env builds.
+        desk_boxes.interior = lambda n: args.interior
     (part,) = _parts.by_name([args.part])
     draw = layout.sample_run_draw(random.Random(args.seed))
     env = MjLegoSortEnv(
