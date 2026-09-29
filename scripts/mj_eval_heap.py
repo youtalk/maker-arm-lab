@@ -109,6 +109,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         "rung 1, 4 for rung 2); 0 is the MS6 scene",
     )
     add_ms7e_arguments(parser)
+    parser.add_argument(
+        "--deep_box_floor",
+        action="store_true",
+        help="MS7e flat track: each desk box floor's collider reaches under the desk top",
+    )
     parser.add_argument("--server", type=str, default="tcp://127.0.0.1:5555")
     parser.add_argument("--out", type=str, default="", help="write the EVAL_OK payload here too")
     parser.add_argument(
@@ -390,6 +395,7 @@ def main(argv=None) -> int:
             class_names=heap_classes(args),
             box_draw=args.box_draw,
             box_unseen=args.box_unseen,
+            deep_box_floor=args.deep_box_floor,
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
@@ -459,6 +465,7 @@ def main(argv=None) -> int:
         payload["tray"] = args.tray
         payload["tray_lean"] = args.tray_lean
         payload["ms7e"] = ms7e_switches(args)
+        payload["deep_box_floor"] = args.deep_box_floor
     except EvalFailure as err:
         print("EVAL_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True)
         return 1

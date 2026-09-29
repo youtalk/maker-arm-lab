@@ -272,13 +272,16 @@ def build_spec(
     num_desk_boxes: int = 0,
     tray: bool = False,
     tray_lean_deg: float = 0.0,
+    deep_box_floor: bool = False,
 ) -> mujoco.MjSpec:
     """The MjSpec for one run draw; ``compile_model`` turns it into a model and handles.
 
     ``parts`` (MS6) replaces the ``num_bricks`` identical box bricks with one body per part.
     A heap lies on the bare desk: there is no dish (owner decision 2026-09-18). ``tray``
     (MS7a design, the tray) adds the four walls of ``layout.tray_static_boxes``, or with
-    ``tray_lean_deg`` > 0 the leaning walls of ``layout.tray_lean_boxes``.
+    ``tray_lean_deg`` > 0 the leaning walls of ``layout.tray_lean_boxes``. ``deep_box_floor``
+    (MS7e flat track) extends each desk box floor's collider under the desk top by
+    ``desk_boxes.DESK_BOX_FLOOR_DEPTH``, so a thin part cannot drop through it.
 
     ``num_desk_boxes`` (MS7a design, desk boxes) removes the shelf and its bins and adds that
     many open boxes on the desk, each a mocap body (``desk_box_<j>``) the env moves per
@@ -364,7 +367,8 @@ def build_spec(
     for j in range(num_desk_boxes):
         # Parked off the desk until the first reset draws the episode's poses.
         body = spec.worldbody.add_body(name=f"desk_box_{j}", mocap=True, pos=[-1.0, 0.2 * j, 0])
-        for name, center, size in desk_boxes.box_geoms(desk_boxes.interior(num_desk_boxes)):
+        depth = desk_boxes.DESK_BOX_FLOOR_DEPTH if deep_box_floor else 0.0
+        for name, center, size in desk_boxes.box_geoms(desk_boxes.interior(num_desk_boxes), depth):
             scene_geoms.append(
                 body.add_geom(
                     name=f"desk_box_{j}_{name}",
@@ -545,11 +549,14 @@ def build_model(
     num_desk_boxes: int = 0,
     tray: bool = False,
     tray_lean_deg: float = 0.0,
+    deep_box_floor: bool = False,
 ) -> tuple[mujoco.MjModel, SceneHandles]:
     """One call for callers that do not need to edit the spec."""
     if parts is not None:
         num_bricks = len(parts)
-    spec = build_spec(draw, num_bricks, cameras_on, parts, num_desk_boxes, tray, tray_lean_deg)
+    spec = build_spec(
+        draw, num_bricks, cameras_on, parts, num_desk_boxes, tray, tray_lean_deg, deep_box_floor
+    )
     return compile_model(spec, num_bricks)
 
 

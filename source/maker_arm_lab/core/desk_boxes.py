@@ -226,16 +226,32 @@ def in_outer_footprint(xy, poses, sizes, margin: float = BOX_FILTER_MARGIN_M) ->
     return False
 
 
+DESK_BOX_FLOOR_DEPTH = 0.010
+"""How far (m) the floor's collider reaches under the desk top with ``deep_box_floor`` (MS7e
+flat track, lever 1). Its top face stays at DESK_BOX_WALL, so a part at rest on it does not move.
+
+A flat part (3.2 mm) released at DESK_BOX_RELEASE_Z hangs at the carry's 20 degree tool lean
+and lands corner first at about 1.3 m/s, about 5.5 mm per 240 Hz step. Once its centre passes
+the 5 mm floor's centre (1.6 + 2.5 mm of penetration) the box-box contact normal flips, and the
+floor pins the part under it on the desk. Dropped still at that lean over a box (40 drops a
+cell, 2026-09-29): plate_2x4 fell through 24, 10, 17 and 0 times from 0.10, 0.08, 0.06 and
+0.04 m, plate_1x2 6, 21, 0 and 0, brick_2x4 never. With the collider this much deeper none of
+320 plate drops fell through. Any depth past about 2 mm keeps the floor's centre under a part
+resting on the desk; 10 mm is chosen, not swept. The desk stands under it and a mocap box
+never collides with the world, so the extra depth touches nothing else."""
+
+
 def box_geoms(
-    size: Sequence[float],
+    size: Sequence[float], floor_depth: float = 0.0
 ) -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
     """(name, centre, size) of the floor and the four walls of a box of interior ``size``, in
-    the box's own frame."""
+    the box's own frame. The floor reaches ``floor_depth`` under the desk top
+    (``DESK_BOX_FLOOR_DEPTH``), its top unchanged."""
     ix, iy, iz = (float(v) for v in size)
     w = DESK_BOX_WALL
     wall_z = w + iz / 2
     return [
-        ("floor", (0.0, 0.0, w / 2), (ix + 2 * w, iy + 2 * w, w)),
+        ("floor", (0.0, 0.0, (w - floor_depth) / 2), (ix + 2 * w, iy + 2 * w, w + floor_depth)),
         ("wall_px", (ix / 2 + w / 2, 0.0, wall_z), (w, iy + 2 * w, iz)),
         ("wall_nx", (-ix / 2 - w / 2, 0.0, wall_z), (w, iy + 2 * w, iz)),
         ("wall_py", (0.0, iy / 2 + w / 2, wall_z), (ix, w, iz)),

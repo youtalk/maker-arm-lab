@@ -277,6 +277,7 @@ def run_meta(
         "desk_boxes": int(getattr(args, "desk_boxes", 0)),
         # MS7e design section 10.1: the MS7e switches, every one off on an MS7d run.
         "ms7e": ms7e_switches(args),
+        "deep_box_floor": bool(getattr(args, "deep_box_floor", False)),
         # MS7c design section 7.1: the rows, the marker and the box row as recorded from the
         # perceived state at these knob scales; each episode counts its perceived selections
         # and its fallbacks (a target part the perception missed).
@@ -653,6 +654,12 @@ def add_batch_arguments(parser) -> None:
         help="MuJoCo heap only: N desk boxes beside the arm replace the shelf and its heap bin "
         "(MS7a: 1 for rung 1, 4 for rung 2); the heap drops on the tray footprint. 0 is the MS6 "
         "scene.",
+    )
+    parser.add_argument(
+        "--deep_box_floor",
+        action="store_true",
+        help="MS7e flat track: each desk box floor's collider reaches under the desk top, so "
+        "a thin part released over the box cannot drop through it (core.desk_boxes)",
     )
     parser.add_argument(
         "--episode_length_s",

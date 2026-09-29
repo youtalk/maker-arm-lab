@@ -496,3 +496,40 @@ def test_the_heap_clients_take_the_desk_boxes_flag():
     ):
         text = (root / name).read_text()
         assert "boxes=env.desk_box_poses[i]" in text and "int(env.destination_bins[i])" not in text
+
+
+def test_the_deep_floor_reaches_under_the_desk_and_keeps_its_top_and_walls():
+    """MS7e flat track, lever 1: only the floor's collider grows, downward."""
+    w = desk_boxes.DESK_BOX_WALL
+    for n in (1, 4):
+        shallow = desk_boxes.box_geoms(desk_boxes.interior(n))
+        deep = desk_boxes.box_geoms(desk_boxes.interior(n), desk_boxes.DESK_BOX_FLOOR_DEPTH)
+        assert deep[1:] == shallow[1:]
+        (_, (_, _, cz), (sx, sy, sz)), (_, _, (sx0, sy0, sz0)) = deep[0], shallow[0]
+        assert (sx, sy, sz0) == (sx0, sy0, w)
+        assert cz + sz / 2 == pytest.approx(w) and cz - sz / 2 == pytest.approx(
+            -desk_boxes.DESK_BOX_FLOOR_DEPTH
+        )
+
+
+def test_deep_box_floor_is_a_batch_argument_recorded_in_run_meta():
+    parser = argparse.ArgumentParser()
+    batch_loop.add_batch_arguments(parser)
+    assert not parser.parse_args(["--out_dir", "/tmp/x"]).deep_box_floor
+    args = parser.parse_args(["--out_dir", "/tmp/x", "--desk_boxes", "4", "--deep_box_floor"])
+    meta = batch_loop.run_meta(
+        args,
+        layout.sample_run_draw(random.Random(0)),
+        oracle.OracleNoise(),
+        None,
+        num_bricks=6,
+        export_mode="EXPORT_ALL",
+        backend="mujoco",
+        task="t",
+    )
+    assert meta["deep_box_floor"] is True
+    root = pathlib.Path(__file__).resolve().parents[1] / "scripts"
+    assert "deep_box_floor=args.deep_box_floor" in (root / "mj_generate_batch.py").read_text()
+    text = (root / "mj_eval_heap.py").read_text()
+    assert '"--deep_box_floor"' in text and "deep_box_floor=args.deep_box_floor" in text
+    assert 'payload["deep_box_floor"] = args.deep_box_floor' in text

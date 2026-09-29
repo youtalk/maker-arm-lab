@@ -37,7 +37,8 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
         (the box of each of the C env.class_names classes, drawn per episode; the four
         core.parts.BASE_CLASSES unless an MS7e switch is on),
         env.destination_bins (N, K) long (part b of env i goes to box destination_bins[i, b],
-        its class's box), env.place_desk_boxes(i, poses),
+        its class's box), env.place_desk_boxes(i, poses), env.deep_box_floor (MS7e flat
+        track: every box floor's collider reaches desk_boxes.DESK_BOX_FLOOR_DEPTH under the desk),
         env.set_context_box(i, box) (the context row's box part, set per target)
     perceived state (MS7c design section 6, heap mode): env.marker_points (N, 3) float32, NaN
         by default and after the env's reset; a finite row is the frozen marker that
@@ -277,6 +278,7 @@ class MjLegoSortEnv:
         class_names: Sequence[str] = BASE_CLASSES,
         box_draw: int = 0,
         box_unseen: str | None = None,
+        deep_box_floor: bool = False,
     ):
         # MS6 phase B design 5.4: "binary" is the raw >= 0 opens contract every corpus before
         # phase B was recorded with; "continuous" reads action[:, 6] as the jaw gap in meters.
@@ -312,6 +314,9 @@ class MjLegoSortEnv:
         if tray_lean_deg and not tray:
             raise ValueError("tray_lean_deg leans the tray's walls; it needs tray=True")
         self.tray_lean_deg = float(tray_lean_deg)
+        if deep_box_floor and desk_boxes <= 0:
+            raise ValueError("deep_box_floor deepens the desk box floors; it needs desk_boxes")
+        self.deep_box_floor = deep_box_floor
         if self.parts is not None:
             # MS6 rework section 6: heap mode has one bin, at y = 0.0. Flatten the layout
             # this env starts with so self.bin_layouts, the built box, the release target and
@@ -391,6 +396,7 @@ class MjLegoSortEnv:
             num_desk_boxes=desk_boxes,
             tray=tray,
             tray_lean_deg=self.tray_lean_deg,
+            deep_box_floor=deep_box_floor,
         )
         self.models = [base_model] + [copy.copy(base_model) for _ in range(num_envs - 1)]
         self.datas = [mujoco.MjData(m) for m in self.models]

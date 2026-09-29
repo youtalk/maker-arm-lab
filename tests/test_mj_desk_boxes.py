@@ -6,6 +6,7 @@ import math
 import random
 
 import h5py
+import mujoco
 import numpy as np
 import pytest
 import torch
@@ -15,7 +16,7 @@ from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.core.parts import BASE_CLASSES
 from maker_arm_lab.core.stowed import per_brick_stowed
-from maker_arm_lab.mj.env import MjLegoSortEnv
+from maker_arm_lab.mj.env import HEAP_PARK_X, MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 from test_heap_loop import SPREAD
 from test_mj_heap_oracle import PARTS, _place
@@ -477,3 +478,60 @@ def test_the_scripted_place_hands_a_lifted_part_to_the_teacher(scripted):
     # One part in reach, two out of it: one cycle, and the teacher's carry stows it.
     assert ep["cycle_targets"] == [0] and ep["cycle_reasons"] == ["stowed"], ep
     assert ep["bricks_stowed"] == 1
+
+
+def _drops(deep: bool, part_index: int, n: int = 8) -> np.ndarray:
+    """Part ``part_index`` of (plate_2x4, brick_2x4) released still over box 0 from 0.10 m at
+    the carry's 19.5 degree lean, ``n`` headings; the other part parked. Final (7,) poses."""
+    plate, brick = parts.by_name(["plate_2x4", "brick_2x4"])
+    draw = sample_run_draw(random.Random(5))
+    env = MjLegoSortEnv(
+        1,
+        draw,
+        parts=[plate, brick],
+        cameras=False,
+        desk_boxes=4,
+        deep_box_floor=deep,
+        class_names=parts.PART_CLASSES,
+    )
+    env.reset(seed=3)
+    env.place_desk_boxes(0, FIXED)
+    m, d, h = env.models[0], env.datas[0], env.handles
+    lean = math.radians(19.5)
+    out = []
+    for k in range(n):
+        axis, yaw = 1.3 * k, 0.7 * k
+        tilt = np.array([math.cos(lean / 2), math.cos(axis) * math.sin(lean / 2), 0.0, 0.0])
+        tilt[2] = math.sin(axis) * math.sin(lean / 2)
+        quat = np.zeros(4)
+        mujoco.mju_mulQuat(quat, tilt, np.array([math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]))
+        for b in range(2):
+            adr = h.brick_qpos[b]
+            here = b == part_index
+            d.qpos[adr : adr + 3] = (*FIXED[0][:2], 0.10) if here else (HEAP_PARK_X, 0.1 * b, 0.0)
+            d.qpos[adr + 3 : adr + 7] = quat if here else (1.0, 0.0, 0.0, 0.0)
+            d.qvel[h.brick_dof[b] : h.brick_dof[b] + 6] = 0.0
+        mujoco.mj_forward(m, d)
+        mujoco.mj_step(m, d, nstep=360)
+        adr = h.brick_qpos[part_index]
+        out.append(d.qpos[adr : adr + 7].copy())
+    env.close()
+    return np.array(out)
+
+
+def test_a_plate_released_over_a_box_stays_on_the_deep_floor_and_a_brick_is_unchanged():
+    """MS7e flat track, lever 1 (``desk_boxes.DESK_BOX_FLOOR_DEPTH``): the plate dropped
+    through the 5 mm floor and was pinned under it on the desk; the deep floor holds it on
+    top, and a brick lands where it always did."""
+    on_floor = desk_boxes.DESK_BOX_WALL + parts.PLATE_HEIGHT / 2
+    shallow = _drops(False, 0)[:, 2]
+    assert (shallow < desk_boxes.DESK_BOX_WALL).any(), shallow
+    assert _drops(True, 0)[:, 2] == pytest.approx(on_floor, abs=0.001)
+    assert np.abs(_drops(False, 1) - _drops(True, 1)).max() < 1e-6
+
+
+def test_deep_box_floor_needs_desk_boxes():
+    with pytest.raises(ValueError, match="deep_box_floor"):
+        MjLegoSortEnv(
+            1, sample_run_draw(random.Random(5)), parts=PARTS, cameras=False, deep_box_floor=True
+        )

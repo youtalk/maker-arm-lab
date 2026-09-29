@@ -148,6 +148,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         class_names=heap_classes(args),
         box_draw=args.box_draw,
         box_unseen=args.box_unseen,
+        deep_box_floor=args.deep_box_floor,
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)
