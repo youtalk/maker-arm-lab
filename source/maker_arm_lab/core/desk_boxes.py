@@ -104,20 +104,33 @@ over the band (40 trials each): (0.12, 0.0, 0.15) planned 23 times, and (0.15, 0
 (0.18, 0.0, 0.14) and (0.20, 0.0, 0.12) all 40, in 10 to 61 steps. The nearest of the three
 to the arm keeps the most of the heap in the overhead frame."""
 DRAW_TRIES = 5000
+DESK_BOX_SLOTS = 8
+"""MS7e design section 4.2: with the box draw on, the scene builds this many boxes."""
 BOX_COUNT_MIN = 4
 """MS7e design section 4.2: the box draw's count is uniform from here to the rung's ceiling."""
-BOX_MIN = 0.07  # INITIAL: MS7e design section 4.4 item 1 measures it
+BOX_MIN = 0.07
 BOX_MAX = 0.10
 BOX_MAX_ASPECT = 1.4
 BOX_DEPTH = (0.03, 0.05)
 """The box draw's interior (MS7e design section 4.2): each footprint side in BOX_MIN to
 BOX_MAX with at most BOX_MAX_ASPECT between the two, and the depth in BOX_DEPTH. The rim is the
-depth plus DESK_BOX_WALL."""
+depth plus DESK_BOX_WALL.
+
+BOX_MIN is the size floor of MS7e ledger R4 a, its first step: ``scripts/
+mj_release_envelope_check.py --desk_boxes 4 --interior 0.07,0.07,0.05`` on the MS7a band
+landed brick_2x4, brick_1x2x5, brick_2x7, brick_1x8 and brick_2x8 each 80 of 80 with EXTEND
+converged (EXTEND residual at most 1.20 mm, landing at most 15.4 mm from the box centre, no
+arm geom touching the box, 2026-09-29)."""
 SIZE_DRAWS = 200
 """How often one side of the box draw draws its sizes. Three boxes on a side of B1_BAND_X fit
 only when their sides are small: 20 size draws placed five boxes in 554 of the 1000 ceiling
 seeds on x 0.02..0.24 at BOX_MIN 0.07, and 200 place them in 999 (2026-09-29). A failed size
 draw costs microseconds, so a draw stays under 3 ms."""
+SIZE_ROUNDS = 10
+"""A side that exhausts SIZE_DRAWS draws again from the same generator, up to this many rounds
+of SIZE_DRAWS in all; only past that does the draw raise, a defect and not an episode outcome
+(MS7e ledger D7). The count is never stepped down, so the count distribution stays uniform.
+On the B2 band 4 of 1000 seeds exhaust the first round at eight boxes (the lean track)."""
 YAW_CLIP_STEP = math.radians(1.0)
 B1_BAND_X = (0.03, 0.25)
 B1_BAND_Y = (0.18, 0.20)
@@ -138,6 +151,22 @@ yaw 90 degrees, RETREAT ended 119 mm from its goal and the rig abandoned, for fo
 parts, and the tightest joint came within 0.010 rad at |y| 0.20. In front (brick_2x4, 16
 trials a cell): x 0.26 landed every trial, x 0.27 none at |y| 0.20, x 0.28 none at |y| 0.19
 and 0.20, and x 0.30 to 0.34 none."""
+B1_CEILING = 6
+"""The largest box count B1's draw places in at least 990 of 1000 seeds (20290000 to 20290999,
+MS7e ledger R4 d): six in 1000 of 1000, seven in none (2026-09-29)."""
+UNSEEN_DRAWS = {
+    "size": {"sides": (BOX_MIN, 0.12), "aspect": 1.7, "beyond": (BOX_MAX, BOX_MAX_ASPECT)},
+    "rim": {"depth": (0.05, 0.06), "back": -0.010},
+}
+"""The unseen-box ladder rows (MS7e design section 8.3), as ``draw_boxes`` arguments over the
+rung's own. Size: every box has a side over BOX_MAX or an aspect over BOX_MAX_ASPECT, with
+sides to 0.12 m and aspects to 1.7. Rim: interiors 0.05 to 0.06 m deep; the 0.065 m rim
+projects further out of the frame, so the back edge moves to -0.010 (0.4 px inside at |y|
+0.30, 2026-09-29)."""
+UNSEEN_CEILINGS = {"size": 4, "rim": 6}
+"""The largest count each unseen row's draw places in at least 990 of the 1000 ceiling seeds on
+B1's band (2026-09-29): with sizes to 0.12 m five boxes place in 840, with 0.065 m rims six in
+1000. The row draws counts up to this ("at the counts that fit")."""
 FRAME_BACK_X = -0.015
 """The box draw keeps every footprint corner at x >= this, m: the overhead frame's back edge.
 
@@ -146,6 +175,9 @@ Projected at the rim of the deepest drawn box (0.055 m) with the camera draw at 
 frame at |y| 0.30 and 2.2 px at |y| 0.20, and the margin grows about 3 px per cm of x. The
 frame's other edges keep 5 px or more over the whole band. The MS7a band's back edge at x 0.05
 was sized for the 9 cm box: a 10 cm box yawed 45 degrees there leaves the frame by 2.1 px."""
+B1_DRAW = {"band_x": B1_BAND_X, "band_y": B1_BAND_Y, "back": FRAME_BACK_X}
+"""Rung B1's ``draw_boxes`` arguments: its band and the frame's back edge (MS7e ledger D6). A
+rung passes its own; an unseen row's ``UNSEEN_DRAWS`` entry goes over them."""
 BOX_FILTER_MARGIN_M = 0.005  # INITIAL: the MS7d isolation row R1 measures it
 """m: ``in_outer_footprint`` grows every box's outer footprint by this on each side (MS7d
 design section 4.2, L1). The perceived candidate filter tested a detection's 3D centre against
@@ -154,9 +186,14 @@ at rest in its box put it back among the candidates: 92 cycles of MS7c candidate
 
 
 def interior(n: int) -> tuple[float, float, float]:
-    """The interior of every box when ``n`` desk boxes stand on the desk. Every function below
-    that takes ``n`` sizes its box this way."""
+    """The interior of every box when ``n`` MS7a desk boxes stand on the desk. The functions
+    below take each box's own interior (``size``), which is this one with the box draw off."""
     return DESK_BOX_INTERIOR_ONE if n == 1 else DESK_BOX_INTERIOR_MANY
+
+
+def interiors(n: int) -> tuple[tuple[float, float, float], ...]:
+    """Every box's interior when ``n`` MS7a desk boxes stand on the desk."""
+    return (interior(n),) * n
 
 
 def outer_half(size: Sequence[float]) -> tuple[float, float]:
@@ -164,24 +201,24 @@ def outer_half(size: Sequence[float]) -> tuple[float, float]:
     return (size[0] / 2 + DESK_BOX_WALL, size[1] / 2 + DESK_BOX_WALL)
 
 
-def rim_z(n: int) -> float:
-    return DESK_BOX_WALL + interior(n)[2]
+def rim_z(size: Sequence[float]) -> float:
+    return DESK_BOX_WALL + size[2]
 
 
-def stow_region(n: int) -> tuple[float, tuple[float, float, float]]:
-    """(centre z, half extents in the box frame) of the grader's box: the interior footprint,
-    and z from the box floor up DESK_BOX_STOW_HEIGHT."""
-    ix, iy, _ = interior(n)
+def stow_region(size: Sequence[float]) -> tuple[float, tuple[float, float, float]]:
+    """(centre z, half extents in the box frame) of the grader's box of interior ``size``: the
+    interior footprint, and z from the box floor up DESK_BOX_STOW_HEIGHT whatever the depth."""
+    ix, iy = size[0], size[1]
     h = DESK_BOX_STOW_HEIGHT
     return DESK_BOX_WALL + h / 2, (ix / 2, iy / 2, h / 2)
 
 
-def in_outer_footprint(xy, poses, n: int, margin: float = BOX_FILTER_MARGIN_M) -> bool:
+def in_outer_footprint(xy, poses, sizes, margin: float = BOX_FILTER_MARGIN_M) -> bool:
     """Does the point ``xy`` lie in the outer footprint (interior plus wall) of any of these
-    box ``poses`` (``n`` on the desk), grown by ``margin`` on every side, in each box's own
-    frame? Its height does not count. Pure."""
-    hx, hy = outer_half(interior(n))
-    for x, y, yaw in poses:
+    box ``poses``, one interior in ``sizes`` per pose, grown by ``margin`` on every side, in
+    each box's own frame? Its height does not count. Pure."""
+    for (x, y, yaw), size in zip(poses, sizes):
+        hx, hy = outer_half(size)
         dx, dy = float(xy[0]) - float(x), float(xy[1]) - float(y)
         c, s = math.cos(yaw), math.sin(yaw)
         if abs(c * dx + s * dy) <= hx + margin and abs(c * dy - s * dx) <= hy + margin:
@@ -189,9 +226,12 @@ def in_outer_footprint(xy, poses, n: int, margin: float = BOX_FILTER_MARGIN_M) -
     return False
 
 
-def box_geoms(n: int) -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
-    """(name, centre, size) of the floor and the four walls, in the box's own frame."""
-    ix, iy, iz = interior(n)
+def box_geoms(
+    size: Sequence[float],
+) -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
+    """(name, centre, size) of the floor and the four walls of a box of interior ``size``, in
+    the box's own frame."""
+    ix, iy, iz = (float(v) for v in size)
     w = DESK_BOX_WALL
     wall_z = w + iz / 2
     return [
@@ -203,16 +243,16 @@ def box_geoms(n: int) -> list[tuple[str, tuple[float, float, float], tuple[float
     ]
 
 
-def box_walls(poses: Sequence[Sequence[float]], n: int) -> tuple[Wall, ...]:
-    """The four walls of each box at these ``poses`` (``n`` on the desk) for the grasp model,
-    as ``grasp.tray_walls`` gives the tray's (MS7d design section 4.2, L9). Each footprint is
-    the wall's ``box_geoms`` rectangle turned by the box yaw, the top is the rim, the heading
-    runs along the wall's length, ``outward`` points away from the box centre, and no wall
-    leans. ``Wall.box`` marks them. Pure."""
+def box_walls(poses: Sequence[Sequence[float]], sizes) -> tuple[Wall, ...]:
+    """The four walls of each box at these ``poses`` (one interior in ``sizes`` each) for the
+    grasp model, as ``grasp.tray_walls`` gives the tray's (MS7d design section 4.2, L9). Each
+    footprint is the wall's ``box_geoms`` rectangle turned by the box yaw, the top is the rim,
+    the heading runs along the wall's length, ``outward`` points away from the box centre, and
+    no wall leans. ``Wall.box`` marks them. Pure."""
     walls = []
-    for x, y, yaw in poses:
+    for (x, y, yaw), box in zip(poses, sizes):
         c, s = math.cos(yaw), math.sin(yaw)
-        for name, (u, v, _), size in box_geoms(n):
+        for name, (u, v, _), size in box_geoms(box):
             if name == "floor":
                 continue
             hu, hv = size[0] / 2, size[1] / 2
@@ -222,7 +262,7 @@ def box_walls(poses: Sequence[Sequence[float]], n: int) -> tuple[Wall, ...]:
             )
             out = math.atan2(s * u + c * v, c * u - s * v)
             normal = (math.cos(out), math.sin(out))
-            walls.append(Wall(footprint, out + math.pi / 2, rim_z(n), normal, box=True))
+            walls.append(Wall(footprint, out + math.pi / 2, rim_z(box), normal, box=True))
     return tuple(walls)
 
 
@@ -346,13 +386,21 @@ def draw_interior(
     sides: tuple[float, float] = (BOX_MIN, BOX_MAX),
     aspect: float = BOX_MAX_ASPECT,
     depth: tuple[float, float] = BOX_DEPTH,
+    beyond: tuple[float, float] | None = None,
 ) -> tuple[float, float, float]:
     """One box's interior (x, y, z): both footprint sides uniform in ``sides``, drawn again
-    until neither exceeds ``aspect`` times the other, and the depth uniform in ``depth``."""
+    until neither exceeds ``aspect`` times the other, and the depth uniform in ``depth``.
+
+    ``beyond`` (a side and an aspect) also draws again a footprint within both: the unseen
+    size row takes only boxes with a side or an aspect that training never drew."""
     while True:
         ix, iy = rng.uniform(*sides), rng.uniform(*sides)
-        if max(ix, iy) <= aspect * min(ix, iy):
-            return ix, iy, rng.uniform(*depth)
+        ratio = max(ix, iy) / min(ix, iy)
+        if ratio > aspect:
+            continue
+        if beyond is not None and max(ix, iy) <= beyond[0] and ratio <= beyond[1]:
+            continue
+        return ix, iy, rng.uniform(*depth)
 
 
 def _place_in_order(rng, sizes, sign, band_x, band_y, back):
@@ -401,17 +449,19 @@ def draw_boxes(
     sides: tuple[float, float] = (BOX_MIN, BOX_MAX),
     aspect: float = BOX_MAX_ASPECT,
     depth: tuple[float, float] = BOX_DEPTH,
+    beyond: tuple[float, float] | None = None,
     back: float = FRAME_BACK_X,
     size_draws: int = SIZE_DRAWS,
-) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:
-    """The MS7e box draw (design section 4.2): ``n`` box poses and their interiors, from
-    ``rng`` alone so a seed reproduces them.
+    rounds: int = SIZE_ROUNDS,
+) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]], int]:
+    """The MS7e box draw (design section 4.2): ``n`` box poses, their interiors and the extra
+    rounds of ``size_draws`` its sides took, from ``rng`` alone so a seed reproduces them.
 
     The boxes alternate sides, and the side of the odd box is drawn. Each side draws its
     interiors (``draw_interior``), then places them along x in order (``_place_in_order``),
     every footprint corner at x ``back`` or more (the frame, FRAME_BACK_X). A side whose sizes
     cannot fit, or that fails DRAW_TRIES placements on the corridor, draws its interiors again,
-    up to ``size_draws`` times.
+    up to ``rounds`` rounds of ``size_draws`` (SIZE_ROUNDS), and raises past them.
 
     Not by rejection as ``sample_boxes`` places: on every band tried, rejection placed three
     boxes on one side in 0 of 1000 seeds (5000 tries times 20 size draws, 2026-09-29), where the
@@ -421,22 +471,25 @@ def draw_boxes(
     signs = [first if k % 2 == 0 else -first for k in range(n)]
     poses: list = [None] * n
     sizes: list = [None] * n
+    extra = 0
     for sign in (first, -first):
         slots = [k for k in range(n) if signs[k] == sign]
         if not slots:
             continue
-        for _ in range(size_draws):
-            drawn = [draw_interior(rng, sides, aspect, depth) for _ in slots]
+        for attempt in range(rounds * size_draws):
+            drawn = [draw_interior(rng, sides, aspect, depth, beyond) for _ in slots]
             side = _draw_side(rng, drawn, sign, band_x, band_y, back)
             if side is not None:
+                extra += attempt // size_draws
                 break
         else:
             raise RuntimeError(
-                f"no clear draw of {len(slots)} desk boxes on one side in {size_draws} size draws"
+                f"no clear draw of {len(slots)} desk boxes on one side in {rounds} rounds of "
+                f"{size_draws} size draws"
             )
         for k, pose, size in zip(slots, side, drawn):
             poses[k], sizes[k] = pose, size
-    return poses, sizes
+    return poses, sizes, extra
 
 
 def class_map(rng: random.Random, n: int, classes: Sequence[str] = BASE_CLASSES) -> tuple[int, ...]:

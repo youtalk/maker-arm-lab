@@ -81,8 +81,9 @@ def test_the_box_draw_keeps_its_sizes_its_band_its_frame_and_its_gaps(n):
     corridor = desk_boxes.pick_corridor()
     (x0, x1), (y0, y1) = desk_boxes.B1_BAND_X, desk_boxes.B1_BAND_Y
     for seed in range(40):
-        poses, sizes = desk_boxes.draw_boxes(random.Random(seed), n)
-        assert (poses, sizes) == desk_boxes.draw_boxes(random.Random(seed), n)
+        poses, sizes, extra = desk_boxes.draw_boxes(random.Random(seed), n)
+        assert (poses, sizes, extra) == desk_boxes.draw_boxes(random.Random(seed), n)
+        assert extra == 0
         assert abs(sum(math.copysign(1.0, p[1]) for p in poses)) == n % 2
         for pose, (ix, iy, iz) in zip(poses, sizes):
             assert x0 <= pose[0] <= x1 and y0 <= abs(pose[1]) <= y1, pose
@@ -102,9 +103,20 @@ def test_the_box_draw_keeps_its_sizes_its_band_its_frame_and_its_gaps(n):
 
 def test_a_side_the_band_cannot_hold_fails_its_draw():
     with pytest.raises(RuntimeError):
-        desk_boxes.draw_boxes(random.Random(0), 7)
+        desk_boxes.draw_boxes(random.Random(0), 7, rounds=2)
     with pytest.raises(RuntimeError):
-        desk_boxes.draw_boxes(random.Random(0), 5, band_x=desk_boxes.DESK_BOX_BAND_X)
+        desk_boxes.draw_boxes(random.Random(0), 5, band_x=desk_boxes.DESK_BOX_BAND_X, rounds=2)
+
+
+def test_a_side_that_exhausts_its_size_draws_draws_again_and_counts_the_rounds():
+    """MS7e ledger D7: five boxes place on B1's band in every ceiling seed at 200 size draws,
+    so 10 size draws a round exhaust some rounds; the count stays and the rounds show."""
+    extras = []
+    for seed in range(20290000, 20290040):
+        poses, _, extra = desk_boxes.draw_boxes(random.Random(seed), 5, size_draws=10)
+        assert len(poses) == 5
+        extras.append(extra)
+    assert max(extras) > 0 and min(extras) == 0
 
 
 def test_a_seed_reproduces_the_draw():
@@ -141,20 +153,20 @@ def test_a_box_footprint_on_the_corridor_is_refused():
 def test_one_box_is_the_11_cm_box_and_four_keep_the_9_cm_box():
     assert desk_boxes.interior(1) == (0.11, 0.11, 0.06)
     assert desk_boxes.interior(4) == layout.BIN_INTERIOR == (0.09, 0.09, 0.04)
-    assert desk_boxes.rim_z(1) == pytest.approx(0.065)
-    z, half = desk_boxes.stow_region(1)
+    assert desk_boxes.rim_z(desk_boxes.interior(1)) == pytest.approx(0.065)
+    z, half = desk_boxes.stow_region(desk_boxes.interior(1))
     assert z - half[2] == pytest.approx(desk_boxes.DESK_BOX_WALL)  # the band starts at the floor
     assert half == pytest.approx((0.055, 0.055, 0.04))
     # The band stops under the release: a part held there over the box is not in it yet.
     assert z + half[2] < desk_boxes.DESK_BOX_RELEASE_Z - 0.01
-    z4, half4 = desk_boxes.stow_region(4)
+    z4, half4 = desk_boxes.stow_region(desk_boxes.interior(4))
     assert z4 == pytest.approx(0.045) and half4 == pytest.approx((0.045, 0.045, 0.04))
 
 
 # -- the grader ------------------------------------------------------------------------------
 
 POSES = [(0.08, 0.22, math.radians(40.0)), (0.08, -0.22, math.radians(-30.0))]
-Z, HALF = desk_boxes.stow_region(len(POSES))
+Z, HALF = desk_boxes.stow_region(desk_boxes.interior(len(POSES)))
 
 
 def _boxes():
@@ -261,7 +273,7 @@ def _camera_poses():
 @pytest.mark.parametrize("n", [1, 4])
 def test_every_box_corner_at_every_band_extreme_is_in_the_overhead_frame(n):
     (x0, x1), (y0, y1) = desk_boxes.band_x(n), desk_boxes.DESK_BOX_BAND_Y
-    rim = desk_boxes.rim_z(n)
+    rim = desk_boxes.rim_z(desk_boxes.interior(n))
     centres = [(x, s * y) for x in (x0, x1) for y in (y0, y1) for s in (1.0, -1.0)]
     points = [
         (*c, z)
@@ -350,7 +362,7 @@ def test_the_box_walls_stand_where_the_box_geoms_put_them_on_a_yawed_box():
     faces the interior's, their tops the rim, ``outward`` away from the box centre, the
     heading along the wall and no lean."""
     n = len(FIXED)
-    walls = desk_boxes.box_walls(FIXED, n)
+    walls = desk_boxes.box_walls(FIXED, desk_boxes.interiors(n))
     assert len(walls) == 4 * n
     ix, _, _ = desk_boxes.interior(n)
     for k, pose in enumerate(FIXED):
@@ -359,7 +371,7 @@ def test_the_box_walls_stand_where_the_box_geoms_put_them_on_a_yawed_box():
         for corner in desk_boxes.corners(pose, desk_boxes.interior(n)):
             assert min(math.dist(corner, p) for p in vertices) < 1e-12
         for w in mine:
-            assert w.box and w.lean == 0.0 and w.top == desk_boxes.rim_z(n)
+            assert w.box and w.lean == 0.0 and w.top == desk_boxes.rim_z(desk_boxes.interior(n))
             assert grasp.wall_distance(pose[:2], w) == pytest.approx(ix / 2)
             cx = sum(x for x, _ in w.footprint) / 4 - pose[0]
             cy = sum(y for _, y in w.footprint) / 4 - pose[1]
@@ -394,7 +406,9 @@ def _box_wall_selector(on):
     sel = heap_oracle.HeapOracle(
         layout.DEFAULT_BIN_LAYOUT, [BRICK], 0, oracle.nominal_draw(), boxes=FIXED, tray=True
     )
-    sel.walls = grasp.tray_walls(30.0) + (desk_boxes.box_walls(FIXED, len(FIXED)) if on else ())
+    sel.walls = grasp.tray_walls(30.0) + (
+        desk_boxes.box_walls(FIXED, desk_boxes.interiors(len(FIXED))) if on else ()
+    )
     return sel
 
 

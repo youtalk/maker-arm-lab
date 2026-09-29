@@ -146,6 +146,8 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         tray=args.tray,
         tray_lean_deg=args.tray_lean,
         class_names=heap_classes(args),
+        box_draw=args.box_draw,
+        box_unseen=args.box_unseen,
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)
@@ -163,6 +165,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
                 rng=rig_rng,
                 cycle_budget=args.cycle_budget,
                 boxes=env.desk_box_poses[i],
+                box_sizes=env.desk_box_sizes[i],
                 tray=env.tray,
                 tray_lean_deg=env.tray_lean_deg,
             )

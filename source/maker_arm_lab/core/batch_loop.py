@@ -23,7 +23,7 @@ from pathlib import Path
 
 import torch
 
-from maker_arm_lab.core import layout, oracle, perception, trajectory
+from maker_arm_lab.core import desk_boxes, layout, oracle, perception, trajectory
 from maker_arm_lab.core import parts as _parts
 from maker_arm_lab.core.layout import sample_run_draw
 
@@ -72,7 +72,7 @@ def heap_classes(args) -> tuple[str, ...]:
     return _parts.PART_CLASSES if on else _parts.BASE_CLASSES
 
 
-UNBUILT_SWITCHES = ("box_draw", "release_lean", "box_unseen")
+UNBUILT_SWITCHES = ("release_lean",)
 """The MS7e switches whose behaviour is not in this commit: any value but off is a usage
 error. The boxes and release-lean tracks remove theirs as they land. The gate supervisor keeps
 a stdlib copy (``scripts/run_gate_eval.py``), pinned by a test."""
@@ -138,6 +138,11 @@ def check_ms7e(parser, args) -> None:
             parser.error(f"--{name} is not built on this commit")
     if args.heap_family and args.heap_family not in args.families:
         parser.error("--heap_family must name one of --families")
+    lo, hi = desk_boxes.BOX_COUNT_MIN, desk_boxes.B1_CEILING
+    if args.box_draw and not (lo <= args.box_draw <= hi and getattr(args, "desk_boxes", 0) > 0):
+        parser.error(f"--box_draw draws {lo} to at most {hi} boxes (B1) and needs --desk_boxes")
+    if args.box_unseen and not args.box_draw:
+        parser.error("--box_unseen draws the unseen boxes of --box_draw")
 
 
 def ms7e_switches(args) -> dict:

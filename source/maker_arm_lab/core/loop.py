@@ -1015,13 +1015,17 @@ def look_again(tool_xy, lean_deg: float, streak: int) -> bool:
     return not tool_clear_of_tray(tool_xy, lean_deg) and streak < cap
 
 
-def over_box(xy, boxes) -> bool:
+def over_box(xy, boxes, sizes) -> bool:
     """Does the point ``xy`` lie over a desk box? Each box is an (x, y, yaw), the perceived
-    pose under ``perceived``, with the grader's footprint (``desk_boxes.stow_region``). Pure."""
-    z, half = desk_boxes.stow_region(len(boxes))
-    frames = torch.tensor([[(float(x), float(y), z, float(yaw)) for x, y, yaw in boxes]])
-    point = torch.tensor([[[float(xy[0]), float(xy[1]), z]]])
-    return bool(checker.in_boxes(point, frames, torch.tensor(half)).any())
+    pose under ``perceived``, with the grader's footprint of its interior in ``sizes``
+    (``desk_boxes.stow_region``). Pure."""
+    regions = [desk_boxes.stow_region(size) for size in sizes]
+    frames = [(float(x), float(y), z, float(yaw)) for (x, y, yaw), (z, _) in zip(boxes, regions)]
+    if not frames:
+        return False
+    point = torch.tensor([[[float(xy[0]), float(xy[1]), frames[0][2]]]])
+    half = torch.tensor([[h for _, h in regions]])
+    return bool(checker.in_boxes(point, torch.tensor([frames]), half).any())
 
 
 def voted_class(views) -> str:
@@ -1608,6 +1612,12 @@ def rollout(
         # The loop runs one episode per env: its truth, before an env's own end resets it.
         destination = torch.as_tensor(env.destination_bins).clone().to("cpu")
         class_to_box = [dict(zip(class_names, map(int, row))) for row in env.class_to_box]
+        # MS7e: the episode's own box count, the boxes the scene built without the box draw.
+        box_count = [
+            int(n) for n in getattr(env, "box_count", [len(p) for p in env.desk_box_poses])
+        ]
+        # MS7e ledger D7: the box draw's extra size-draw rounds, recorded with the draw on.
+        rounds = getattr(env, "box_draw_rounds", None) if getattr(env, "box_draw", 0) else None
         final_box = torch.full((num_envs, k), -1, dtype=torch.long)
     if adopt_held and not per_part:
         raise EvalFailure("adopt_held", "needs desk boxes: a part's own box is the one it adopts")
@@ -1694,22 +1704,24 @@ def rollout(
         true_classes = [part_class(p) for p in env.parts]  # the metric's wrong-class counts
         lean = float(getattr(env, "tray_lean_deg", 0.0)) if getattr(env, "tray", False) else 0.0
         poses = env.desk_box_poses.copy()
+        drawn = bool(getattr(env, "box_draw", 0))  # MS7e: each box's size is perceived too
         for i, st in enumerate(states):
             st.perceiver = perception.Perceiver(run_seed, i, scales, class_names)
-            st.perceiver.reset_episode(poses[i])
+            st.perceiver.reset_episode(poses[i], env.desk_box_sizes[i] if drawn else ())
             if marker_bias:
                 st.marker = perception.MarkerBias(st.perceiver, run_seed, i)
             if class_views:
                 st.perceiver.views = perception.ClassViews(run_seed, i, scales, k, class_names)
             poses[i] = st.perceiver.box_poses
             st.selector.boxes = st.perceiver.box_poses
+            st.selector.box_sizes = st.perceiver.box_sizes
             st.selector.failure_scope = "part"
             st.selector.knows_destinations = False
             st.selector.box_filter_xy = box_filter_xy
             if box_walls:
                 # L9: the grasp model and the rake also read the perceived boxes' walls.
-                boxes = st.perceiver.box_poses
-                st.selector.walls += desk_boxes.box_walls(boxes, len(boxes))
+                boxes, sizes = st.perceiver.box_poses, st.perceiver.box_sizes
+                st.selector.walls += desk_boxes.box_walls(boxes, sizes)
             if wrist_fix:
                 st.wrist = perception.WristCamera(run_seed, i, scales)
         env.perceived_box_poses = poses
@@ -1795,7 +1807,8 @@ def rollout(
             stowed_now = {b for b in range(k) if bool(in_bin[i, b])}
             if st.cycle is not None and perceived:
                 c, d = st.cycle, detectors[i]
-                over = d.lost and over_box(top_picks[i][:2], st.perceiver.box_poses)
+                p = st.perceiver
+                over = d.lost and over_box(top_picks[i][:2], p.box_poses, p.box_sizes)
                 gap = float(gaps[i]) if release_gap else None
                 released = perceived_release(c, d.lost, d.started, over, float(openings[i]), gap)
                 reason = perceived_cycle_end(c, step, released, bool(c.release_over))
@@ -2311,10 +2324,12 @@ def rollout(
                 final_box[i],
                 st.classes,
                 st.census,
-                env.desk_boxes,
+                box_count[i],
                 class_names,
             )
             boxes["class_to_box"] = class_to_box[i]
+            if rounds is not None:
+                boxes["box_draw_rounds"] = int(rounds[i])
         episodes.append(
             {
                 **result.to_json(),

@@ -364,7 +364,7 @@ def build_spec(
     for j in range(num_desk_boxes):
         # Parked off the desk until the first reset draws the episode's poses.
         body = spec.worldbody.add_body(name=f"desk_box_{j}", mocap=True, pos=[-1.0, 0.2 * j, 0])
-        for name, center, size in desk_boxes.box_geoms(num_desk_boxes):
+        for name, center, size in desk_boxes.box_geoms(desk_boxes.interior(num_desk_boxes)):
             scene_geoms.append(
                 body.add_geom(
                     name=f"desk_box_{j}_{name}",
@@ -568,6 +568,40 @@ def apply_bins(model: mujoco.MjModel, bl: layout.BinLayout, heap: bool = False) 
     boxes = layout.heap_bin_static_boxes(bl) if heap else layout.bin_static_boxes(bl)
     for name, center, _size in boxes:
         model.geom_pos[model.geom(name).id] = center
+
+
+def apply_desk_box_size(model: mujoco.MjModel, j: int, size) -> None:
+    """Resize desk box ``j`` to interior ``size`` (the MS7e box draw, design section 4.2).
+
+    Writes each geom's centre and size from ``desk_boxes.box_geoms``, then every bound the
+    collision pipeline caches from them, which ``mj_setConst`` does not refresh (read off
+    MuJoCo 3.13.0, 2026-09-29): the geom's bounding sphere (``geom_rbound``), its local box
+    (``geom_aabb``) and the body's bounding volume tree (``bvh_aabb``), which lives in the
+    body's inertial frame. The tree keeps the compiled partition: a leaf is its geom's box and
+    a node the union of its two children, and a child always follows its parent."""
+    body = model.body(f"desk_box_{j}").id
+    for name, center, full in desk_boxes.box_geoms(size):
+        g = model.geom(f"desk_box_{j}_{name}").id
+        half = np.asarray(full, dtype=float) / 2.0
+        model.geom_pos[g] = center
+        model.geom_size[g] = half
+        model.geom_rbound[g] = np.linalg.norm(half)
+        model.geom_aabb[g] = (0.0, 0.0, 0.0, *half)
+    rot = np.zeros(9)
+    mujoco.mju_quat2Mat(rot, model.body_iquat[body])
+    rot = rot.reshape(3, 3)  # inertial axes in the body frame, as columns
+    start, count = model.body_bvhadr[body], model.body_bvhnum[body]
+    for node in reversed(range(start, start + count)):
+        a, b = model.bvh_child[node]
+        if a < 0:
+            g = model.bvh_nodeid[node]
+            centre = rot.T @ (model.geom_pos[g] - model.body_ipos[body])
+            model.bvh_aabb[node] = (*centre, *(np.abs(rot.T) @ model.geom_size[g]))
+            continue
+        kids = [model.bvh_aabb[start + c] for c in (a, b)]
+        lo = np.minimum(*(k[:3] - k[3:] for k in kids))
+        hi = np.maximum(*(k[:3] + k[3:] for k in kids))
+        model.bvh_aabb[node] = (*(lo + hi) / 2.0, *(hi - lo) / 2.0)
 
 
 def apply_lighting(model: mujoco.MjModel, draw: dict) -> None:

@@ -50,7 +50,14 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--aspect", type=float, default=desk_boxes.BOX_MAX_ASPECT)
     parser.add_argument("--depth", type=_pair, default=desk_boxes.BOX_DEPTH)
     parser.add_argument("--back", type=float, default=desk_boxes.FRAME_BACK_X)
+    parser.add_argument(
+        "--unseen",
+        choices=tuple(desk_boxes.UNSEEN_DRAWS),
+        default=None,
+        help="an unseen-box ladder row's draw (desk_boxes.UNSEEN_DRAWS) over the flags above",
+    )
     parser.add_argument("--size_draws", type=int, default=desk_boxes.SIZE_DRAWS)
+    parser.add_argument("--rounds", type=int, default=desk_boxes.SIZE_ROUNDS)
     parser.add_argument("--counts", type=lambda t: [int(v) for v in t.split(",")], default=[4])
     parser.add_argument("--seed", type=int, default=20290000)
     parser.add_argument("--seeds", type=int, default=1000)
@@ -63,21 +70,22 @@ def parse_args(argv=None) -> argparse.Namespace:
 def _one(job):
     args, n, seed = job
     t0 = time.perf_counter()
+    draw = {
+        "band_x": args.band_x,
+        "band_y": args.band_y,
+        "sides": (args.box_min, args.box_max),
+        "aspect": args.aspect,
+        "depth": args.depth,
+        "back": args.back,
+        **desk_boxes.UNSEEN_DRAWS.get(args.unseen, {}),
+    }
     try:
-        poses, sizes = desk_boxes.draw_boxes(
-            random.Random(seed),
-            n,
-            band_x=args.band_x,
-            band_y=args.band_y,
-            sides=(args.box_min, args.box_max),
-            aspect=args.aspect,
-            depth=args.depth,
-            back=args.back,
-            size_draws=args.size_draws,
+        poses, sizes, extra = desk_boxes.draw_boxes(
+            random.Random(seed), n, size_draws=args.size_draws, rounds=args.rounds, **draw
         )
     except RuntimeError:
-        return n, None, None, time.perf_counter() - t0
-    return n, poses, sizes, time.perf_counter() - t0
+        return n, None, None, time.perf_counter() - t0, None
+    return n, poses, sizes, time.perf_counter() - t0, extra
 
 
 def run(args) -> dict:
@@ -90,6 +98,7 @@ def run(args) -> dict:
         yaws = [abs(p[2]) for r in placed for p in r[1]]
         rows[n] = {
             "placed": len(placed),
+            "first_round": sum(r[4] == 0 for r in placed),
             "seeds": len(mine),
             "feasible": len(placed) >= args.feasible * len(mine),
             "side_mean": round(statistics.fmean(sides), 4) if sides else None,
@@ -110,7 +119,9 @@ def run(args) -> dict:
         "aspect": args.aspect,
         "depth": list(args.depth),
         "back": args.back,
+        "unseen": args.unseen,
         "size_draws": args.size_draws,
+        "rounds": args.rounds,
         "draw_tries": desk_boxes.DRAW_TRIES,
         "seed": args.seed,
         "seeds": args.seeds,

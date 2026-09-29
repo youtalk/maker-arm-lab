@@ -31,7 +31,7 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from maker_arm_lab.core import grasp, oracle
+from maker_arm_lab.core import desk_boxes, grasp, oracle
 from maker_arm_lab.core.parts import BASE_CLASSES, BOX_AXES, SLOPE_AXES, Part
 from maker_arm_lab.core.quat import quat_apply, quat_mul
 
@@ -263,12 +263,19 @@ class Perceiver:
         self.classes = tuple(classes)  # the active class list a wrong class is drawn from
         self._bias = (0.0, 0.0, 0.0)
         self._box_poses: tuple[tuple[float, float, float], ...] = ()
+        self._box_sizes: tuple[tuple[float, float, float], ...] = ()
         self.views: ClassViews | None = None  # ``class_views`` (L5): the per-part class model
 
     @property
     def box_poses(self) -> tuple[tuple[float, float, float], ...]:
         """The episode's perceived (x, y, yaw) per desk box, fixed until ``reset_episode``."""
         return self._box_poses
+
+    @property
+    def box_sizes(self) -> tuple[tuple[float, float, float], ...]:
+        """The episode's perceived interior per desk box (MS7e design section 4.3), or with no
+        true sizes given to ``reset_episode`` the MS7a box of ``desk_boxes.interior``."""
+        return self._box_sizes or desk_boxes.interiors(len(self._box_poses))
 
     @property
     def bias(self) -> tuple[float, float, float]:
@@ -284,8 +291,13 @@ class Perceiver:
         pos = self.scales["pos"]
         return (pos, pos, pos * self.scales["pos_z"])
 
-    def reset_episode(self, true_boxes: Sequence[Sequence[float]]) -> None:
-        """Draw the episode's position bias, then each box's bias in box order."""
+    def reset_episode(
+        self, true_boxes: Sequence[Sequence[float]], true_sizes: Sequence[Sequence[float]] = ()
+    ) -> None:
+        """Draw the episode's position bias, then each box's bias in box order, then with
+        ``true_sizes`` (the MS7e box draw) each box's interior noise: 3 draws a box, the
+        ``box`` knob times BOX_SIGMA_M on each side and on the depth, so on the rim (MS7e design
+        section 4.3). With no sizes the draws are MS7d's."""
         box = self.scales["box"]
         self._bias = tuple(
             a * s * self._gauss() for a, s in zip(self._pos_axes(), POS_BIAS_SIGMA_M)
@@ -301,6 +313,9 @@ class Perceiver:
                 )
             )
         self._box_poses = tuple(poses)
+        self._box_sizes = tuple(
+            tuple(float(v) + box * BOX_SIGMA_M * self._gauss() for v in size) for size in true_sizes
+        )
 
     def classify(self, true_cls: str, part: int | None = None) -> str:
         """One classification: the true class, or at the class knob's rate one of the other

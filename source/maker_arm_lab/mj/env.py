@@ -117,6 +117,9 @@ DESK_COLOR_RANGE = {"r": (0.3, 0.7), "g": (0.25, 0.55), "b": (0.2, 0.45)}
 BRICK_MASS_SCALE = (0.7, 1.3)
 BRICK_FRICTION_SCALE = (0.8, 1.2)  # Isaac's static_friction_range; MuJoCo has one coefficient
 HEAP_PARK_X = 3.0
+BOX_PARK_X = -1.0
+"""Where a desk box the episode's count leaves over waits (m along x, behind the arm and off the
+desk), as the scene builds every box before the first reset."""
 """Where a heap part waits (m along x, well past the 0.9 m desk) until its drop batch."""
 # Per-frame camera jitter (MS4 lever 1): resampled on every rendered frame, on top of the
 # per-episode camera draw, so the policy cannot read the camera pose off a static background.
@@ -272,6 +275,8 @@ class MjLegoSortEnv:
         tray: bool = False,
         tray_lean_deg: float = 0.0,
         class_names: Sequence[str] = BASE_CLASSES,
+        box_draw: int = 0,
+        box_unseen: str | None = None,
     ):
         # MS6 phase B design 5.4: "binary" is the raw >= 0 opens contract every corpus before
         # phase B was recorded with; "continuous" reads action[:, 6] as the jaw gap in meters.
@@ -326,9 +331,29 @@ class MjLegoSortEnv:
             raise ValueError(f"context channels hold {CONTEXT_MAX_BRICKS} bricks, got {num_bricks}")
         if desk_boxes < 0 or (desk_boxes > 0 and self.parts is None):
             raise ValueError(f"desk_boxes needs a heap and a count >= 0, got {desk_boxes}")
+        if box_draw and not (
+            desk_boxes and _boxes.BOX_COUNT_MIN <= box_draw <= _boxes.DESK_BOX_SLOTS
+        ):
+            raise ValueError(
+                f"box_draw draws {_boxes.BOX_COUNT_MIN} to {_boxes.DESK_BOX_SLOTS} desk boxes "
+                f"and needs desk_boxes > 0, got box_draw {box_draw}, desk_boxes {desk_boxes}"
+            )
+        if box_unseen is not None and (not box_draw or box_unseen not in _boxes.UNSEEN_DRAWS):
+            raise ValueError(f"box_unseen is one of {sorted(_boxes.UNSEEN_DRAWS)} under box_draw")
+        # MS7e design section 4.2: the box draw builds every slot, draws the count, the sizes
+        # and the poses per episode and parks the boxes the count leaves over off the desk.
+        self.box_draw = box_draw
+        self.box_unseen = box_unseen
+        self._box_draw_args = {**_boxes.B1_DRAW, **_boxes.UNSEEN_DRAWS.get(box_unseen, {})}
+        self._box_count_max = min(box_draw, _boxes.UNSEEN_CEILINGS.get(box_unseen, box_draw))
+        if box_draw:
+            desk_boxes = _boxes.DESK_BOX_SLOTS
         # MS7a design, desk boxes: N boxes on the desk replace the shelf and its heap bin.
         self.desk_boxes = desk_boxes
         self.desk_box_poses = np.zeros((num_envs, desk_boxes, 3))
+        self.desk_box_sizes = np.tile(_boxes.interior(desk_boxes), (num_envs, desk_boxes, 1))
+        self.box_count = np.full(num_envs, desk_boxes, dtype=np.int64)
+        self.box_draw_rounds = np.zeros(num_envs, dtype=np.int64)  # extra size-draw rounds
         self.perceived_box_poses = None  # MS7c: (N, M, 3) when the loop serves perceived boxes
         # The episode's box per class, in class_names order (MS7a design, classes): the active
         # class list, core.parts.PART_CLASSES when an MS7e switch is on (MS7e design section 5).
@@ -400,7 +425,8 @@ class MjLegoSortEnv:
         if self.parts is not None:
             if desk_boxes:
                 self.destination_bins = torch.zeros(num_envs, num_bricks, dtype=torch.long)
-                self.stow_half_extents = torch.tensor(_boxes.stow_region(desk_boxes)[1])
+                interior = _boxes.interior(desk_boxes)
+                self.stow_half_extents = torch.tensor(_boxes.stow_region(interior)[1])
             else:
                 self.destination_bins = torch.zeros(num_envs, dtype=torch.long)
                 self.stow_half_extents = torch.tensor(STOW_HALF_EXTENTS)
@@ -615,11 +641,17 @@ class MjLegoSortEnv:
         )
         return (*(torch.from_numpy(r) for r in rows), torch.from_numpy(jac[:, dofs]))
 
-    def place_desk_boxes(self, i: int, poses) -> None:
-        """Stand env ``i``'s desk boxes at ``poses``, one (x, y, yaw) per box, on the desk.
+    def place_desk_boxes(self, i: int, poses, sizes=()) -> None:
+        """Stand env ``i``'s desk boxes at ``poses``, one (x, y, yaw) per box, on the desk, and
+        resize the first ``len(sizes)`` of them to those interiors (``scene.apply_desk_box_size``;
+        a box keeps its size otherwise).
 
         Writes the mocap bodies; the next ``mj_forward`` or step moves the geoms.
         """
+        for j, size in enumerate(sizes):
+            if not np.array_equal(self.desk_box_sizes[i, j], size):
+                scene.apply_desk_box_size(self.models[i], j, size)
+                self.desk_box_sizes[i, j] = size
         d = self.datas[i]
         for j, (x, y, yaw) in enumerate(poses):
             self.desk_box_poses[i, j] = (x, y, yaw)
@@ -767,8 +799,17 @@ class MjLegoSortEnv:
         if self.desk_boxes:
             # MS7a design, desk boxes: the boxes stand first, from the same per-reset rng, and
             # the heap drops on the tray footprint beside them, walls or not.
-            self.place_desk_boxes(i, _boxes.sample_boxes(self._rng, self.desk_boxes))
-            self.class_to_box[i] = _boxes.class_map(self._rng, self.desk_boxes, self.class_names)
+            if self.box_draw:
+                n = self._rng.randint(_boxes.BOX_COUNT_MIN, self._box_count_max)
+                poses, sizes, extra = _boxes.draw_boxes(self._rng, n, **self._box_draw_args)
+                self.box_draw_rounds[i] = extra
+                parked = [(BOX_PARK_X, 0.2 * j, 0.0) for j in range(n, self.desk_boxes)]
+                self.place_desk_boxes(i, poses + parked, sizes)
+                self.box_count[i] = n
+            else:
+                self.place_desk_boxes(i, _boxes.sample_boxes(self._rng, self.desk_boxes))
+            n = int(self.box_count[i])
+            self.class_to_box[i] = _boxes.class_map(self._rng, n, self.class_names)
             self.destination_bins[i] = torch.tensor(
                 _boxes.part_destinations(self.parts, self.class_to_box[i], self.class_names)
             )
@@ -830,6 +871,10 @@ class MjLegoSortEnv:
             # One destination per part and every box pose, so forensics rebuild the scene.
             state["destination_bin"] = self.destination_bins[i].numpy().astype(np.int64)
             state["desk_box_poses"] = self.desk_box_poses[i].astype(np.float32)
+            if self.box_draw:
+                state["desk_box_sizes"] = self.desk_box_sizes[i].astype(np.float32)
+                state["box_count"] = np.array([self.box_count[i]], dtype=np.int64)
+                state["box_draw_rounds"] = np.array([self.box_draw_rounds[i]], dtype=np.int64)
             state["class_to_box"] = self.class_to_box[i].copy()
         elif self.parts is not None:
             state["destination_bin"] = np.array([int(self.destination_bins[i])], dtype=np.int64)
