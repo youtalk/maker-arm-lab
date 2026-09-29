@@ -54,7 +54,7 @@ def test_desk_boxes_replace_the_shelf_and_stand_at_the_drawn_poses(n):
         assert sorted(env.class_to_box[i]) == ([0, 1, 2, 3] if n == 4 else [0, 0, 0, 0])
     assert env.desk_box_poses.shape == (2, n, 3)
     for i in range(2):
-        assert desk_boxes.clear(env.desk_box_poses[i], n)
+        assert desk_boxes.clear(env.desk_box_poses[i], [desk_boxes.interior(n)] * n)
         for j in range(n):
             assert desk_boxes.in_band(env.desk_box_poses[i, j], n)
             assert np.allclose(_box_floor_xy(env, i, j), env.desk_box_poses[i, j, :2])

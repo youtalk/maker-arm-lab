@@ -104,6 +104,26 @@ over the band (40 trials each): (0.12, 0.0, 0.15) planned 23 times, and (0.15, 0
 (0.18, 0.0, 0.14) and (0.20, 0.0, 0.12) all 40, in 10 to 61 steps. The nearest of the three
 to the arm keeps the most of the heap in the overhead frame."""
 DRAW_TRIES = 5000
+BOX_COUNT_MIN = 4
+"""MS7e design section 4.2: the box draw's count is uniform from here to the rung's ceiling."""
+BOX_MIN = 0.07  # INITIAL: MS7e design section 4.4 item 1 measures it
+BOX_MAX = 0.10
+BOX_MAX_ASPECT = 1.4
+BOX_DEPTH = (0.03, 0.05)
+"""The box draw's interior (MS7e design section 4.2): each footprint side in BOX_MIN to
+BOX_MAX with at most BOX_MAX_ASPECT between the two, and the depth in BOX_DEPTH. The rim is the
+depth plus DESK_BOX_WALL."""
+SIZE_DRAWS = 20  # INITIAL
+"""How often one side of the box draw draws its sizes again after DRAW_TRIES placements."""
+YAW_CLIP_STEP = math.radians(1.0)
+FRAME_BACK_X = -0.015
+"""The box draw keeps every footprint corner at x >= this, m: the overhead frame's back edge.
+
+Projected at the rim of the deepest drawn box (0.055 m) with the camera draw at its extremes
+(+-0.01 m, +-2 degrees per axis, 2026-09-29): a rim point at x -0.015 keeps 0.5 px inside the
+frame at |y| 0.30 and 2.2 px at |y| 0.20, and the margin grows about 3 px per cm of x. The
+frame's other edges keep 5 px or more over the whole band. The MS7a band's back edge at x 0.05
+was sized for the 9 cm box: a 10 cm box yawed 45 degrees there leaves the frame by 2.1 px."""
 BOX_FILTER_MARGIN_M = 0.005  # INITIAL: the MS7d isolation row R1 measures it
 """m: ``in_outer_footprint`` grows every box's outer footprint by this on each side (MS7d
 design section 4.2, L1). The perceived candidate filter tested a detection's 3D centre against
@@ -117,10 +137,9 @@ def interior(n: int) -> tuple[float, float, float]:
     return DESK_BOX_INTERIOR_ONE if n == 1 else DESK_BOX_INTERIOR_MANY
 
 
-def outer_half(n: int) -> tuple[float, float]:
-    """Half the outer footprint (x, y) of a box in its own frame, m."""
-    ix, iy, _ = interior(n)
-    return (ix / 2 + DESK_BOX_WALL, iy / 2 + DESK_BOX_WALL)
+def outer_half(size: Sequence[float]) -> tuple[float, float]:
+    """Half the outer footprint (x, y) of a box of interior ``size`` in its own frame, m."""
+    return (size[0] / 2 + DESK_BOX_WALL, size[1] / 2 + DESK_BOX_WALL)
 
 
 def rim_z(n: int) -> float:
@@ -139,7 +158,7 @@ def in_outer_footprint(xy, poses, n: int, margin: float = BOX_FILTER_MARGIN_M) -
     """Does the point ``xy`` lie in the outer footprint (interior plus wall) of any of these
     box ``poses`` (``n`` on the desk), grown by ``margin`` on every side, in each box's own
     frame? Its height does not count. Pure."""
-    hx, hy = outer_half(n)
+    hx, hy = outer_half(interior(n))
     for x, y, yaw in poses:
         dx, dy = float(xy[0]) - float(x), float(xy[1]) - float(y)
         c, s = math.cos(yaw), math.sin(yaw)
@@ -185,10 +204,11 @@ def box_walls(poses: Sequence[Sequence[float]], n: int) -> tuple[Wall, ...]:
     return tuple(walls)
 
 
-def corners(pose: Sequence[float], n: int) -> list[tuple[float, float]]:
-    """The outer footprint's four corners in the world, counter-clockwise."""
+def corners(pose: Sequence[float], size: Sequence[float]) -> list[tuple[float, float]]:
+    """The outer footprint's four corners in the world, counter-clockwise, of a box of
+    interior ``size``."""
     x, y, yaw = (float(v) for v in pose)
-    hx, hy = outer_half(n)
+    hx, hy = outer_half(size)
     c, s = math.cos(yaw), math.sin(yaw)
     return [
         (x + c * u - s * v, y + s * u + c * v)
@@ -239,17 +259,28 @@ def in_band(pose: Sequence[float], n: int) -> bool:
     )
 
 
-def clear(poses: Sequence[Sequence[float]], n: int) -> bool:
-    """Every footprint of these boxes, ``n`` on the desk in all, clears the pick corridor and
-    every other footprint."""
+def clear(poses: Sequence[Sequence[float]], sizes: Sequence[Sequence[float]]) -> bool:
+    """Every footprint of these boxes, one interior in ``sizes`` per pose, clears the pick
+    corridor and every other footprint.
+
+    Two boxes whose inscribed discs come within DESK_BOX_GAP fail, and two whose circumscribed
+    discs keep it pass, before any polygon distance: the answer is the same, and a crowded
+    side's rejection draw runs about ten times faster."""
+    halves = [outer_half(size) for size in sizes]
+    for a in range(len(poses)):
+        for b in range(a + 1, len(poses)):
+            d = math.hypot(poses[a][0] - poses[b][0], poses[a][1] - poses[b][1])
+            if d < min(halves[a]) + min(halves[b]) + DESK_BOX_GAP:
+                return False
+            if d >= math.hypot(*halves[a]) + math.hypot(*halves[b]) + DESK_BOX_GAP:
+                continue
+            gap = polygon_distance(corners(poses[a], sizes[a]), corners(poses[b], sizes[b]))
+            if gap < DESK_BOX_GAP:
+                return False
     corridor = pick_corridor()
-    prints = [corners(p, n) for p in poses]
-    if any(polygon_distance(c, corridor) < DESK_BOX_CLEARANCE for c in prints):
-        return False
     return all(
-        polygon_distance(prints[a], prints[b]) >= DESK_BOX_GAP
-        for a in range(len(prints))
-        for b in range(a + 1, len(prints))
+        polygon_distance(corners(p, size), corridor) >= DESK_BOX_CLEARANCE
+        for p, size in zip(poses, sizes)
     )
 
 
@@ -277,7 +308,7 @@ def sample_boxes(rng: random.Random, n: int) -> list[tuple[float, float, float]]
                 )
                 for _ in slots
             ]
-            if clear(side, n):
+            if clear(side, [interior(n)] * len(side)):
                 break
         else:
             raise RuntimeError(
@@ -286,6 +317,115 @@ def sample_boxes(rng: random.Random, n: int) -> list[tuple[float, float, float]]
         for k, pose in zip(slots, side):
             poses[k] = pose
     return poses
+
+
+def draw_interior(
+    rng: random.Random,
+    sides: tuple[float, float] = (BOX_MIN, BOX_MAX),
+    aspect: float = BOX_MAX_ASPECT,
+    depth: tuple[float, float] = BOX_DEPTH,
+) -> tuple[float, float, float]:
+    """One box's interior (x, y, z): both footprint sides uniform in ``sides``, drawn again
+    until neither exceeds ``aspect`` times the other, and the depth uniform in ``depth``."""
+    while True:
+        ix, iy = rng.uniform(*sides), rng.uniform(*sides)
+        if max(ix, iy) <= aspect * min(ix, iy):
+            return ix, iy, rng.uniform(*depth)
+
+
+def _place_in_order(rng, sizes, sign, band_x, band_y, back):
+    """One side's boxes along x in draw order, or None if these sizes cannot fit the band.
+
+    Each centre is drawn in the interval the boxes before it leave, keeping room for the boxes
+    after it at zero yaw and its back corner at x ``back`` or more. Its yaw is drawn first and
+    then turned toward zero, a degree at a time, until the box's x extent fits. The x extents
+    keep DESK_BOX_GAP between neighbours, so only the corridor can still refuse the draw."""
+    halves = [outer_half(size) for size in sizes]
+    x0, x1 = band_x
+    poses, right = [], -math.inf
+    for j, (hx, hy) in enumerate(halves):
+        later = halves[j + 1 :]
+        room = sum(DESK_BOX_GAP + 2 * h[0] for h in later) - (later[-1][0] if later else 0.0)
+        yaw = rng.uniform(-DESK_BOX_MAX_YAW, DESK_BOX_MAX_YAW)
+        while True:
+            extent = hx * abs(math.cos(yaw)) + hy * abs(math.sin(yaw))
+            lo = max(x0, back + extent, right + DESK_BOX_GAP + extent)
+            hi = x1 - room - extent if later else x1
+            if lo <= hi or yaw == 0.0:
+                break
+            yaw = math.copysign(max(0.0, abs(yaw) - YAW_CLIP_STEP), yaw)
+        if lo > hi:
+            return None
+        x = rng.uniform(lo, hi)
+        poses.append((x, sign * rng.uniform(*band_y), yaw))
+        right = x + extent
+    return poses
+
+
+def _draw_side(rng, sizes, sign, band_x, band_y, back, sequential):
+    """One side's poses for these interiors in DRAW_TRIES placements, or None."""
+    for _ in range(DRAW_TRIES):
+        if sequential:
+            side = _place_in_order(rng, sizes, sign, band_x, band_y, back)
+            if side is None:
+                return None
+        else:
+            side = [
+                (
+                    rng.uniform(*band_x),
+                    sign * rng.uniform(*band_y),
+                    rng.uniform(-DESK_BOX_MAX_YAW, DESK_BOX_MAX_YAW),
+                )
+                for _ in sizes
+            ]
+            if any(min(c[0] for c in corners(p, z)) < back for p, z in zip(side, sizes)):
+                continue
+        if clear(side, sizes):
+            return side
+    return None
+
+
+def draw_boxes(
+    rng: random.Random,
+    n: int,
+    band_x: tuple[float, float] = DESK_BOX_BAND_X,
+    band_y: tuple[float, float] = DESK_BOX_BAND_Y,
+    sides: tuple[float, float] = (BOX_MIN, BOX_MAX),
+    aspect: float = BOX_MAX_ASPECT,
+    depth: tuple[float, float] = BOX_DEPTH,
+    back: float = FRAME_BACK_X,
+    sequential: bool = False,
+    size_draws: int = SIZE_DRAWS,
+) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:
+    """The MS7e box draw (design section 4.2): ``n`` box poses and their interiors, from
+    ``rng`` alone so a seed reproduces them.
+
+    The boxes alternate sides, and the side of the odd box is drawn. Each side draws its
+    interiors (``draw_interior``), then places them: by rejection as ``sample_boxes`` does, or
+    along x in order (``sequential``), every footprint corner at x ``back`` or more (the frame,
+    FRAME_BACK_X). A side that fails its DRAW_TRIES placements draws its interiors again, up to
+    ``size_draws`` times.
+    """
+    first = rng.choice((1.0, -1.0))
+    signs = [first if k % 2 == 0 else -first for k in range(n)]
+    poses: list = [None] * n
+    sizes: list = [None] * n
+    for sign in (first, -first):
+        slots = [k for k in range(n) if signs[k] == sign]
+        if not slots:
+            continue
+        for _ in range(size_draws):
+            drawn = [draw_interior(rng, sides, aspect, depth) for _ in slots]
+            side = _draw_side(rng, drawn, sign, band_x, band_y, back, sequential)
+            if side is not None:
+                break
+        else:
+            raise RuntimeError(
+                f"no clear draw of {len(slots)} desk boxes on one side in {size_draws} size draws"
+            )
+        for k, pose, size in zip(slots, side, drawn):
+            poses[k], sizes[k] = pose, size
+    return poses, sizes
 
 
 def class_map(rng: random.Random, n: int, classes: Sequence[str] = BASE_CLASSES) -> tuple[int, ...]:

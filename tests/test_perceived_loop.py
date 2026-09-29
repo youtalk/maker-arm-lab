@@ -332,7 +332,7 @@ def test_box_filter_xy_tests_the_outer_footprint_plus_the_margin_and_not_z():
     4 mm off the outer wall of box 3, yawed 0.6 rad: only the first clears the 5 mm margin.
     Part 3 lies on the open desk."""
     z = parts.make_part("brick", 2, 4).size[2] / 2
-    _, hy = desk_boxes.outer_half(len(FIXED))
+    _, hy = desk_boxes.outer_half(desk_boxes.interior(len(FIXED)))
     positions = [
         _in_box(FIXED[2], 0.0, -0.035, desk_boxes.DESK_BOX_WALL + z - 0.005),
         _in_box(FIXED[3], 0.0, hy + 0.020, z),

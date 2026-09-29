@@ -58,13 +58,14 @@ def test_every_drawn_box_is_in_the_band_on_its_side_and_clear(n):
         for pose in poses:
             assert desk_boxes.in_band(pose, n), pose
             assert abs(pose[2]) <= math.radians(45.0) + 1e-12
-            print_ = desk_boxes.corners(pose, n)
+            print_ = desk_boxes.corners(pose, desk_boxes.interior(n))
             assert polygon_distance(print_, corridor) >= desk_boxes.DESK_BOX_CLEARANCE
             assert polygon_distance(print_, _tray_outer()) >= desk_boxes.DESK_BOX_CLEARANCE
             # Never under the arm base either: every corner stays off the base disc.
             assert min(math.hypot(*c) for c in print_) > desk_boxes.ARM_BASE_RADIUS
         for a, b in itertools.combinations(poses, 2):
-            gap = polygon_distance(desk_boxes.corners(a, n), desk_boxes.corners(b, n))
+            size = desk_boxes.interior(n)
+            gap = polygon_distance(desk_boxes.corners(a, size), desk_boxes.corners(b, size))
             assert gap >= desk_boxes.DESK_BOX_GAP
         if n == 4:
             # Two per side: boxes 0 and 2 on the left (+y), 1 and 3 on the right.
@@ -73,6 +74,35 @@ def test_every_drawn_box_is_in_the_band_on_its_side_and_clear(n):
             sides.add(math.copysign(1.0, poses[0][1]))
     if n == 1:
         assert sides == {1.0, -1.0}  # rung 1 draws the side per episode
+
+
+@pytest.mark.parametrize("sequential", [False, True])
+def test_the_box_draw_keeps_its_sizes_its_band_its_frame_and_its_gaps(sequential):
+    corridor = desk_boxes.pick_corridor()
+    for seed in range(60):
+        n = 4
+        poses, sizes = desk_boxes.draw_boxes(random.Random(seed), n, sequential=sequential)
+        again = desk_boxes.draw_boxes(random.Random(seed), n, sequential=sequential)
+        assert (poses, sizes) == again
+        assert sorted(math.copysign(1.0, p[1]) for p in poses) == [-1.0, -1.0, 1.0, 1.0]
+        for pose, (ix, iy, iz) in zip(poses, sizes):
+            assert desk_boxes.in_band(pose, n), pose
+            assert desk_boxes.BOX_MIN <= min(ix, iy) and max(ix, iy) <= desk_boxes.BOX_MAX
+            assert max(ix, iy) <= desk_boxes.BOX_MAX_ASPECT * min(ix, iy)
+            assert desk_boxes.BOX_DEPTH[0] <= iz <= desk_boxes.BOX_DEPTH[1]
+            print_ = desk_boxes.corners(pose, (ix, iy, iz))
+            assert min(c[0] for c in print_) >= desk_boxes.FRAME_BACK_X - 1e-12
+            assert polygon_distance(print_, corridor) >= desk_boxes.DESK_BOX_CLEARANCE
+        for a, b in itertools.combinations(range(n), 2):
+            gap = polygon_distance(
+                desk_boxes.corners(poses[a], sizes[a]), desk_boxes.corners(poses[b], sizes[b])
+            )
+            assert gap >= desk_boxes.DESK_BOX_GAP
+
+
+def test_a_side_the_band_cannot_hold_fails_its_draw():
+    with pytest.raises(RuntimeError):
+        desk_boxes.draw_boxes(random.Random(0), 6, sequential=True, size_draws=3)
 
 
 def test_a_seed_reproduces_the_draw():
@@ -96,13 +126,14 @@ def test_four_boxes_draw_a_class_permutation_and_one_box_takes_every_class():
 
 def test_a_box_footprint_on_the_corridor_is_refused():
     x0, y0 = desk_boxes.DESK_BOX_BAND_X[0], desk_boxes.DESK_BOX_BAND_Y[0]
-    assert not desk_boxes.clear([(layout.TRAY_CENTER[0], 0.12, 0.0)], 1)  # on the tray wall
-    assert not desk_boxes.clear([(0.1, 0.3, 0.0), (0.1, 0.35, 0.0)], 4)  # two boxes overlap
-    assert desk_boxes.clear([(x0 + 0.05, y0 + 0.03, 0.0)], 4)
+    one, many = desk_boxes.interior(1), desk_boxes.interior(4)
+    assert not desk_boxes.clear([(layout.TRAY_CENTER[0], 0.12, 0.0)], [one])  # on the tray wall
+    assert not desk_boxes.clear([(0.1, 0.3, 0.0), (0.1, 0.35, 0.0)], [many] * 2)  # overlap
+    assert desk_boxes.clear([(x0 + 0.05, y0 + 0.03, 0.0)], [many])
     # The one box of rung 1 is 2 cm wider, so the same pose can clear as one of four and not
     # alone: a 45 degree yaw at the band's inner edge beside the tray.
     tight = (layout.TRAY_CENTER[0], 0.20, math.radians(45.0))
-    assert desk_boxes.clear([tight], 4) and not desk_boxes.clear([tight], 1)
+    assert desk_boxes.clear([tight], [many]) and not desk_boxes.clear([tight], [one])
 
 
 def test_one_box_is_the_11_cm_box_and_four_keep_the_9_cm_box():
@@ -234,7 +265,7 @@ def test_every_box_corner_at_every_band_extreme_is_in_the_overhead_frame(n):
         (*c, z)
         for x, y in centres
         for yaw in (-desk_boxes.DESK_BOX_MAX_YAW, 0.0, desk_boxes.DESK_BOX_MAX_YAW)
-        for c in desk_boxes.corners((x, y, yaw), n)
+        for c in desk_boxes.corners((x, y, yaw), desk_boxes.interior(n))
         for z in (0.0, rim)
     ]
     worst = math.inf
@@ -323,7 +354,7 @@ def test_the_box_walls_stand_where_the_box_geoms_put_them_on_a_yawed_box():
     for k, pose in enumerate(FIXED):
         mine = walls[4 * k : 4 * k + 4]
         vertices = [p for w in mine for p in w.footprint]
-        for corner in desk_boxes.corners(pose, n):
+        for corner in desk_boxes.corners(pose, desk_boxes.interior(n)):
             assert min(math.dist(corner, p) for p in vertices) < 1e-12
         for w in mine:
             assert w.box and w.lean == 0.0 and w.top == desk_boxes.rim_z(n)
@@ -343,7 +374,7 @@ def _beside_box_wall(box, gap, turn=0.0):
     off the wall; and the wall's outward normal."""
     pose = FIXED[box]
     side = -1.0 if pose[1] > 0.0 else 1.0
-    _, hy = desk_boxes.outer_half(len(FIXED))
+    _, hy = desk_boxes.outer_half(desk_boxes.interior(len(FIXED)))
     x, y, _ = _in_box(pose, 0.0, side * (hy + gap), 0.0)
     yaw = pose[2] + turn
     scene = oracle.SceneSnapshot(
