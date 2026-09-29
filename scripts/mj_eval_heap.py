@@ -396,6 +396,7 @@ def main(argv=None) -> int:
             box_draw=args.box_draw,
             box_unseen=args.box_unseen,
             deep_box_floor=args.deep_box_floor,
+            release_lean=args.release_lean,
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
@@ -415,7 +416,12 @@ def main(argv=None) -> int:
             )
 
         rig = OracleRig(
-            env, env.cfg.bin_layout, oracle.OracleNoise(), rig_rng, oracle_factory=factory
+            env,
+            env.cfg.bin_layout,
+            oracle.OracleNoise(),
+            rig_rng,
+            oracle_factory=factory,
+            release_lean=args.release_lean,
         )
         policy = None if args.oracle_driver else policy_client.ServerPolicy(args.server)
         trace = [] if args.hold_trace else None

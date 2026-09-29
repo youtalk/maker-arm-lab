@@ -72,7 +72,7 @@ def heap_classes(args) -> tuple[str, ...]:
     return _parts.PART_CLASSES if on else _parts.BASE_CLASSES
 
 
-UNBUILT_SWITCHES = ("release_lean",)
+UNBUILT_SWITCHES: tuple[str, ...] = ()
 """The MS7e switches whose behaviour is not in this commit: any value but off is a usage
 error. The boxes and release-lean tracks remove theirs as they land. The gate supervisor keeps
 a stdlib copy (``scripts/run_gate_eval.py``), pinned by a test."""

@@ -108,7 +108,7 @@ maker_arm_lab; the test pins it."""
 READY_FAMILIES: frozenset[str] = frozenset()
 """``core.parts.READY_FAMILIES``, copied and pinned the same way: ``--families`` with another
 key is refused before a server starts (MS7e design section 10.2)."""
-UNBUILT_SWITCHES = ("release_lean",)
+UNBUILT_SWITCHES: tuple[str, ...] = ()
 """``core.batch_loop.UNBUILT_SWITCHES``, copied and pinned the same way."""
 
 

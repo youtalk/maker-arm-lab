@@ -149,6 +149,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         box_draw=args.box_draw,
         box_unseen=args.box_unseen,
         deep_box_floor=args.deep_box_floor,
+        release_lean=args.release_lean,
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)
@@ -186,6 +187,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         transport_speed=args.transport_speed,
         oracle_factory=factory,
         perceivers=perceivers,
+        release_lean=args.release_lean,
     )
     meta = run_meta(
         args,
