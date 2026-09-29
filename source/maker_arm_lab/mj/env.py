@@ -419,6 +419,17 @@ class MjLegoSortEnv:
         self.datas = [mujoco.MjData(m) for m in self.models]
         self._nominal_inertia = base_model.body_inertia[list(self.handles.brick_bodies)].copy()
         self._nominal_mass = base_model.body_mass[list(self.handles.brick_bodies)].copy()
+        # A part's colliders are every geom of its body that collides, studs aside: one, or an
+        # LDraw part's hulls. The friction draw reads them all; a round part's collision studs
+        # (round_physics) keep their friction.
+        self._colliders = tuple(
+            tuple(
+                g
+                for g in geoms
+                if base_model.geom_contype[g] and "_stud_" not in base_model.geom(g).name
+            )
+            for geoms in self.handles.body_geoms
+        )
         self.renderers = [mujoco.Renderer(m, 224, 224) for m in self.models] if cameras else []
         self._cam_wrist = base_model.camera("wrist").id if cameras else -1
         self._cam_overhead = base_model.camera("overhead").id if cameras else -1
@@ -754,9 +765,8 @@ class MjLegoSortEnv:
                 scale = random.uniform(*BRICK_MASS_SCALE)
                 m.body_mass[body] = self._nominal_mass[b] * scale
                 m.body_inertia[body] = self._nominal_inertia[b] * scale
-                m.geom_friction[h.brick_geoms[b], 0] = scene.BRICK_FRICTION[0] * random.uniform(
-                    *BRICK_FRICTION_SCALE
-                )
+                friction = scene.BRICK_FRICTION[0] * random.uniform(*BRICK_FRICTION_SCALE)
+                m.geom_friction[list(self._colliders[b]), 0] = friction
             mujoco.mj_setConst(m, d)
         mujoco.mj_resetData(m, d)
         offset = self.cfg.start_pose_offset_rad

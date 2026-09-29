@@ -147,3 +147,42 @@ def test_a_round_part_on_its_side_stops_rolling_under_the_switch(round_physics):
     mujoco.mj_step(model, data, nstep=720)
     travel = abs(data.qpos[adr] - start)
     assert (travel < 0.008) if round_physics else (travel > 0.03), travel
+
+
+LDRAW = [parts.ldraw_part(i) for i in parts.LDRAW_IDS]
+
+
+@pytest.fixture(scope="module")
+def ldraw_built():
+    return scene.build_model(_draw(), parts=LDRAW, cameras_on=False)
+
+
+def test_each_ldraw_hull_is_a_collider_with_the_brick_contacts(ldraw_built):
+    """MS7e design section 6.1: BRICK_FRICTION and condim 4 on every hull; the hulls share the
+    H2 mass and the studs are visual."""
+    model, h = ldraw_built
+    for b, part in enumerate(LDRAW):
+        colliders = [g for g in h.body_geoms[b] if model.geom_contype[g]]
+        assert colliders[0] == h.brick_geoms[b] and len(colliders) == len(part.hulls)
+        for g in colliders:
+            assert model.geom_type[g] == mujoco.mjtGeom.mjGEOM_MESH
+            assert model.geom_contype[g] == 3 and model.geom_condim[g] == scene.BRICK_CONDIM
+            assert model.geom_friction[g] == pytest.approx(scene.BRICK_FRICTION)
+        studs = [g for g in h.body_geoms[b] if not model.geom_contype[g]]
+        assert len(studs) == len(part.stud_frames)
+        assert model.body_mass[h.brick_bodies[b]] == pytest.approx(part.mass, rel=1e-6)
+
+
+def test_every_ldraw_part_rests_on_the_desk(ldraw_built):
+    model, h = ldraw_built
+    data = mujoco.MjData(model)
+    for b, adr in enumerate(h.brick_qpos):
+        data.qpos[adr : adr + 3] = (0.10 + 0.05 * (b % 4), -0.06 + 0.06 * (b // 4), 0.03)
+        data.qpos[adr + 3 : adr + 7] = (1.0, 0.0, 0.0, 0.0)
+    mujoco.mj_forward(model, data)
+    mujoco.mj_step(model, data, nstep=720)
+    for b, part in enumerate(LDRAW):
+        z = data.qpos[h.brick_qpos[b] + 2]
+        assert z == pytest.approx(part.size[2] / 2, abs=0.001), (part.name, z)
+        speed = np.linalg.norm(data.qvel[h.brick_dof[b] : h.brick_dof[b] + 6])
+        assert speed < 0.02, (part.name, speed)

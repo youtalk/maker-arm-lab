@@ -234,14 +234,18 @@ def _add_position_actuator(spec, joint: str, kp: float, kd: float, force_limit: 
 
 def _add_part_geoms(
     spec, body, index: int, part: _parts.Part, rgba, round_physics: bool = False
-) -> mujoco.MjsGeom:
-    """One collider (box, cylinder or slope hull) plus visual-only studs (design H3).
+) -> list[mujoco.MjsGeom]:
+    """The colliders (a box, a cylinder, a slope hull or an LDraw part's hulls) plus visual-only
+    studs (design H3).
 
     Under ``round_physics`` a round part's studs collide too, and the part's geoms carry
-    ``ROUND_CONDIM`` and ``ROUND_FRICTION`` (MS7e design section 6.4). Returns the collider.
+    ``ROUND_CONDIM`` and ``ROUND_FRICTION`` (MS7e design section 6.4). Returns the colliders,
+    ``brick_<index>_geom`` first. Each LDraw hull is its own mesh geom and carries its share of
+    the part's mass.
     """
     name = f"brick_{index}_geom"
     rolls = round_physics and part.family == "round"
+    colliders = []
     if part.family == "round":
         geom = body.add_geom(
             name=name,
@@ -250,6 +254,20 @@ def _add_part_geoms(
             rgba=list(rgba),
             friction=list(ROUND_FRICTION if rolls else BRICK_FRICTION),
         )
+    elif part.hulls:
+        for k, (share, verts) in enumerate(part.hulls):
+            mesh = f"brick_{index}_hull_{k}"
+            spec.add_mesh(name=mesh, uservert=[c for v in verts for c in v])
+            hull = body.add_geom(
+                name=name if k == 0 else f"{name}_{k}",
+                type=mujoco.mjtGeom.mjGEOM_MESH,
+                meshname=mesh,
+                rgba=list(rgba),
+                friction=list(BRICK_FRICTION),
+            )
+            hull.mass = part.mass * share
+            colliders.append(hull)
+        geom = colliders[0]
     elif part.hull is None:
         geom = body.add_geom(
             name=name,
@@ -267,8 +285,11 @@ def _add_part_geoms(
             rgba=list(rgba),
             friction=list(BRICK_FRICTION),
         )
-    geom.mass = part.mass
-    geom.condim = ROUND_CONDIM if rolls else BRICK_CONDIM
+    if not colliders:
+        geom.mass = part.mass
+        colliders.append(geom)
+    for geom in colliders:
+        geom.condim = ROUND_CONDIM if rolls else BRICK_CONDIM
     for k, (x, y) in enumerate(_parts.stud_positions(part)):
         stud = body.add_geom(
             name=f"brick_{index}_stud_{k}",
@@ -285,7 +306,17 @@ def _add_part_geoms(
         else:
             stud.contype, stud.conaffinity = 0, 0
         stud.mass = 0.0
-    return geom
+    for k, (base, axis) in enumerate(part.stud_frames):  # LDraw studs, on any face
+        stud = body.add_geom(
+            name=f"brick_{index}_stud_{k}",
+            type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+            size=[_parts.STUD_RADIUS, 0.0, 0.0],
+            fromto=[*base, *(b + _parts.STUD_HEIGHT * a for b, a in zip(base, axis))],
+            rgba=list(rgba),
+        )
+        stud.contype, stud.conaffinity = 0, 0
+        stud.mass = 0.0
+    return colliders
 
 
 def build_spec(
@@ -461,12 +492,14 @@ def build_spec(
             )
             geom.mass = layout.BRICK_MASS
             geom.condim = BRICK_CONDIM
+            colliders = [geom]
         else:
-            geom = _add_part_geoms(
+            colliders = _add_part_geoms(
                 spec, body, index, parts[index], layout.BRICK_RGBA[color], round_physics
             )
-        geom.solref = list(CONTACT_SOLREF)
-        scene_geoms.append(geom)
+        for geom in colliders:
+            geom.solref = list(CONTACT_SOLREF)
+            scene_geoms.append(geom)
     for geom in scene_geoms:
         geom.contype, geom.conaffinity = 3, 3  # collides with the robot AND with itself
 
