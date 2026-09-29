@@ -115,6 +115,19 @@ DESK_SOLMIX = 1.0e6
 # what re-tunes these if it fails.
 BRICK_FRICTION = (1.0, 0.005, 0.0001)
 BRICK_CONDIM = 4
+# MS7e design section 6.4: under the round family, a round part's studs collide and its
+# contacts take condim 6, which adds rolling friction to the torsional term of BRICK_CONDIM.
+# Studs cannot stop a cylinder on its side from rolling about its own axis, since they lie on
+# that axis; the rolling term is what can. The rolling probe of 2026-09-29 dropped each round
+# part 48 times into the leaned tray and kicked it 48 times at rest, at 0.1 m/s (the jaw
+# speed) across its axis. At 1e-3 a part on its side rolled 1.3 to 8.5 mm (p90 per part) and
+# every part came to rest within 0.45 s. At 3e-4 a round 4x4 rolled 22 mm and 37 of 48
+# round 1x1 drops rocked in place for the whole 6 s. At 2e-3 a round 2x2 balanced on its rim
+# edge in 17 of 48 rests. With condim 4, collision studs or not, the rolls reached 83 to
+# 134 mm (p90), and 8 to 27 of 48 kicked parts still rolled after 6 s.
+ROUND_CONDIM = 6
+ROUND_ROLLING_FRICTION = 0.001  # INITIAL: the lone-part table (MS7e design section 6.2)
+ROUND_FRICTION = (*BRICK_FRICTION[:2], ROUND_ROLLING_FRICTION)
 NOSLIP_ITERATIONS = 3
 IMPRATIO = 10.0
 FLOOR_Z = -0.75  # the Isaac GroundPlaneCfg's height
@@ -219,19 +232,23 @@ def _add_position_actuator(spec, joint: str, kp: float, kd: float, force_limit: 
     act.ctrlrange = list(spec.joint(joint).range)
 
 
-def _add_part_geoms(spec, body, index: int, part: _parts.Part, rgba) -> mujoco.MjsGeom:
+def _add_part_geoms(
+    spec, body, index: int, part: _parts.Part, rgba, round_physics: bool = False
+) -> mujoco.MjsGeom:
     """One collider (box, cylinder or slope hull) plus visual-only studs (design H3).
 
-    Returns the collider.
+    Under ``round_physics`` a round part's studs collide too, and the part's geoms carry
+    ``ROUND_CONDIM`` and ``ROUND_FRICTION`` (MS7e design section 6.4). Returns the collider.
     """
     name = f"brick_{index}_geom"
+    rolls = round_physics and part.family == "round"
     if part.family == "round":
         geom = body.add_geom(
             name=name,
             type=mujoco.mjtGeom.mjGEOM_CYLINDER,
             size=[part.size[0] / 2, part.size[2] / 2, 0.0],
             rgba=list(rgba),
-            friction=list(BRICK_FRICTION),
+            friction=list(ROUND_FRICTION if rolls else BRICK_FRICTION),
         )
     elif part.hull is None:
         geom = body.add_geom(
@@ -251,6 +268,7 @@ def _add_part_geoms(spec, body, index: int, part: _parts.Part, rgba) -> mujoco.M
             friction=list(BRICK_FRICTION),
         )
     geom.mass = part.mass
+    geom.condim = ROUND_CONDIM if rolls else BRICK_CONDIM
     for k, (x, y) in enumerate(_parts.stud_positions(part)):
         stud = body.add_geom(
             name=f"brick_{index}_stud_{k}",
@@ -259,7 +277,13 @@ def _add_part_geoms(spec, body, index: int, part: _parts.Part, rgba) -> mujoco.M
             pos=[x, y, part.size[2] / 2 + _parts.STUD_HEIGHT / 2],
             rgba=list(rgba),
         )
-        stud.contype, stud.conaffinity = 0, 0
+        if rolls:
+            stud.contype, stud.conaffinity = 3, 3  # build_spec's scene pair
+            stud.condim = ROUND_CONDIM
+            stud.friction = list(ROUND_FRICTION)
+            stud.solref = list(CONTACT_SOLREF)
+        else:
+            stud.contype, stud.conaffinity = 0, 0
         stud.mass = 0.0
     return geom
 
@@ -274,6 +298,7 @@ def build_spec(
     tray_lean_deg: float = 0.0,
     deep_box_floor: bool = False,
     camera_back: float = 0.0,
+    round_physics: bool = False,
 ) -> mujoco.MjSpec:
     """The MjSpec for one run draw; ``compile_model`` turns it into a model and handles.
 
@@ -290,6 +315,9 @@ def build_spec(
     part dropped on a world geom moved by ``geom_pos`` fell through it (measured 2026-09-23).
 
     ``camera_back`` moves the overhead camera's nominal x back (``overhead_camera_pose``).
+
+    ``round_physics`` (MS7e design section 6.4) gives round parts collision studs and
+    ``ROUND_CONDIM``; every other part is built as without it.
     """
     if parts is not None:
         num_bricks = len(parts)
@@ -432,9 +460,11 @@ def build_spec(
                 friction=list(BRICK_FRICTION),
             )
             geom.mass = layout.BRICK_MASS
+            geom.condim = BRICK_CONDIM
         else:
-            geom = _add_part_geoms(spec, body, index, parts[index], layout.BRICK_RGBA[color])
-        geom.condim = BRICK_CONDIM
+            geom = _add_part_geoms(
+                spec, body, index, parts[index], layout.BRICK_RGBA[color], round_physics
+            )
         geom.solref = list(CONTACT_SOLREF)
         scene_geoms.append(geom)
     for geom in scene_geoms:
@@ -553,6 +583,7 @@ def build_model(
     tray_lean_deg: float = 0.0,
     deep_box_floor: bool = False,
     camera_back: float = 0.0,
+    round_physics: bool = False,
 ) -> tuple[mujoco.MjModel, SceneHandles]:
     """One call for callers that do not need to edit the spec."""
     if parts is not None:
@@ -567,6 +598,7 @@ def build_model(
         tray_lean_deg,
         deep_box_floor=deep_box_floor,
         camera_back=camera_back,
+        round_physics=round_physics,
     )
     return compile_model(spec, num_bricks)
 

@@ -281,6 +281,7 @@ class MjLegoSortEnv:
         box_unseen: str | None = None,
         deep_box_floor: bool = False,
         release_lean: bool = False,
+        round_physics: bool = False,
     ):
         # MS6 phase B design 5.4: "binary" is the raw >= 0 opens contract every corpus before
         # phase B was recorded with; "continuous" reads action[:, 6] as the jaw gap in meters.
@@ -409,7 +410,11 @@ class MjLegoSortEnv:
             tray_lean_deg=self.tray_lean_deg,
             deep_box_floor=deep_box_floor,
             camera_back=self.camera_back,
+            round_physics=round_physics,
         )
+        # The part each part geom belongs to: a jaw on a collision stud (round_physics) holds
+        # that part as surely as a jaw on its collider.
+        self._geom_part = {g: b for b, geoms in enumerate(self.handles.body_geoms) for g in geoms}
         self.models = [base_model] + [copy.copy(base_model) for _ in range(num_envs - 1)]
         self.datas = [mujoco.MjData(m) for m in self.models]
         self._nominal_inertia = base_model.body_inertia[list(self.handles.brick_bodies)].copy()
@@ -921,12 +926,11 @@ class MjLegoSortEnv:
                 for side, finger in enumerate(h.finger_geoms):
                     if geoms[0] in finger or geoms[1] in finger:
                         other = geoms[1] if geoms[0] in finger else geoms[0]
-                        if other in h.brick_geoms:
+                        b = self._geom_part.get(other)
+                        if b is not None:
                             mujoco.mj_contactForce(m, d, k, force)
                             world = con.frame.reshape(3, 3).T @ force[:3]
-                            (left if side == 0 else right)[i, 0, h.brick_geoms.index(other)] += (
-                                world
-                            )
+                            (left if side == 0 else right)[i, 0, b] += world
             if images and self.cameras:
                 if self.cfg.frame_jitter:
                     pos, rot = scene.overhead_camera_pose(self.episode_draws[i], self.camera_back)

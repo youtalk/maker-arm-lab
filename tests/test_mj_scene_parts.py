@@ -99,3 +99,51 @@ def test_the_desk_is_a_hard_surface_under_a_pressed_part():
     mujoco.mj_step(model, data, nstep=480)
     sunk = PARTS[0].size[2] / 2 - data.qpos[adr + 2]
     assert 0.0 <= sunk < 0.001, sunk
+
+
+ROUND = [p for p in parts._replayable() if p.family == "round"]
+
+
+def test_round_physics_changes_the_round_parts_only():
+    """MS7e design section 6.4: collision studs and condim 6 on round parts, under the switch
+    only. Every other part's geoms are the same bytes either way."""
+    mixed = parts._replayable()
+    off, h = scene.build_model(_draw(), parts=mixed, cameras_on=False)
+    on, _ = scene.build_model(_draw(), parts=mixed, cameras_on=False, round_physics=True)
+    assert on.ngeom == off.ngeom
+    rolls = {g for b, p in enumerate(mixed) if p.family == "round" for g in h.body_geoms[b]}
+    rest = [g for g in range(off.ngeom) if g not in rolls]
+    for name in [n for n in dir(off) if n.startswith("geom_")]:
+        a, b = getattr(off, name), getattr(on, name)
+        if isinstance(a, np.ndarray) and a.shape and a.shape[0] == off.ngeom:
+            assert np.array_equal(a[rest], b[rest]), name
+    for g in rolls:
+        assert on.geom_contype[g] == 3 and on.geom_condim[g] == scene.ROUND_CONDIM
+        assert on.geom_friction[g] == pytest.approx(scene.ROUND_FRICTION)
+    for b, p in enumerate(mixed):
+        if p.family == "round":
+            collider, *studs = h.body_geoms[b]
+            assert off.geom_condim[collider] == scene.BRICK_CONDIM
+            assert off.geom_friction[collider] == pytest.approx(scene.BRICK_FRICTION)
+            assert studs and all(off.geom_contype[g] == 0 for g in studs)
+
+
+@pytest.mark.parametrize("round_physics", [False, True])
+def test_a_round_part_on_its_side_stops_rolling_under_the_switch(round_physics):
+    """A jaw closes at 0.1 m/s. A round 2x2 on its side kicked that fast across its axis
+    rolled 46 mm at the median without the switch and 2.7 mm with it (rolling probe,
+    2026-09-29); the studs alone did not stop it."""
+    (part,) = parts.by_name(["round_2x2"])
+    model, h = scene.build_model(
+        _draw(), parts=[part], cameras_on=False, round_physics=round_physics
+    )
+    data = mujoco.MjData(model)
+    adr, dof = h.brick_qpos[0], h.brick_dof[0]
+    data.qpos[adr : adr + 3] = (0.19, 0.0, part.size[0] / 2 + 0.001)
+    data.qpos[adr + 3 : adr + 7] = (np.sqrt(0.5), np.sqrt(0.5), 0.0, 0.0)  # axis along y
+    mujoco.mj_step(model, data, nstep=240)
+    start = data.qpos[adr].copy()
+    data.qvel[dof] = 0.1
+    mujoco.mj_step(model, data, nstep=720)
+    travel = abs(data.qpos[adr] - start)
+    assert (travel < 0.008) if round_physics else (travel > 0.03), travel
