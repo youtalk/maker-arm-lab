@@ -156,3 +156,12 @@ def test_the_heap_client_records_the_ms7e_switches_and_serves_the_active_classes
     assert "add_ms7e_arguments(parser)" in text and "check_ms7e(parser, args)" in text
     assert 'payload["ms7e"] = ms7e_switches(args)' in text
     assert "class_names=heap_classes(args)" in text
+
+
+@pytest.mark.parametrize("script", ["mj_eval_heap.py", "mj_generate_batch.py"])
+def test_families_round_turns_on_the_round_physics(script):
+    """MS7e design section 6.4 and ledger D4: the round family key is the switch of its
+    collision studs and rolling friction, in the client and the recorder alike."""
+    assert "round" in parts.READY_FAMILIES
+    text = (ROOT / "scripts" / script).read_text()
+    assert 'round_physics="round" in args.families' in text

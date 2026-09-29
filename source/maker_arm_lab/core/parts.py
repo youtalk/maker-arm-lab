@@ -51,7 +51,7 @@ FAMILIES = ("brick", "slope", "round", "ldraw", "plate", "tile")
 split unchanged (MS7e design section 5)."""
 FAMILY_KEYS = {"round": ("round",), "ldraw": ("ldraw",), "flat": ("plate", "tile")}
 """The keys ``--families`` accepts, and the families each brings into the catalog."""
-READY_FAMILIES: frozenset[str] = frozenset()
+READY_FAMILIES: frozenset[str] = frozenset({"round"})
 """The ``FAMILY_KEYS`` keys whose behaviour is in this commit. Each family track adds its key
 when it lands; ``--families`` with any other key is a usage error (MS7e design section 10.2)."""
 LDRAW_IDS = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")

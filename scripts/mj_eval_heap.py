@@ -397,6 +397,7 @@ def main(argv=None) -> int:
             box_unseen=args.box_unseen,
             deep_box_floor=args.deep_box_floor,
             release_lean=args.release_lean,
+            round_physics="round" in args.families,  # MS7e design section 6.4
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
