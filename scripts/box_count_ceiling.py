@@ -7,7 +7,7 @@ count. The counts run in ascending order and stop at the first infeasible one: a
 puts at least as many boxes on each side. Pure geometry, CPU only, no MuJoCo.
 
     PYTHONPATH=$PWD/source .venv/bin/python scripts/box_count_ceiling.py --box_min 0.07 \\
-        --band_x=0.05,0.21 --procs 8 --out /tmp/ceiling.json
+        --band_x=0.03,0.25 --band_y=0.18,0.20 --counts 4,5,6,7,8 --procs 8 --out /tmp/c.json
 
 Prints exactly one ``CEILING_OK {json}`` or ``CEILING_FAIL {json}`` line on every exit path,
 argparse errors included, and exits through ``os._exit``.
@@ -43,14 +43,13 @@ def _pair(text: str) -> tuple[float, float]:
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = _TokenEmittingParser(description=__doc__)
-    parser.add_argument("--band_x", type=_pair, default=desk_boxes.DESK_BOX_BAND_X)
-    parser.add_argument("--band_y", type=_pair, default=desk_boxes.DESK_BOX_BAND_Y)
+    parser.add_argument("--band_x", type=_pair, default=desk_boxes.B1_BAND_X)
+    parser.add_argument("--band_y", type=_pair, default=desk_boxes.B1_BAND_Y)
     parser.add_argument("--box_min", type=float, default=desk_boxes.BOX_MIN)
     parser.add_argument("--box_max", type=float, default=desk_boxes.BOX_MAX)
     parser.add_argument("--aspect", type=float, default=desk_boxes.BOX_MAX_ASPECT)
     parser.add_argument("--depth", type=_pair, default=desk_boxes.BOX_DEPTH)
     parser.add_argument("--back", type=float, default=desk_boxes.FRAME_BACK_X)
-    parser.add_argument("--sequential", action="store_true")
     parser.add_argument("--size_draws", type=int, default=desk_boxes.SIZE_DRAWS)
     parser.add_argument("--counts", type=lambda t: [int(v) for v in t.split(",")], default=[4])
     parser.add_argument("--seed", type=int, default=20290000)
@@ -74,7 +73,6 @@ def _one(job):
             aspect=args.aspect,
             depth=args.depth,
             back=args.back,
-            sequential=args.sequential,
             size_draws=args.size_draws,
         )
     except RuntimeError:
@@ -112,7 +110,6 @@ def run(args) -> dict:
         "aspect": args.aspect,
         "depth": list(args.depth),
         "back": args.back,
-        "sampler": "sequential" if args.sequential else "rejection",
         "size_draws": args.size_draws,
         "draw_tries": desk_boxes.DRAW_TRIES,
         "seed": args.seed,

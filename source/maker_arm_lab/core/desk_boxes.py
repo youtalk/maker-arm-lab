@@ -113,9 +113,31 @@ BOX_DEPTH = (0.03, 0.05)
 """The box draw's interior (MS7e design section 4.2): each footprint side in BOX_MIN to
 BOX_MAX with at most BOX_MAX_ASPECT between the two, and the depth in BOX_DEPTH. The rim is the
 depth plus DESK_BOX_WALL."""
-SIZE_DRAWS = 20  # INITIAL
-"""How often one side of the box draw draws its sizes again after DRAW_TRIES placements."""
+SIZE_DRAWS = 200
+"""How often one side of the box draw draws its sizes. Three boxes on a side of B1_BAND_X fit
+only when their sides are small: 20 size draws placed five boxes in 554 of the 1000 ceiling
+seeds on x 0.02..0.24 at BOX_MIN 0.07, and 200 place them in 999 (2026-09-29). A failed size
+draw costs microseconds, so a draw stays under 3 ms."""
 YAW_CLIP_STEP = math.radians(1.0)
+B1_BAND_X = (0.03, 0.25)
+B1_BAND_Y = (0.18, 0.20)
+"""MS7e rung B1's band: the box centre's x and |y| under the box draw.
+
+The MS7a band (DESK_BOX_BAND_X) holds two boxes a side: its 0.16 m of centre x fits three
+boxes of 8 cm outside and 2 cm gaps in no seed. This band takes the MS7a driven reach at |y|
+0.20 or less (x 0.02 to 0.24), leaves its back cell and adds 1 cm in front.
+
+Certified by ``scripts/mj_release_envelope_check.py --desk_boxes 4 --band_x=0.03,0.25
+--band_y=0.18,0.20`` with 7 and 10 cm interiors 0.05 m deep on Machine A, 2026-09-29:
+brick_2x4, brick_1x2x5, brick_2x7, brick_1x8 and brick_2x8 each landed 80 of 80 with EXTEND
+converged at both sizes, EXTEND residual at most 1.56 mm, RETREAT's at most 0.84 mm, no
+abandoned cycle, no arm geom touching a box, tightest joint 0.032 rad from its stop.
+
+Its edges keep 1 to 2 cm from failed cells. At x 0.02, |y| 0.18, box yaw -45 degrees and part
+yaw 90 degrees, RETREAT ended 119 mm from its goal and the rig abandoned, for four of the five
+parts, and the tightest joint came within 0.010 rad at |y| 0.20. In front (brick_2x4, 16
+trials a cell): x 0.26 landed every trial, x 0.27 none at |y| 0.20, x 0.28 none at |y| 0.19
+and 0.20, and x 0.30 to 0.34 none."""
 FRAME_BACK_X = -0.015
 """The box draw keeps every footprint corner at x >= this, m: the overhead frame's back edge.
 
@@ -362,25 +384,11 @@ def _place_in_order(rng, sizes, sign, band_x, band_y, back):
     return poses
 
 
-def _draw_side(rng, sizes, sign, band_x, band_y, back, sequential):
+def _draw_side(rng, sizes, sign, band_x, band_y, back):
     """One side's poses for these interiors in DRAW_TRIES placements, or None."""
     for _ in range(DRAW_TRIES):
-        if sequential:
-            side = _place_in_order(rng, sizes, sign, band_x, band_y, back)
-            if side is None:
-                return None
-        else:
-            side = [
-                (
-                    rng.uniform(*band_x),
-                    sign * rng.uniform(*band_y),
-                    rng.uniform(-DESK_BOX_MAX_YAW, DESK_BOX_MAX_YAW),
-                )
-                for _ in sizes
-            ]
-            if any(min(c[0] for c in corners(p, z)) < back for p, z in zip(side, sizes)):
-                continue
-        if clear(side, sizes):
+        side = _place_in_order(rng, sizes, sign, band_x, band_y, back)
+        if side is None or clear(side, sizes):
             return side
     return None
 
@@ -388,23 +396,26 @@ def _draw_side(rng, sizes, sign, band_x, band_y, back, sequential):
 def draw_boxes(
     rng: random.Random,
     n: int,
-    band_x: tuple[float, float] = DESK_BOX_BAND_X,
-    band_y: tuple[float, float] = DESK_BOX_BAND_Y,
+    band_x: tuple[float, float] = B1_BAND_X,
+    band_y: tuple[float, float] = B1_BAND_Y,
     sides: tuple[float, float] = (BOX_MIN, BOX_MAX),
     aspect: float = BOX_MAX_ASPECT,
     depth: tuple[float, float] = BOX_DEPTH,
     back: float = FRAME_BACK_X,
-    sequential: bool = False,
     size_draws: int = SIZE_DRAWS,
 ) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:
     """The MS7e box draw (design section 4.2): ``n`` box poses and their interiors, from
     ``rng`` alone so a seed reproduces them.
 
     The boxes alternate sides, and the side of the odd box is drawn. Each side draws its
-    interiors (``draw_interior``), then places them: by rejection as ``sample_boxes`` does, or
-    along x in order (``sequential``), every footprint corner at x ``back`` or more (the frame,
-    FRAME_BACK_X). A side that fails its DRAW_TRIES placements draws its interiors again, up to
-    ``size_draws`` times.
+    interiors (``draw_interior``), then places them along x in order (``_place_in_order``),
+    every footprint corner at x ``back`` or more (the frame, FRAME_BACK_X). A side whose sizes
+    cannot fit, or that fails DRAW_TRIES placements on the corridor, draws its interiors again,
+    up to ``size_draws`` times.
+
+    Not by rejection as ``sample_boxes`` places: on every band tried, rejection placed three
+    boxes on one side in 0 of 1000 seeds (5000 tries times 20 size draws, 2026-09-29), where the
+    in-order placement places them in 1000 of 1000 on B1_BAND_X.
     """
     first = rng.choice((1.0, -1.0))
     signs = [first if k % 2 == 0 else -first for k in range(n)]
@@ -416,7 +427,7 @@ def draw_boxes(
             continue
         for _ in range(size_draws):
             drawn = [draw_interior(rng, sides, aspect, depth) for _ in slots]
-            side = _draw_side(rng, drawn, sign, band_x, band_y, back, sequential)
+            side = _draw_side(rng, drawn, sign, band_x, band_y, back)
             if side is not None:
                 break
         else:

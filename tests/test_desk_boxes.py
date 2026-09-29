@@ -76,17 +76,17 @@ def test_every_drawn_box_is_in_the_band_on_its_side_and_clear(n):
         assert sides == {1.0, -1.0}  # rung 1 draws the side per episode
 
 
-@pytest.mark.parametrize("sequential", [False, True])
-def test_the_box_draw_keeps_its_sizes_its_band_its_frame_and_its_gaps(sequential):
+@pytest.mark.parametrize("n", [4, 5, 6])
+def test_the_box_draw_keeps_its_sizes_its_band_its_frame_and_its_gaps(n):
     corridor = desk_boxes.pick_corridor()
-    for seed in range(60):
-        n = 4
-        poses, sizes = desk_boxes.draw_boxes(random.Random(seed), n, sequential=sequential)
-        again = desk_boxes.draw_boxes(random.Random(seed), n, sequential=sequential)
-        assert (poses, sizes) == again
-        assert sorted(math.copysign(1.0, p[1]) for p in poses) == [-1.0, -1.0, 1.0, 1.0]
+    (x0, x1), (y0, y1) = desk_boxes.B1_BAND_X, desk_boxes.B1_BAND_Y
+    for seed in range(40):
+        poses, sizes = desk_boxes.draw_boxes(random.Random(seed), n)
+        assert (poses, sizes) == desk_boxes.draw_boxes(random.Random(seed), n)
+        assert abs(sum(math.copysign(1.0, p[1]) for p in poses)) == n % 2
         for pose, (ix, iy, iz) in zip(poses, sizes):
-            assert desk_boxes.in_band(pose, n), pose
+            assert x0 <= pose[0] <= x1 and y0 <= abs(pose[1]) <= y1, pose
+            assert abs(pose[2]) <= desk_boxes.DESK_BOX_MAX_YAW + 1e-12
             assert desk_boxes.BOX_MIN <= min(ix, iy) and max(ix, iy) <= desk_boxes.BOX_MAX
             assert max(ix, iy) <= desk_boxes.BOX_MAX_ASPECT * min(ix, iy)
             assert desk_boxes.BOX_DEPTH[0] <= iz <= desk_boxes.BOX_DEPTH[1]
@@ -102,7 +102,9 @@ def test_the_box_draw_keeps_its_sizes_its_band_its_frame_and_its_gaps(sequential
 
 def test_a_side_the_band_cannot_hold_fails_its_draw():
     with pytest.raises(RuntimeError):
-        desk_boxes.draw_boxes(random.Random(0), 6, sequential=True, size_draws=3)
+        desk_boxes.draw_boxes(random.Random(0), 7)
+    with pytest.raises(RuntimeError):
+        desk_boxes.draw_boxes(random.Random(0), 5, band_x=desk_boxes.DESK_BOX_BAND_X)
 
 
 def test_a_seed_reproduces_the_draw():
