@@ -989,6 +989,7 @@ class Cycle:
     # ``perceived``: the target's detection at selection, the failure memory's position.
     target_xy: tuple | None = None  # m, its perceived centre xy
     seen_class: str | None = None  # its class perceived overhead
+    seen_size: tuple | None = None  # m, its perceived size (a size-reading classifier's input)
     box: int = -1  # the box served now: the overhead class's, then the class drawn at a lift
     volume: float = 0.0  # m^3, the bounding volume the loop books into ``box`` at a release end
     read_class: str | None = None  # ``classifier``: the class its narrow overhead view read
@@ -2284,13 +2285,14 @@ def rollout(
                 if classifier is not None:
                     # MS7f view 1: the narrow overhead view of the detection.
                     frame = env.narrow_overhead(i, seen.centre)
-                    logp, _ = classifier.log_probs(frame, class_names)
+                    logp, _ = classifier.log_probs(frame, class_names, size=seen.size)
                     st.cycle.read_logp = logp
                     st.cycle.read_class = cls = summed_class(class_names, logp)
                     st.opening = False
                 st.cycle.seen_yaw = float(scene.brick_yaw[target])
                 st.cycle.box = desk_boxes.lighter_box(class_boxes[i][cls], st.box_load)
                 st.cycle.volume = math.prod(seen.size)
+                st.cycle.seen_size = seen.size
                 env.marker_points[i] = torch.tensor(seen.centre)
                 env.set_context_box(i, st.cycle.box)
                 st.counts["selections"] += 1
@@ -2535,7 +2537,9 @@ def rollout(
                         # The stand-in above drew what it draws without the switch; the wrist
                         # frame decides (MS7f view 2), or ends the cycle on a passenger.
                         frame = env.obs_buf["images"]["wrist_rgb"][i].numpy()
-                        logp, rider = classifier.log_probs(frame, class_names, wrist=True)
+                        logp, rider = classifier.log_probs(
+                            frame, class_names, wrist=True, size=c.seen_size
+                        )
                         read = summed_class(class_names, logp)
                         st.counts["passenger_reads"] += rider
                         if passenger_drop and rider and tray and over_tray(pick, lean, wall_height):
@@ -2575,7 +2579,7 @@ def rollout(
                         cls: desk_boxes.lighter_box(own, st.box_load)
                         for cls, own in class_boxes[i].items()
                     }
-                    carry_logp, _ = classifier.log_probs(frame, class_names, wrist=True)
+                    carry_logp, _ = classifier.log_probs(frame, class_names, True, c.seen_size)
                     views_logp = [v for v in (c.read_logp, lift_logp, carry_logp) if v]
                     summed = summed_class(class_names, *views_logp)  # no overhead read: two
                     _, taken, box = lift_class_box(summed, lambda x: x, lighter, c.box)

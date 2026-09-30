@@ -517,27 +517,38 @@ class PartClassifier:
     passenger model, a TorchScript file from ``lerobot_stack/train_part_classifier.py``, on the
     CPU. The file carries its category names (``categories``) and its passenger operating point
     (``passenger_threshold``, a logit); it takes uint8 (N, 224, 224, 3) frames and whether they are
-    wrist frames, which it crops around the jaws itself."""
+    wrist frames, which it crops itself, and with ``size_input`` the part's perceived size."""
 
     def __init__(self, path):
         self.path = str(path)
         self.model = torch.jit.load(self.path, map_location="cpu").eval()
         self.categories = tuple(self.model.categories)
         self.threshold = float(self.model.passenger_threshold)
+        self.size_input = bool(getattr(self.model, "size_input", False))
 
     @torch.no_grad()
-    def log_probs(self, frame, active: Sequence[str], wrist: bool = False) -> tuple[list, bool]:
+    def log_probs(
+        self, frame, active: Sequence[str], wrist: bool = False, size=None
+    ) -> tuple[list, bool]:
         """One (224, 224, 3) uint8 frame, a wrist frame or the narrow overhead view: the log
         probability of each of the run's ``active`` categories, in their order, and whether the
-        passenger head reads a second part in the jaws."""
-        logits, rider = self.model(torch.as_tensor(frame)[None], wrist)
+        passenger head reads a second part in the jaws. ``size`` is the part's perceived size
+        (a detection's ``size``), which a ``size_input`` model reads sorted; None reads unknown."""
+        x = torch.as_tensor(frame)[None]
+        if self.size_input:
+            known = torch.tensor([sorted(size)]) if size is not None else torch.full((1, 3), -1.0)
+            logits, rider = self.model(x, wrist, known)
+        else:
+            logits, rider = self.model(x, wrist)
         cols = [self.categories.index(c) for c in active]
         logp = torch.log_softmax(logits[0, cols].float(), dim=0).tolist()
         return logp, float(rider[0]) >= self.threshold
 
-    def read(self, frame, active: Sequence[str], wrist: bool = False) -> tuple[str, bool]:
+    def read(
+        self, frame, active: Sequence[str], wrist: bool = False, size=None
+    ) -> tuple[str, bool]:
         """``log_probs``' most likely category and its passenger read."""
-        logp, rider = self.log_probs(frame, active, wrist)
+        logp, rider = self.log_probs(frame, active, wrist, size)
         return active[max(range(len(active)), key=logp.__getitem__)], rider
 
 

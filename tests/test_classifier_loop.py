@@ -61,6 +61,31 @@ class _Stub(torch.nn.Module):
         return logits, torch.full((n,), self.rider)
 
 
+class _SizedStub(torch.nn.Module):
+    """A ``size_input`` model: class ``over`` on the overhead view and ``wrist`` on a wrist
+    frame, and an error on an unknown size (-1), so a run only ends if every view got one."""
+
+    categories: List[str]  # noqa: UP006
+    passenger_threshold: float
+    size_input: bool
+
+    def __init__(self, names, over: int, wrist: int):
+        super().__init__()
+        self.categories = list(names)
+        self.passenger_threshold = 0.0
+        self.size_input = True
+        self.over, self.wrist = over, wrist
+
+    def forward(
+        self, frames: torch.Tensor, wrist: bool, size: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:  # noqa: UP006
+        if bool((size < 0.0).any()):
+            raise RuntimeError("no perceived size")
+        logits = torch.zeros(frames.shape[0], len(self.categories))
+        logits[:, self.wrist if wrist else self.over] = 1.0
+        return logits, torch.full((frames.shape[0],), -1.0)
+
+
 def _classifier(tmp_path, bright="wide", dark="wide", rider=-1.0, names=parts.BASE_CLASSES):
     path = tmp_path / f"stub_{bright}_{dark}_{rider}.pt"
     stub = _Stub(names, names.index(bright), names.index(dark), rider)
@@ -151,6 +176,27 @@ def test_the_carry_view_is_the_third_vote(tmp_path):
     poses = env.perceived_box_poses[0]
     rows = [b for _, b, _, _, _ in served]
     assert np.allclose(rows[0], poses[slope]) and any(np.allclose(r, poses[wide]) for r in rows)
+
+
+def test_a_size_reading_model_gets_the_detection_size_in_every_view(tmp_path):
+    """Overhead reads slope and both wrist views wide, so every lift waits for the carry view:
+    the run ends only if the overhead, lift and carry reads all got a perceived size."""
+    env, rig, policy = _scene()
+    names = parts.BASE_CLASSES
+    path = tmp_path / "sized.pt"
+    torch.jit.script(_SizedStub(names, names.index("slope"), names.index("wide"))).save(str(path))
+    payload = _rollout(
+        env,
+        rig,
+        policy,
+        perceived=True,
+        classifier=perception.PartClassifier(path),
+        class_views=True,
+        **SWITCHES,
+    )
+    env.close()
+    seen = payload["perception"]
+    assert seen["third_views"] > 0 and seen["votes_changed"] == 0
 
 
 def test_the_passenger_response_opens_the_jaws_only_over_the_tray(tmp_path):
