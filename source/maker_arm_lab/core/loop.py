@@ -762,8 +762,8 @@ def box_wall_refusals(selector, scene, target: int) -> int:
         selector.parts[target].closing_axes,
     )
     tray = [w for w in selector.walls if not w.box]
-    return len(grasp.candidate_grasps(*args, tray)) - len(
-        grasp.candidate_grasps(*args, selector.walls)
+    return len(grasp.candidate_grasps(*args, tray, selector.hold_band)) - len(
+        grasp.candidate_grasps(*args, selector.walls, selector.hold_band)
     )
 
 

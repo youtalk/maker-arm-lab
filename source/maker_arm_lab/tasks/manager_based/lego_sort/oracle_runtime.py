@@ -999,6 +999,7 @@ class OracleRig:
                 oracle.PICK_TILT_RAD,
                 [p.closing_axes for p in seen_parts],
                 orc.walls,
+                orc.hold_band,
             )
             if ranked:
                 chosen = grasp.select_grasp(ranked) or ranked[0]
