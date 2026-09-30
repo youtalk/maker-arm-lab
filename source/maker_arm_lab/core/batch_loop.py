@@ -250,7 +250,14 @@ passenger_drop track C's (design section 6); transport_speed track S's (design s
 teacher walk's pace. The gate supervisor keeps a stdlib copy (``scripts/run_gate_eval.py``),
 pinned by a test."""
 MS7F_READY: frozenset[str] = frozenset(
-    {"categories", "deep_tray", "tray_refill", "box_empty", "book_miss"}
+    {
+        "categories",
+        "deep_tray",
+        "tray_refill",
+        "box_empty",
+        "book_miss",
+        "transport_speed",
+    }
 )
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
 a usage error with the script's fail token (MS7f design section 12.2). Each track adds its

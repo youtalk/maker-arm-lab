@@ -339,6 +339,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         parser.error("--heap_k must be positive: this client evaluates heap episodes only")
     if args.heap_k > MAX_HEAP_K:
         parser.error(f"--heap_k {args.heap_k} exceeds {MAX_HEAP_K}, the MS7f heap (MAX_HEAP_K)")
+    if not args.transport_speed > 0.0:
+        parser.error("--transport_speed must be positive")
     check_ms7e(parser, args)
     check_ms7f(parser, args)
     if args.desk_boxes < 0:
@@ -453,6 +455,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             env.cfg.bin_layout,
             oracle.OracleNoise(),
             rig_rng,
+            transport_speed=args.transport_speed,
             oracle_factory=factory,
             release_lean=args.release_lean,
             carry_via=args.carry_via,
