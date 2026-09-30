@@ -638,7 +638,9 @@ class OracleRig:
         self.perceivers = perceivers
         if perceivers is not None:
             self._part_sizes = torch.tensor([p.size for p in env.parts])
-            self._part_classes = [part_class(p) for p in env.parts]
+            # The env's class of each part: its category under MS7f --categories.
+            keys = getattr(env, "part_classes", None)
+            self._part_classes = list(keys) if keys else [part_class(p) for p in env.parts]
             # Per env: (selection key, row, point) of the selection in force, or None.
             self._frozen: list[tuple | None] = [None] * self.num_envs
             self._swaps_seen = [0] * self.num_envs
@@ -899,16 +901,25 @@ class OracleRig:
         until RETREAT ends. ``oracle_marker_part`` and ``oracle_cycle_target`` are what the
         policy sees, and under the 2026-09-22 protocol they switch to the pre-selected next
         part the moment RELEASE ends (``EnvOracle.preselects_next_target``).
+
+        ``oracle_marker_box`` is the box the teacher sends the marker's part to when its oracle
+        chooses among a category's boxes (MS7f ``--categories``, ``HeapOracle.release_box``),
+        else -1 and the env serves the part's own box. A heap of more than 127 parts keeps its
+        part ids in int16 (the MS7f heap size, design section 5).
         """
         if not hasattr(self.env, "oracle_cycle_phase"):
+            ids = torch.int16 if self.num_bricks > 127 else torch.int8
             self.env.oracle_cycle_phase = torch.full(
                 (self.num_envs,), -1, dtype=torch.int8, device=self.device
             )
             self.env.oracle_cycle_brick = torch.full(
-                (self.num_envs,), -1, dtype=torch.int8, device=self.device
+                (self.num_envs,), -1, dtype=ids, device=self.device
             )
             self.env.oracle_marker_part = torch.full(
-                (self.num_envs,), -1, dtype=torch.int8, device=self.device
+                (self.num_envs,), -1, dtype=ids, device=self.device
+            )
+            self.env.oracle_marker_box = torch.full(
+                (self.num_envs,), -1, dtype=torch.int16, device=self.device
             )
             self.env.oracle_cycle_target = torch.zeros(
                 (self.num_envs, 7), dtype=torch.float32, device=self.device
@@ -936,6 +947,8 @@ class OracleRig:
             if ahead:
                 marker_i, start, chosen = orc_i.next_brick, orc_i.next_brick_start, orc_i.next_grasp
             self.env.oracle_marker_part[i] = marker_i if marker_i is not None else -1
+            sets = getattr(orc_i, "box_sets", None) if marker_i is not None else None
+            self.env.oracle_marker_box[i] = -1 if sets is None else orc_i.release_box(marker_i)
             if self.perceivers is None:
                 self.env.oracle_cycle_target[i] = torch.tensor(target_context(start, chosen))
                 continue

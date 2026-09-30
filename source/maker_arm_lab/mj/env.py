@@ -40,6 +40,12 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
         its class's box), env.place_desk_boxes(i, poses), env.deep_box_floor (MS7e flat
         track: every box floor's collider reaches desk_boxes.DESK_BOX_FLOOR_DEPTH under the desk),
         env.set_context_box(i, box) (the context row's box part, set per target)
+    categories (MS7f design section 6.2, ``categories=True`` under the box draw): env.categories,
+        env.part_classes (K,) each part's class (its category; part_class without the switch),
+        env.class_boxes (N lists of C tuples: every box of each category, the first one
+        class_to_box's), env.destination_mask (N, K, M) bool (the grader's correct boxes of each
+        part) and env.part_box_sets(i) (the teacher's box_sets); the rig's stash
+        env.oracle_marker_box names the box its teacher sends the marker's part to
     perceived state (MS7c design section 6, heap mode): env.marker_points (N, 3) float32, NaN
         by default and after the env's reset; a finite row is the frozen marker that
         stamp_markers() draws in place of target_part's live centre; the recording rig's
@@ -84,7 +90,7 @@ from maker_arm_lab.core import profile as _profile
 from maker_arm_lab.core.cameras import OVERHEAD_B2_BACK_M
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.heap_oracle import STOW_HALF_EXTENTS
-from maker_arm_lab.core.parts import BASE_CLASSES, Part, part_class
+from maker_arm_lab.core.parts import BASE_CLASSES, Part, part_category, part_class
 from maker_arm_lab.core.quat import compose_offset_rot, quat_apply, quat_mul, rpy_from_quat
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.core.target import target_brick
@@ -96,7 +102,7 @@ from maker_arm_lab.mj.context_names import (
     CONTEXT_PRIVILEGED_NAMES,  # noqa: F401 -- re-exported as mj_env.CONTEXT_PRIVILEGED_NAMES
 )
 from maker_arm_lab.mj.depth import noisy_depth_mm
-from maker_arm_lab.mj.recorder import ShardRecorder
+from maker_arm_lab.mj.recorder import MAX_INT8_PART, ShardRecorder
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_NAMES,
     GRIPPER_CLOSED_POS,
@@ -282,6 +288,7 @@ class MjLegoSortEnv:
         deep_box_floor: bool = False,
         release_lean: bool = False,
         round_physics: bool = False,
+        categories: bool = False,
     ):
         # MS6 phase B design 5.4: "binary" is the raw >= 0 opens contract every corpus before
         # phase B was recorded with; "continuous" reads action[:, 6] as the jaw gap in meters.
@@ -374,13 +381,21 @@ class MjLegoSortEnv:
         self.perceived_box_poses = None  # MS7c: (N, M, 3) when the loop serves perceived boxes
         # The episode's box per class, in class_names order (MS7a design, classes): the active
         # class list, core.parts.PART_CLASSES when an MS7e switch is on (MS7e design section 5).
+        # MS7f --categories (design section 6.2): the classes are the active categories, and a
+        # category may take two boxes (class_boxes), the first in class_to_box.
+        if categories and not box_draw:
+            raise ValueError("categories maps the categories onto the drawn boxes: needs box_draw")
+        self.categories = categories
         self.class_names = tuple(class_names)
+        self._class_of = part_category if categories else part_class
+        self.part_classes = tuple(map(self._class_of, self.parts or ()))  # each part's class
         # The heap's bounding volume per class, the load the box draw's fold fits to its boxes.
         self._class_volumes = [
-            sum(math.prod(p.size) for p in self.parts or () if part_class(p) == c)
+            sum(math.prod(p.size) for p, k in zip(self.parts or (), self.part_classes) if k == c)
             for c in self.class_names
         ]
         self.class_to_box = np.zeros((num_envs, len(self.class_names)), dtype=np.int64)
+        self.class_boxes: list[tuple[tuple[int, ...], ...]] = [()] * num_envs  # --categories
         self.context_mode = context
         self.context_camera = np.zeros((num_envs, CONTEXT_DIMS["camera"]), dtype=np.float32)
         self.context_privileged = np.zeros((num_envs, CONTEXT_DIMS["privileged"]), dtype=np.float32)
@@ -464,6 +479,10 @@ class MjLegoSortEnv:
         if self.parts is not None:
             if desk_boxes:
                 self.destination_bins = torch.zeros(num_envs, num_bricks, dtype=torch.long)
+                if categories:
+                    self.destination_mask = torch.zeros(
+                        num_envs, num_bricks, desk_boxes, dtype=torch.bool
+                    )
                 interior = _boxes.interior(desk_boxes)
                 self.stow_half_extents = torch.tensor(_boxes.stow_region(interior)[1])
             else:
@@ -485,6 +504,7 @@ class MjLegoSortEnv:
                 depth=self.parts is not None,
                 gripper_mode=gripper_mode,
                 class_names=self.class_names,
+                wide_ids=num_bricks > MAX_INT8_PART,
             )
             if export_dir is not None
             else None
@@ -622,7 +642,11 @@ class MjLegoSortEnv:
                 if point is not None:
                     self.marker_points[i] = point[i]  # NaN clears it
                 if self.desk_boxes and int(marker[i]) >= 0:
-                    self.set_context_box(i, int(self.destination_bins[i, int(marker[i])]))
+                    # MS7f --categories: the box the teacher's own load record sends it to.
+                    box = getattr(self, "oracle_marker_box", None)
+                    box = -1 if box is None else int(box[i])
+                    box = box if box >= 0 else int(self.destination_bins[i, int(marker[i])])
+                    self.set_context_box(i, box)
                 if target is None:
                     continue
                 row = target[i].numpy()
@@ -657,6 +681,15 @@ class MjLegoSortEnv:
         self.context_box[i] = row
         self.context_camera_box[i, 6:] = self.context_box[i]
         self.context_camera_box_target[i, 6:9] = self.context_box[i]
+
+    def part_box_sets(self, i: int) -> tuple[tuple[int, ...], ...] | None:
+        """Env ``i``'s boxes of each part: under ``--categories`` every box of the part's
+        category, the first one first (MS7f design section 6.2), the teacher's ``box_sets``.
+        None with the switch off: the part's one box is ``destination_bins``'s."""
+        if not self.categories:
+            return None
+        own = dict(zip(self.class_names, self.class_boxes[i]))
+        return tuple(own[c] for c in self.part_classes)
 
     def arm_torques(self, i: int) -> tuple[torch.Tensor, ...]:
         """MS7d L6 and L7: what ``core.torque`` turns into the pick-point force, read from env
@@ -848,15 +881,25 @@ class MjLegoSortEnv:
             else:
                 self.place_desk_boxes(i, _boxes.sample_boxes(self._rng, self.desk_boxes))
             n = int(self.box_count[i])
-            if self.box_draw:
+            if self.categories:
+                sets = _boxes.category_map(self._rng, sizes, self.class_names, self._class_volumes)
+                self.class_to_box[i] = [own[0] for own in sets]
+            elif self.box_draw:
                 self.class_to_box[i] = _boxes.fitted_class_map(
                     self._rng, sizes, self.class_names, self._class_volumes
                 )
             else:
                 self.class_to_box[i] = _boxes.class_map(self._rng, n, self.class_names)
             self.destination_bins[i] = torch.tensor(
-                _boxes.part_destinations(self.parts, self.class_to_box[i], self.class_names)
+                _boxes.part_destinations(
+                    self.parts, self.class_to_box[i], self.class_names, self._class_of
+                )
             )
+            if self.categories:
+                self.class_boxes[i] = sets
+                self.destination_mask[i] = False
+                for b, own in enumerate(self.part_box_sets(i)):
+                    self.destination_mask[i, b, list(own)] = True
             zone = layout.tray_bounds()
         else:
             # MS6 rework section 6: heap mode has one bin, at y = 0.0. The release target,
@@ -920,6 +963,11 @@ class MjLegoSortEnv:
                 state["box_count"] = np.array([self.box_count[i]], dtype=np.int64)
                 state["box_draw_rounds"] = np.array([self.box_draw_rounds[i]], dtype=np.int64)
             state["class_to_box"] = self.class_to_box[i].copy()
+            if self.categories:  # MS7f: every box of each category, (C, M) in class_names order
+                mask = np.zeros((len(self.class_names), self.desk_boxes), dtype=bool)
+                for c, own in enumerate(self.class_boxes[i]):
+                    mask[c, list(own)] = True
+                state["class_box_mask"] = mask
         elif self.parts is not None:
             state["destination_bin"] = np.array([int(self.destination_bins[i])], dtype=np.int64)
         return state

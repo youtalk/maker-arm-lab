@@ -67,7 +67,10 @@ def heap_parts(args) -> list[_parts.Part] | None:
 def heap_classes(args) -> tuple[str, ...]:
     """The active class list: the eight MS7e classes whenever ``--families`` names a family or
     the box draw is on, else the four MS7a classes, so with every MS7e switch off the class
-    map and the perception's class draws are MS7d's (MS7e design section 5)."""
+    map and the perception's class draws are MS7d's (MS7e design section 5). Under MS7f
+    ``--categories`` it is the run's active categories (``parts.active_categories``)."""
+    if getattr(args, "categories", False):
+        return _parts.active_categories(getattr(args, "families", ()))
     on = getattr(args, "families", ()) or getattr(args, "box_draw", 0)
     return _parts.PART_CLASSES if on else _parts.BASE_CLASSES
 
@@ -208,6 +211,44 @@ def ms7e_switches(args) -> dict:
     }
 
 
+MS7F_OFF: dict = {"categories": False}
+"""The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
+of a run with every one off, what an MS7e run ran with. The gate supervisor keeps a stdlib copy
+(``scripts/run_gate_eval.py``), pinned by a test."""
+MS7F_READY: frozenset[str] = frozenset({"categories"})
+"""The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
+a usage error with the script's fail token (MS7f design section 12.2). Each track adds its
+switch in the commit that brings the behaviour; the supervisor's copy is pinned by a test."""
+
+
+def add_ms7f_arguments(parser) -> None:
+    """The MS7f switches (MS7f design section 12.1), shared by the MuJoCo heap scripts. Each
+    defaults off, and off is MS7e."""
+    parser.add_argument(
+        "--categories",
+        action="store_true",
+        help="MS7f: sort by the six categories (parts.PART_CATEGORIES) over the drawn boxes, a "
+        "category with more boxes than it needs taking a second one (desk_boxes.category_map); "
+        "needs --box_draw",
+    )
+
+
+def check_ms7f(parser, args, ready: frozenset[str] = MS7F_READY) -> None:
+    """Refuse an MS7f switch whose behaviour is not in this commit (MS7f design section 12.2)
+    with ``parser.error``, so the script prints its fail token instead of a no-op run."""
+    for name, off in MS7F_OFF.items():
+        if getattr(args, name, off) != off and name not in ready:
+            parser.error(f"--{name} is not built on this commit")
+    if getattr(args, "categories", False) and not getattr(args, "box_draw", 0):
+        parser.error("--categories maps the categories onto the drawn boxes: it needs --box_draw")
+
+
+def ms7f_switches(args) -> dict:
+    """The MS7f switch block a payload and a run's meta record, and the gate supervisor's cache
+    matches (``run_gate_eval.ms7f_block``). Every switch off is MS7e."""
+    return {name: getattr(args, name, off) for name, off in MS7F_OFF.items()}
+
+
 def cycle_actor(orc) -> int:
     """The actor ordinal of the frame about to be recorded (design H7).
 
@@ -328,6 +369,7 @@ def run_meta(
         "desk_boxes": int(getattr(args, "desk_boxes", 0)),
         # MS7e design section 10.1: the MS7e switches, every one off on an MS7d run.
         "ms7e": ms7e_switches(args),
+        "ms7f": ms7f_switches(args),  # MS7f design section 12.1, every one off on an MS7e run
         "deep_box_floor": bool(getattr(args, "deep_box_floor", False)),
         # MS7c design section 7.1: the rows, the marker and the box row as recorded from the
         # perceived state at these knob scales; each episode counts its perceived selections

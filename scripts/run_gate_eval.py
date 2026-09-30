@@ -109,6 +109,9 @@ class GateCfg:
     # MS7e unseen-box ladder, the seen row (design section 8.3): (RUN0, LAYOUT0), draw i reads a
     # recorded run's own seeds RUN0 + i and LAYOUT0 + i (make_eval_draws); None is the formula.
     seen_seeds: tuple | None = None
+    # MuJoCo heap only: the MS7f switches (MS7f design section 12.1) at their values, forwarded
+    # to the heap client and recorded in its payload's "ms7f" block; MS7F_OFF is MS7e.
+    ms7f: dict = field(default_factory=dict)
 
 
 FAMILY_KEYS = ("round", "ldraw", "flat")
@@ -162,6 +165,31 @@ def ms7e_block(cfg: "GateCfg") -> dict:
         "thin_snap": cfg.thin_snap,
         "snap_closed": cfg.snap_closed,
     }
+
+
+MS7F_OFF = {"categories": False}
+"""``core.batch_loop.MS7F_OFF``, copied because the supervisor imports no maker_arm_lab; the test
+pins it. The "ms7f" block of a read with every MS7f switch off, what an MS7e payload ran with."""
+MS7F_READY: frozenset[str] = frozenset({"categories"})
+"""``core.batch_loop.MS7F_READY``, copied and pinned the same way: any other MS7f switch at a
+value but its off value is refused before a server starts (MS7f design section 12.2)."""
+
+
+def ms7f_block(cfg: "GateCfg") -> dict:
+    """The payload's "ms7f" block a read with ``cfg`` records (``core.batch_loop.ms7f_switches``);
+    the cache matches on it."""
+    return MS7F_OFF | cfg.ms7f
+
+
+def ms7f_flags(block: dict) -> list[str]:
+    """The heap client's flags for an "ms7f" block: a switch at its off value sends nothing, an
+    on switch its flag, and a valued switch its flag and value."""
+    flags = []
+    for name, value in block.items():
+        if value == MS7F_OFF[name]:
+            continue
+        flags += [f"--{name}"] if value is True else [f"--{name}", str(value)]
+    return flags
 
 
 MS7D_LEVERS = {
@@ -610,6 +638,7 @@ def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
                 prefix.append("--thin_snap")
             if cfg.snap_closed:
                 prefix.append("--snap_closed")
+            prefix += ms7f_flags(ms7f_block(cfg))
         prefix += list(cfg.client_flags)
     else:
         prefix = [
@@ -694,6 +723,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
             and payload.get("deep_box_floor", False) == cfg.deep_box_floor
             # A payload that predates the MS7e switches, or a later one, ran with them off.
             and MS7E_OFF | payload.get("ms7e", {}) == ms7e_block(cfg)
+            # The same for the MS7f switches (MS7f design section 12.2).
+            and MS7F_OFF | payload.get("ms7f", {}) == ms7f_block(cfg)
         )
     # The served inference configuration is part of what a draw measured. An open-loop read
     # (the checkpoint's own n_action_steps) must never stand in for a temporal-ensemble read.
@@ -778,6 +809,7 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
     )
     results["policy_id"] = next((p.get("policy_id") for p in ordered), None)
     results["ms7e"] = ms7e_block(cfg)
+    results["ms7f"] = ms7f_block(cfg)
     results["draws"] = [
         {
             "process_index": d.process_index,
@@ -1073,6 +1105,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "floors' colliders reach under the desk top",
     )
     parser.add_argument(
+        "--categories",
+        action="store_true",
+        help="MuJoCo heap only, MS7f: forwarded as --categories, the six categories over the "
+        "drawn boxes; needs --box_draw",
+    )
+    parser.add_argument(
         "--seen_seeds",
         type=_seed_pair,
         default=None,
@@ -1161,6 +1199,17 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError("--heap_family must name one of --families")
     if args.carry_via and not args.release_lean:
         raise ValueError("--carry_via bends the B2 carry: it needs --release_lean")
+    ms7f = {name: getattr(args, name) for name in MS7F_OFF}
+    for name, value in ms7f.items():
+        if value == MS7F_OFF[name]:
+            continue
+        if args.heap_k <= 0 or args.backend != "mujoco":
+            raise ValueError(f"--{name} needs --heap_k > 0 and --backend mujoco")
+        if name not in MS7F_READY:
+            # The client's own usage error (MS7f design section 12.2), before a server starts.
+            raise ValueError(f"--{name} is not built on this commit")
+    if args.categories and not args.box_draw:
+        raise ValueError("--categories maps the categories onto the drawn boxes: needs --box_draw")
     if args.seen_seeds and args.num_envs != 1:
         # The env's one generator draws env 0's boxes before any heap; each later env's boxes
         # follow the heap before it, which held-out parts change.
@@ -1216,6 +1265,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         thin_snap=args.thin_snap,
         snap_closed=args.snap_closed,
         seen_seeds=args.seen_seeds,
+        ms7f=ms7f,
         client_flags=tuple(shlex.split(args.client_flags))
         + (("--scripted_place",) if args.scripted_place else ())
         + (("--scripted_rake",) if args.scripted_rake else ())

@@ -1429,3 +1429,45 @@ def test_the_gate_sums_the_family_and_box_count_rows():
     assert list(rows["stowed_by_box_count"]) == ["4", "5"]
     # The box draw gives each episode its own number of boxes (a crash on 2026-09-29).
     assert rows["stowed_by_box"] == [{"stowed": 7, "total": 12}] + [{"stowed": 0, "total": 0}] * 4
+
+
+def test_the_supervisors_ms7f_copies_match_the_core_modules():
+    import argparse
+
+    from maker_arm_lab.core import batch_loop
+
+    assert ge.MS7F_OFF == batch_loop.MS7F_OFF == batch_loop.ms7f_switches(argparse.Namespace())
+    assert ge.MS7F_READY == batch_loop.MS7F_READY
+
+
+def test_the_supervisor_forwards_categories_and_its_cache_matches_it(tmp_path, capsys):
+    draw = ge.make_eval_draws(1, 1)[0]
+    argv = _argv(tmp_path / "gate") + MS7E_HEAP + ["--desk_boxes", "8", "--box_draw", "6"]
+    plain = ge._build_cfg(ge._parse_args(argv))
+    on = ge._build_cfg(ge._parse_args(argv + ["--categories"]))
+    assert "--categories" in ge._eval_command(on, draw)
+    assert "--categories" not in ge._eval_command(plain, draw)
+    assert ge.ms7f_block(plain) == ge.MS7F_OFF and ge.ms7f_block(on)["categories"] is True
+    path = tmp_path / "gate" / "eval_000.json"
+    path.parent.mkdir(parents=True)
+
+    def hit(gate_cfg, **extra):
+        served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+        payload = _heap_payload(draw, inference=served, desk_boxes=8, **extra)
+        payload["ms7e"] = ge.MS7E_OFF | {"box_draw": 6}
+        path.write_text(json.dumps(payload))
+        return ge._cached_payload(gate_cfg, draw) is not None
+
+    # An MS7e payload (no block) ran with every MS7f switch off.
+    assert hit(plain) and hit(plain, ms7f=ge.MS7F_OFF) and not hit(plain, ms7f=ge.ms7f_block(on))
+    assert hit(on, ms7f=ge.ms7f_block(on)) and not hit(on) and not hit(on, ms7f=ge.MS7F_OFF)
+    no_draw = [a for a in argv if a not in ("--box_draw", "6")]
+    with pytest.raises(ValueError, match="needs --box_draw"):
+        ge._build_cfg(ge._parse_args(no_draw + ["--categories"]))
+    with pytest.raises(ValueError, match="need --heap_k > 0|needs --heap_k > 0"):
+        ge._build_cfg(ge._parse_args(_argv(tmp_path) + ["--categories", "--box_draw", "6"]))
+    ledger = _fake_ledger(tmp_path)
+    cfg = _cfg(tmp_path, ledger, processes=1, backend="mujoco", heap_k=50, box_draw=6)
+    cfg.ms7f = {"categories": True}
+    results = ge.run_gate(cfg, lambda d: _heap_payload(d), lambda: _FakeServer([]))
+    assert results["ms7f"] == {"categories": True}

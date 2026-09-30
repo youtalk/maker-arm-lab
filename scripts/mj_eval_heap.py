@@ -30,10 +30,13 @@ from maker_arm_lab.core import oracle, perception
 from maker_arm_lab.core.batch_loop import (
     PARTS_SPLITS,
     add_ms7e_arguments,
+    add_ms7f_arguments,
     check_ms7e,
+    check_ms7f,
     heap_classes,
     heap_parts,
     ms7e_switches,
+    ms7f_switches,
 )
 from maker_arm_lab.core.eval_loop import EvalFailure
 from maker_arm_lab.core.heap_oracle import HeapOracle
@@ -109,6 +112,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         "rung 1, 4 for rung 2); 0 is the MS6 scene",
     )
     add_ms7e_arguments(parser)
+    add_ms7f_arguments(parser)
     parser.add_argument(
         "--deep_box_floor",
         action="store_true",
@@ -322,6 +326,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     if args.heap_k <= 0:
         parser.error("--heap_k must be positive: this client evaluates heap episodes only")
     check_ms7e(parser, args)
+    check_ms7f(parser, args)
     if args.desk_boxes < 0:
         parser.error("--desk_boxes must be 0 or more")
     if args.perceived:
@@ -398,9 +403,13 @@ def main(argv=None) -> int:
             deep_box_floor=args.deep_box_floor,
             release_lean=args.release_lean,
             round_physics="round" in args.families,  # MS7e design section 6.4
+            categories=args.categories,
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
+        # MS7f --categories: the teacher's record of what it released per box, one per env and
+        # shared by the oracle of every cycle, since the loop runs one episode per env.
+        loads = [[0.0] * env.desk_boxes for _ in range(env.num_envs)]
 
         def factory(i, bl, episode_draw):
             return HeapOracle(
@@ -415,6 +424,8 @@ def main(argv=None) -> int:
                 tray=env.tray,
                 tray_lean_deg=env.tray_lean_deg,
                 wall_band_cont=args.wall_band_cont,
+                box_sets=env.part_box_sets(i),
+                box_load=loads[i],
             )
 
         rig = OracleRig(
@@ -477,6 +488,7 @@ def main(argv=None) -> int:
         payload["tray"] = args.tray
         payload["tray_lean"] = args.tray_lean
         payload["ms7e"] = ms7e_switches(args)
+        payload["ms7f"] = ms7f_switches(args)
         payload["deep_box_floor"] = args.deep_box_floor
         if args.passenger_check:
             # Each rejected LIFT's passengers, as indices into payload["parts"].

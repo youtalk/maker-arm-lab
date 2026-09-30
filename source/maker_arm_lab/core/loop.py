@@ -911,6 +911,7 @@ class Cycle:
     target_xy: tuple | None = None  # m, its perceived centre xy
     seen_class: str | None = None  # its class perceived overhead
     box: int = -1  # the box served now: the overhead class's, then the class drawn at a lift
+    volume: float = 0.0  # m^3, the bounding volume the loop books into ``box`` at a release end
     # ``perceived_release``: a lifted hold ended over a box (True) or off one (False), and the
     # jaws have not yet opened to ``SELECT_OPEN_FRACTION``; None with no release under way.
     release_over: bool | None = None
@@ -960,6 +961,9 @@ class EnvState:
     look_since: int | None = None  # the step a streak of empty selections began (look_again)
     wrist: perception.WristCamera | None = None  # ``wrist_fix``: this env's wrist look
     forces: list[float] = field(default_factory=list)  # MS7d: N, each approach step's force
+    # MS7f --categories: m^3 per desk box, the volume this loop's own cycles released there
+    # (``desk_boxes.lighter_box`` picks between a category's two boxes by it), never the truth.
+    box_load: list[float] = field(default_factory=list)
 
 
 def _layout_of(rig, i: int):
@@ -1293,6 +1297,8 @@ def box_census(
     census: list[dict],
     num_boxes: int,
     class_names=BASE_CLASSES,
+    keys=None,
+    sets=None,
 ) -> dict:
     """The desk-box rows of one episode's end (MS7a design, the census). Pure.
 
@@ -1303,11 +1309,17 @@ def box_census(
     Returns the rows: parts stowed and parts in total per class (every one of the active
     ``class_names``), per family of the heap (MS7e design section 8.1) and per box, the
     wrong-box parts and the episode's box count.
+
+    ``keys`` is each part's class (``part_class`` by default; its category under MS7f
+    ``--categories``) and ``sets`` each part's boxes (``destination`` alone by default): a part
+    at rest in any of them is in its own box, and its box row is the one it rests in.
     """
+    keys = keys or [part_class(p) for p in parts]
+    sets = sets or [(int(d),) for d in destination]
     wrong = [
         b
         for b in range(len(parts))
-        if int(resting_box[b]) >= 0 and int(resting_box[b]) != int(destination[b])
+        if int(resting_box[b]) >= 0 and int(resting_box[b]) not in sets[b]
     ]
     for b in wrong:
         for j in reversed(range(len(classes))):
@@ -1319,7 +1331,8 @@ def box_census(
     by_family = {f: {"stowed": 0, "total": 0} for f in FAMILIES if f in present}
     by_box = [{"stowed": 0, "total": 0} for _ in range(num_boxes)]
     for b, part in enumerate(parts):
-        rows = (by_class[part_class(part)], by_family[part.family], by_box[int(destination[b])])
+        box = int(resting_box[b]) if int(resting_box[b]) in sets[b] else sets[b][0]
+        rows = (by_class[keys[b]], by_family[part.family], by_box[box])
         for row in rows:
             row["total"] += 1
             row["stowed"] += int(bool(stowed[b]))
@@ -1388,6 +1401,13 @@ def truth_reads(env, per_part: bool) -> TruthReads:
     )
 
 
+def part_keys(env) -> tuple[str, ...]:
+    """Each part's class as the env sorts it: ``env.part_classes`` (its category under MS7f
+    ``--categories``), or ``part_class`` on an env without it."""
+    keys = getattr(env, "part_classes", None)
+    return tuple(keys) if keys else tuple(part_class(p) for p in env.parts)
+
+
 def perception_truth(env, rig, i: int) -> perception.Truth:
     """``perceived``: the one truth read of a selection, what ``Perceiver.perceive`` turns into
     what the overhead camera reports. Every part's live centre and orientation, the catalog
@@ -1399,7 +1419,7 @@ def perception_truth(env, rig, i: int) -> perception.Truth:
         pos=torch.stack([d.root_pos_w[i] - origin for d in data]).to("cpu"),
         quat=torch.stack([d.root_quat_w[i] for d in data]).to("cpu"),
         sizes=torch.tensor([p.size for p in env.parts]),
-        classes=tuple(part_class(p) for p in env.parts),
+        classes=part_keys(env),
         tool_xy=tuple(rig.pick_point(i)[:2].tolist()),
         closing_axes=tuple(p.closing_axes for p in env.parts),
     )
@@ -1413,7 +1433,7 @@ def wrist_class(env, i: int) -> tuple[str | None, int]:
     left = env.scene["finger_left_brick"].data.force_matrix_w[i : i + 1].norm(dim=-1).squeeze(1)
     right = env.scene["finger_right_brick"].data.force_matrix_w[i : i + 1].norm(dim=-1).squeeze(1)
     b = int(checker.held_brick_from_forces(left, right, min_force=HELD_MIN_FORCE)[0])
-    return (None, b) if b < 0 else (part_class(env.parts[b]), b)
+    return (None, b) if b < 0 else (part_keys(env)[b], b)
 
 
 def wrist_look_truth(env, rig, i: int, b: int) -> tuple[float, float, float, bool]:
@@ -1563,6 +1583,8 @@ def _left_parts(selector, pos: torch.Tensor, in_bin: torch.Tensor) -> list:
 def _close_cycle(st: EnvState, reason: str, stowed: list[int], step: int, scene) -> None:
     cycle = st.cycle
     ok = reason == "stowed"
+    if reason in ("stowed", "released", "placed") and cycle.box >= 0:
+        st.box_load[cycle.box] += cycle.volume  # the loop's belief: its part went there
     st.outcomes.append(ok)
     st.reasons.append(reason)
     st.steps.append(step - cycle.start_step)
@@ -1687,6 +1709,16 @@ def rollout(
         # The loop runs one episode per env: its truth, before an env's own end resets it.
         destination = torch.as_tensor(env.destination_bins).clone().to("cpu")
         class_to_box = [dict(zip(class_names, map(int, row))) for row in env.class_to_box]
+        # MS7f --categories (design section 6.2): every box of each class, the first one
+        # class_to_box's, and each part's. With the switch off each class and each part has its
+        # one box, read where the loop always read them.
+        keys = part_keys(env)
+        if getattr(env, "categories", False):
+            class_boxes = [dict(zip(class_names, row)) for row in env.class_boxes]
+            part_sets = [[own[c] for c in keys] for own in class_boxes]
+        else:
+            class_boxes = [{c: (b,) for c, b in row.items()} for row in class_to_box]
+            part_sets = [[(int(b),) for b in row] for row in destination]
         # MS7e: the episode's own box count, the boxes the scene built without the box draw.
         box_count = [
             int(n) for n in getattr(env, "box_count", [len(p) for p in env.desk_box_poses])
@@ -1763,6 +1795,8 @@ def rollout(
     # pre-selection at hand-back (``_select``). Phase B design 5.2 pinned the loop's target on
     # those frames; campaign n (2026-09-22) reverses it.
     states = [EnvState(selector=_selector(rig, i)) for i in range(num_envs)]
+    for st in states:
+        st.box_load = [0.0] * (len(env.desk_box_poses[0]) if per_part else 0)
     if part_failures:
         for st in states:
             st.selector.failure_scope = "part"
@@ -1789,7 +1823,7 @@ def rollout(
         # The episode's perception per env. The box poses are the last truth the setup reads:
         # the perceived ones replace them in the served row, the selector's any-box filter and
         # the cycle end. The selector books failures by position and reads no destination.
-        true_classes = [part_class(p) for p in env.parts]  # the metric's wrong-class counts
+        true_classes = list(part_keys(env))  # the metric's wrong-class counts
         lean = float(getattr(env, "tray_lean_deg", 0.0)) if getattr(env, "tray", False) else 0.0
         poses = env.desk_box_poses.copy()
         drawn = bool(getattr(env, "box_draw", 0))  # MS7e: each box's size is perceived too
@@ -2027,7 +2061,8 @@ def rollout(
                 st.cycle.target_xy = seen.centre[:2]
                 st.cycle.seen_class = seen.cls
                 st.cycle.seen_yaw = float(scene.brick_yaw[target])
-                st.cycle.box = class_to_box[i][seen.cls]
+                st.cycle.box = desk_boxes.lighter_box(class_boxes[i][seen.cls], st.box_load)
+                st.cycle.volume = math.prod(seen.size)
                 env.marker_points[i] = torch.tensor(seen.centre)
                 env.set_context_box(i, st.cycle.box)
                 st.counts["selections"] += 1
@@ -2039,7 +2074,9 @@ def rollout(
             else:
                 env.target_part[i] = target
                 if per_part:
-                    env.set_context_box(i, int(env.destination_bins[i, target]))
+                    st.cycle.box = desk_boxes.lighter_box(part_sets[i][target], st.box_load)
+                    st.cycle.volume = math.prod(env.parts[target].size)
+                    env.set_context_box(i, st.cycle.box)
             if ctx_target is not None:
                 ctx_target[i] = target_context(scene.brick_pos[target], st.selector.grasp)
             replan[i] = True
@@ -2251,10 +2288,14 @@ def rollout(
                     # the jaws, the target or not; nothing between them keeps the row.
                     true_cls, part = wrist_class(env, i)
                     views = st.perceiver.views  # ``class_views``: a third view on a disagreement
+                    lighter = {
+                        c: desk_boxes.lighter_box(own, st.box_load)
+                        for c, own in class_boxes[i].items()
+                    }
                     drawn, taken, box = lift_class_box(
                         true_cls,
                         partial(st.perceiver.classify, part=part),
-                        class_to_box[i],
+                        lighter,
                         c.box,
                         seen=c.seen_class,
                         third=None if views is None else partial(views.view, part),
@@ -2284,7 +2325,9 @@ def rollout(
                 # own box, and its marker and box row follow the part (adopt_held_part).
                 c.adopted = h
                 env.target_part[i] = h
-                env.set_context_box(i, int(destination[i, h]))
+                c.box = desk_boxes.lighter_box(part_sets[i][h], st.box_load)
+                c.volume = math.prod(env.parts[h].size)
+                env.set_context_box(i, c.box)
                 replan[i] = True
         # The MS7c hold census: what the detector read at the top of this step (the jaw gap
         # measured then against the command the last step sent, whoever drives) on the cycle
@@ -2423,8 +2466,13 @@ def rollout(
                 st.census,
                 box_count[i],
                 class_names,
+                keys,
+                part_sets[i],
             )
             boxes["class_to_box"] = class_to_box[i]
+            if getattr(env, "categories", False):
+                boxes["class_boxes"] = {c: list(own) for c, own in class_boxes[i].items()}
+                boxes["stowed_by_category"] = boxes["stowed_by_class"]
             if rounds is not None:
                 boxes["box_draw_rounds"] = int(rounds[i])
                 boxes.update(geometry[i])
@@ -2529,6 +2577,7 @@ def _sum_box_rows(episodes: list[dict]) -> dict:
     by_family: dict[str, dict] = {}
     by_count: dict[str, dict] = {}
     by_box: list[dict] = []
+    by_category: dict[str, dict] = {}
     for ep in episodes:
         count_rows = {
             str(ep["box_count"]): {"stowed": ep["bricks_stowed"], "total": ep["num_bricks"]}
@@ -2537,6 +2586,7 @@ def _sum_box_rows(episodes: list[dict]) -> dict:
             (by_class, ep["stowed_by_class"]),
             (by_family, ep["stowed_by_family"]),
             (by_count, count_rows),
+            (by_category, ep.get("stowed_by_category", {})),
         ):
             for name, row in rows.items():
                 total = table.setdefault(name, {"stowed": 0, "total": 0})
@@ -2554,6 +2604,7 @@ def _sum_box_rows(episodes: list[dict]) -> dict:
         "stowed_by_box": by_box,
         "wrong_box_parts": sum(ep["wrong_box_parts"] for ep in episodes),
         "wrong_box_cycles": sum(ep["cycle_classes"].count("wrong_box") for ep in episodes),
+        **({"stowed_by_category": by_category} if by_category else {}),
     }
 
 

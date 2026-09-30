@@ -35,8 +35,10 @@ from maker_arm_lab.core import perception
 from maker_arm_lab.core.batch_loop import (
     add_batch_arguments,
     add_ms7e_arguments,
+    add_ms7f_arguments,
     build_run,
     check_ms7e,
+    check_ms7f,
     heap_classes,
     heap_episode_length_s,
     heap_parts,
@@ -80,6 +82,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = _TokenEmittingParser(description=__doc__)
     add_batch_arguments(parser)
     add_ms7e_arguments(parser)
+    add_ms7f_arguments(parser)
     parser.add_argument(
         "--perceived",
         action="store_true",
@@ -107,6 +110,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         if not (0 <= getattr(args, name) < 2**32):
             parser.error(f"--{name} is outside numpy's seed range (0 <= seed < 2**32)")
     check_ms7e(parser, args)
+    check_ms7f(parser, args)
     if args.perceived and (args.heap_k <= 0 or args.desk_boxes <= 0):
         parser.error(
             "--perceived records a heap sorted into desk boxes: it needs --heap_k > 0 "
@@ -151,6 +155,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         deep_box_floor=args.deep_box_floor,
         release_lean=args.release_lean,
         round_physics="round" in args.families,  # MS7e design section 6.4
+        categories=args.categories,
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)
@@ -172,6 +177,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
                 tray=env.tray,
                 tray_lean_deg=env.tray_lean_deg,
                 wall_band_cont=args.wall_band_cont,
+                box_sets=env.part_box_sets(i),  # MS7f: one teacher, one load record an episode
             )
 
     perceivers = None

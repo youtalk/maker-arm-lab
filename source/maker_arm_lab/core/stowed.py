@@ -148,12 +148,18 @@ def per_brick_stowed(env, max_speed: float = 0.02) -> torch.Tensor:
     interior half extents; the heap's box is taller than the rim so a pile over it still
     counts (design H6). A (N, K) ``destination_bins`` grades part b of env i against its own
     desk box ``destination_bins[i, b]``, in that box's yawed frame (MS7a design, desk boxes).
+    An env's ``destination_mask`` (N, K, M) bool, the MS7f category map's, grades part b
+    against every box it marks: any box of the part's category (MS7f design section 6.2).
     """
     pos, vel = _brick_states(env)
     device = str(env.device)
     destination = getattr(env, "destination_bins", None)
     if destination is not None and torch.as_tensor(destination).dim() == 2:
         boxes, half = env_desk_boxes(env, device)
+        allowed = getattr(env, "destination_mask", None)
+        if allowed is not None:
+            allowed = torch.as_tensor(allowed).to(device)
+            return checker.parts_at_rest_in_box_sets(pos, vel, boxes, half, allowed, max_speed)
         ids = torch.as_tensor(destination).to(device)
         return checker.parts_at_rest_in_own_boxes(pos, vel, boxes, half, ids, max_speed)
     if destination is None:
