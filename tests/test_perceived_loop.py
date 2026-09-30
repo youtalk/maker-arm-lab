@@ -41,6 +41,7 @@ def _env_and_rig(
     tray_lean=0.0,
     wall_band_cont=False,
     categories=False,
+    **ms7f,
 ):
     draw = sample_run_draw(random.Random(5))
     draw["slot_colors"] = (0, 1, 2, 3)
@@ -58,6 +59,7 @@ def _env_and_rig(
         class_names=class_names,
         box_draw=box_draw,
         categories=categories,
+        **ms7f,
     )
     env.reset(seed=11)
     if not box_draw:
@@ -80,6 +82,7 @@ def _env_and_rig(
             wall_band_cont=wall_band_cont,
             box_sets=env.part_box_sets(i),
             box_load=loads[i],
+            tray_wall_height=env.tray_wall_height,
         )
 
     rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)
@@ -790,7 +793,7 @@ def test_a_rake_that_hands_back_over_its_part_looks_again_and_finds_it(monkeypat
     for looks in (False, True):
         env, rig = _one_stuck_brick(monkeypatch)
         if not looks:
-            monkeypatch.setattr(loop, "look_again", lambda tool_xy, lean_deg, streak: False)
+            monkeypatch.setattr(loop, "look_again", lambda *args: False)
         payload = _rollout(
             env, rig, _Home(), budget=3, perceived=True, noise_scales=ZERO, scripted_rake=True
         )
@@ -1064,8 +1067,12 @@ TRUTH_DECISION_READS = (
 """The loop's truth reads besides the three accessors: what its decisions read before MS7c."""
 
 
-def _teacher_scene(monkeypatch, class_names=parts.BASE_CLASSES, box_draw=0, categories=False):
-    env, rig = _env_and_rig(class_names=class_names, box_draw=box_draw, categories=categories)
+def _teacher_scene(
+    monkeypatch, class_names=parts.BASE_CLASSES, box_draw=0, categories=False, **env_kwargs
+):
+    env, rig = _env_and_rig(
+        class_names=class_names, box_draw=box_draw, categories=categories, **env_kwargs
+    )
     _place(env, SPREAD)
     switches = {
         "select_at_release": True,
@@ -1097,8 +1104,16 @@ def _ms7f_scene(monkeypatch):
     the six categories over the drawn boxes, a category's second boxes chosen by the loop's
     own release record (MS7f design section 6.2). A track that readies a loop switch adds it
     here, so the no-truth test runs with every ready switch on (design section 12.2)."""
-    assert batch_loop.MS7F_READY == {"categories"}, "turn the new switch on in this scene"
-    return _teacher_scene(monkeypatch, parts.active_categories(), box_draw=6, categories=True)
+    assert batch_loop.MS7F_READY == {"categories", "deep_tray"}, "turn it on in this scene"
+    return _teacher_scene(
+        monkeypatch,
+        parts.active_categories(),
+        box_draw=6,
+        categories=True,
+        tray=True,
+        tray_lean=30.0,
+        deep_tray=True,
+    )
 
 
 def _thin_snap_scene(monkeypatch):

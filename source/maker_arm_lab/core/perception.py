@@ -207,6 +207,9 @@ class Truth:
     classes: Sequence[str]  # (K,) PART_CLASSES names
     tool_xy: tuple[float, float]  # the tool point the arm hides parts around
     closing_axes: Sequence[tuple[int, ...]] = ()  # (K,) catalog closing axes; () is BOX_AXES
+    # MS7f: the parts parked off the desk (a refill's waiting parts, an emptied box's parts).
+    # They draw like any part, so the streams stay paired, and are never detected.
+    parked: frozenset[int] = frozenset()
 
 
 def covered(
@@ -352,7 +355,7 @@ class Perceiver:
             dsize = [s["size"] * SIZE_SIGMA_M * self._gauss() for _ in range(3)]
             missed = self.rng.random() < miss
             cls = self.classify(truth.classes[b], b)
-            if missed or b in hidden:
+            if missed or b in hidden or b in truth.parked:
                 continue
             dsize[int(grasp.body_axes_world(quat[b])[:, 2].abs().argmax())] *= 2.0
             turn = (math.cos(dyaw / 2.0), 0.0, 0.0, math.sin(dyaw / 2.0))

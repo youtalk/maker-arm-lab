@@ -137,13 +137,14 @@ class Wall:
     box: bool = False
 
 
-def tray_walls(lean_deg: float = 0.0) -> tuple[Wall, ...]:
-    """The four walls of ``layout.tray_static_boxes`` for the grasp model, leaning outward by
+def tray_walls(lean_deg: float = 0.0, height: float = layout.TRAY_WALL_HEIGHT) -> tuple[Wall, ...]:
+    """The four walls of ``layout.tray_static_boxes`` (``height`` high, the MS7f deep tray's
+    ``layout.DEEP_TRAY_WALL_HEIGHT`` or today's) for the grasp model, leaning outward by
     ``lean_deg`` when the scene builds ``layout.tray_lean_boxes``: the footprint is the
     vertical wall's, whose inner face is the leaning wall's foot."""
     walls = []
     cx, cy = layout.TRAY_CENTER
-    for _, center, size in layout.tray_static_boxes():
+    for _, center, size in layout.tray_static_boxes(height):
         corners = [
             (center[0] + sx * size[0] / 2, center[1] + sy * size[1] / 2)
             for sx in (-1.0, 1.0)

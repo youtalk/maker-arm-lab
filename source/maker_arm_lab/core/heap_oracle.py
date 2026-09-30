@@ -156,6 +156,7 @@ class HeapOracle(oracle.EnvOracle):
         wall_band_cont: bool = False,
         box_sets: Sequence[Sequence[int]] | None = None,
         box_load: list[float] | None = None,
+        tray_wall_height: float = layout.TRAY_WALL_HEIGHT,
     ):
         """``destination`` is the MS6 bin index, or with ``boxes`` (one (x, y, yaw) per desk
         box) the box index of every part, (K,), or one index for them all. ``box_sizes`` is
@@ -165,11 +166,13 @@ class HeapOracle(oracle.EnvOracle):
         ``--categories``, ``MjLegoSortEnv.part_box_sets``) is every box of each part's category,
         the first one ``destination``'s; ``box_load`` is the volume released per box, the
         record ``release_box`` reads and each RELEASE adds to, shared by the oracles of one
-        episode (the heap loop's oracle driver builds one per cycle), a fresh one when None."""
+        episode (the heap loop's oracle driver builds one per cycle), a fresh one when None.
+        ``tray_wall_height`` is the tray walls' height, ``layout.DEEP_TRAY_WALL_HEIGHT`` for
+        the MS7f deep tray (MS7f design 5.3)."""
         super().__init__(bl, len(parts), draw, induction=induction, rng=rng)
         # MS7a design, the tray: the heap lies inside four walls that ``core.grasp`` ranks
         # against (``grasp.wall_allows``). Off, the heap lies on the bare desk as in MS6.
-        self.walls = grasp.tray_walls(tray_lean_deg) if tray else ()
+        self.walls = grasp.tray_walls(tray_lean_deg, tray_wall_height) if tray else ()
         self.hold_band = grasp.CONT_HOLD_BAND if wall_band_cont else grasp.JAW_HOLD_BAND
         self.parts = tuple(parts)
         self.boxes = tuple(tuple(float(v) for v in box) for box in boxes)

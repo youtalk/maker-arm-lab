@@ -162,6 +162,8 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         release_lean=args.release_lean,
         round_physics="round" in args.families,  # MS7e design section 6.4
         categories=args.categories,
+        deep_tray=args.deep_tray,
+        tray_refill=args.tray_refill,
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)
@@ -184,6 +186,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
                 tray_lean_deg=env.tray_lean_deg,
                 wall_band_cont=args.wall_band_cont,
                 box_sets=env.part_box_sets(i),  # MS7f: one teacher, one load record an episode
+                tray_wall_height=env.tray_wall_height,
             )
 
     perceivers = None

@@ -330,13 +330,15 @@ def build_spec(
     deep_box_floor: bool = False,
     camera_back: float = 0.0,
     round_physics: bool = False,
+    tray_wall_height: float = layout.TRAY_WALL_HEIGHT,
 ) -> mujoco.MjSpec:
     """The MjSpec for one run draw; ``compile_model`` turns it into a model and handles.
 
     ``parts`` (MS6) replaces the ``num_bricks`` identical box bricks with one body per part.
     A heap lies on the bare desk: there is no dish (owner decision 2026-09-18). ``tray``
     (MS7a design, the tray) adds the four walls of ``layout.tray_static_boxes``, or with
-    ``tray_lean_deg`` > 0 the leaning walls of ``layout.tray_lean_boxes``. ``deep_box_floor``
+    ``tray_lean_deg`` > 0 the leaning walls of ``layout.tray_lean_boxes``, each
+    ``tray_wall_height`` high (the MS7f deep tray's ``layout.DEEP_TRAY_WALL_HEIGHT``). ``deep_box_floor``
     (MS7e flat track) extends each desk box floor's collider under the desk top by
     ``desk_boxes.DESK_BOX_FLOOR_DEPTH``, so a thin part cannot drop through it.
 
@@ -458,10 +460,11 @@ def build_spec(
         )
     walls = []
     if tray:
+        h = tray_wall_height
         walls = (
-            layout.tray_lean_boxes(tray_lean_deg)
+            layout.tray_lean_boxes(tray_lean_deg, h)
             if tray_lean_deg > 0.0
-            else [(*box, (1.0, 0.0, 0.0, 0.0)) for box in layout.tray_static_boxes()]
+            else [(*box, (1.0, 0.0, 0.0, 0.0)) for box in layout.tray_static_boxes(h)]
         )
     for name, center, size, quat in walls:
         scene_geoms.append(
@@ -617,6 +620,7 @@ def build_model(
     deep_box_floor: bool = False,
     camera_back: float = 0.0,
     round_physics: bool = False,
+    tray_wall_height: float = layout.TRAY_WALL_HEIGHT,
 ) -> tuple[mujoco.MjModel, SceneHandles]:
     """One call for callers that do not need to edit the spec."""
     if parts is not None:
@@ -632,6 +636,7 @@ def build_model(
         deep_box_floor=deep_box_floor,
         camera_back=camera_back,
         round_physics=round_physics,
+        tray_wall_height=tray_wall_height,
     )
     return compile_model(spec, num_bricks)
 

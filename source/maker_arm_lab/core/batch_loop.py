@@ -248,7 +248,7 @@ deep_tray, tray_refill and box_empty track H's (design section 5); classifier an
 passenger_drop track C's (design section 6); transport_speed track S's (design section 8), the
 teacher walk's pace. The gate supervisor keeps a stdlib copy (``scripts/run_gate_eval.py``),
 pinned by a test."""
-MS7F_READY: frozenset[str] = frozenset({"categories"})
+MS7F_READY: frozenset[str] = frozenset({"categories", "deep_tray"})
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
 a usage error with the script's fail token (MS7f design section 12.2). Each track adds its
 switch in the commit that brings the behaviour; the supervisor's copy is pinned by a test."""
@@ -313,6 +313,9 @@ def check_ms7f(parser, args, ready: frozenset[str] = MS7F_READY) -> None:
             parser.error(f"--{name} is not built on this commit")
     if getattr(args, "categories", False) and not getattr(args, "box_draw", 0):
         parser.error("--categories maps the categories onto the drawn boxes: it needs --box_draw")
+    for name in ("deep_tray", "tray_refill"):  # MS7f track H: the tray's two arms
+        if getattr(args, name, False) and not getattr(args, "tray", False):
+            parser.error(f"--{name} changes the tray: it needs --tray")
 
 
 def ms7f_switches(args) -> dict:

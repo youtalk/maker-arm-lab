@@ -408,6 +408,8 @@ def main(argv=None) -> int:
             release_lean=args.release_lean,
             round_physics="round" in args.families,  # MS7e design section 6.4
             categories=args.categories,
+            deep_tray=args.deep_tray,
+            tray_refill=args.tray_refill,
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
@@ -430,6 +432,7 @@ def main(argv=None) -> int:
                 wall_band_cont=args.wall_band_cont,
                 box_sets=env.part_box_sets(i),
                 box_load=loads[i],
+                tray_wall_height=env.tray_wall_height,
             )
 
         rig = OracleRig(

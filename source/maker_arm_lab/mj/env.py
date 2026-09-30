@@ -125,6 +125,10 @@ DESK_COLOR_RANGE = {"r": (0.3, 0.7), "g": (0.25, 0.55), "b": (0.2, 0.45)}
 BRICK_MASS_SCALE = (0.7, 1.3)
 BRICK_FRICTION_SCALE = (0.8, 1.2)  # Isaac's static_friction_range; MuJoCo has one coefficient
 HEAP_PARK_X = 3.0
+PARK_Z = 1.0
+"""m: the height a parked part (MS7f: a refill's waiting part, an emptied box's part) floats at,
+at (HEAP_PARK_X, 0.1 * its index): off the desk, over ``heap_oracle.CANDIDATE_MAX_Z``, with its
+colliders off and its gravity compensated, so it touches nothing and stays still."""
 BOX_PARK_X = -1.0
 """Where a desk box the episode's count leaves over waits (m along x, behind the arm and off the
 desk), as the scene builds every box before the first reset."""
@@ -289,6 +293,8 @@ class MjLegoSortEnv:
         release_lean: bool = False,
         round_physics: bool = False,
         categories: bool = False,
+        deep_tray: bool = False,
+        tray_refill: bool = False,
     ):
         # MS6 phase B design 5.4: "binary" is the raw >= 0 opens contract every corpus before
         # phase B was recorded with; "continuous" reads action[:, 6] as the jaw gap in meters.
@@ -324,6 +330,15 @@ class MjLegoSortEnv:
         if tray_lean_deg and not tray:
             raise ValueError("tray_lean_deg leans the tray's walls; it needs tray=True")
         self.tray_lean_deg = float(tray_lean_deg)
+        if (deep_tray or tray_refill) and not tray:
+            raise ValueError("deep_tray and tray_refill change the tray; they need tray=True")
+        # MS7f design 5.3: H1, the deep tray, stacks the whole heap over its pile; H1',
+        # the refill, starts with layout.TRAY_REFILL_START parts in and parks the rest.
+        self.deep_tray = deep_tray
+        self.tray_refill = tray_refill
+        self.tray_wall_height = (
+            layout.DEEP_TRAY_WALL_HEIGHT if deep_tray else layout.TRAY_WALL_HEIGHT
+        )
         if deep_box_floor and desk_boxes <= 0:
             raise ValueError("deep_box_floor deepens the desk box floors; it needs desk_boxes")
         self.deep_box_floor = deep_box_floor
@@ -431,12 +446,17 @@ class MjLegoSortEnv:
             deep_box_floor=deep_box_floor,
             camera_back=self.camera_back,
             round_physics=round_physics,
+            tray_wall_height=self.tray_wall_height,
         )
         # The part each part geom belongs to: a jaw on a collision stud (round_physics) holds
         # that part as surely as a jaw on its collider.
         self._geom_part = {g: b for b, geoms in enumerate(self.handles.body_geoms) for g in geoms}
         self.models = [base_model] + [copy.copy(base_model) for _ in range(num_envs - 1)]
         self.datas = [mujoco.MjData(m) for m in self.models]
+        # A parked part's colliders and gravity come back from these (``_unpark``).
+        self._contype = base_model.geom_contype.copy()
+        self._conaffinity = base_model.geom_conaffinity.copy()
+        self._gravcomp = base_model.body_gravcomp.copy()
         self._nominal_inertia = base_model.body_inertia[list(self.handles.brick_bodies)].copy()
         self._nominal_mass = base_model.body_mass[list(self.handles.brick_bodies)].copy()
         # A part's colliders are every geom of its body that collides, studs aside: one, or an
@@ -490,6 +510,10 @@ class MjLegoSortEnv:
                 self.stow_half_extents = torch.tensor(STOW_HALF_EXTENTS)
             self.target_part = torch.full((num_envs,), -1, dtype=torch.int16)
             self.marker_points = torch.full((num_envs, 3), math.nan)
+            # MS7f: the parts parked now (a refill's waiting parts, an emptied box's parts) and
+            # each env's waiting parts in their drop order (``tray_refill``).
+            self.parked = torch.zeros(num_envs, num_bricks, dtype=torch.bool)
+            self.pool: list[list[int]] = [[] for _ in range(num_envs)]
             if cameras:
                 self._depth = np.zeros((num_envs, 224, 224), dtype=np.uint16)
                 self.obs_buf["images"]["overhead_depth"] = torch.from_numpy(self._depth)
@@ -905,7 +929,7 @@ class MjLegoSortEnv:
             # MS6 rework section 6: heap mode has one bin, at y = 0.0. The release target,
             # the grader's bin centre and the built box are then the same box.
             self.destination_bins[i] = 0
-        z_top = layout.HEAP_DROP_Z_MIN + layout.HEAP_DROP_Z_PER_PART * k
+        self._unpark(i, range(k))  # the last episode's parked parts
         # Hold the arm where the reset left it while the heap settles; nothing is recorded.
         d.ctrl[list(h.arm_actuators)] = d.qpos[list(h.joint_qpos[:6])]
         d.ctrl[list(h.gripper_actuators)] = GRIPPER_OPEN_POS
@@ -917,10 +941,48 @@ class MjLegoSortEnv:
             adr = h.brick_qpos[b]
             d.qpos[adr : adr + 3] = (HEAP_PARK_X, 0.1 * b, 0.0)
             d.qvel[h.brick_dof[b] : h.brick_dof[b] + 6] = 0.0
-        # Batches released HEAP_DROP_BATCH_STEPS apart, each over points clear of one another,
-        # so the parts pile up on the desk instead of being written into each other in the air.
-        for start in range(0, k, layout.HEAP_DROP_BATCH):
-            batch = list(range(start, min(start + layout.HEAP_DROP_BATCH, k)))
+        # MS7f H1': the first TRAY_REFILL_START parts drop, the rest wait parked for refills.
+        first = min(k, layout.TRAY_REFILL_START) if self.tray_refill else k
+        self.pool[i] = list(range(first, k))
+        self._park(i, self.pool[i])
+        self._drop_batches(i, list(range(first)), zone, stacked=self.deep_tray)
+        self._settle(i, stacked=self.deep_tray)
+
+    def _settle(self, i: int, stacked: bool) -> None:
+        """HEAP_SETTLE_STEPS of physics with the arm held. A stacked pile (the MS7f deep tray,
+        a refill) then settles on in HEAP_DROP_BATCH_STEPS chunks until no part in the tray
+        moves faster than layout.STACKED_SETTLE_SPEED, for at most STACKED_SETTLE_MAX_STEPS."""
+        m, d, h = self.models[i], self.datas[i], self.handles
+        mujoco.mj_step(m, d, nstep=layout.HEAP_SETTLE_STEPS)
+        extra = 0
+        while stacked and extra < layout.STACKED_SETTLE_MAX_STEPS:
+            speed = max(
+                (
+                    float(np.linalg.norm(d.qvel[h.brick_dof[b] : h.brick_dof[b] + 3]))
+                    for b, body in enumerate(h.brick_bodies)
+                    if not bool(self.parked[i, b]) and self._in_tray(d.xpos[body])
+                ),
+                default=0.0,
+            )
+            if speed <= layout.STACKED_SETTLE_SPEED:
+                break
+            mujoco.mj_step(m, d, nstep=layout.HEAP_DROP_BATCH_STEPS)
+            extra += layout.HEAP_DROP_BATCH_STEPS
+
+    def _drop_batches(self, i: int, parts: list[int], zone, stacked: bool) -> None:
+        """Release ``parts`` in batches HEAP_DROP_BATCH_STEPS apart, each over points clear of
+        one another, so the parts pile up instead of being written into each other in the air.
+
+        A part's centre starts uniform in [HEAP_DROP_Z_MIN, HEAP_DROP_Z_MIN +
+        HEAP_DROP_Z_PER_PART * len(parts)]. ``stacked`` (the MS7f deep tray and the refill)
+        starts it instead with its lowest point up to STACKED_DROP_Z_SPAN over the top of the
+        pile in the tray so far (``_pile_top``): a 150-part heap reaches over that fixed band,
+        and a part started inside the pile is flung out of the tray."""
+        m, d, h = self.models[i], self.datas[i], self.handles
+        z_top = layout.HEAP_DROP_Z_MIN + layout.HEAP_DROP_Z_PER_PART * len(parts)
+        for start in range(0, len(parts), layout.HEAP_DROP_BATCH):
+            batch = parts[start : start + layout.HEAP_DROP_BATCH]
+            self._unpark(i, batch)
             points = layout.sample_heap_batch(
                 self._rng,
                 self.bin_layouts[i],
@@ -928,14 +990,92 @@ class MjLegoSortEnv:
                 zone=zone,
                 tray=self.tray,
             )
+            top = self._pile_top(i) if stacked else 0.0
             for b, (x, y) in zip(batch, points):
+                if stacked:
+                    lo = max(layout.HEAP_DROP_Z_MIN, top + self.parts[b].half_diagonal)
+                    z = self._rng.uniform(lo, lo + layout.STACKED_DROP_Z_SPAN)
+                else:
+                    z = self._rng.uniform(layout.HEAP_DROP_Z_MIN, z_top)
                 adr = h.brick_qpos[b]
-                d.qpos[adr : adr + 3] = (x, y, self._rng.uniform(layout.HEAP_DROP_Z_MIN, z_top))
+                d.qpos[adr : adr + 3] = (x, y, z)
                 d.qpos[adr + 3 : adr + 7] = _random_quat(self._rng)
                 d.qvel[h.brick_dof[b] : h.brick_dof[b] + 6] = 0.0
             mujoco.mj_forward(m, d)
             mujoco.mj_step(m, d, nstep=layout.HEAP_DROP_BATCH_STEPS)
-        mujoco.mj_step(m, d, nstep=layout.HEAP_SETTLE_STEPS)
+
+    def _pile_top(self, i: int) -> float:
+        """m: the highest point of the pile in the tray, each part's centre plus its half
+        diagonal, over the parts in the tray (``layout.in_tray``); 0 with none."""
+        d, h = self.datas[i], self.handles
+        return max(
+            (
+                float(d.xpos[body][2]) + self.parts[b].half_diagonal
+                for b, body in enumerate(h.brick_bodies)
+                if not bool(self.parked[i, b]) and self._in_tray(d.xpos[body])
+            ),
+            default=0.0,
+        )
+
+    def _in_tray(self, pos) -> bool:
+        return layout.in_tray(pos, self.tray_lean_deg, self.tray_wall_height)
+
+    def _park(self, i: int, parts) -> None:
+        """MS7f: park ``parts`` of env ``i`` at (HEAP_PARK_X, 0.1 * b, PARK_Z), still, with
+        their colliders off and their gravity compensated, so they touch nothing and never
+        fall. The next ``mj_forward`` or step moves their geoms."""
+        m, d, h = self.models[i], self.datas[i], self.handles
+        for b in parts:
+            adr, dof = h.brick_qpos[b], h.brick_dof[b]
+            d.qpos[adr : adr + 7] = (HEAP_PARK_X, 0.1 * b, PARK_Z, 1.0, 0.0, 0.0, 0.0)
+            d.qvel[dof : dof + 6] = 0.0
+            m.body_gravcomp[h.brick_bodies[b]] = 1.0
+            geoms = list(h.body_geoms[b])
+            m.geom_contype[geoms] = 0
+            m.geom_conaffinity[geoms] = 0
+            self.parked[i, b] = True
+
+    def _unpark(self, i: int, parts) -> None:
+        """Give parked ``parts`` of env ``i`` their colliders and gravity back; they stay where
+        they are until the caller places them."""
+        m, h = self.models[i], self.handles
+        for b in parts:
+            if not bool(self.parked[i, b]):
+                continue
+            body, geoms = h.brick_bodies[b], list(h.body_geoms[b])
+            m.body_gravcomp[body] = self._gravcomp[body]
+            m.geom_contype[geoms] = self._contype[geoms]
+            m.geom_conaffinity[geoms] = self._conaffinity[geoms]
+            self.parked[i, b] = False
+
+    def tray_count(self, i: int) -> int:
+        """MS7f H1': the parts of env ``i`` in the tray (``layout.in_tray``), parked parts never.
+        The person who refills the tray counts them, so it reads the simulator."""
+        d, h = self.datas[i], self.handles
+        return sum(
+            1
+            for b, body in enumerate(h.brick_bodies)
+            if not bool(self.parked[i, b]) and self._in_tray(d.xpos[body])
+        )
+
+    def refill_tray(self, i: int) -> int:
+        """MS7f H1', a person's event between cycles (MS7f design 5.3): when
+        layout.TRAY_REFILL_AT or fewer parts are in env ``i``'s tray and parts still wait, drop
+        the next waiting parts in until TRAY_REFILL_START are in, or none wait. The drop is
+        stacked (``_drop_batches``) and settles (``_settle``) with the arm held where it is.
+        The event takes no control step: the episode's step count does not move. Returns
+        the parts dropped, 0 with no event."""
+        if not self.tray_refill or not self.pool[i]:
+            return 0
+        count = self.tray_count(i)
+        if count > layout.TRAY_REFILL_AT:
+            return 0
+        n = min(layout.TRAY_REFILL_START - count, len(self.pool[i]))
+        parts, self.pool[i] = self.pool[i][:n], self.pool[i][n:]
+        self._drop_batches(i, parts, None, stacked=True)
+        self._settle(i, stacked=True)
+        self._refresh([i], images=True)
+        return n
 
     def _initial_state(self, i: int) -> dict[str, np.ndarray]:
         d, h, bl = self.datas[i], self.handles, self.bin_layouts[i]

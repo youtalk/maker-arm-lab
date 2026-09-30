@@ -1113,27 +1113,29 @@ def perceived_cycle_end(cycle: Cycle, step: int, released: bool, over: bool) -> 
     return None
 
 
-def tool_clear_of_tray(xy, lean_deg: float) -> bool:
+def tool_clear_of_tray(xy, lean_deg: float, height: float = layout.TRAY_WALL_HEIGHT) -> bool:
     """``perceived``: does the tool at ``xy`` hide no part in the tray? Its distance to the tray
     interior footprint must be more than ``perception.TOOL_OCCLUSION_RADIUS_M``. The footprint
     is the interior at the rim, the wider of floor and rim: an outward lean of ``lean_deg``
-    widens the rim by ``TRAY_WALL_HEIGHT * tan(lean)`` on every side (``layout.tray_lean_boxes``).
-    With the tray off it is the heap's drop zone. Known geometry and the FK tool point only.
-    Pure."""
+    widens the rim of walls ``height`` high by ``height * tan(lean)`` on every side
+    (``layout.tray_rim_growth``). With the tray off it is the heap's drop zone. Known geometry
+    and the FK tool point only. Pure."""
     (x0, x1), (y0, y1) = layout.tray_bounds()
-    grow = layout.TRAY_WALL_HEIGHT * math.tan(math.radians(max(lean_deg, 0.0)))
+    grow = layout.tray_rim_growth(lean_deg, height)
     dx = max(x0 - grow - float(xy[0]), 0.0, float(xy[0]) - x1 - grow)
     dy = max(y0 - grow - float(xy[1]), 0.0, float(xy[1]) - y1 - grow)
     return math.hypot(dx, dy) > perception.TOOL_OCCLUSION_RADIUS_M
 
 
-def look_again(tool_xy, lean_deg: float, streak: int) -> bool:
+def look_again(
+    tool_xy, lean_deg: float, streak: int, height: float = layout.TRAY_WALL_HEIGHT
+) -> bool:
     """``perceived``: after a selection with neither a target nor a rake, wait and perceive
     again instead of ending the episode ``no_candidate``? Yes while the tool may hide a part
-    in the tray (``tool_clear_of_tray``) and the streak of empty selections, ``streak`` steps
-    old (0 at its first), is under the retreat wait's cap. Pure."""
+    in the tray (``tool_clear_of_tray``, walls ``height`` high) and the streak of empty
+    selections, ``streak`` steps old (0 at its first), is under the retreat wait's cap. Pure."""
     cap = int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET)
-    return not tool_clear_of_tray(tool_xy, lean_deg) and streak < cap
+    return not tool_clear_of_tray(tool_xy, lean_deg, height) and streak < cap
 
 
 def over_box(xy, boxes, sizes) -> bool:
@@ -1462,10 +1464,11 @@ def part_keys(env) -> tuple[str, ...]:
 def perception_truth(env, rig, i: int) -> perception.Truth:
     """``perceived``: the one truth read of a selection, what ``Perceiver.perceive`` turns into
     what the overhead camera reports. Every part's live centre and orientation, the catalog
-    sizes, classes and closing axes, and the tool point the arm hides parts around (the FK pick
-    point)."""
+    sizes, classes and closing axes, the tool point the arm hides parts around (the FK pick
+    point) and the MS7f parked parts (``env.parked``), which the camera never sees."""
     data = [env.scene[f"brick_{b}"].data for b in range(env.cfg.num_bricks)]
     origin = env.scene.env_origins[i]
+    parked = getattr(env, "parked", None)  # MS7f: parts off the desk, never detected
     return perception.Truth(
         pos=torch.stack([d.root_pos_w[i] - origin for d in data]).to("cpu"),
         quat=torch.stack([d.root_quat_w[i] for d in data]).to("cpu"),
@@ -1473,6 +1476,7 @@ def perception_truth(env, rig, i: int) -> perception.Truth:
         classes=part_keys(env),
         tool_xy=tuple(rig.pick_point(i)[:2].tolist()),
         closing_axes=tuple(p.closing_axes for p in env.parts),
+        parked=frozenset() if parked is None else frozenset(parked[i].nonzero().flatten().tolist()),
     )
 
 
@@ -1722,6 +1726,8 @@ def rollout(
     counts its parts of those kinds and the ones stowed (MS7f design section 4.4, the held-out
     row), read on the grader's final mask. The payload also carries ``steps_total``,
     ``stows_per_hour`` (``stows_per_hour``) and the ``events`` of ``EVENT_NAMES``.
+    An env built with ``tray_refill`` (MS7f H1') runs a person's refill between an env's
+    cycles, before its next selection (``between_cycles``).
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1808,6 +1814,7 @@ def rollout(
         raise EvalFailure("snap_closed", "ends pick_snap's landing hold: it needs pick_snap")
     if contact_hold and not perceived:
         raise EvalFailure("contact_hold", "the stop flag's contact fallback needs perceived")
+    refill = bool(getattr(env, "tray_refill", False))  # MS7f H1': the env parks the waiting parts
     if perceived:
         if policy is None:
             raise EvalFailure("perceived", "serves a policy; the oracle driver reads the truth")
@@ -1881,6 +1888,7 @@ def rollout(
         # the cycle end. The selector books failures by position and reads no destination.
         true_classes = list(part_keys(env))  # the metric's wrong-class counts
         lean = float(getattr(env, "tray_lean_deg", 0.0)) if getattr(env, "tray", False) else 0.0
+        wall_height = getattr(env, "tray_wall_height", layout.TRAY_WALL_HEIGHT)  # MS7f H1
         poses = env.desk_box_poses.copy()
         drawn = bool(getattr(env, "box_draw", 0))  # MS7e: each box's size is perceived too
         for i, st in enumerate(states):
@@ -2050,6 +2058,18 @@ def rollout(
                 if not ready:
                     st.select_wait_steps += 1
                     continue
+            if refill and between_cycles(env, i, st.events):
+                # The event moved parts: the truth of this step is stale for env i.
+                truth = truth_reads(env, per_part)
+                per_brick, in_bin, pos, speed, held, boxed = (
+                    truth.per_brick,
+                    truth.in_bin,
+                    truth.pos,
+                    truth.speed,
+                    truth.held,
+                    truth.boxed,
+                )
+                stowed_now = {b for b in range(k) if bool(in_bin[i, b])}
             if perceived:
                 state, scene = _perceived_scene(st, env, rig, i, k)
             else:
@@ -2085,7 +2105,7 @@ def rollout(
                 continue
             if target is None and perceived and st.selector.cycles < cycle_budget:
                 streak = 0 if st.look_since is None else step - st.look_since
-                if look_again(top_picks[i][:2], lean, streak):
+                if look_again(top_picks[i][:2], lean, streak, wall_height):
                     if st.look_since is None:
                         st.look_since = step
                         st.counts["look_again_waits"] += 1
@@ -2662,6 +2682,17 @@ def interval_sums(episodes: list[dict]) -> dict:
             row["cycles"] += 1
             row["steps"] = [a + b for a, b in zip(row["steps"], four)]
     return {"names": list(INTERVAL_NAMES), "by_outcome": dict(sorted(by.items()))}
+
+
+def between_cycles(env, i: int, counts) -> bool:
+    """MS7f: a person's events between env ``i``'s cycles, before its next selection, at zero
+    simulated time (MS7f design 4.1 and 5.3): the refill (``env.refill_tray``), booked in
+    ``counts``. The person reads the simulator; no loop decision reads what they read. Returns
+    whether an event moved a part."""
+    if env.refill_tray(i):
+        counts["tray_refill"] += 1
+        return True
+    return False
 
 
 def _sum_box_rows(episodes: list[dict]) -> dict:

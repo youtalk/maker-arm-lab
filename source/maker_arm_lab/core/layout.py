@@ -188,6 +188,39 @@ TRAY_CENTER = (0.195, 0.0)
 TRAY_INTERIOR = (0.13, 0.20)
 TRAY_WALL_HEIGHT = 0.02
 TRAY_WALL = 0.005
+DEEP_TRAY_WALL_HEIGHT = 0.045  # INITIAL: the MS7f H1 read (ledger R4) decides the deep tray
+"""MS7f H1, the deep tray (MS7f design 5.3): the same footprint and lean with walls this
+high, deep enough for a 150-part heap. The mean catalog part's bounding volume is 3.7 cm3, so
+150 parts at a packing of 2 fill the floor footprint to 0.043 m (design section 3)."""
+
+
+TRAY_REFILL_START = 50  # INITIAL: the MS7f H1' read (ledger R4) decides the refill
+"""MS7f H1', the refill (MS7f design 5.3): the parts in the tray at the episode's start, and
+the count a refill fills it back up to."""
+TRAY_REFILL_AT = 10  # INITIAL: the MS7f H1' read (ledger R4) decides the refill
+"""MS7f H1': between cycles, a refill drops parts in when this many or fewer are in the tray."""
+IN_TRAY_MAX_Z = 0.10
+"""m: a part higher than this is in the jaws or on a box, never in the tray
+(``heap_oracle.CANDIDATE_MAX_Z``'s value)."""
+STACKED_DROP_Z_SPAN = 0.02  # INITIAL: the MS7f deep tray settle test reads it
+"""m: a stacked drop (the MS7f deep tray and the refill) releases a part with its lowest point
+up to this far over the top of the pile so far, so no part starts inside the pile."""
+STACKED_SETTLE_SPEED = 0.02
+"""m/s: a stacked pile settles on past HEAP_SETTLE_STEPS until no part in the tray moves faster
+than this, the grader's at-rest speed. After HEAP_SETTLE_STEPS a 150-part deep heap still held
+a part sliding at 0.086 m/s (2026-09-30, the settle test's heap)."""
+STACKED_SETTLE_MAX_STEPS = 2400
+"""Physics steps (10 s at 240 Hz) a stacked pile may settle on past HEAP_SETTLE_STEPS."""
+
+
+def in_tray(pos, lean_deg: float = 0.0, height: float = TRAY_WALL_HEIGHT) -> bool:
+    """Does a part centre ``pos`` (x, y, z) lie in the tray: over the interior footprint at the
+    rim (``tray_rim_growth`` wider than the floor on every side) and no higher than
+    IN_TRAY_MAX_Z? The MS7f refill's tray count and the hidden share read it."""
+    (x0, x1), (y0, y1) = tray_bounds()
+    grow = tray_rim_growth(lean_deg, height)
+    x, y, z = (float(v) for v in pos[:3])
+    return x0 - grow <= x <= x1 + grow and y0 - grow <= y <= y1 + grow and z <= IN_TRAY_MAX_Z
 
 
 TRAY_DROP_INSET = 0.005
@@ -202,29 +235,30 @@ def tray_bounds() -> tuple[tuple[float, float], tuple[float, float]]:
     return ((cx - hx, cx + hx), (cy - hy, cy + hy))
 
 
-def tray_static_boxes() -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
-    """(name, center, size) for the four tray walls, as static colliders on the desk.
+def tray_static_boxes(
+    height: float = TRAY_WALL_HEIGHT,
+) -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:
+    """(name, center, size) for the four tray walls, ``height`` high, as static colliders on
+    the desk (DEEP_TRAY_WALL_HEIGHT for the MS7f deep tray).
 
     The near and far walls (at -x and +x) run the full outer length, so they close the corners.
     """
     (x0, x1), (y0, y1) = tray_bounds()
-    z = TRAY_WALL_HEIGHT / 2
+    z = height / 2
     w = TRAY_WALL
     long_y = TRAY_INTERIOR[1] + 2 * w
     return [
-        ("tray_wall_near", (x0 - w / 2, TRAY_CENTER[1], z), (w, long_y, TRAY_WALL_HEIGHT)),
-        ("tray_wall_far", (x1 + w / 2, TRAY_CENTER[1], z), (w, long_y, TRAY_WALL_HEIGHT)),
-        (
-            "tray_wall_left",
-            (TRAY_CENTER[0], y0 - w / 2, z),
-            (TRAY_INTERIOR[0], w, TRAY_WALL_HEIGHT),
-        ),
-        (
-            "tray_wall_right",
-            (TRAY_CENTER[0], y1 + w / 2, z),
-            (TRAY_INTERIOR[0], w, TRAY_WALL_HEIGHT),
-        ),
+        ("tray_wall_near", (x0 - w / 2, TRAY_CENTER[1], z), (w, long_y, height)),
+        ("tray_wall_far", (x1 + w / 2, TRAY_CENTER[1], z), (w, long_y, height)),
+        ("tray_wall_left", (TRAY_CENTER[0], y0 - w / 2, z), (TRAY_INTERIOR[0], w, height)),
+        ("tray_wall_right", (TRAY_CENTER[0], y1 + w / 2, z), (TRAY_INTERIOR[0], w, height)),
     ]
+
+
+def tray_rim_growth(lean_deg: float, height: float = TRAY_WALL_HEIGHT) -> float:
+    """How much wider (m) the tray interior is at the rim than at the desk on every side: an
+    outward lean of ``lean_deg`` on walls ``height`` high (``tray_lean_boxes``)."""
+    return height * math.tan(math.radians(max(lean_deg, 0.0)))
 
 
 TRAY_WALL_OUTWARD_DEG = {"near": 180.0, "far": 0.0, "left": -90.0, "right": 90.0}
@@ -232,22 +266,23 @@ TRAY_WALL_OUTWARD_DEG = {"near": 180.0, "far": 0.0, "left": -90.0, "right": 90.0
 
 
 def tray_lean_boxes(
-    lean_deg: float,
+    lean_deg: float, height: float = TRAY_WALL_HEIGHT
 ) -> list[tuple[str, tuple[float, float, float], tuple[float, float, float], tuple]]:
     """(name, center, size, quat) of the four tray walls leaning outward by ``lean_deg``.
 
     Each wall is a slab TRAY_WALL thick whose inner bottom edge lies on the interior edge on
-    the desk, tilted outward about that edge so its rim stands TRAY_WALL_HEIGHT high, as the
-    MS6 round dish's rim leaned (git c15f8f8). The interior footprint at the desk is the H1
-    one; at the rim it is ``TRAY_WALL_HEIGHT * tan(lean)`` wider on every side. Each slab runs
-    long enough past the corners to meet its neighbours at the rim. ``lean_deg`` 0 builds
-    vertical slabs; the scene builds ``tray_static_boxes`` then instead.
+    the desk, tilted outward about that edge so its rim stands ``height`` high (TRAY_WALL_HEIGHT,
+    or DEEP_TRAY_WALL_HEIGHT for the MS7f deep tray), as the MS6 round dish's rim leaned (git
+    c15f8f8). The interior footprint at the desk is the H1 one; at the rim it is
+    ``height * tan(lean)`` wider on every side. Each slab runs long enough past the corners to
+    meet its neighbours at the rim. ``lean_deg`` 0 builds vertical slabs; the scene builds
+    ``tray_static_boxes`` then instead.
     """
     tilt = math.radians(lean_deg)
-    span = TRAY_WALL_HEIGHT / math.cos(tilt)
+    span = height / math.cos(tilt)
     out = 0.5 * span * math.sin(tilt) + 0.5 * TRAY_WALL * math.cos(tilt)
     z = 0.5 * span * math.cos(tilt) - 0.5 * TRAY_WALL * math.sin(tilt)
-    grow = TRAY_WALL_HEIGHT * math.tan(tilt) + TRAY_WALL
+    grow = height * math.tan(tilt) + TRAY_WALL
     (x0, x1), (y0, y1) = tray_bounds()
     cx, cy = TRAY_CENTER
     edges = {"near": (x0, cy), "far": (x1, cy), "left": (cx, y0), "right": (cx, y1)}
