@@ -171,6 +171,9 @@ def test_the_carry_view_is_the_third_vote(tmp_path):
     env.close()
     seen = payload["perception"]
     assert seen["third_views"] > 0 and seen["votes_changed"] == 0
+    rows = [r for e in payload["episodes"] for r in e["cycle_census"]]
+    assert all(r["read_class"] == "slope" for r in rows)
+    assert {r["taken_class"] for r in rows if r["lift_class"]} == {"wide"}
     to_box = env.class_to_box[0]
     slope, wide = (int(to_box[parts.BASE_CLASSES.index(c)]) for c in ("slope", "wide"))
     poses = env.perceived_box_poses[0]

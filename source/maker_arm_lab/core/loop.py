@@ -994,6 +994,10 @@ class Cycle:
     volume: float = 0.0  # m^3, the bounding volume the loop books into ``box`` at a release end
     read_class: str | None = None  # ``classifier``: the class its narrow overhead view read
     read_logp: list | None = None  # and each run class's log probability there
+    lift_class: str | None = None  # ``classifier``: the last lift's wrist read
+    taken_class: str | None = None  # the class that set the box at that lift or its vote
+    vote_lost: bool = False  # the part left the jaws before the vote's carry view
+    rider_read: bool = False  # the passenger head read a second part at that lift
     # ``classifier`` with ``class_views``: a lift that read another class than ``read_class``
     # waits for the carry view, (the lift's class, the true class at the lift, the view's step,
     # the lift's log probabilities).
@@ -1624,6 +1628,11 @@ wrist frame read a passenger, the cycles ``passenger_drop`` ended, and the votes
 came after the part left the jaws. Under the switch ``third_views``, ``votes_changed`` and
 ``wrong_voted_class`` count the carry views taken. The passenger head's recall is C1's
 (``lerobot_stack/train_part_classifier.py``); the loop reads no passenger truth."""
+CLASSIFIER_CENSUS = ("read_class", "lift_class", "taken_class", "vote_lost", "rider_read")
+"""``classifier``'s fields in a ``cycle_census`` row: the overhead read that set the box at
+selection, the last lift's wrist read, the class that set the box at that lift or at its vote
+(None when no lift was read or the vote was lost, so the selection's box stayed), and whether
+the vote was lost or the passenger head fired. Observation only."""
 TORQUE_COUNTS = ("force_capped", "hold_blocked", "hold_blocked_cycles")
 """The ``torque`` block's counts under ``hold_force`` or ``force_cap``: the steps L7 held the arm,
 the hold entries L6 refused (one per confirmed run of the jaw-gap rule) and the cycles with one."""
@@ -2541,6 +2550,7 @@ def rollout(
                             frame, class_names, wrist=True, size=c.seen_size
                         )
                         read = summed_class(class_names, logp)
+                        c.lift_class, c.rider_read, c.taken_class = read, bool(rider), None
                         st.counts["passenger_reads"] += rider
                         if passenger_drop and rider and tray and over_tray(pick, lean, wall_height):
                             st.counts["passenger_drops"] += 1
@@ -2554,6 +2564,7 @@ def rollout(
                             taken = box = None
                         else:
                             _, taken, box = lift_class_box(read, lambda x: x, lighter, c.box)
+                            c.taken_class = taken
                     if drawn is None:
                         st.counts["lifts_empty"] += 1
                     else:
@@ -2573,6 +2584,7 @@ def rollout(
                     c.vote = None
                     if not detectors[i].lifted:
                         st.counts["votes_lost"] += 1
+                        c.vote_lost = True
                         continue
                     frame = classifier.wrist_frame(env, i)
                     lighter = {
@@ -2583,6 +2595,7 @@ def rollout(
                     views_logp = [v for v in (c.read_logp, lift_logp, carry_logp) if v]
                     summed = summed_class(class_names, *views_logp)  # no overhead read: two
                     _, taken, box = lift_class_box(summed, lambda x: x, lighter, c.box)
+                    c.taken_class = taken
                     st.counts["third_views"] += 1
                     st.counts["votes_changed"] += taken != read
                     st.counts["wrong_voted_class"] += true_cls is not None and taken != true_cls
@@ -2996,6 +3009,8 @@ def _book_census(st: EnvState, cycle: Cycle, reason: str) -> None:
     row = {name: getattr(cycle, name) for name in CENSUS_EXPORT}
     row["first_held_is_target"] = cycle.first_held == cycle.target
     row["last_held_is_target"] = cycle.last_held == cycle.target
+    if cycle.read_logp is not None:  # ``classifier``: the reads behind the cycle's box
+        row |= {k: getattr(cycle, k) for k in CLASSIFIER_CENSUS}
     st.census.append({k: round(v, 4) if isinstance(v, float) else v for k, v in row.items()})
 
 
