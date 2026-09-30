@@ -142,8 +142,8 @@ def load(paths) -> dict[str, np.ndarray]:
         return z[k] if k in z.files else np.full(len(z["view"]), -1)
 
     crops = {tuple(z["wrist_crop"].tolist()) if "wrist_crop" in z.files else None for z in parts}
-    if len(crops) > 1:
-        raise ValueError(f"render files with different wrist frames: {sorted(map(str, crops))}")
+    if len(crops - {None}) > 1:
+        raise ValueError(f"render files with different wrist crops: {sorted(map(str, crops))}")
     keys = sorted({k for z in parts for k in z.files} - {"args", "frames", "wrist_crop"})
     keys = sorted(set(keys) | LATER_LABELS)
     out = {k: np.concatenate([column(z, k) for z in parts]) for k in keys}
@@ -155,7 +155,11 @@ def load(paths) -> dict[str, np.ndarray]:
         out["frames"][at : at + n] = z["frames"]
         at += n
     out["file"] = np.concatenate([np.full(len(z["view"]), n) for n, z in enumerate(parts)])
-    out["wrist_crop"] = crops.pop()
+    out["wrist_crop"] = next((c for c in crops if c is not None), None)
+    out["wrist_mixed"] = len(crops) > 1
+    if out["wrist_mixed"]:  # a file from before the native crop gives its overhead frames only
+        old = np.concatenate([np.full(len(z["view"]), "wrist_crop" not in z.files) for z in parts])
+        out["category"] = np.where(old & (out["view"] != "overhead"), "", out["category"])
     sizes = [Path(p).with_name(Path(p).name.removesuffix(".npz") + ".size.npy") for p in paths]
     out["size"] = np.concatenate(
         [
@@ -564,7 +568,7 @@ def run(args) -> dict:
         keep = out / "logits.npz"
         data = load(sorted(args.read))
         crop = getattr(served, "wrist_input", "frame") == "crop"
-        if crop != (data["wrist_crop"] is not None):
+        if data["wrist_mixed"] or crop != (data["wrist_crop"] is not None):
             raise ValueError("the model and the read files take different wrist frames")
         result = read(served, data, torch.device(args.read_device), keep)
         (out / "c1.json").write_text(json.dumps(result, indent=2))

@@ -151,7 +151,13 @@ def test_native_wrist_crops_make_a_crop_model_and_do_not_mix(tmp_path):
     b = _render_file(tmp_path / "render_2.npz", 2, n=3)
     assert tpc.load([a])["wrist_crop"] == tuple(crop.tolist())
     assert tpc.load([b])["wrist_crop"] is None
-    with pytest.raises(ValueError, match="different wrist frames"):
-        tpc.load([a, b])
+    mixed = tpc.load([a, b])  # the older file gives its overhead frames only
+    assert mixed["wrist_mixed"] and mixed["wrist_crop"] == tuple(crop.tolist())
+    older_wrist = (mixed["file"] == 1) & (mixed["view"] != "overhead")
+    assert (mixed["category"][older_wrist] == "").all()
+    assert (mixed["category"][~older_wrist] != "").all()
+    c = _render_file(tmp_path / "render_3.npz", 3, n=3, wrist_crop=crop + 1)
+    with pytest.raises(ValueError, match="different wrist crops"):
+        tpc.load([a, c])
     model = tpc.PartClassifier(None, wrist_crop=True)
     assert model.wrist_input == "crop" and model.wrist_roi == [0, 224, 0, 224]
