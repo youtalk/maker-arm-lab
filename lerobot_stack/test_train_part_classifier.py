@@ -104,6 +104,7 @@ def test_a_file_without_the_rider_label_reads_unknown(tmp_path):
     old = dict(np.load(new))
     del old["riders"], old["rider_seen"]
     np.savez_compressed(tmp_path / "render_2.npz", **old)
+    assert (tpc.load([tmp_path / "render_2.npz"])["riders"] == -1).all()
     data = tpc.load([new, tmp_path / "render_2.npz"])
     assert (data["riders"][12:] == -1).all() and (data["riders"][:12] >= -1).all()
     assert (data["riders"][:12] == data["passengers"][:12]).all()

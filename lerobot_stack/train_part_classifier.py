@@ -55,6 +55,7 @@ WRIST_ROI = (76, 188, 58, 170)  # INITIAL: the C1 training ladder, 2026-09-30
 224 px: 112 px around the pick point, which projects to (114, 144) at 8.9 cm; the heap under the
 jaws fills the rest of the frame. On the preliminary set (36 train heaps read on 4 others, 134
 lifts) the lift view read 0.69 on the whole frame, 0.82 on a 144 px crop and 0.85 on this one."""
+LATER_LABELS = {"riders", "rider_seen"}  # render set labels an older file does not carry
 MIN_SEEN = 0.5  # INITIAL: the share of a part's sample points the overhead camera sees
 PASSENGER_FALSE_ALARMS = 0.01  # the operating point's cap, half the C1 bar's 0.02
 BARS = {"lift_accuracy": 0.97, "category_accuracy": 0.90, "recall": 0.8, "false_alarms": 0.02}
@@ -102,7 +103,7 @@ def load(paths) -> dict[str, np.ndarray]:
     def column(z, k):
         return z[k] if k in z.files else np.full(len(z["view"]), -1)
 
-    keys = sorted({k for z in parts for k in z.files} - {"args", "frames"})
+    keys = sorted({k for z in parts for k in z.files} - {"args", "frames"} | LATER_LABELS)
     out = {k: np.concatenate([column(z, k) for z in parts]) for k in keys}
     # The frames go straight into one array: a concatenation would hold every frame twice.
     out["frames"] = np.empty((len(out["view"]), 224, 224, 3), dtype=np.uint8)
