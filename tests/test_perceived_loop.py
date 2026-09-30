@@ -1066,6 +1066,18 @@ def _box_draw_scene(monkeypatch):
     return _teacher_scene(monkeypatch, parts.PART_CLASSES, box_draw=6)
 
 
+def test_a_box_draw_episode_records_its_boxes(monkeypatch):
+    """The census rebuilds each drawn box from the episode record (MS7e ledger R11)."""
+    env, rig, policy, budget, switches = _box_draw_scene(monkeypatch)
+    n = int(env.box_count[0])
+    poses, sizes = env.desk_box_poses[0, :n].tolist(), env.desk_box_sizes[0, :n].tolist()
+    ep = _rollout(env, rig, policy, budget=budget, perceived=True, **switches)["episodes"][0]
+    env.close()
+    assert ep["box_count"] == n and ep["box_draw_rounds"] == 0
+    assert np.allclose(ep["box_poses"], poses, atol=1e-4)
+    assert np.allclose(ep["box_sizes"], sizes, atol=1e-4)
+
+
 def _rake_scene(monkeypatch):
     """A brick stuck 25 mm off the tray's left wall at 45 degrees, which ranks no grasp under a
     20 degree band so the selector plans a rake, and a 2x2 brick in the open tray."""

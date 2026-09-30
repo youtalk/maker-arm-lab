@@ -1620,6 +1620,15 @@ def rollout(
         ]
         # MS7e ledger D7: the box draw's extra size-draw rounds, recorded with the draw on.
         rounds = getattr(env, "box_draw_rounds", None) if getattr(env, "box_draw", 0) else None
+        # And each drawn box's pose and interior, so a read's census rebuilds the boxes.
+        geometry = []
+        if rounds is not None:
+            tables = (("box_poses", env.desk_box_poses), ("box_sizes", env.desk_box_sizes))
+            for i, n in enumerate(box_count):
+                rows = {
+                    key: [[round(float(v), 4) for v in r] for r in t[i][:n]] for key, t in tables
+                }
+                geometry.append(rows)
         final_box = torch.full((num_envs, k), -1, dtype=torch.long)
     if adopt_held and not per_part:
         raise EvalFailure("adopt_held", "needs desk boxes: a part's own box is the one it adopts")
@@ -2332,6 +2341,7 @@ def rollout(
             boxes["class_to_box"] = class_to_box[i]
             if rounds is not None:
                 boxes["box_draw_rounds"] = int(rounds[i])
+                boxes.update(geometry[i])
         episodes.append(
             {
                 **result.to_json(),
