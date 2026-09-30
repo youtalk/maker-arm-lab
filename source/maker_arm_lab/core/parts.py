@@ -17,6 +17,9 @@ the 31.8 mm grasps slide off one side (section 5). They stay constructible so a 
 with them still replays through ``by_name``. Tall bricks (two, three and five bricks high)
 took their place. Round bricks (cylinders) came and went the same day (``RETIRED_FAMILIES``).
 
+MS7f (MS7f design section 6.1) sorts by six categories (``PART_CATEGORIES``,
+``part_category``) in place of the eight classes when its ``--categories`` switch is on.
+
 MS7e (MS7e design sections 5 and 6) brings three families back one at a time: round, LDraw
 and flat (plates and tiles, no 4-wide part). ``catalog(families)`` adds a family only when a
 ``FAMILY_KEYS`` key names it, so with no key the catalog, the split and the four classes are
@@ -236,6 +239,37 @@ def part_class(part: Part) -> str:
     if part.size[2] > BRICK_HEIGHT + 1e-9:
         return "tall"
     return "narrow" if part.nx == 1 else "wide"
+
+
+PART_CATEGORIES = ("brick", "special", "flat", "round", "joint", "minifig")
+"""The six sort categories of MS7f (MS7f design section 6.1), in the order the category map
+lists them. They replace the eight classes under ``--categories``."""
+FAMILY_CATEGORY = {
+    "brick": "brick",
+    "slope": "special",
+    "ldraw": "special",
+    "plate": "flat",
+    "tile": "flat",
+    "round": "round",
+    "joint": "joint",
+    "minifig": "minifig",
+}
+"""The category of each family: a brick of any height or width is a brick, a slope and an LDraw
+part are special, a plate and a tile are flat. ``joint`` and ``minifig`` are the families of
+MS7f design section 7, which the parts track adds to ``FAMILIES``."""
+
+
+def part_category(part: Part) -> str:
+    """The sort category of ``part`` (``PART_CATEGORIES``), read off its family."""
+    return FAMILY_CATEGORY[part.family]
+
+
+def active_categories(families: Sequence[str] = ()) -> tuple[str, ...]:
+    """The categories of a run whose catalog holds the ``FAMILY_KEYS`` keys ``families``
+    (``catalog``): those of its families, in ``PART_CATEGORIES`` order. Brick and slope are in
+    every catalog, so brick and special always are."""
+    present = {"brick", "slope"} | {f for key in families for f in FAMILY_KEYS[key]}
+    return tuple(c for c in PART_CATEGORIES if c in {FAMILY_CATEGORY[f] for f in present})
 
 
 def stud_positions(part: Part) -> list[tuple[float, float]]:

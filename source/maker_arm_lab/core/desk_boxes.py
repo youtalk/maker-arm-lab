@@ -590,9 +590,64 @@ def fitted_class_map(
     return best
 
 
+def category_map(
+    rng: random.Random,
+    sizes: Sequence[Sequence[float]],
+    categories: Sequence[str],
+    volumes: Sequence[float],
+) -> tuple[tuple[int, ...], ...]:
+    """The episode's category-to-box map under ``--categories`` (MS7f design section 6.2): the
+    boxes of each of the active ``categories``, in their order, each category's first box
+    first, from ``rng`` alone so a seed reproduces it.
+
+    ``volumes`` is each category's expected volume: the summed bounding volume of the episode's
+    drawn parts of that category. With no more boxes than categories it is R11's fit
+    (``fitted_class_map``), one box a category, several categories to a box when the boxes are
+    fewer. With more boxes, a shuffle of the boxes gives every category its first box, and each
+    box left over is a second box for the next category in the order of expected volume, the
+    largest first (a tie to the earlier category), round that order again past one second box
+    each. The shuffle is drawn again, up to FOLD_TRIES times, until every box's interior volume
+    is at least BOX_VOLUME_PER_PART_VOLUME times its load, a category's volume split evenly
+    over its boxes (the loop sends a part to the one with less in it); past that, the draw with
+    the largest least ratio. Every draw stays a uniform shuffle, so no category keeps a box
+    across episodes."""
+    n, c = len(sizes), len(categories)
+    if n <= c:
+        return tuple((b,) for b in fitted_class_map(rng, sizes, categories, volumes))
+    order = sorted(range(c), key=lambda k: -volumes[k])  # stable: a tie keeps category order
+    best, best_ratio = (), -math.inf
+    for _ in range(FOLD_TRIES):
+        boxes = list(range(n))
+        rng.shuffle(boxes)
+        sets = [[b] for b in boxes[:c]]
+        for j, b in enumerate(boxes[c:]):
+            sets[order[j % c]].append(b)
+        load = [0.0] * n
+        for volume, own in zip(volumes, sets):
+            for b in own:
+                load[b] += volume / len(own)
+        ratio = min(math.prod(s) / v for s, v in zip(sizes, load) if v > 0)
+        if ratio >= BOX_VOLUME_PER_PART_VOLUME:
+            return tuple(map(tuple, sets))
+        if ratio > best_ratio:
+            best, best_ratio = tuple(map(tuple, sets)), ratio
+    return best
+
+
+def lighter_box(boxes: Sequence[int], load: Sequence[float]) -> int:
+    """The box of ``boxes`` with the least volume in ``load`` (one entry per box: what the
+    caller's own record says it released there, never the simulator's), a tie to the lower
+    box index (MS7f design section 6.2)."""
+    return min(boxes, key=lambda b: (load[b], b))
+
+
 def part_destinations(
-    parts: Sequence[Part], class_to_box: Sequence[int], classes: Sequence[str] = BASE_CLASSES
+    parts: Sequence[Part],
+    class_to_box: Sequence[int],
+    classes: Sequence[str] = BASE_CLASSES,
+    key=part_class,
 ) -> list[int]:
     """The box each part goes to, one entry per part: its class's box, ``class_to_box`` read in
-    the order of the active ``classes``."""
-    return [int(class_to_box[list(classes).index(part_class(p))]) for p in parts]
+    the order of the active ``classes``. ``key`` names a part's class: ``parts.part_category``
+    under ``--categories``."""
+    return [int(class_to_box[list(classes).index(key(p))]) for p in parts]

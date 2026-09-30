@@ -242,6 +242,21 @@ def parts_at_rest_in_own_boxes(
     return own & (brick_lin_vel_w.norm(dim=-1) <= max_speed)
 
 
+def parts_at_rest_in_box_sets(
+    brick_pos_w: torch.Tensor,
+    brick_lin_vel_w: torch.Tensor,
+    boxes: torch.Tensor,
+    half_extents: torch.Tensor,
+    allowed: torch.Tensor,
+    max_speed: float = 0.02,
+) -> torch.Tensor:
+    """(N,B) bool: part b of env n is at rest inside a box ``allowed[n, b]`` (N,B,M bool) marks:
+    under the MS7f category map any box of its category is a correct stow (MS7f design section
+    6.2). One marked box per part is ``parts_at_rest_in_own_boxes``."""
+    inside = in_boxes(brick_pos_w, boxes, half_extents) & allowed.bool()
+    return inside.any(dim=-1) & (brick_lin_vel_w.norm(dim=-1) <= max_speed)
+
+
 def containing_bin(
     brick_pos_w: torch.Tensor,
     brick_lin_vel_w: torch.Tensor,
