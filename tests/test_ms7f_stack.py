@@ -27,6 +27,10 @@ ON = {
     "classifier": ["--classifier", "/tmp/ms7f_no_such_classifier.pt"],
     "passenger_drop": ["--passenger_drop"],
     "transport_speed": ["--transport_speed", "6.0"],
+    "descend_speed": ["--descend_speed", "2.0"],
+    "close_steps": ["--close_steps", "15"],
+    "lift_hold_steps": ["--lift_hold_steps", "10"],
+    "release_steps": ["--release_steps", "10"],
 }
 """Each MS7f switch at a value that is not its off value. A track that adds a switch adds it
 here too (the first test holds the table to ``MS7F_OFF``)."""

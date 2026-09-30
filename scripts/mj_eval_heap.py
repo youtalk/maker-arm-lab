@@ -34,11 +34,13 @@ from maker_arm_lab.core.batch_loop import (
     add_ms7f_arguments,
     check_ms7e,
     check_ms7f,
+    check_teacher_waits,
     heap_classes,
     heap_parts,
     heldout_names,
     ms7e_switches,
     ms7f_switches,
+    teacher_waits,
 )
 from maker_arm_lab.core.eval_loop import EvalFailure
 from maker_arm_lab.core.heap_oracle import HeapOracle
@@ -343,6 +345,7 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         parser.error("--transport_speed must be positive")
     check_ms7e(parser, args)
     check_ms7f(parser, args)
+    check_teacher_waits(parser, args)
     if args.desk_boxes < 0:
         parser.error("--desk_boxes must be 0 or more")
     if args.perceived:
@@ -433,7 +436,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
         loads = [[0.0] * env.desk_boxes for _ in range(env.num_envs)]
 
         def factory(i, bl, episode_draw):
-            return HeapOracle(
+            orc = HeapOracle(
                 bl,
                 env.parts,
                 env.destination_bins[i],
@@ -449,6 +452,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
                 box_load=loads[i],
                 tray_wall_height=env.tray_wall_height,
             )
+            return teacher_waits(orc, args)
 
         rig = OracleRig(
             env,
@@ -460,6 +464,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             release_lean=args.release_lean,
             carry_via=args.carry_via,
             passenger_check=args.passenger_check,
+            descend_speed=args.descend_speed,
         )
         policy = None if args.oracle_driver else policy_client.ServerPolicy(args.server)
         trace = [] if args.hold_trace else None

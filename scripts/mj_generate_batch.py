@@ -40,6 +40,7 @@ from maker_arm_lab.core.batch_loop import (
     build_run,
     check_ms7e,
     check_ms7f,
+    check_teacher_waits,
     heap_classes,
     heap_cycle_budget,
     heap_episode_length_s,
@@ -49,6 +50,7 @@ from maker_arm_lab.core.batch_loop import (
     run_batch,
     run_meta,
     run_stats,
+    teacher_waits,
     write_meta,
 )
 from maker_arm_lab.core.heap_oracle import HeapOracle
@@ -119,6 +121,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     # The recorder's walk pace predates MS7f (the MS3 speed ladder): it is built here.
     # --book_miss is the heap loop's; the rig driving here keeps its own failure memory.
     check_ms7f(parser, args, (MS7F_READY - {"book_miss"}) | {"transport_speed"})
+    check_teacher_waits(parser, args)
     if args.perceived and (args.heap_k <= 0 or args.desk_boxes <= 0):
         parser.error(
             "--perceived records a heap sorted into desk boxes: it needs --heap_k > 0 "
@@ -174,7 +177,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
     if parts is not None:
 
         def factory(i, layout_i, episode_draw):
-            return HeapOracle(
+            orc = HeapOracle(
                 layout_i,
                 env.parts,
                 env.destination_bins[i],
@@ -190,6 +193,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
                 box_sets=env.part_box_sets(i),  # MS7f: one teacher, one load record an episode
                 tray_wall_height=env.tray_wall_height,
             )
+            return teacher_waits(orc, args)
 
     perceivers = None
     if args.perceived:  # MS7c design section 7.1: the teacher acts on the truth
@@ -209,6 +213,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         release_lean=args.release_lean,
         carry_via=args.carry_via,
         passenger_check=args.passenger_check,
+        descend_speed=args.descend_speed,
     )
     install_heap_events(env, rig, args.box_empty)  # MS7f: the refill and the box emptying
     meta = run_meta(

@@ -503,6 +503,7 @@ class OracleRig:
         release_lean: bool = False,
         carry_via: bool = False,
         passenger_check: bool = False,
+        descend_speed: float = 1.0,
     ):
         self.env = env
         # MS7e rung B2: EXTEND leans toward its box (LEAN_AZIMUTH's note, `_leg_lean`).
@@ -522,6 +523,8 @@ class OracleRig:
         self.gripper_mode = getattr(env, "gripper_mode", "binary")
         # Multiplier on the pace of the transport legs (TRANSPORT_PHASES); see leg_resolution.
         self.transport_speed = transport_speed
+        # MS7f track S: the multiplier on DESCEND's pace, 1.0 today (LINEAR_PACE_M_PER_S's note).
+        self.descend_speed = descend_speed
         self.bl = bl
         self.noise = noise
         self.rng = rng
@@ -1786,6 +1789,8 @@ class OracleRig:
     def _leg_resolution(self, i: int, goal: oracle.Goal, **geometry: float) -> tuple[int, int]:
         """``leg_resolution`` for this env's episode draw, this phase's budget and pace."""
         speed_scale = self.transport_speed if goal.phase in TRANSPORT_PHASES else 1.0
+        if goal.phase == oracle.Phase.DESCEND:
+            speed_scale = self.descend_speed
         return leg_resolution(
             goal.max_steps, self.oracles[i].draw.gain_scale, speed_scale=speed_scale, **geometry
         )

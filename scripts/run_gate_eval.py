@@ -179,6 +179,10 @@ MS7F_OFF = {
     "classifier": None,
     "passenger_drop": False,
     "transport_speed": 4.0,
+    "descend_speed": 1.0,
+    "close_steps": 45,
+    "lift_hold_steps": 30,
+    "release_steps": 20,
 }
 """``core.batch_loop.MS7F_OFF``, copied because the supervisor imports no maker_arm_lab; the test
 pins it. The "ms7f" block of a read with every MS7f switch off, what an MS7e payload ran with."""
@@ -192,6 +196,10 @@ MS7F_READY: frozenset[str] = frozenset(
         "box_empty",
         "book_miss",
         "transport_speed",
+        "descend_speed",
+        "close_steps",
+        "lift_hold_steps",
+        "release_steps",
     }
 )
 """``core.batch_loop.MS7F_READY``, copied and pinned the same way: any other MS7f switch at a
@@ -1247,6 +1255,19 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=MS7F_OFF["transport_speed"],
         help="MuJoCo heap only, MS7f S: forwarded as --transport_speed X, the teacher walk's pace",
     )
+    parser.add_argument(
+        "--descend_speed",
+        type=float,
+        default=MS7F_OFF["descend_speed"],
+        help="MuJoCo heap only, MS7f S1: forwarded as --descend_speed X, DESCEND's pace",
+    )
+    for name in ("close_steps", "lift_hold_steps", "release_steps"):
+        parser.add_argument(
+            f"--{name}",
+            type=int,
+            default=MS7F_OFF[name],
+            help=f"MuJoCo heap only, MS7f S1: forwarded as --{name} N, a teacher wait",
+        )
     parser.add_argument(
         "--seen_seeds",
         type=_seed_pair,

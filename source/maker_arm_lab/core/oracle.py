@@ -108,6 +108,9 @@ MAX_GRASP_RETRIES = 2
 # RAISE_MAX_STEPS below.
 SETTLE_STEPS = 240
 CLOSE_STEPS = 45
+LIFT_HOLD_STEPS = 30
+"""LIFT's post-arrival hold before its gate reads the rise (``OracleRig._phase_result``)."""
+RELEASE_STEPS = 20
 DEFAULT_MAX_STEPS = 300
 DESCEND_STALL_STEPS = 12
 LIFT_HEIGHT = 0.10
@@ -724,6 +727,11 @@ class EnvOracle:
         another bin, and the gated corpus was recorded with this LIFT. ``HeapOracle`` turns it
         on, where one bin takes every part. The runtime's LIFT gate reads it
         (``oracle_runtime.OracleRig._lift_result``)."""
+        # The fixed waits of a pick cycle in control steps (CLOSE, LIFT's post-arrival hold,
+        # RELEASE): today's here, trimmed per oracle by a client (MS7f design section 8.2).
+        self.close_steps = CLOSE_STEPS
+        self.lift_hold_steps = LIFT_HOLD_STEPS
+        self.release_steps = RELEASE_STEPS
         self.release_tilt = RELEASE_TILT_RAD
         """The tool tilt EXTEND, RELEASE and RETREAT hold: the shelf's measured release attitude.
         ``HeapOracle`` over desk boxes holds the pick tilt instead (MS7a design, desk boxes)."""
@@ -1060,7 +1068,15 @@ class EnvOracle:
             return self.descend_goal(self._target_yaw(scene))
         if self.phase == Phase.CLOSE:
             return self._goal(
-                Phase.CLOSE, None, None, PICK_TILT_RAD, -1.0, None, 0, CLOSE_STEPS, hold=CLOSE_STEPS
+                Phase.CLOSE,
+                None,
+                None,
+                PICK_TILT_RAD,
+                -1.0,
+                None,
+                0,
+                self.close_steps,
+                hold=self.close_steps,
             )
         if self.phase == Phase.LIFT:
             target = scene.pick_point.clone()
@@ -1086,7 +1102,15 @@ class EnvOracle:
             else:
                 target[2] += LIFT_HEIGHT
             return self._goal(
-                Phase.LIFT, target, None, PICK_TILT_RAD, -1.0, 0.002, 0, DEFAULT_MAX_STEPS, hold=30
+                Phase.LIFT,
+                target,
+                None,
+                PICK_TILT_RAD,
+                -1.0,
+                0.002,
+                0,
+                DEFAULT_MAX_STEPS,
+                hold=self.lift_hold_steps,
             )
         if self.phase == Phase.REOPEN:
             return self._goal(Phase.REOPEN, None, None, 0.0, 1.0, None, 0, 20, hold=20)
@@ -1107,7 +1131,15 @@ class EnvOracle:
             return self.extend_goal()
         if self.phase == Phase.RELEASE:
             return self._goal(
-                Phase.RELEASE, None, None, self.release_tilt, 1.0, None, 0, 20, hold=20
+                Phase.RELEASE,
+                None,
+                None,
+                self.release_tilt,
+                1.0,
+                None,
+                0,
+                self.release_steps,
+                hold=self.release_steps,
             )
         if self.phase == Phase.RETREAT:
             # tilt_rad=RELEASE_TILT_RAD, not 0.0 (level): OpenYAM measured

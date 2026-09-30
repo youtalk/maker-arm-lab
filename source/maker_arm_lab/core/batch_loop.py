@@ -216,6 +216,27 @@ def check_ms7e(parser, args) -> None:
         parser.error("--snap_closed ends pick_snap's landing hold: it needs --pick_snap")
 
 
+TEACHER_WAITS = ("close_steps", "lift_hold_steps", "release_steps")
+"""The ``EnvOracle`` waits a heap client trims per oracle (``teacher_waits``); with
+``descend_speed`` they are track S's teacher trims (MS7f design section 8.2)."""
+
+
+def check_teacher_waits(parser, args) -> None:
+    """Refuse a wait under one step or a pace at or under zero with ``parser.error``."""
+    if not args.descend_speed > 0.0:
+        parser.error("--descend_speed must be positive")
+    for name in TEACHER_WAITS:
+        if getattr(args, name) < 1:
+            parser.error(f"--{name} must be at least 1")
+
+
+def teacher_waits(orc, args):
+    """``orc`` (an ``EnvOracle``) with the waits of ``args``; returns it."""
+    for name in TEACHER_WAITS:
+        setattr(orc, name, getattr(args, name))
+    return orc
+
+
 def ms7e_switches(args) -> dict:
     """The MS7e switch block a payload and a run's meta record, and the gate supervisor's cache
     matches (``run_gate_eval.ms7e_block``). Every switch off is MS7d."""
@@ -242,12 +263,16 @@ MS7F_OFF: dict = {
     "classifier": None,
     "passenger_drop": False,
     "transport_speed": trajectory.TRANSPORT_SPEED,
+    "descend_speed": 1.0,
+    "close_steps": oracle.CLOSE_STEPS,
+    "lift_hold_steps": oracle.LIFT_HOLD_STEPS,
+    "release_steps": oracle.RELEASE_STEPS,
 }
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
 of a run with every one off, what an MS7e run ran with. categories is the base track's;
 deep_tray, tray_refill, box_empty and book_miss track H's (design section 5); classifier and
-passenger_drop track C's (design section 6); transport_speed track S's (design section 8), the
-teacher walk's pace. The gate supervisor keeps a stdlib copy (``scripts/run_gate_eval.py``),
+passenger_drop track C's (design section 6); transport_speed (the teacher walk's pace),
+descend_speed and the teacher waits (TEACHER_WAITS) track S's (design section 8). The gate supervisor keeps a stdlib copy (``scripts/run_gate_eval.py``),
 pinned by a test."""
 MS7F_READY: frozenset[str] = frozenset(
     {
@@ -257,6 +282,10 @@ MS7F_READY: frozenset[str] = frozenset(
         "box_empty",
         "book_miss",
         "transport_speed",
+        "descend_speed",
+        "close_steps",
+        "lift_hold_steps",
+        "release_steps",
     }
 )
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
@@ -319,6 +348,30 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
             help="MS7f S: the teacher walk's pace, the multiplier on the transport legs "
             "(trajectory.TRANSPORT_SPEED)",
         )
+    parser.add_argument(
+        "--descend_speed",
+        type=float,
+        default=1.0,
+        help="MS7f S1: the multiplier on DESCEND's pace (OracleRig.descend_speed)",
+    )
+    parser.add_argument(
+        "--close_steps",
+        type=int,
+        default=oracle.CLOSE_STEPS,
+        help="MS7f S1: control steps the teacher's CLOSE holds",
+    )
+    parser.add_argument(
+        "--lift_hold_steps",
+        type=int,
+        default=oracle.LIFT_HOLD_STEPS,
+        help="MS7f S1: control steps LIFT holds after it arrives, before its gate reads the rise",
+    )
+    parser.add_argument(
+        "--release_steps",
+        type=int,
+        default=oracle.RELEASE_STEPS,
+        help="MS7f S1: control steps the teacher's RELEASE holds",
+    )
 
 
 def check_ms7f(parser, args, ready: frozenset[str] = MS7F_READY) -> None:
