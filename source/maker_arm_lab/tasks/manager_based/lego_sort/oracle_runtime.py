@@ -513,6 +513,10 @@ class OracleRig:
         # holds each rejected LIFT's passengers per env for the run; rearm and resume keep it.
         self.passenger_check = passenger_check
         self.passenger_log: list[list[list[int]]] = [[] for _ in range(env.num_envs)]
+        # MS7f: a person's events between two of the rig's own cycles (RETREAT ended, the next
+        # HOVER not yet entered), called with the env index, True when they moved parts. The
+        # recorder installs it (``core.batch_loop.install_heap_events``); None runs no events.
+        self.between_cycles = None
         # Every part's position when the attempt's HOVER started, under the switch only.
         self.parts_start: list[torch.Tensor | None] = [None] * env.num_envs
         self.gripper_mode = getattr(env, "gripper_mode", "binary")
@@ -733,6 +737,9 @@ class OracleRig:
         # describes the NEXT episode's scatter. Device-side and never synced here; the one
         # host read is in episode_stats.
         self._stowed_sample = per_brick_stowed(self.env)
+        emptied = getattr(self.env, "emptied_ok", None)  # MS7f H2: graded at an emptying
+        if emptied is not None:
+            self._stowed_sample = self._stowed_sample | emptied.to(self.device)
         return action
 
     def observe(self, dones: torch.Tensor) -> dict:
@@ -990,6 +997,7 @@ class OracleRig:
                 sizes=self._part_sizes,
                 classes=self._part_classes,
                 tool_xy=tuple(scene.pick_point[:2].tolist()),
+                parked=frozenset(self.env.parked[i].nonzero().flatten().tolist()),
             )
         )
         stats = self.stats[i]
@@ -1050,6 +1058,9 @@ class OracleRig:
                 continue
             if self._push_takeover_over(i):
                 continue
+            events = goal.phase == oracle.Phase.RETREAT and self.between_cycles is not None
+            if events and self.between_cycles(i):
+                scene = self.snapshot(i)  # the event moved parts
             self._enter_phase(i, scene, ending_phase=goal.phase)
 
     def _phase_result(self, i: int, goal: oracle.Goal) -> oracle.PhaseResult | None:
@@ -1855,6 +1866,8 @@ class OracleRig:
             self.abandoned[i] = False
             self._outcome[i] = None
             self.stats[i] = self._fresh_stats()
+            if self.between_cycles is not None:  # MS7f: the recorder's events, per episode
+                self.stats[i]["events"] = {"tray_refill": 0, "box_empty": 0}  # loop.EVENT_NAMES
             self.single_cycle[i] = False
             self.takeover_result[i] = None
             if not idle:

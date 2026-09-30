@@ -248,7 +248,7 @@ deep_tray, tray_refill and box_empty track H's (design section 5); classifier an
 passenger_drop track C's (design section 6); transport_speed track S's (design section 8), the
 teacher walk's pace. The gate supervisor keeps a stdlib copy (``scripts/run_gate_eval.py``),
 pinned by a test."""
-MS7F_READY: frozenset[str] = frozenset({"categories", "deep_tray"})
+MS7F_READY: frozenset[str] = frozenset({"categories", "deep_tray", "tray_refill", "box_empty"})
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
 a usage error with the script's fail token (MS7f design section 12.2). Each track adds its
 switch in the commit that brings the behaviour; the supervisor's copy is pinned by a test."""
@@ -324,6 +324,28 @@ def ms7f_switches(args) -> dict:
     """The MS7f switch block a payload and a run's meta record, and the gate supervisor's cache
     matches (``run_gate_eval.ms7f_block``). Every switch off is MS7e."""
     return {name: getattr(args, name, off) for name, off in MS7F_OFF.items()}
+
+
+def install_heap_events(env, rig, box_empty: bool) -> None:
+    """MS7f: the recorder's rig runs a person's events between its own cycles, as the heap
+    loop runs them between its cycles (``loop.between_cycles``): the refill of an env built
+    with ``tray_refill`` and, with ``box_empty``, the emptying of full boxes, after which the
+    teacher's load record of that box starts over. Each episode's stats carry the counts in
+    "events"; a part an emptying graded correct counts as delivered (``env.emptied_ok``)."""
+    refill = bool(getattr(env, "tray_refill", False))
+    if not (box_empty or refill):
+        return
+    ok = torch.zeros(env.num_envs, env.cfg.num_bricks, dtype=torch.bool)
+    box = torch.full((env.num_envs, env.cfg.num_bricks), -1, dtype=torch.long)
+    for i in range(env.num_envs):
+        rig.stats[i]["events"] = dict.fromkeys(EVENTS, 0)
+
+    def between(i: int) -> bool:
+        loads = [getattr(rig.oracles[i], "box_load", None) or []]
+        counts = rig.stats[i]["events"]
+        return _loop.between_cycles(env, i, counts, ok, box, box_empty, refill, loads=loads)
+
+    rig.between_cycles = between
 
 
 def cycle_actor(orc) -> int:

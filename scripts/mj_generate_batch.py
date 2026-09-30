@@ -44,6 +44,7 @@ from maker_arm_lab.core.batch_loop import (
     heap_cycle_budget,
     heap_episode_length_s,
     heap_parts,
+    install_heap_events,
     make_induction,
     run_batch,
     run_meta,
@@ -208,6 +209,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         carry_via=args.carry_via,
         passenger_check=args.passenger_check,
     )
+    install_heap_events(env, rig, args.box_empty)  # MS7f: the refill and the box emptying
     meta = run_meta(
         args,
         draw,

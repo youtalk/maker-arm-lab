@@ -513,6 +513,9 @@ class MjLegoSortEnv:
             # MS7f: the parts parked now (a refill's waiting parts, an emptied box's parts) and
             # each env's waiting parts in their drop order (``tray_refill``).
             self.parked = torch.zeros(num_envs, num_bricks, dtype=torch.bool)
+            # MS7f H2: the parts an emptying graded correct this episode. They are parked, and
+            # the episode's success counts them as stowed.
+            self.emptied_ok = torch.zeros(num_envs, num_bricks, dtype=torch.bool)
             self.pool: list[list[int]] = [[] for _ in range(num_envs)]
             if cameras:
                 self._depth = np.zeros((num_envs, 224, 224), dtype=np.uint16)
@@ -612,7 +615,10 @@ class MjLegoSortEnv:
             mujoco.mj_step(self.models[i], d, nstep=scene.CONTROL_SUBSTEPS)
         self.episode_length_buf += 1
         self._refresh(range(self.num_envs), images=False)
-        success = per_brick_stowed(self).all(dim=-1)
+        stowed = per_brick_stowed(self)
+        if heap:
+            stowed = stowed | self.emptied_ok  # MS7f H2: an emptied box's graded parts
+        success = stowed.all(dim=-1)
         truncated = torch.from_numpy(self.episode_length_buf >= self.max_episode_length)
         self._success = success.clone()
         terminated = success.clone()
@@ -930,6 +936,7 @@ class MjLegoSortEnv:
             # the grader's bin centre and the built box are then the same box.
             self.destination_bins[i] = 0
         self._unpark(i, range(k))  # the last episode's parked parts
+        self.emptied_ok[i] = False
         # Hold the arm where the reset left it while the heap settles; nothing is recorded.
         d.ctrl[list(h.arm_actuators)] = d.qpos[list(h.joint_qpos[:6])]
         d.ctrl[list(h.gripper_actuators)] = GRIPPER_OPEN_POS
@@ -1082,7 +1089,8 @@ class MjLegoSortEnv:
         ``i`` whose parts at rest in it (``parts_resting_box``) sum a bounding volume of at
         least its interior volume over ``desk_boxes.BOX_VOLUME_PER_PART_VOLUME`` is emptied.
         The grader reads each of its parts at that moment (``per_brick_stowed``, at rest in a
-        box of its own), then they are parked. The person looks at the boxes, so this reads
+        box of its own), then they are parked; ``emptied_ok`` keeps the grade for the episode's
+        success. The person looks at the boxes, so this reads
         the simulator. Returns (box, parts, graded correct) per emptied box, in box order."""
         if not self.desk_boxes:
             return []
@@ -1095,6 +1103,7 @@ class MjLegoSortEnv:
             capacity = math.prod(self.desk_box_sizes[i, j]) / _boxes.BOX_VOLUME_PER_PART_VOLUME
             if inside and load >= capacity:
                 out.append((j, inside, [bool(own[b]) for b in inside]))
+                self.emptied_ok[i, inside] = torch.tensor([bool(own[b]) for b in inside])
                 self._park(i, inside)
         if out:
             mujoco.mj_forward(self.models[i], self.datas[i])

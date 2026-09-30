@@ -10,9 +10,12 @@ import mujoco
 import pytest
 import torch
 
-from maker_arm_lab.core import desk_boxes, layout, loop, parts, perception
+from maker_arm_lab.core import batch_loop, desk_boxes, layout, loop, oracle, parts, perception
+from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.stowed import parts_resting_box
 from maker_arm_lab.mj.env import MjLegoSortEnv
+from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
+from test_mj_desk_boxes import FIXED
 from test_perceived_loop import _env_and_rig as _loop_env
 from test_perceived_loop import _rollout, _Still
 
@@ -278,3 +281,50 @@ def test_ten_cycles_with_no_correct_stow_end_a_stretch_episode(monkeypatch):
             assert ep["interventions"] == {"strays": 0, "miss_streak": 1}
         else:
             assert ep["cycles"] > loop.STRETCH_MISS_STREAK and "interventions" not in ep
+
+
+def test_the_recorder_rig_runs_the_events_between_its_own_cycles(monkeypatch):
+    """The teacher's own run (the recorder, ``batch_loop.run_batch``): with the events
+    installed, the rig refills the tray and empties full boxes when a RETREAT ends, books both
+    in the episode's "events", counts the parts an emptying graded correct as delivered, and
+    the episode succeeds once every part is stowed or emptied correct. Two of four parts start
+    in the tray and one part fills a box."""
+    monkeypatch.setattr(layout, "TRAY_REFILL_START", 2)
+    monkeypatch.setattr(layout, "TRAY_REFILL_AT", 1)
+    four = [parts.make_part("brick", 2, 4), parts.make_part("brick", 2, 2)] * 2
+    env = MjLegoSortEnv(
+        1,
+        _draw(),
+        parts=four,
+        cameras=False,
+        tray=True,
+        tray_lean_deg=30.0,
+        desk_boxes=4,
+        gripper_mode="continuous",
+        tray_refill=True,
+        episode_length_s=240.0,
+    )
+    env.reset(seed=11)
+    env.place_desk_boxes(0, FIXED)
+    monkeypatch.setattr(desk_boxes, "BOX_VOLUME_PER_PART_VOLUME", 1e4)
+
+    def factory(i, bl, draw):
+        return HeapOracle(
+            bl,
+            env.parts,
+            env.destination_bins[i],
+            draw,
+            rng=random.Random(1),
+            boxes=env.desk_box_poses[i],
+            box_sizes=env.desk_box_sizes[i],
+            tray=True,
+            tray_lean_deg=30.0,
+        )
+
+    rig = OracleRig(
+        env, env.cfg.bin_layout, oracle.OracleNoise(), random.Random(1), oracle_factory=factory
+    )
+    batch_loop.install_heap_events(env, rig, box_empty=True)
+    ep = batch_loop.run_batch(env, rig, 1, max_wall_minutes=10.0)["episodes"][0]
+    assert ep["events"]["tray_refill"] >= 1 and ep["events"]["box_empty"] >= 1, ep
+    assert ep["succeeded"] and ep["bricks_delivered"] == 4, ep

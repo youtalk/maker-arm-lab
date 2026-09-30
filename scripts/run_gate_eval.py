@@ -183,7 +183,7 @@ MS7F_OFF = {
 pins it. The "ms7f" block of a read with every MS7f switch off, what an MS7e payload ran with."""
 MAX_HEAP_K = 150
 """``core.batch_loop.MAX_HEAP_K``, the MS7f heap, copied and pinned the same way."""
-MS7F_READY: frozenset[str] = frozenset({"categories", "deep_tray"})
+MS7F_READY: frozenset[str] = frozenset({"categories", "deep_tray", "tray_refill", "box_empty"})
 """``core.batch_loop.MS7F_READY``, copied and pinned the same way: any other MS7f switch at a
 value but its off value is refused before a server starts (MS7f design section 12.2)."""
 
