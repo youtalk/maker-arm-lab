@@ -1285,15 +1285,15 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
     monkeypatch.setattr(ge, "READY_FAMILIES", frozenset(ge.FAMILY_KEYS))
     monkeypatch.setattr(ge, "UNBUILT_SWITCHES", ())
     draw = ge.make_eval_draws(1, 1)[0]
-    argv = _argv(tmp_path / "gate") + MS7E_HEAP
+    argv = _argv(tmp_path / "gate") + MS7E_HEAP + ["--desk_boxes", "4"]
     plain = ge._build_cfg(ge._parse_args(argv))
     assert plain.families == () and ge.ms7e_block(plain) == ge.MS7E_OFF
     switches = ["--families", "flat,round", "--box_draw", "6", "--release_lean", "--carry_via"]
-    switches += ["--box_unseen", "size", "--heap_family", "flat"]
+    switches += ["--box_unseen", "size", "--heap_family", "flat", "--passenger_check"]
     cfg = ge._build_cfg(ge._parse_args(argv + switches))
     cmd = ge._eval_command(cfg, draw)
     at = cmd.index("--families")
-    assert cmd[at : at + 10] == ["--families", "round,flat", *switches[2:]]
+    assert cmd[at : at + 11] == ["--families", "round,flat", *switches[2:]]
     block = ge.ms7e_block(cfg)
     assert block == {
         "families": ["round", "flat"],
@@ -1302,9 +1302,11 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
         "carry_via": True,
         "box_unseen": "size",
         "heap_family": "flat",
+        "passenger_check": True,
     }
-    assert not {"--families", "--box_draw", "--release_lean", "--carry_via"} & set(
-        ge._eval_command(plain, draw)
+    off = set(ge._eval_command(plain, draw))
+    assert (
+        not {"--families", "--box_draw", "--release_lean", "--carry_via", "--passenger_check"} & off
     )
     path = tmp_path / "gate" / "eval_000.json"
     path.parent.mkdir(parents=True)
@@ -1312,7 +1314,8 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
     served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
 
     def hit(gate_cfg, **extra):
-        path.write_text(json.dumps(_heap_payload(draw, inference=served, **extra)))
+        payload = _heap_payload(draw, inference=served, desk_boxes=4, **extra)
+        path.write_text(json.dumps(payload))
         return ge._cached_payload(gate_cfg, draw) is not None
 
     assert hit(plain) and hit(plain, ms7e=ge.MS7E_OFF) and not hit(plain, ms7e=block)
@@ -1328,6 +1331,7 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
         ("carry_via", False),
         ("box_unseen", "rim"),
         ("heap_family", "round"),
+        ("passenger_check", False),
     ):
         assert not hit(cfg, ms7e=block | {name: other}), name
     ledger = _fake_ledger(tmp_path)

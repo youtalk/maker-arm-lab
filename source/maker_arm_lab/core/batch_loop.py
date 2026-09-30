@@ -131,6 +131,12 @@ def add_ms7e_arguments(parser) -> None:
         help="MS7e family heap read: half of each heap from this family, half from the other "
         "parts of the split; the key must be in --families",
     )
+    parser.add_argument(
+        "--passenger_check",
+        action="store_true",
+        help="MS7e teacher lever T2 (ledger R12): a LIFT that raised a part other than the one "
+        "it carries reopens in the tray and retries, so no passenger rides into another box",
+    )
 
 
 def check_ms7e(parser, args) -> None:
@@ -157,6 +163,8 @@ def check_ms7e(parser, args) -> None:
         parser.error("--box_unseen draws the unseen boxes of --box_draw")
     if getattr(args, "deep_box_floor", False) and getattr(args, "desk_boxes", 0) <= 0:
         parser.error("--deep_box_floor deepens the desk box floors: it needs --desk_boxes")
+    if getattr(args, "passenger_check", False) and getattr(args, "desk_boxes", 0) <= 0:
+        parser.error("--passenger_check keeps passengers out of other boxes: it needs --desk_boxes")
 
 
 def ms7e_switches(args) -> dict:
@@ -169,6 +177,7 @@ def ms7e_switches(args) -> dict:
         "carry_via": bool(getattr(args, "carry_via", False)),
         "box_unseen": getattr(args, "box_unseen", None),
         "heap_family": getattr(args, "heap_family", None),
+        "passenger_check": bool(getattr(args, "passenger_check", False)),
     }
 
 

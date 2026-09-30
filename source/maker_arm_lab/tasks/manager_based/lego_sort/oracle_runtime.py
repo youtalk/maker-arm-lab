@@ -285,6 +285,15 @@ ROT_CONVERGED = 0.02
 # loop reads the same rise gate (phase B design 5.5).
 LIFT_MAX_XY_ERROR = 0.03  # m
 
+# MS7e teacher lever T2 (ledger R12, ``passenger_check``): at the LIFT gate a part other than
+# the carried one that stands this much over where it lay when the attempt's HOVER started,
+# within PASSENGER_XY_M of the pick point, rode up with the jaws. The D10 census of 2026-09-29
+# traced 21 of 22 wrong-box parts on count-8 heaps to such passengers, landing in the carried
+# part's box. LIFT raises 0.10 m, so a rider stands near that; a neighbour a finger nudges
+# rises a few mm.
+PASSENGER_MIN_RISE = 0.02  # INITIAL: m, the T2 heap reads on the D10 seeds
+PASSENGER_XY_M = 0.06  # INITIAL: m, a 1x8 across the jaws or a part on a long target
+
 # `resume` calls a brick pinched at core.checker.HELD_MIN_FORCE (imported above), the
 # attribution threshold the eval loop and the privileged channel read it at. It is under
 # PINCH_MIN_FORCE on purpose: a takeover on a weak pinch still enters LIFT, whose gate then
@@ -493,12 +502,19 @@ class OracleRig:
         perceivers=None,
         release_lean: bool = False,
         carry_via: bool = False,
+        passenger_check: bool = False,
     ):
         self.env = env
         # MS7e rung B2: EXTEND leans toward its box (LEAN_AZIMUTH's note, `_leg_lean`).
         self.release_lean = release_lean
         # MS7e R12 T1: an EXTEND that would pass the base axis walks an arc (CARRY_MIN_RADIUS_M).
         self.carry_via = carry_via
+        # MS7e teacher lever T2: a LIFT with a passenger is a miss (`_lift_result`). The log
+        # holds each rejected LIFT's passengers per env for the run; rearm and resume keep it.
+        self.passenger_check = passenger_check
+        self.passenger_log: list[list[list[int]]] = [[] for _ in range(env.num_envs)]
+        # Every part's position when the attempt's HOVER started, under the switch only.
+        self.parts_start: list[torch.Tensor | None] = [None] * env.num_envs
         self.gripper_mode = getattr(env, "gripper_mode", "binary")
         # Multiplier on the pace of the transport legs (TRANSPORT_PHASES); see leg_resolution.
         self.transport_speed = transport_speed
@@ -1099,6 +1115,13 @@ class OracleRig:
                 # The cycle follows the part actually held; REOPEN would drop it.
                 orc.adopt_held_part(held)
                 brick, lifted = held, True
+        if lifted and self.passenger_check and self.parts_start[i] is not None:
+            riders = self._passengers(i, brick)
+            if riders:
+                # REOPEN drops the carried part and its riders back into the tray, and the
+                # retry ladder (core.oracle's LIFT branch) picks the part again.
+                self.passenger_log[i].append(riders)
+                lifted = False
         # MS6 design 7.4: the stall floor follows the width the jaws close across, and so
         # does the force floor (the jaw drive's force is its stall times its stiffness). The
         # floors stay the ones the CHOSEN grasp set -- `pinch_ok` is telemetry here, not the
@@ -1132,6 +1155,18 @@ class OracleRig:
             if error < best_error:
                 best, best_error = b, error
         return best
+
+    def _passengers(self, i: int, carried: int) -> list[int]:
+        """The parts other than ``carried`` that rose with the jaws (``PASSENGER_MIN_RISE``)."""
+        pick = self.pick_point(i)
+        riders = []
+        for b in range(self.num_bricks):
+            pos = self._brick_pos(i, b)
+            rise = (pos[2] - self.parts_start[i][b, 2]).item()
+            near = (pos[:2] - pick[:2]).norm().item() < PASSENGER_XY_M
+            if b != carried and rise > PASSENGER_MIN_RISE and near:
+                riders.append(b)
+        return riders
 
     def _enter_phase(
         self, i: int, scene: oracle.SceneSnapshot, ending_phase: oracle.Phase | None = None
@@ -1177,6 +1212,10 @@ class OracleRig:
             # than read off `scene` (CPU -- see snapshot()) so it stays on self.device,
             # matching brick_end/pick_point in _lift_result.
             self.brick_start[i] = self._brick_pos(i, orc.target_brick)
+            if self.passenger_check:
+                self.parts_start[i] = torch.stack(
+                    [self._brick_pos(i, b) for b in range(self.num_bricks)]
+                )
         if goal.phase == oracle.Phase.DESCEND:
             # core.oracle deliberately leaves this to the runtime (it owns the
             # maker_arm_lab.robots import) -- the core target is the brick's resting z. It is
@@ -1917,6 +1956,7 @@ class OracleRig:
             self._go_idle(i, None)
             return False
         self.brick_start[i] = self._brick_pos(i, held) if held >= 0 else None
+        self.parts_start[i] = None  # a resumed LIFT has no HOVER to measure riders from
         if lifted_from is not None:
             self.brick_start[i][2] = lifted_from
         self.idle[i] = False

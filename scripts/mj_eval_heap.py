@@ -424,6 +424,7 @@ def main(argv=None) -> int:
             oracle_factory=factory,
             release_lean=args.release_lean,
             carry_via=args.carry_via,
+            passenger_check=args.passenger_check,
         )
         policy = None if args.oracle_driver else policy_client.ServerPolicy(args.server)
         trace = [] if args.hold_trace else None
@@ -474,6 +475,9 @@ def main(argv=None) -> int:
         payload["tray_lean"] = args.tray_lean
         payload["ms7e"] = ms7e_switches(args)
         payload["deep_box_floor"] = args.deep_box_floor
+        if args.passenger_check:
+            # Each rejected LIFT's passengers, as indices into payload["parts"].
+            payload["passenger_rejects"] = [r for log in rig.passenger_log for r in log]
     except EvalFailure as err:
         print("EVAL_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True)
         return 1

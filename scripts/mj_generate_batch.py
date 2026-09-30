@@ -190,6 +190,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         perceivers=perceivers,
         release_lean=args.release_lean,
         carry_via=args.carry_via,
+        passenger_check=args.passenger_check,
     )
     meta = run_meta(
         args,
