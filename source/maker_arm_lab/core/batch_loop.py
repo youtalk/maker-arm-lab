@@ -138,9 +138,13 @@ def check_ms7e(parser, args) -> None:
             parser.error(f"--{name} is not built on this commit")
     if args.heap_family and args.heap_family not in args.families:
         parser.error("--heap_family must name one of --families")
-    lo, hi = desk_boxes.BOX_COUNT_MIN, desk_boxes.B1_CEILING
+    b2 = getattr(args, "release_lean", False)
+    lo, hi = desk_boxes.BOX_COUNT_MIN, desk_boxes.B2_CEILING if b2 else desk_boxes.B1_CEILING
     if args.box_draw and not (lo <= args.box_draw <= hi and getattr(args, "desk_boxes", 0) > 0):
-        parser.error(f"--box_draw draws {lo} to at most {hi} boxes (B1) and needs --desk_boxes")
+        parser.error(
+            f"--box_draw draws {lo} to at most {hi} boxes ({'B2' if b2 else 'B1'}) and needs "
+            "--desk_boxes"
+        )
     if args.box_unseen and not args.box_draw:
         parser.error("--box_unseen draws the unseen boxes of --box_draw")
 

@@ -178,6 +178,32 @@ was sized for the 9 cm box: a 10 cm box yawed 45 degrees there leaves the frame 
 B1_DRAW = {"band_x": B1_BAND_X, "band_y": B1_BAND_Y, "back": FRAME_BACK_X}
 """Rung B1's ``draw_boxes`` arguments: its band and the frame's back edge (MS7e ledger D6). A
 rung passes its own; an unseen row's ``UNSEEN_DRAWS`` entry goes over them."""
+B2_BAND_X = (-0.07, 0.25)
+B2_BAND_Y = B1_BAND_Y
+"""MS7e rung B2's band under ``--release_lean`` (ledger D7): B1's, reaching back to X_BACK -0.07.
+
+The release lean (``oracle_runtime.LEAN_AZIMUTH``'s note) is what reaches behind B1: with the
+lean pinned to +x, EXTEND planned in 0 of 40 trials at x -0.07 to 0.00. Certified by
+``scripts/mj_release_envelope_check.py --desk_boxes 4 --release_lean --band_x=-0.07,0.25
+--band_y=0.18,0.20 --seed 20289500`` with a 0.07 x 0.07 x 0.05 interior on Machine A, 2026-09-29:
+brick_2x4, brick_1x2x5, brick_2x7, brick_1x8 and brick_2x8 each landed 80 of 80 with EXTEND and
+RETREAT converged, EXTEND residual at most 0.64 mm, RETREAT's at most 1.02 mm, no abandoned
+cycle, no arm geom touching a box, tightest joint 0.436 rad from its stop. X_BACK -0.06, the
+design's, certifies too but places seven boxes in only 345 of the 1000 ceiling seeds; at -0.08
+one RETREAT per part does not plan (box at x -0.08, |y| 0.18)."""
+B2_FRAME_BACK_X = -0.142
+"""B2's frame back edge, m: at the moved camera (``cameras.OVERHEAD_B2_BACK_M``), a rim point of
+the deepest box at x -0.142 keeps 4 px inside the frame at every |y| up to 0.30, at the camera
+draw's extremes (projected, 2026-09-29)."""
+B2_CEILING = 8
+"""B2's count ceiling on the ceiling seeds (MS7e ledger R4 d): eight boxes in 1000 of 1000 (996
+in the first SIZE_DRAWS round), 2026-09-29."""
+B2_DRAW = {"band_x": B2_BAND_X, "band_y": B2_BAND_Y, "back": B2_FRAME_BACK_X}
+B2_UNSEEN_DRAWS = {**UNSEEN_DRAWS, "rim": {**UNSEEN_DRAWS["rim"], "back": -0.137}}
+"""The unseen rows on B2: the 0.065 m rim keeps 4 px at the moved camera from x -0.137."""
+B2_UNSEEN_CEILINGS = {"size": 6, "rim": 8}
+"""On B2's band (1000 ceiling seeds, 2026-09-29): with sizes to 0.12 m seven boxes place in 756,
+with 0.065 m rims eight in 1000."""
 BOX_FILTER_MARGIN_M = 0.005  # INITIAL: the MS7d isolation row R1 measures it
 """m: ``in_outer_footprint`` grows every box's outer footprint by this on each side (MS7d
 design section 4.2, L1). The perceived candidate filter tested a detection's 3D centre against

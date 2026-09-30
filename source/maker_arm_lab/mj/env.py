@@ -355,8 +355,13 @@ class MjLegoSortEnv:
         # and the poses per episode and parks the boxes the count leaves over off the desk.
         self.box_draw = box_draw
         self.box_unseen = box_unseen
-        self._box_draw_args = {**_boxes.B1_DRAW, **_boxes.UNSEEN_DRAWS.get(box_unseen, {})}
-        self._box_count_max = min(box_draw, _boxes.UNSEEN_CEILINGS.get(box_unseen, box_draw))
+        rung, unseen, ceilings = (
+            (_boxes.B2_DRAW, _boxes.B2_UNSEEN_DRAWS, _boxes.B2_UNSEEN_CEILINGS)
+            if release_lean
+            else (_boxes.B1_DRAW, _boxes.UNSEEN_DRAWS, _boxes.UNSEEN_CEILINGS)
+        )
+        self._box_draw_args = {**rung, **unseen.get(box_unseen, {})}
+        self._box_count_max = min(box_draw, ceilings.get(box_unseen, box_draw))
         if box_draw:
             desk_boxes = _boxes.DESK_BOX_SLOTS
         # MS7a design, desk boxes: N boxes on the desk replace the shelf and its heap bin.

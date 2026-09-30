@@ -2,15 +2,17 @@
 rig leans EXTEND toward its box and the overhead camera moves back; with it off, both are
 MS7d's."""
 
+import argparse
 import itertools
 import math
+import pathlib
 import random
 
 import mujoco
 import numpy as np
 import pytest
 
-from maker_arm_lab.core import cameras, layout, oracle, parts
+from maker_arm_lab.core import batch_loop, cameras, desk_boxes, layout, oracle, parts
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.quat import quat_mul
 from maker_arm_lab.core.stowed import per_brick_stowed
@@ -24,8 +26,6 @@ BEHIND = (-0.05, 0.19, 0.3)
 """A box behind the B1 band: with the lean pinned to +x, EXTEND has no plan there (the design
 section 3.1 probe); leaning toward it, the part lands."""
 PARKED = [(-0.6, 0.3 * j, 0.0) for j in (1, 2, 3)]
-B2_BAND = ((-0.07, 0.25), (0.18, 0.20))  # ledger D7: X_BACK -0.07, the B1 front and |y|
-B2_WORST_BOX = (0.10, 0.10, 0.05)  # the largest drawn interior at the deepest rim
 
 
 def _draw():
@@ -200,10 +200,10 @@ def _worst_margin(back: float, points) -> float:
 def test_the_camera_shift_is_the_smallest_that_frames_every_b2_box_and_the_tray():
     """MS7e design section 4.4 item 3: every rim corner of a B2 box keeps 4 px inside the
     frame, and the leaned tray stays inside it, at the extremes of the camera draw."""
-    (x0, x1), (y0, y1) = B2_BAND
-    wall = layout.BIN_WALL
-    hx, hy = B2_WORST_BOX[0] / 2 + wall, B2_WORST_BOX[1] / 2 + wall
-    rim = wall + B2_WORST_BOX[2]
+    (x0, x1), (y0, y1) = desk_boxes.B2_BAND_X, desk_boxes.B2_BAND_Y
+    wall = desk_boxes.DESK_BOX_WALL
+    hx = hy = desk_boxes.BOX_MAX / 2 + wall  # the largest drawn box, at the deepest rim
+    rim = wall + desk_boxes.BOX_DEPTH[1]
     boxes = []
     for x, y, s, yaw in itertools.product((x0, x1), (y0, y1), (1.0, -1.0), (-45.0, 0.0, 45.0)):
         c, n = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
@@ -221,3 +221,77 @@ def test_the_camera_shift_is_the_smallest_that_frames_every_b2_box_and_the_tray(
     assert _worst_margin(back - 0.001, boxes) < 4.0
     assert _worst_margin(back, tray) > 0.0
     assert _worst_margin(0.0, boxes) < 0.0  # the unshifted camera loses the back boxes
+
+
+# -- the B2 box draw -----------------------------------------------------------------------
+
+
+def test_under_the_switch_the_box_draw_takes_b2s_band_count_and_frame():
+    env = MjLegoSortEnv(
+        2,
+        _draw(),
+        parts=[BRICK] * 3,
+        cameras=False,
+        desk_boxes=4,
+        tray=True,
+        box_draw=8,
+        release_lean=True,
+        class_names=parts.PART_CLASSES,
+        episode_draws=True,
+    )
+    (x0, x1), (y0, y1) = desk_boxes.B2_BAND_X, desk_boxes.B2_BAND_Y
+    counts, behind_b1 = set(), False
+    for seed in range(12):
+        env.reset(seed=seed)
+        for i in range(2):
+            n = int(env.box_count[i])
+            counts.add(n)
+            poses, sizes = env.desk_box_poses[i, :n], env.desk_box_sizes[i, :n]
+            assert desk_boxes.clear(poses, sizes)
+            for pose, size in zip(poses, sizes):
+                assert x0 <= pose[0] <= x1 and y0 <= abs(pose[1]) <= y1
+                back = min(c[0] for c in desk_boxes.corners(pose, size))
+                assert back >= desk_boxes.B2_FRAME_BACK_X - 1e-12
+                behind_b1 |= pose[0] < desk_boxes.B1_BAND_X[0]
+    env.close()
+    assert counts == {4, 5, 6, 7, 8} and behind_b1
+
+
+def test_the_unseen_rim_row_keeps_b2s_rim_frame():
+    assert desk_boxes.B2_UNSEEN_DRAWS["size"] == desk_boxes.UNSEEN_DRAWS["size"]
+    assert desk_boxes.B2_UNSEEN_DRAWS["rim"]["depth"] == desk_boxes.UNSEEN_DRAWS["rim"]["depth"]
+    env = MjLegoSortEnv(
+        1,
+        _draw(),
+        parts=[BRICK],
+        cameras=False,
+        desk_boxes=4,
+        box_draw=8,
+        box_unseen="rim",
+        release_lean=True,
+    )
+    assert env._box_draw_args["back"] == desk_boxes.B2_UNSEEN_DRAWS["rim"]["back"]
+    assert env._box_draw_args["band_x"] == desk_boxes.B2_BAND_X
+    env.close()
+
+
+def _checked(argv):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--desk_boxes", type=int, default=0)
+    batch_loop.add_ms7e_arguments(parser)
+    args = parser.parse_args(argv)
+    batch_loop.check_ms7e(parser, args)
+    return args
+
+
+def test_eight_boxes_need_the_switch_and_the_switch_is_built_in_every_client():
+    assert "release_lean" not in batch_loop.UNBUILT_SWITCHES
+    with pytest.raises(SystemExit):
+        _checked(["--desk_boxes", "4", "--box_draw", "8"])
+    assert _checked(["--desk_boxes", "4", "--box_draw", "8", "--release_lean"]).box_draw == 8
+    with pytest.raises(SystemExit):
+        _checked(["--desk_boxes", "4", "--box_draw", "9", "--release_lean"])
+    root = pathlib.Path(__file__).resolve().parents[1] / "scripts"
+    for name in ("mj_eval_heap.py", "mj_generate_batch.py"):
+        # the env (the camera and the band) and the rig (the lean)
+        assert (root / name).read_text().count("release_lean=args.release_lean") == 2
