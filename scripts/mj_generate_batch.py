@@ -171,6 +171,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
                 box_sizes=env.desk_box_sizes[i],
                 tray=env.tray,
                 tray_lean_deg=env.tray_lean_deg,
+                wall_band_cont=args.wall_band_cont,
             )
 
     perceivers = None

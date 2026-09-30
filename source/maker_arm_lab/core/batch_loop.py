@@ -137,6 +137,12 @@ def add_ms7e_arguments(parser) -> None:
         help="MS7e teacher lever T2 (ledger R12): a LIFT that raised a part other than the one "
         "it carries reopens in the tray and retries, so no passenger rides into another box",
     )
+    parser.add_argument(
+        "--wall_band_cont",
+        action="store_true",
+        help="MS7e serving lever S3 (ledger R13), with --gripper continuous: the grasp model's "
+        "wall test puts the fingers at the continuous jaws' landing gap, not the binary hold band",
+    )
 
 
 def check_ms7e(parser, args) -> None:
@@ -165,6 +171,8 @@ def check_ms7e(parser, args) -> None:
         parser.error("--deep_box_floor deepens the desk box floors: it needs --desk_boxes")
     if getattr(args, "passenger_check", False) and getattr(args, "desk_boxes", 0) <= 0:
         parser.error("--passenger_check keeps passengers out of other boxes: it needs --desk_boxes")
+    if getattr(args, "wall_band_cont", False) and getattr(args, "gripper", "") != "continuous":
+        parser.error("--wall_band_cont is the continuous jaws' band: it needs --gripper continuous")
 
 
 def ms7e_switches(args) -> dict:
@@ -178,6 +186,7 @@ def ms7e_switches(args) -> dict:
         "box_unseen": getattr(args, "box_unseen", None),
         "heap_family": getattr(args, "heap_family", None),
         "passenger_check": bool(getattr(args, "passenger_check", False)),
+        "wall_band_cont": bool(getattr(args, "wall_band_cont", False)),
     }
 
 

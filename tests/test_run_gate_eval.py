@@ -1303,6 +1303,7 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
         "box_unseen": "size",
         "heap_family": "flat",
         "passenger_check": True,
+        "wall_band_cont": False,  # the continuous gripper's switch, its own test
     }
     off = set(ge._eval_command(plain, draw))
     assert (
@@ -1361,6 +1362,32 @@ def test_the_supervisor_forwards_deep_box_floor_and_its_cache_matches_it(tmp_pat
 
     assert hit(plain) and not hit(deep)
     assert hit(deep, deep_box_floor=True) and not hit(plain, deep_box_floor=True)
+
+
+def test_the_supervisor_forwards_wall_band_cont_and_its_cache_matches_it(tmp_path):
+    """MS7e ledger R13 S3, on the continuous gripper only. A payload that predates the switch
+    ran with it off."""
+    draw = ge.make_eval_draws(1, 1)[0]
+    argv = _argv(tmp_path / "gate") + MS7E_HEAP + ["--gripper", "continuous"]
+    plain = ge._build_cfg(ge._parse_args(argv))
+    on = ge._build_cfg(ge._parse_args(argv + ["--wall_band_cont"]))
+    assert "--wall_band_cont" in ge._eval_command(on, draw)
+    assert "--wall_band_cont" not in ge._eval_command(plain, draw)
+    assert ge.ms7e_block(on) == ge.MS7E_OFF | {"wall_band_cont": True}
+    with pytest.raises(ValueError, match="needs --gripper continuous"):
+        ge._build_cfg(ge._parse_args(_argv(tmp_path) + MS7E_HEAP + ["--wall_band_cont"]))
+    path = tmp_path / "gate" / "eval_000.json"
+    path.parent.mkdir(parents=True)
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+
+    def hit(gate_cfg, **extra):
+        payload = _heap_payload(draw, inference=served, gripper="continuous", **extra)
+        path.write_text(json.dumps(payload))
+        return ge._cached_payload(gate_cfg, draw) is not None
+
+    old = {k: v for k, v in ge.MS7E_OFF.items() if k != "wall_band_cont"}
+    assert hit(plain) and hit(plain, ms7e=old) and not hit(on) and not hit(on, ms7e=old)
+    assert hit(on, ms7e=ge.ms7e_block(on)) and not hit(plain, ms7e=ge.ms7e_block(on))
 
 
 def test_the_gate_sums_the_family_and_box_count_rows():

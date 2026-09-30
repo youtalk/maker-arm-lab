@@ -103,6 +103,7 @@ class GateCfg:
     box_unseen: str | None = None
     heap_family: str | None = None
     passenger_check: bool = False
+    wall_band_cont: bool = False
 
 
 FAMILY_KEYS = ("round", "ldraw", "flat")
@@ -134,6 +135,7 @@ MS7E_OFF = {
     "box_unseen": None,
     "heap_family": None,
     "passenger_check": False,
+    "wall_band_cont": False,
 }
 """The "ms7e" block of a read with every MS7e switch off, what an MS7d payload ran with."""
 
@@ -149,6 +151,7 @@ def ms7e_block(cfg: "GateCfg") -> dict:
         "box_unseen": cfg.box_unseen,
         "heap_family": cfg.heap_family,
         "passenger_check": cfg.passenger_check,
+        "wall_band_cont": cfg.wall_band_cont,
     }
 
 
@@ -574,6 +577,8 @@ def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
                 prefix += ["--heap_family", cfg.heap_family]
             if cfg.passenger_check:
                 prefix.append("--passenger_check")
+            if cfg.wall_band_cont:
+                prefix.append("--wall_band_cont")
         prefix += list(cfg.client_flags)
     else:
         prefix = [
@@ -1009,6 +1014,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="MuJoCo heap only, MS7e teacher lever T2: forwarded as --passenger_check",
     )
     parser.add_argument(
+        "--wall_band_cont",
+        action="store_true",
+        help="MuJoCo heap only, MS7e serving lever S3 with --gripper continuous: forwarded as "
+        "--wall_band_cont",
+    )
+    parser.add_argument(
         "--deep_box_floor",
         action="store_true",
         help="MuJoCo heap only, MS7e flat lever 1: forwarded as --deep_box_floor, the desk box "
@@ -1070,6 +1081,10 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
     if args.passenger_check and args.desk_boxes <= 0:
         raise ValueError(
             "--passenger_check keeps passengers out of other boxes: it needs --desk_boxes"
+        )
+    if args.wall_band_cont and args.gripper != "continuous":
+        raise ValueError(
+            "--wall_band_cont is the continuous jaws' band: it needs --gripper continuous"
         )
     families = families_key(args.families)
     if any(getattr(args, name) for name in MS7E_OFF) and (
@@ -1134,6 +1149,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         box_unseen=args.box_unseen,
         heap_family=args.heap_family,
         passenger_check=args.passenger_check,
+        wall_band_cont=args.wall_band_cont,
         client_flags=tuple(shlex.split(args.client_flags))
         + (("--scripted_place",) if args.scripted_place else ())
         + (("--scripted_rake",) if args.scripted_rake else ())
