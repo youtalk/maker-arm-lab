@@ -8,10 +8,9 @@
  ],
  "closing_axes": [
   0,
-  1,
   2
  ],
- "closing_axes_reason": "a 1x2 plate; y puts one jaw on the side ball, at its equator",
+ "closing_axes_reason": "a 1x2 plate; y puts one jaw on the side ball, which squeezes it out",
  "hulls": [
   [
    [

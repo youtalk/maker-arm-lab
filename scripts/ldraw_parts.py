@@ -94,9 +94,9 @@ PARTS = {
     "43093": ((0, 1, 2), "as 2780: x on the flat ends, y and z across the collar"),
     "3937": ((0, 1, 2), "box-shaped: a 1x2 brick whose top is the two hinge lugs"),
     "3938": ((0, 1, 2), "a 1x2 plate over the hinge knuckle; z meets the knuckle's lowest line"),
-    "14417": ((0, 1, 2), "a 1x2 plate; y puts one jaw on the side ball, at its equator"),
+    "14417": ((0, 2), "a 1x2 plate; y puts one jaw on the side ball, which squeezes it out"),
     "14418": ((0, 1, 2), "a 1x2 plate; x puts one jaw on the socket's round end"),
-    "4081b": ((0, 1, 2), "a 1x1 plate; x puts one jaw on the outside of the side clip"),
+    "4081b": ((1, 2), "a 1x1 plate; x puts one jaw on the side clip's ring, as 14417's y"),
     # MS7f minifig family: each part as LDraw builds it upright, one rigid body.
     "3626b": ((0, 1, 2), "a head: x and y across its round side, z from the top to the neck"),
     "973": ((0, 1, 2), "a torso: y on the flat front and back, x on the tapered sides"),
@@ -107,7 +107,12 @@ PARTS = {
     "3838": ((0, 1, 2), "air tanks: x across the two tanks, y front to back, z end to end"),
     "4349": ((0, 1, 2), "a loudhailer: x end to end, y across the cone, z cone to handle"),
 }
-"""Part id -> (closing axes, reason). The axes are body axes after this tool's orientation."""
+"""Part id -> (closing axes, reason). The axes are body axes after this tool's orientation.
+
+The joint table first offered 14417 its y axis and 4081b its x axis (15.2 mm each, one jaw on
+the ball or on the clip's ring): the part squeezed out at LIFT on 10 of 11 such grasps, with
+no jaw force left at the gate, and the table stowed 4 and 10 of 12 (MS7f lone-part table,
+seeds 20303000 + catalog index, 2026-09-30). The other axes of both parts stowed every lift."""
 HORIZONTAL_FILL = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")
 """The MS7e parts fill their horizontal slices only, so 3700's pin hole stays open. Every later
 part fills its slices across all three axes: a pin lies along x, and only its x slices close

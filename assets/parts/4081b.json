@@ -7,11 +7,10 @@
   0.0064
  ],
  "closing_axes": [
-  0,
   1,
   2
  ],
- "closing_axes_reason": "a 1x1 plate; x puts one jaw on the outside of the side clip",
+ "closing_axes_reason": "a 1x1 plate; x puts one jaw on the side clip's ring, as 14417's y",
  "hulls": [
   [
    [
