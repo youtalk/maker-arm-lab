@@ -122,6 +122,43 @@ LEAN_AZIMUTH = 0.0
 # keeps the pinned lean above. With +x pinned, a box behind the side band has no EXTEND plan
 # (the probe of 2026-09-29: 0 of 40 at x -0.07 to 0.00).
 
+# MS7e ledger R12, teacher lever T1 (the rig's ``carry_via`` switch, B2 only). A straight EXTEND
+# from the tray's far side to a box at the band's back passes close to the arm base axis, and
+# the part drops on the way: the D10 census of 2026-09-29 read closest approach under 0.08 m
+# failed 20 of 20 carries, 0.08 to 0.09 m 5 of 12, 0.09 m and over 11 of 483. Such a leg walks
+# an arc about the base axis instead (`carry_arc_point`), so it keeps at least the smaller of
+# its two end radii, and the base turns at an even pace.
+CARRY_MIN_RADIUS_M = 0.10  # INITIAL: R12's floor, the census's clean band plus 1 cm
+
+
+def base_clearance(start, end) -> float:
+    """The least horizontal distance from the arm base axis (the env origin's z axis) to the
+    straight segment ``start`` -> ``end``."""
+    ax, ay, bx, by = float(start[0]), float(start[1]), float(end[0]), float(end[1])
+    dx, dy = bx - ax, by - ay
+    span = dx * dx + dy * dy
+    t = 0.0 if span == 0.0 else min(1.0, max(0.0, -(ax * dx + ay * dy) / span))
+    return math.hypot(ax + t * dx, ay + t * dy)
+
+
+def carry_arc(start, end) -> tuple[float, float, float, float, float]:
+    """The arc from ``start`` to ``end`` about the base axis: start radius, radius change,
+    start azimuth, turn (the short way round), and its length."""
+    r0, r1 = math.hypot(float(start[0]), float(start[1])), math.hypot(float(end[0]), float(end[1]))
+    a0 = math.atan2(float(start[1]), float(start[0]))
+    turn = math.remainder(math.atan2(float(end[1]), float(end[0])) - a0, math.tau)
+    length = math.hypot(r1 - r0, 0.5 * (r0 + r1) * turn, float(end[2]) - float(start[2]))
+    return r0, r1 - r0, a0, turn, length
+
+
+def carry_arc_point(start, end, t: float) -> torch.Tensor:
+    """The point at ``t`` in [0, 1] of `carry_arc`: radius, azimuth and height linear in t."""
+    r0, dr, a0, turn, _ = carry_arc(start, end)
+    r, a = r0 + dr * t, a0 + turn * t
+    z = float(start[2]) + (float(end[2]) - float(start[2])) * t
+    return torch.tensor([r * math.cos(a), r * math.sin(a), z], dtype=torch.float64)
+
+
 BRICK_HALF_HEIGHT = layout.BRICK_SIZE[2] / 2
 # Ruling D3-10 / D3-11 candidate 2: the descend is near level, and rather than one fixed
 # tilt the runtime tries the ladder in order and takes the smallest tilt whose descend path
@@ -455,10 +492,13 @@ class OracleRig:
         oracle_factory=None,
         perceivers=None,
         release_lean: bool = False,
+        carry_via: bool = False,
     ):
         self.env = env
         # MS7e rung B2: EXTEND leans toward its box (LEAN_AZIMUTH's note, `_leg_lean`).
         self.release_lean = release_lean
+        # MS7e R12 T1: an EXTEND that would pass the base axis walks an arc (CARRY_MIN_RADIUS_M).
+        self.carry_via = carry_via
         self.gripper_mode = getattr(env, "gripper_mode", "binary")
         # Multiplier on the pace of the transport legs (TRANSPORT_PHASES); see leg_resolution.
         self.transport_speed = transport_speed
@@ -1610,22 +1650,34 @@ class OracleRig:
         ``GlobalIK.solve_path``'s continuity constraint is what makes this safe to walk with
         a brick in the jaws: a solver jumping to another IK branch mid-leg fails the path
         outright instead of commanding a lurch through the scene.
+
+        Under ``carry_via`` an EXTEND whose straight line passes within CARRY_MIN_RADIUS_M of
+        the base axis walks `carry_arc` instead; the tilt, heading and lean sweep as before.
         """
         if heading_to is None:
             heading_to = heading_from
         if offset_z is None:
             offset_z = float(self.pick_offset[i, 2].item())
+        arc = (
+            self.carry_via
+            and goal.phase == oracle.Phase.EXTEND
+            and base_clearance(pick_from, pick_to) < CARRY_MIN_RADIUS_M
+        )
         count, steps = self._leg_resolution(
             i,
             goal,
-            distance=float((pick_to - pick_from).norm()),
+            distance=carry_arc(pick_from, pick_to)[4]
+            if arc
+            else float((pick_to - pick_from).norm()),
             tilt_change=abs(tilt_to - tilt_from),
             heading_change=abs(heading_to - heading_from),
             lean_change=abs(lean_to - lean_from),
         )
         targets = [
             self._target_for(
-                pick_from + (pick_to - pick_from) * t,
+                carry_arc_point(pick_from, pick_to, float(t))
+                if arc
+                else pick_from + (pick_to - pick_from) * t,
                 float(tilt_from + (tilt_to - tilt_from) * float(t)),
                 float(heading_from + (heading_to - heading_from) * float(t)),
                 offset_z,
