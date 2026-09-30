@@ -45,7 +45,7 @@ def test_the_ms7e_part_order_and_its_families():
     table = _load()
     order = table.part_order()
     assert order[:29] == [p.name for p in parts.catalog()]
-    assert len(order) == 51 and len(set(order)) == 51
+    assert len(order) == len(set(order)) == 51 + len(parts.JOINT_IDS)
     pins = {
         "round_1x1": 29,
         "round_4x4": 32,
@@ -58,7 +58,8 @@ def test_the_ms7e_part_order_and_its_families():
     }
     for name, index in pins.items():
         assert order.index(name) == index, name
-    assert [parts.catalog_index(n) for n in order] == list(range(51))
+    assert [parts.catalog_index(n) for n in order] == list(range(len(order)))
+    assert table.family_parts("joint") == order[51:59] == [f"joint_{i}" for i in parts.JOINT_IDS]
     assert table.family_parts("round") == order[29:33]
     assert table.family_parts("flat") == order[41:51]
     assert table.family_parts("tile") == order[47:51]

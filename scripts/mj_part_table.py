@@ -88,36 +88,11 @@ TRAY_LEAN_DEG = 30.0
 DROP_HEIGHT_M = 0.005
 """The drop's lowest possible corner over the tray floor: the centre starts one half diagonal
 plus this high, so no orientation starts inside the floor."""
-MS7E_PARTS = (
-    "round_1x1",
-    "round_2x2",
-    "round_2x2x2",
-    "round_4x4",
-    "ldraw_3700",
-    "ldraw_3701",
-    "ldraw_3894",
-    "ldraw_4490",
-    "ldraw_3659",
-    "ldraw_87087",
-    "ldraw_11211",
-    "ldraw_3660",
-    "plate_1x2",
-    "plate_1x4",
-    "plate_1x6",
-    "plate_2x2",
-    "plate_2x4",
-    "plate_2x6",
-    "tile_1x2",
-    "tile_1x4",
-    "tile_2x2",
-    "tile_2x4",
-)
-"""The MS7e parts after main's 29-part catalog, in the MS7e catalog order."""
 
 
 def part_order() -> list[str]:
-    """Every part name the table knows, in the MS7e catalog order."""
-    return [p.name for p in _parts.catalog()] + list(MS7E_PARTS)
+    """Every part name the table knows, in the catalog order (``parts.catalog_index``)."""
+    return [p.name for p in _parts.catalog(tuple(_parts.FAMILY_KEYS))]
 
 
 def family(name: str) -> str:
@@ -126,7 +101,7 @@ def family(name: str) -> str:
     return "flat" if prefix in ("plate", "tile") else prefix
 
 
-FAMILIES = ("brick", "slope", "round", "ldraw", "flat", "plate", "tile")
+FAMILIES = ("brick", "slope", "round", "ldraw", "flat", "plate", "tile", "joint")
 
 
 def family_parts(fam: str) -> list[str]:

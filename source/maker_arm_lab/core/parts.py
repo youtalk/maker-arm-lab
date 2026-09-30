@@ -40,6 +40,11 @@ An LDraw part (``ldraw_part``) is read from ``assets/parts/<id>.json``, which
 collider is up to four convex hulls (``Part.hulls``) and its studs are visual
 (``Part.stud_frames``). Its mass keeps the H2 rule, and each hull carries the share of it that
 its volume holds (MS7e design section 6.1).
+
+MS7f (MS7f design section 7) adds two more families the same generator builds: joint
+(``JOINT_IDS``). Its parts are named ``<family>_<id>``, come after tile in ``FAMILIES`` so no
+catalog index moves, split on their own generator and class as ``special`` while the eight
+MS7e classes sort.
 """
 
 from __future__ import annotations
@@ -64,17 +69,27 @@ MASS_FLOOR_KG = 0.0005  # solver health on 1x1 plates (0.12 g solid)
 # 7 mm under the 52.4 mm per-jaw travel; the full gap is 104.8 mm (robots.frames.JAW_FULL_GAP)
 MAX_GRASP_WIDTH = 0.045
 HELDOUT_FRACTION = 0.2
-FAMILIES = ("brick", "slope", "round", "ldraw", "plate", "tile")
+FAMILIES = ("brick", "slope", "round", "ldraw", "plate", "tile", "joint")
 """Catalog order. The MS7e families come after brick and slope, so ``split`` draws the base
-split unchanged (MS7e design section 5)."""
-FAMILY_KEYS = {"round": ("round",), "ldraw": ("ldraw",), "flat": ("plate", "tile")}
+split unchanged (MS7e design section 5), and the MS7f families after tile."""
+FAMILY_KEYS = {
+    "round": ("round",),
+    "ldraw": ("ldraw",),
+    "flat": ("plate", "tile"),
+    "joint": ("joint",),
+}
 """The keys ``--families`` accepts, and the families each brings into the catalog."""
-READY_FAMILIES: frozenset[str] = frozenset({"round", "ldraw", "flat"})
+READY_FAMILIES: frozenset[str] = frozenset({"round", "ldraw", "flat", "joint"})
 """The ``FAMILY_KEYS`` keys whose behaviour is in this commit. Each family track adds its key
 when it lands; ``--families`` with any other key is a usage error (MS7e design section 10.2)."""
 LDRAW_IDS = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")
 """The pre-registered LDraw parts, in catalog order (MS7e design section 6.5). Part names are
 ``ldraw_<id>``; ``ldraw_part`` loads each from ``assets/parts/<id>.json``."""
+JOINT_IDS = ("2780", "6558", "43093", "3937", "3938", "14417", "14418", "4081b")
+"""MS7f joint family: three Technic pins (friction, long, axle pin), the two halves of a 1x2
+hinge brick, a 1x2 plate with a side ball, one with a socket and a 1x1 plate with a clip."""
+LDRAW_FAMILY_IDS = {"ldraw": LDRAW_IDS, "joint": JOINT_IDS}
+"""Every family read from ``LDRAW_DIR``, with its part ids in catalog order."""
 LDRAW_DIR = Path(__file__).resolve().parents[3] / "assets" / "parts"
 FLAT_FAMILIES = ("plate", "tile")  # in the catalog only under ``--families flat``
 RETIRED_FAMILIES = ("round",)
@@ -194,15 +209,15 @@ def make_part(family: str, nx: int, ny: int, nz: int = 1) -> Part:
 
 
 @functools.cache
-def ldraw_part(part_id: str) -> Part:
-    """The LDraw part ``part_id`` from its JSON file (module docstring). ``nx`` and ``ny`` are
-    its footprint in studs; its studs are ``stud_frames``, so ``studs`` is False."""
+def ldraw_part(part_id: str, family: str = "ldraw") -> Part:
+    """The ``family`` part ``part_id`` from its JSON file (module docstring). ``nx`` and ``ny``
+    are its footprint in studs; its studs are ``stud_frames``, so ``studs`` is False."""
     rec = json.loads((LDRAW_DIR / f"{part_id}.json").read_text())
     size = tuple(rec["size"])
     total = sum(rec["hull_volumes"])
     return Part(
-        name=f"ldraw_{part_id}",
-        family="ldraw",
+        name=f"{family}_{part_id}",
+        family=family,
         nx=round(size[1] / STUD_PITCH),
         ny=round(size[0] / STUD_PITCH),
         size=size,
@@ -227,12 +242,14 @@ map and the perception's class draws are MS7d's."""
 
 def part_class(part: Part) -> str:
     """The sorting class of ``part``: its family for a round part, a plate and a tile,
-    ``special`` for an LDraw part, ``slope`` for a slope, ``tall`` for a brick taller than one
-    brick height, ``narrow`` for a one-height brick one stud wide and ``wide`` for a one-height
-    brick two or more studs wide. The base catalog holds 6, 5, 8 and 10."""
+    ``special`` for a part from ``LDRAW_DIR``, ``slope`` for a slope, ``tall`` for a brick
+    taller than one brick height, ``narrow`` for a one-height brick one stud wide and ``wide``
+    for a one-height brick two or more studs wide. The base catalog holds 6, 5, 8 and 10.
+
+    The MS7f families join ``special``: a ninth class would reshuffle every MS7e class map."""
     if part.family in ("round", "plate", "tile"):
         return part.family
-    if part.family == "ldraw":
+    if part.family in LDRAW_FAMILY_IDS:
         return "special"
     if part.family == "slope":
         return "slope"
@@ -298,8 +315,8 @@ def graspable(part: Part) -> bool:
 def _family_parts(family: str) -> list[Part]:
     """Every graspable part of one family, in catalog order."""
     made = (
-        [ldraw_part(i) for i in LDRAW_IDS]
-        if family == "ldraw"
+        [ldraw_part(i, family) for i in LDRAW_FAMILY_IDS[family]]
+        if family in LDRAW_FAMILY_IDS
         else [make_part(family, *spec) for spec in _FAMILY_SPECS[family]]
     )
     return [p for p in made if graspable(p)]
@@ -318,23 +335,26 @@ def catalog(families: Sequence[str] = ()) -> list[Part]:
 
 def catalog_index(name: str) -> int:
     """The part's index in the full MS7e order: the MS7d catalog (0 to 28), then round, LDraw,
-    plate and tile. An LDraw part needs no JSON for it. The lone-part table seeds a part's
-    trials at 20289000 plus this index (MS7e design section 8.4)."""
+    plate and tile, then the MS7f families. A part from ``LDRAW_DIR`` needs no JSON for it. The
+    lone-part table seeds a part's trials at 20289000 plus this index (MS7e design section
+    8.4)."""
     names = []
     for f in FAMILIES:
         names += (
-            [f"ldraw_{i}" for i in LDRAW_IDS]
-            if f == "ldraw"
+            [f"{f}_{i}" for i in LDRAW_FAMILY_IDS[f]]
+            if f in LDRAW_FAMILY_IDS
             else [p.name for p in _family_parts(f)]
         )
     return names.index(name)
 
 
 def _replayable() -> list[Part]:
-    """The catalog plus the flat, retired and LDraw parts other shards were recorded with."""
+    """The catalog plus the flat, retired and LDraw-built parts other shards were recorded
+    with."""
     flat = [make_part(f, nx, ny) for f in FLAT_FAMILIES for nx, ny in _BOX_FOOTPRINTS]
     retired = [make_part(*spec) for spec in _RETIRED]
-    return catalog() + [p for p in flat if graspable(p)] + retired + _family_parts("ldraw")
+    ldraw = [p for f in LDRAW_FAMILY_IDS for p in _family_parts(f)]
+    return catalog() + [p for p in flat if graspable(p)] + retired + ldraw
 
 
 def split(parts: Sequence[Part], seed: int) -> tuple[list[Part], list[Part]]:

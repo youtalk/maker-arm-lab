@@ -30,6 +30,8 @@ For each part the tool:
 * fills the collision mesh: it voxelizes the surface at ``VOXEL_M`` and fills, slice by
   horizontal slice, every region the walls enclose. The underside of a brick fills; an opening
   that reaches the outside sideways (an arch, a pin hole, the space under a slope) stays open.
+  A part after the MS7e ones fills the slices across x and y as well (``HORIZONTAL_FILL``), so
+  the bore of a pin that lies along x fills too.
   The LDraw walls are 1.6 mm thick and a gripped jaw sinks 2 to 4 mm into a part
   (``core.grasp.CLOSE_SQUEEZE_M``), so a hollow part would let the jaw through its wall. The
   solid matches every other part of the catalog, which is a solid box.
@@ -86,8 +88,21 @@ PARTS = {
     "87087": ((0, 2), "y runs through the side stud, which a real jaw meets 1.6 mm early"),
     "11211": ((0, 2), "y runs through the two side studs, which a real jaw meets 1.6 mm early"),
     "3660": ((0, 2), "y puts a jaw on the slope; z closes top on bottom strip, as a slope's z"),
+    # MS7f joint family (MS7f design section 7). LDraw lays a pin along x, its rest on the desk.
+    "2780": ((0, 1, 2), "x on the flat pin ends; y and z across the collar when they lie flat"),
+    "6558": ((0, 1, 2), "as 2780: x on the flat ends, y and z across the collar"),
+    "43093": ((0, 1, 2), "as 2780: x on the flat ends, y and z across the collar"),
+    "3937": ((0, 1, 2), "box-shaped: a 1x2 brick whose top is the two hinge lugs"),
+    "3938": ((0, 1, 2), "a 1x2 plate over the hinge knuckle; z meets the knuckle's lowest line"),
+    "14417": ((0, 1, 2), "a 1x2 plate; y puts one jaw on the side ball, at its equator"),
+    "14418": ((0, 1, 2), "a 1x2 plate; x puts one jaw on the socket's round end"),
+    "4081b": ((0, 1, 2), "a 1x1 plate; x puts one jaw on the outside of the side clip"),
 }
 """Part id -> (closing axes, reason). The axes are body axes after this tool's orientation."""
+HORIZONTAL_FILL = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")
+"""The MS7e parts fill their horizontal slices only, so 3700's pin hole stays open. Every later
+part fills its slices across all three axes: a pin lies along x, and only its x slices close
+its bore (MS7f design section 13)."""
 
 
 class _TokenEmittingParser(argparse.ArgumentParser):
@@ -224,9 +239,10 @@ def disk(center, axis, radius, n: int = 16):
     return np.array([[center, ring[i], ring[(i + 1) % n]] for i in range(n)])
 
 
-def fill_voxels(tris, lo, hi):
+def fill_voxels(tris, lo, hi, axes=(2,)):
     """(solid, origin): the voxels of the triangle soup ``tris`` (N, 3, 3), m, with every region
-    its walls enclose in a horizontal slice filled (module docstring).
+    its walls enclose in a slice across one of ``axes`` filled (module docstring). The default
+    slices are the horizontal ones.
 
     The grid starts half a voxel below ``lo``, so a face on the LDU grid lies mid-voxel.
     """
@@ -245,7 +261,10 @@ def fill_voxels(tris, lo, hi):
         pts = tri[0] + a * (tri[1] - tri[0]) + b * (tri[2] - tri[0])
         idx = np.floor((pts - origin) / VOXEL_M).astype(int)
         surface[idx[:, 0], idx[:, 1], idx[:, 2]] = True
-    solid = np.stack([binary_fill_holes(surface[:, :, k]) for k in range(shape[2])], axis=2)
+    solid = np.zeros_like(surface)
+    for axis in axes:
+        slices = [binary_fill_holes(s) for s in np.moveaxis(surface, axis, 0)]
+        solid |= np.moveaxis(np.stack(slices), 0, axis)
     return solid, origin
 
 
@@ -304,7 +323,8 @@ def build_part(lib: Library, part_id: str, max_hulls: int, seed: int) -> dict:
     caps = [disk(s["base"], s["axis"], s["radius"]) for s in studs]
     coll = np.concatenate([coll, *caps]) if caps else coll
 
-    solid, origin = fill_voxels(coll, -0.5 * size, 0.5 * size)
+    axes = (2,) if part_id in HORIZONTAL_FILL else (0, 1, 2)
+    solid, origin = fill_voxels(coll, -0.5 * size, 0.5 * size, axes)
     mesh = trimesh.Trimesh(*voxel_faces(solid, origin), process=True)
     convex = mesh.volume >= CONVEX_FILL * mesh.convex_hull.volume
     pieces = coacd.run_coacd(
@@ -367,8 +387,9 @@ def notice(library: pathlib.Path, records: list[dict]) -> str:
             f"Library: the official complete.zip of {stamp:%Y-%m-%d}, sha256",
             f"{digest}.",
             "Changes: the triangles were expanded, converted to meters and reoriented, the studs",
-            "left out of the collision mesh, the cavities each horizontal slice encloses filled,",
-            "and the result split into convex hulls by CoACD (scripts/ldraw_parts.py).",
+            "left out of the collision mesh, the cavities each horizontal slice encloses filled",
+            "(each slice along any axis for the parts after 3660), and the result split into",
+            "convex hulls by CoACD (scripts/ldraw_parts.py).",
             "LDraw is a trademark of the Estate of James Jessiman.",
             "LEGO is a trademark of the LEGO Group, which does not sponsor or endorse this work.",
             "",

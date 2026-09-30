@@ -149,7 +149,7 @@ def test_a_round_part_on_its_side_stops_rolling_under_the_switch(round_physics):
     assert (travel < 0.008) if round_physics else (travel > 0.03), travel
 
 
-LDRAW = [parts.ldraw_part(i) for i in parts.LDRAW_IDS]
+LDRAW = [parts.ldraw_part(i, f) for f, ids in parts.LDRAW_FAMILY_IDS.items() for i in ids]
 
 
 @pytest.fixture(scope="module")

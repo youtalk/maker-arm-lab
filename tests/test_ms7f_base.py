@@ -96,7 +96,7 @@ MS7E_DRAWS = [
 def test_every_catalog_kind_has_one_category():
     everything = parts.catalog(tuple(parts.FAMILY_KEYS))
     categories = Counter(parts.part_category(p) for p in everything)
-    assert categories == {"brick": 23, "special": 14, "flat": 10, "round": 4}
+    assert categories == {"brick": 23, "special": 14, "flat": 10, "round": 4, "joint": 8}
     assert set(parts.FAMILY_CATEGORY) >= set(parts.FAMILIES)
     assert set(parts.FAMILY_CATEGORY.values()) == set(parts.PART_CATEGORIES)
     tall = parts.make_part("brick", 1, 2, 5)

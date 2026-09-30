@@ -30,6 +30,7 @@ MS7D_CATALOG = [
     "brick_2x2x3",
     *(f"slope_{nx}x{ny}" for nx in (1, 2) for ny in (2, 3, 4)),
 ]
+MS7E_KEYS = ("round", "ldraw", "flat")  # the MS7e catalog; later families have their own tests
 MS7D_HELDOUT = [
     "brick_1x6",
     "brick_2x3",
@@ -182,7 +183,7 @@ def test_every_family_combination_keeps_the_seven_base_heldout_parts():
 
 
 def test_each_new_family_holds_out_a_fifth_rounded_up_whatever_else_joins():
-    everything = parts.catalog(tuple(parts.FAMILY_KEYS))
+    everything = parts.catalog(MS7E_KEYS)
     sizes = Counter(p.family for p in everything)
     assert sizes == {"brick": 23, "slope": 6, "round": 4, "ldraw": 8, "plate": 6, "tile": 4}
     _, held = parts.split(everything, 20260915)
@@ -199,7 +200,7 @@ def test_each_new_family_holds_out_a_fifth_rounded_up_whatever_else_joins():
 
 
 def test_the_eight_class_table_classes_every_part():
-    everything = parts.catalog(tuple(parts.FAMILY_KEYS))
+    everything = parts.catalog(MS7E_KEYS)
     classes = Counter(parts.part_class(p) for p in everything)
     assert classes == {
         "slope": 6,
