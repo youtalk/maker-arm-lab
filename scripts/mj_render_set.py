@@ -21,6 +21,9 @@ at its event from the state the heap loop's frame of that step shows.
 * carry: the wrist frame ``loop.CARRY_VIEW_STEPS`` later, if the detector still reads a lift.
 * wrist (``--wrist_every S``, off by default): more wrist frames of the same lift for training,
   every S steps up to twice the carry view's offset while the detector reads a lift.
+* ``--classifier_extra SHARE`` (off by default): that share of the drawn heap's parts becomes
+  kinds of ``parts.CLASSIFIER_EXTRA``, which no catalog or split holds, so the classifier learns
+  category cues from more kinds while the catalog's held-out kinds stay unseen.
 
 Labels read the simulator, a recording tool and not a decision (design section 6.4): the part's
 category and name and whether its kind is held out; on a wrist frame the part both jaws press
@@ -136,6 +139,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="extra wrist frames (view 'wrist') every this many steps after a lift; 0 is off",
     )
     parser.add_argument(
+        "--classifier_extra",
+        type=float,
+        default=0.0,
+        help="render only: the share of the drawn heap's parts replaced by kinds of "
+        "parts.CLASSIFIER_EXTRA, which no catalog or split holds; 0 is off",
+    )
+    parser.add_argument(
         "--extra_overhead",
         type=int,
         default=3,
@@ -143,6 +153,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     args = parser.parse_args(argv)
     check_ms7e(parser, args)
+    if not 0.0 <= args.classifier_extra <= 1.0:
+        parser.error("--classifier_extra is a share, from 0 to 1")
+    if args.classifier_extra and not getattr(_parts, "CLASSIFIER_EXTRA", ()):
+        parser.error("--classifier_extra needs parts.CLASSIFIER_EXTRA, which this commit lacks")
     if args.heap_k <= 0 or args.desk_boxes <= 0 or args.no_cameras:
         parser.error(
             "the render set records heap cycles into desk boxes: it needs --heap_k > 0, "
@@ -151,11 +165,21 @@ def parse_args(argv=None) -> argparse.Namespace:
     return args
 
 
+def mix_extra(parts, extra, share: float, rng: random.Random) -> list:
+    """``parts`` with each one replaced, at the chance ``share``, by a kind drawn from ``extra``."""
+    return [rng.choice(extra) if rng.random() < share else p for p in parts]
+
+
 def build(args):
     """The env and the teacher rig, as ``scripts/mj_generate_batch.py`` builds them, exporting
-    nothing and rendering nothing per step."""
+    nothing and rendering nothing per step. ``--classifier_extra`` mixes the extra kinds into
+    the drawn heap, from its own generator, so the draw of the heap itself does not change."""
     draw, bl, noise = build_run(args)
     parts = heap_parts(args)
+    if args.classifier_extra:
+        extra = _parts.by_name(_parts.CLASSIFIER_EXTRA)
+        rng = random.Random(f"extra:{args.run_seed}")
+        parts = mix_extra(parts, extra, args.classifier_extra, rng)
     env = MjLegoSortEnv(
         args.num_envs,
         draw,

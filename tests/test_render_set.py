@@ -3,6 +3,7 @@ driven by the teacher, labels that equal the truth of the scene at each view."""
 
 import importlib.util
 import pathlib
+import random
 import subprocess
 import sys
 
@@ -42,6 +43,17 @@ def test_usage_errors_print_the_fail_token():
 
 
 @pytest.mark.skipif(not _can_render(), reason="no MuJoCo GL context on this host")
+def test_mix_extra_replaces_the_share_it_is_given():
+    mix = _load().mix_extra
+    parts, extra = list(range(200)), ["x", "y"]
+    assert mix(parts, extra, 0.0, random.Random(1)) == parts
+    assert set(mix(parts, extra, 1.0, random.Random(1))) == {"x", "y"}
+    half = mix(parts, extra, 0.5, random.Random(1))
+    assert half == mix(parts, extra, 0.5, random.Random(1))
+    assert 60 < sum(p in extra for p in half) < 140
+    assert all(p == k for k, p in enumerate(half) if p not in extra)
+
+
 def test_tilt_reads_the_part_axis_from_world_up():
     tilt = _load()._tilt
     c = np.cos(np.pi / 4)
