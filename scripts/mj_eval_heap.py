@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lerobot_stack"))
 import policy_client
 from maker_arm_lab.core import oracle, perception
 from maker_arm_lab.core.batch_loop import (
+    MAX_HEAP_K,
     PARTS_SPLITS,
     add_ms7e_arguments,
     add_ms7f_arguments,
@@ -326,6 +327,8 @@ def parse_args(argv=None) -> argparse.Namespace:
             parser.error(f"--{name} is outside numpy's seed range (0 <= seed < 2**32)")
     if args.heap_k <= 0:
         parser.error("--heap_k must be positive: this client evaluates heap episodes only")
+    if args.heap_k > MAX_HEAP_K:
+        parser.error(f"--heap_k {args.heap_k} exceeds {MAX_HEAP_K}, the MS7f heap (MAX_HEAP_K)")
     check_ms7e(parser, args)
     check_ms7f(parser, args)
     if args.desk_boxes < 0:

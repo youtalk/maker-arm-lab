@@ -26,6 +26,7 @@ import torch
 from maker_arm_lab.core import desk_boxes, layout, oracle, perception, trajectory
 from maker_arm_lab.core import loop as _loop
 from maker_arm_lab.core import parts as _parts
+from maker_arm_lab.core.heap_oracle import CYCLE_BUDGET
 from maker_arm_lab.core.layout import sample_run_draw
 
 CAMPAIGN_TARGET_SUCCESSES = 50
@@ -36,8 +37,19 @@ LEGACY_EPISODE_LENGTH_S = 180.0
 
 
 def heap_episode_length_s(k: int, cycle_budget: int) -> float:
-    """Design section 9: 30 s of settle and slack plus 20 s per pick the budget allows."""
+    """Design section 9: 30 s of settle and slack plus 20 s per pick the budget allows. With
+    ``heap_cycle_budget`` it scales with the heap: 1030 s at 50 parts, 3030 s (90,900 steps) at
+    the MS7f heap of 150, where the MS7e teacher's 14.3 s a cycle at 1.04 cycles a part needs
+    about 2230 s (MS7f design section 3)."""
     return 30.0 + 20.0 * min(k, cycle_budget)
+
+
+def heap_cycle_budget(k: int) -> int:
+    """The recorder's default cycle budget for a heap of ``k`` parts: ``heap_oracle.CYCLE_BUDGET``
+    (50) up to 50 parts, the budget of every corpus through MS7e, and above that the heap loop's
+    own ceil(1.3 K) (``loop.cycle_budget``): 195 for the MS7f heap of 150 (MS7f design section
+    5), so a recording and a read of one heap get the same cycles."""
+    return CYCLE_BUDGET if k <= CYCLE_BUDGET else _loop.cycle_budget(k)
 
 
 def heap_parts(args) -> list[_parts.Part] | None:
@@ -695,22 +707,20 @@ def write_meta(
     return path
 
 
-MAX_HEAP_K = 127
-"""mj/recorder.py writes obs/cycle_brick and oracle_runtime.py's env.oracle_cycle_brick are
-int8; a part index above this wraps negative in both, silently mislabeling the corpus. Bounded
-here rather than widened: widening changes the on-disk schema for six-brick shards too."""
+MAX_HEAP_K = 150
+"""The largest heap a script takes: the MS7f heap of 150 parts (MS7f design section 5). A part
+index above 127 does not fit the int8 of obs/cycle_brick and the rig's stash, so a heap over
+127 parts writes both as int16 (``mj.recorder.MAX_INT8_PART``) and every smaller heap keeps
+the int8 schema of every shard before it. No cycle budget, drop or tray is sized past 150."""
 
 
 def _heap_k_type(parser):
-    """A ``type=`` for ``--heap_k`` that rejects a value the int8 cycle_brick channel cannot hold."""
+    """A ``type=`` for ``--heap_k`` that rejects a heap over ``MAX_HEAP_K``."""
 
     def parse(value: str) -> int:
         k = int(value)
         if k > MAX_HEAP_K:
-            parser.error(
-                f"--heap_k {k} exceeds {MAX_HEAP_K}: mj/recorder.py's obs/cycle_brick channel "
-                "is int8 and wraps negative above that, silently mislabeling the corpus"
-            )
+            parser.error(f"--heap_k {k} exceeds {MAX_HEAP_K}, the MS7f heap (MAX_HEAP_K)")
         return k
 
     return parse
@@ -781,8 +791,7 @@ def add_batch_arguments(parser) -> None:
         type=_heap_k_type(parser),
         default=0,
         help="MuJoCo only: replace the six bricks with a heap of K mixed parts on the desk (MS6). "
-        f"0 is the six-brick task; K must be <= {MAX_HEAP_K} (mj/recorder.py's obs/cycle_brick "
-        "and obs/target_part are int8).",
+        f"0 is the six-brick task; K must be <= {MAX_HEAP_K}, the MS7f heap.",
     )
     parser.add_argument(
         "--parts_seed", type=int, default=20260915, help="seeds the held-out split of the catalog"
@@ -794,7 +803,11 @@ def add_batch_arguments(parser) -> None:
         help="which side of the split a heap run draws its parts from",
     )
     parser.add_argument(
-        "--cycle_budget", type=int, default=50, help="pick cycles a heap episode may spend"
+        "--cycle_budget",
+        type=int,
+        default=50,
+        help="pick cycles a heap episode may spend (the MuJoCo recorder's default scales with "
+        "the heap, batch_loop.heap_cycle_budget)",
     )
     parser.add_argument(
         "--tray",

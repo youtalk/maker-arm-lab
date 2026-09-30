@@ -41,6 +41,7 @@ from maker_arm_lab.core.batch_loop import (
     check_ms7e,
     check_ms7f,
     heap_classes,
+    heap_cycle_budget,
     heap_episode_length_s,
     heap_parts,
     make_induction,
@@ -82,6 +83,7 @@ class _TokenEmittingParser(argparse.ArgumentParser):
 def parse_args(argv=None) -> argparse.Namespace:
     parser = _TokenEmittingParser(description=__doc__)
     add_batch_arguments(parser)
+    parser.set_defaults(cycle_budget=None)  # heap_cycle_budget(K) once --heap_k is read
     add_ms7e_arguments(parser)
     add_ms7f_arguments(parser, transport_speed=False)  # --transport_speed is a batch flag
     parser.add_argument(
@@ -110,6 +112,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     for name in ("run_seed", "layout_seed"):
         if not (0 <= getattr(args, name) < 2**32):
             parser.error(f"--{name} is outside numpy's seed range (0 <= seed < 2**32)")
+    if args.cycle_budget is None:
+        args.cycle_budget = heap_cycle_budget(args.heap_k)
     check_ms7e(parser, args)
     # The recorder's walk pace predates MS7f (the MS3 speed ladder): it is built here.
     check_ms7f(parser, args, MS7F_READY | {"transport_speed"})

@@ -394,7 +394,8 @@ class TakeoverConfig:
 
 
 def cycle_budget(k: int) -> int:
-    """The pick cycles an episode of ``k`` parts may spend (phase B design 5.1: 65 at K=50)."""
+    """The pick cycles an episode of ``k`` parts may spend (phase B design 5.1: 65 at K=50, and
+    195 at the MS7f heap of 150, MS7f design section 5)."""
     return math.ceil(CYCLE_BUDGET_FACTOR * k)
 
 
@@ -403,7 +404,10 @@ def episode_length_s(budget: int, control_hz: float = 30.0) -> float:
     retreat wait at its cap before each. The wait lies outside the cycles, so without its
     allowance the episode's step cap binds before the cycle budget does: on the 400k check of
     run m (2026-09-22), 41 of 60 episodes ended on the step cap at a median of 60 of 65 cycles,
-    with a quarter of their steps spent in the wait."""
+    with a quarter of their steps spent in the wait. It scales with the heap through the
+    budget: 2383 s (71,500 steps) at 50 parts, 7150 s (214,500 steps) at 150 (MS7f design
+    section 5); the loop ends an episode at its cycle budget or its last candidate long before.
+    """
     return budget * (CYCLE_STEP_BUDGET + int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET)) / control_hz
 
 

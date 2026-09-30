@@ -461,3 +461,28 @@ def test_the_recorders_run_stats_carry_the_throughput_and_the_events():
     )
     assert stats["steps_total"] == 54000 and stats["stows_per_hour"] == pytest.approx(180.0)
     assert stats["events"] == {"tray_refill": 0, "box_empty": 0}
+
+
+# -- heaps of up to 150 parts (design section 5) ---------------------------------------------
+
+
+def test_the_clients_take_heaps_up_to_150_and_the_budget_scales_with_the_heap(capsys):
+    assert batch_loop.MAX_HEAP_K == 150
+    heap = _load("mj_eval_heap")
+    args = heap.parse_args(["--heap_k", "150", "--oracle_driver"])
+    assert args.cycle_budget == loop.cycle_budget(150) == 195
+    assert loop.episode_length_s(195) == pytest.approx(7150.0)
+    with pytest.raises(SystemExit):
+        heap.main(["--heap_k", "151", "--oracle_driver"])
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1 and out[0].startswith("EVAL_FAIL ") and "exceeds 150" in out[0]
+    batch = _load("mj_generate_batch")
+    base = ["--out_dir", "/tmp/x", "--heap_k"]
+    assert batch.parse_args(base + ["50"]).cycle_budget == 50  # every MS7e corpus's budget
+    assert batch.parse_args(base + ["0"]).cycle_budget == 50
+    assert batch.parse_args(base + ["150"]).cycle_budget == 195
+    assert batch.parse_args(base + ["150", "--cycle_budget", "60"]).cycle_budget == 60
+    assert batch_loop.heap_episode_length_s(150, 195) == 3030.0
+    with pytest.raises(SystemExit):
+        batch.main(base + ["151"])
+    assert capsys.readouterr().out.strip().splitlines()[-1].startswith("BATCH_FAIL usage: ")

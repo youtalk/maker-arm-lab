@@ -181,6 +181,8 @@ MS7F_OFF = {
 }
 """``core.batch_loop.MS7F_OFF``, copied because the supervisor imports no maker_arm_lab; the test
 pins it. The "ms7f" block of a read with every MS7f switch off, what an MS7e payload ran with."""
+MAX_HEAP_K = 150
+"""``core.batch_loop.MAX_HEAP_K``, the MS7f heap, copied and pinned the same way."""
 MS7F_READY: frozenset[str] = frozenset({"categories"})
 """``core.batch_loop.MS7F_READY``, copied and pinned the same way: any other MS7f switch at a
 value but its off value is refused before a server starts (MS7f design section 12.2)."""
@@ -1338,6 +1340,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         # The env's one generator draws env 0's boxes before any heap; each later env's boxes
         # follow the heap before it, which held-out parts change.
         raise ValueError("--seen_seeds reproduces a recorded run's env 0: it needs --num_envs 1")
+    if args.heap_k > MAX_HEAP_K:
+        raise ValueError(f"--heap_k {args.heap_k} exceeds {MAX_HEAP_K}, the MS7f heap")
     if args.heap_k > 0:
         if args.backend != "mujoco":
             raise ValueError("--heap_k needs --backend mujoco: the Isaac env has no heap")

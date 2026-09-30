@@ -63,6 +63,7 @@ ge = _load(ROOT / "scripts" / "run_gate_eval.py")
 def test_every_ms7f_switch_has_an_on_value_here():
     assert set(ON) == set(batch_loop.MS7F_OFF) == set(ge.MS7F_OFF)
     assert ge.MS7F_OFF == batch_loop.MS7F_OFF and ge.MS7F_READY == batch_loop.MS7F_READY
+    assert ge.MAX_HEAP_K == batch_loop.MAX_HEAP_K
 
 
 @pytest.mark.parametrize("name", list(ON))
@@ -187,3 +188,12 @@ def test_every_new_script_prints_one_token_line_on_a_usage_error(script, ok, fai
     tokens = [line for line in run.stdout.splitlines() if line.startswith((ok, fail))]
     assert run.returncode != 0 and len(tokens) == 1 and tokens[0].startswith(fail), run.stdout
     assert "os._exit(" in script.read_text()
+
+
+def test_the_supervisor_refuses_a_heap_over_150(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    argv = _gate_argv(tmp_path)
+    argv[argv.index("--heap_k") + 1] = "151"
+    assert ge.main(argv) == 2 and "exceeds 150" in capsys.readouterr().err
+    argv[argv.index("--heap_k") + 1] = "150"
+    assert ge._build_cfg(ge._parse_args(argv)).heap_k == 150
