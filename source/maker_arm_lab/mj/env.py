@@ -1055,15 +1055,19 @@ class MjLegoSortEnv:
             m.geom_conaffinity[geoms] = self._conaffinity[geoms]
             self.parked[i, b] = False
 
-    def tray_count(self, i: int) -> int:
-        """MS7f H1': the parts of env ``i`` in the tray (``layout.in_tray``), parked parts never.
-        The person who refills the tray counts them, so it reads the simulator."""
+    def tray_parts(self, i: int) -> list[int]:
+        """MS7f: env ``i``'s parts in the tray (``layout.in_tray``), parked parts never. The
+        person who refills or clears the tray sees them, so this reads the simulator."""
         d, h = self.datas[i], self.handles
-        return sum(
-            1
+        return [
+            b
             for b, body in enumerate(h.brick_bodies)
             if not bool(self.parked[i, b]) and self._in_tray(d.xpos[body])
-        )
+        ]
+
+    def tray_count(self, i: int) -> int:
+        """MS7f H1': how many parts ``tray_parts`` finds."""
+        return len(self.tray_parts(i))
 
     def refill_tray(self, i: int) -> int:
         """MS7f H1', a person's event between cycles (MS7f design 5.3): when

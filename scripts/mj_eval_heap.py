@@ -49,12 +49,17 @@ from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 
 
 class _TokenEmittingParser(argparse.ArgumentParser):
-    """A parser whose usage errors still honour the EVAL_OK / EVAL_FAIL contract."""
+    """A parser whose usage errors still honour the EVAL_OK / EVAL_FAIL contract (``token``: a
+    script that runs this client's ``main``, ``scripts/mj_stretch_run.py``, sets its own)."""
+
+    token = "EVAL"
 
     def error(self, message: str):
         self.print_usage(sys.stderr)
         print(f"{self.prog}: error: {message}", file=sys.stderr, flush=True)
-        print("EVAL_FAIL " + json.dumps({"reason": "usage", "detail": message}), flush=True)
+        print(
+            f"{self.token}_FAIL " + json.dumps({"reason": "usage", "detail": message}), flush=True
+        )
         raise SystemExit(2)
 
 
@@ -66,8 +71,8 @@ def _scales(text: str) -> dict:
         raise argparse.ArgumentTypeError(str(err)) from None
 
 
-def parse_args(argv=None) -> argparse.Namespace:
-    parser = _TokenEmittingParser(description=__doc__)
+def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace:
+    parser = parser_cls(description=__doc__)
     parser.add_argument("--num_envs", type=int, default=5)
     parser.add_argument("--run_seed", type=int, default=0, help="env.reset seed and the rig rng")
     parser.add_argument("--layout_seed", type=int, default=0, help="seeds sample_run_draw")
@@ -379,8 +384,11 @@ def frame_writer(frames_dir: str):
     return write
 
 
-def main(argv=None) -> int:
-    args = parse_args(argv)
+def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -> int:
+    """``run`` is the rollout (``loop.rollout``, or the stretch runner's chain of them) and
+    ``episode_s`` overrides the env's episode length; the tokens are ``parser_cls.token``'s."""
+    args = parse_args(argv, parser_cls)
+    token = parser_cls.token
     policy = None
     env = None
     close_error = None
@@ -401,7 +409,7 @@ def main(argv=None) -> int:
             frame_jitter=args.frame_jitter,
             spatial_scale=args.spatial_scale,
             context=args.context,
-            episode_length_s=episode_length_s(args.cycle_budget),
+            episode_length_s=episode_s or episode_length_s(args.cycle_budget),
             gripper_mode=args.gripper,
             desk_boxes=args.desk_boxes,
             tray=args.tray,
@@ -452,7 +460,7 @@ def main(argv=None) -> int:
         )
         policy = None if args.oracle_driver else policy_client.ServerPolicy(args.server)
         trace = [] if args.hold_trace else None
-        payload = rollout(
+        payload = (run or rollout)(
             env,
             rig,
             policy,
@@ -508,11 +516,13 @@ def main(argv=None) -> int:
             # Each rejected LIFT's passengers, as indices into payload["parts"].
             payload["passenger_rejects"] = [r for log in rig.passenger_log for r in log]
     except EvalFailure as err:
-        print("EVAL_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True)
+        print(
+            f"{token}_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True
+        )
         return 1
     except Exception as err:  # noqa: BLE001 -- any uncaught error must still print a token
         print(
-            "EVAL_FAIL "
+            f"{token}_FAIL "
             + json.dumps({"reason": "exception", "detail": f"{err}\n{traceback.format_exc()}"}),
             flush=True,
         )
@@ -529,7 +539,7 @@ def main(argv=None) -> int:
             # so exactly one token is printed on either path (mj_dagger_batch.py's rule).
             close_error = f"{err}\n{traceback.format_exc()}"
     if close_error is not None:
-        print("EVAL_FAIL " + json.dumps({"reason": "close", "detail": close_error}), flush=True)
+        print(f"{token}_FAIL " + json.dumps({"reason": "close", "detail": close_error}), flush=True)
         return 1
     try:
         if args.out:
@@ -538,9 +548,11 @@ def main(argv=None) -> int:
             with gzip.open(args.hold_trace, "wt") as f:
                 f.writelines(json.dumps(row) + "\n" for row in trace)
     except Exception as err:  # noqa: BLE001 -- the rollout already ran; still print a token
-        print("EVAL_FAIL " + json.dumps({"reason": "write_out", "detail": str(err)}), flush=True)
+        print(
+            f"{token}_FAIL " + json.dumps({"reason": "write_out", "detail": str(err)}), flush=True
+        )
         return 1
-    print("EVAL_OK " + json.dumps(payload), flush=True)
+    print(f"{token}_OK " + json.dumps(payload), flush=True)
     return 0
 
 
