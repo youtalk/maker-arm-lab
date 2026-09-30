@@ -2099,6 +2099,7 @@ def rollout(
                 box_empty,
                 refill,
                 interventions[i] if stretch else None,
+                (st.box_load, getattr(st.selector, "box_load", None) or []),
             ):
                 # The event moved parts: the truth of this step is stale for env i.
                 truth = truth_reads(env, per_part)
@@ -2742,14 +2743,15 @@ def interval_sums(episodes: list[dict]) -> dict:
 
 
 def between_cycles(
-    env, i: int, counts, emptied_ok, emptied_box, box_empty, refill, strays=None
+    env, i: int, counts, emptied_ok, emptied_box, box_empty, refill, strays=None, loads=()
 ) -> bool:
     """MS7f: a person's events between env ``i``'s cycles, before its next selection, at zero
     simulated time (MS7f design 4.1, 5.3 and 5.4). ``box_empty`` empties every full box
     (``env.empty_full_boxes``): each of its parts is graded at that moment, once, into
     ``emptied_ok`` and ``emptied_box`` (row ``i``), then parked, and the perceived state never
-    sees it again. ``refill`` refills the tray (``env.refill_tray``). ``counts`` books each
-    event. ``strays``, a stretch run's interventions (MS7f design 10.4 rule 2), first puts every
+    sees it again, and every record in ``loads`` (a list of volume per box: the loop's
+    ``EnvState.box_load``, a teacher's ``HeapOracle.box_load``) starts that box over at 0.
+    ``refill`` refills the tray (``env.refill_tray``). ``counts`` books each event. ``strays``, a stretch run's interventions (MS7f design 10.4 rule 2), first puts every
     part at rest outside the tray and every box back into the tray and books one per part. The
     person reads the simulator; no loop decision reads what they read. Returns whether an event
     moved a part."""
@@ -2765,6 +2767,8 @@ def between_cycles(
             counts["box_empty"] += 1
             emptied_box[i, parts] = box
             emptied_ok[i, parts] = torch.tensor(ok)
+            for load in loads:
+                load[box] = 0.0
             fired = True
     if refill and env.refill_tray(i):
         counts["tray_refill"] += 1
