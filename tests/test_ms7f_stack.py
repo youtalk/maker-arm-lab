@@ -23,6 +23,7 @@ ON = {
     "deep_tray": ["--deep_tray"],
     "tray_refill": ["--tray_refill"],
     "box_empty": ["--box_empty"],
+    "book_miss": ["--book_miss"],
     "classifier": ["--classifier", "/tmp/ms7f_no_such_classifier.pt"],
     "passenger_drop": ["--passenger_drop"],
     "transport_speed": ["--transport_speed", "6.0"],

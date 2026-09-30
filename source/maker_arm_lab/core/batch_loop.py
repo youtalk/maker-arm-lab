@@ -238,17 +238,20 @@ MS7F_OFF: dict = {
     "deep_tray": False,
     "tray_refill": False,
     "box_empty": False,
+    "book_miss": False,
     "classifier": None,
     "passenger_drop": False,
     "transport_speed": trajectory.TRANSPORT_SPEED,
 }
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
 of a run with every one off, what an MS7e run ran with. categories is the base track's;
-deep_tray, tray_refill and box_empty track H's (design section 5); classifier and
+deep_tray, tray_refill, box_empty and book_miss track H's (design section 5); classifier and
 passenger_drop track C's (design section 6); transport_speed track S's (design section 8), the
 teacher walk's pace. The gate supervisor keeps a stdlib copy (``scripts/run_gate_eval.py``),
 pinned by a test."""
-MS7F_READY: frozenset[str] = frozenset({"categories", "deep_tray", "tray_refill", "box_empty"})
+MS7F_READY: frozenset[str] = frozenset(
+    {"categories", "deep_tray", "tray_refill", "box_empty", "book_miss"}
+)
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
 a usage error with the script's fail token (MS7f design section 12.2). Each track adds its
 switch in the commit that brings the behaviour; the supervisor's copy is pinned by a test."""
@@ -281,6 +284,12 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
         "--box_empty",
         action="store_true",
         help="MS7f H2: a full box is emptied between cycles, its parts graded then and parked",
+    )
+    parser.add_argument(
+        "--book_miss",
+        action="store_true",
+        help="MS7f H: the heap loop books a failure against the target of a cycle that stowed only "
+        "other parts (loop.books_failure); the heap client only",
     )
     parser.add_argument(
         "--classifier",

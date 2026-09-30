@@ -503,6 +503,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             snap_closed=args.snap_closed,
             heldout=heldout_names(args),
             box_empty=args.box_empty,
+            book_miss=args.book_miss,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

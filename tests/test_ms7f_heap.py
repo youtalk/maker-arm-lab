@@ -328,3 +328,23 @@ def test_the_recorder_rig_runs_the_events_between_its_own_cycles(monkeypatch):
     ep = batch_loop.run_batch(env, rig, 1, max_wall_minutes=10.0)["episodes"][0]
     assert ep["events"]["tray_refill"] >= 1 and ep["events"]["box_empty"] >= 1, ep
     assert ep["succeeded"] and ep["bricks_delivered"] == 4, ep
+
+
+def test_book_miss_books_the_target_of_a_cycle_that_stowed_only_other_parts():
+    # Off: only a failed cycle books (MS7e). On: a cycle whose stows leave its target out too.
+    assert not loop.books_failure(True, 7, [3], book_miss=False)
+    assert loop.books_failure(True, 7, [3], book_miss=True)
+    assert not loop.books_failure(True, 7, [3, 7], book_miss=True)
+    assert loop.books_failure(False, 7, [], book_miss=False)
+
+
+def test_the_recorder_refuses_book_miss(capsys):
+    # The rig that drives the recorder keeps its own failure memory: --book_miss is the loop's.
+    from test_ms7f_stack import ROOT, _load
+
+    with pytest.raises(SystemExit) as exit_info:
+        _load(ROOT / "scripts" / "mj_generate_batch.py").main(
+            ["--out_dir", "/tmp/x", "--heap_k", "3", "--desk_boxes", "4", "--book_miss"]
+        )
+    assert exit_info.value.code == 2
+    assert "--book_miss is not built on this commit" in capsys.readouterr().out

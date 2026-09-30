@@ -1104,7 +1104,7 @@ def _ms7f_scene(monkeypatch):
     the six categories over the drawn boxes, a category's second boxes chosen by the loop's
     own release record (MS7f design section 6.2). A track that readies a loop switch adds it
     here, so the no-truth test runs with every ready switch on (design section 12.2)."""
-    ready = {"categories", "deep_tray", "tray_refill", "box_empty"}
+    ready = {"categories", "deep_tray", "tray_refill", "box_empty", "book_miss"}
     assert batch_loop.MS7F_READY == ready, "turn it on in this scene"
     # Two of the three bricks start in the tray and one part fills a box, so the refill and
     # an emptying both run between cycles. Set before the build: the box draw reads the ratio.
@@ -1121,7 +1121,7 @@ def _ms7f_scene(monkeypatch):
         deep_tray=True,
         tray_refill=True,
     )
-    return env, rig, policy, budget, switches | {"box_empty": True}
+    return env, rig, policy, budget, switches | {"box_empty": True, "book_miss": True}
 
 
 def _thin_snap_scene(monkeypatch):

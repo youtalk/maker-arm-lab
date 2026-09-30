@@ -175,6 +175,7 @@ MS7F_OFF = {
     "deep_tray": False,
     "tray_refill": False,
     "box_empty": False,
+    "book_miss": False,
     "classifier": None,
     "passenger_drop": False,
     "transport_speed": 4.0,
@@ -183,7 +184,9 @@ MS7F_OFF = {
 pins it. The "ms7f" block of a read with every MS7f switch off, what an MS7e payload ran with."""
 MAX_HEAP_K = 150
 """``core.batch_loop.MAX_HEAP_K``, the MS7f heap, copied and pinned the same way."""
-MS7F_READY: frozenset[str] = frozenset({"categories", "deep_tray", "tray_refill", "box_empty"})
+MS7F_READY: frozenset[str] = frozenset(
+    {"categories", "deep_tray", "tray_refill", "box_empty", "book_miss"}
+)
 """``core.batch_loop.MS7F_READY``, copied and pinned the same way: any other MS7f switch at a
 value but its off value is refused before a server starts (MS7f design section 12.2)."""
 
@@ -1216,6 +1219,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ("deep_tray", "H1, the deep tray"),
         ("tray_refill", "H1', the tray refill"),
         ("box_empty", "H2, the box emptying"),
+        ("book_miss", "H, the missed target's failure"),
         ("passenger_drop", "C, the passenger response"),
     ):
         parser.add_argument(

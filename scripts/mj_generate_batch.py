@@ -117,7 +117,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         args.cycle_budget = heap_cycle_budget(args.heap_k)
     check_ms7e(parser, args)
     # The recorder's walk pace predates MS7f (the MS3 speed ladder): it is built here.
-    check_ms7f(parser, args, MS7F_READY | {"transport_speed"})
+    # --book_miss is the heap loop's; the rig driving here keeps its own failure memory.
+    check_ms7f(parser, args, (MS7F_READY - {"book_miss"}) | {"transport_speed"})
     if args.perceived and (args.heap_k <= 0 or args.desk_boxes <= 0):
         parser.error(
             "--perceived records a heap sorted into desk boxes: it needs --heap_k > 0 "

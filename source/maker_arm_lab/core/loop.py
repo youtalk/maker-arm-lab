@@ -1639,7 +1639,17 @@ def _left_parts(selector, pos: torch.Tensor, in_bin: torch.Tensor) -> list:
     ]
 
 
-def _close_cycle(st: EnvState, reason: str, stowed: list[int], step: int, scene) -> None:
+def books_failure(ok: bool, target: int, stowed: list[int], book_miss: bool) -> bool:
+    """Does a closed cycle book a failure against its target? A failed cycle does. Under
+    ``book_miss`` (MS7f H) so does a cycle that stowed only other parts: without it a part the
+    teacher cannot lift is selected again after every cycle in which the rig gave it up and
+    delivered a neighbour (the stray loop, tables/heap/h0.txt). Pure."""
+    return not ok or (book_miss and target not in stowed)
+
+
+def _close_cycle(
+    st: EnvState, reason: str, stowed: list[int], step: int, scene, book_miss: bool = False
+) -> None:
     cycle = st.cycle
     ok = reason == "stowed"
     if reason in ("stowed", "released", "placed") and cycle.box >= 0:
@@ -1650,7 +1660,7 @@ def _close_cycle(st: EnvState, reason: str, stowed: list[int], step: int, scene)
     st.targets.append(cycle.target)
     st.stowed_parts.extend(stowed)
     _book_census(st, cycle, reason)
-    if not ok and scene is not None:
+    if books_failure(ok, cycle.target, stowed, book_miss) and scene is not None:
         st.selector._mark_failure(scene, cycle.target)
     st.cycle = None
 
@@ -1702,6 +1712,7 @@ def rollout(
     snap_closed: bool = False,
     box_empty: bool = False,
     stretch: bool = False,
+    book_miss: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1740,6 +1751,8 @@ def rollout(
     part at rest outside the tray and every box goes back into the tray (rule 2, counted per
     part), and ``STRETCH_MISS_STREAK`` cycles in a row with no new correct stow end the episode
     ``miss_streak`` (rule 3, ``miss_streak``). The person watches the grader.
+    ``book_miss`` (MS7f H) books a failure against the target of a cycle that stowed only other
+    parts (``books_failure``), on the truth-graded path; a ``--perceived`` cycle is unchanged.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -2054,7 +2067,7 @@ def rollout(
                         st.cycle.grace_steps += 1
                         end = None
                 if end is not None:
-                    _close_cycle(st, end[0], end[1], step, rig.snapshot(i))
+                    _close_cycle(st, end[0], end[1], step, rig.snapshot(i), book_miss)
                     st.idle_since = step
             if st.cycle is not None:
                 continue
