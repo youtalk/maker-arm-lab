@@ -1285,15 +1285,16 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
     monkeypatch.setattr(ge, "READY_FAMILIES", frozenset(ge.FAMILY_KEYS))
     monkeypatch.setattr(ge, "UNBUILT_SWITCHES", ())
     draw = ge.make_eval_draws(1, 1)[0]
-    argv = _argv(tmp_path / "gate") + MS7E_HEAP + ["--desk_boxes", "4"]
+    argv = _argv(tmp_path / "gate") + MS7E_HEAP + ["--desk_boxes", "4", "--pick_snap"]
     plain = ge._build_cfg(ge._parse_args(argv))
     assert plain.families == () and ge.ms7e_block(plain) == ge.MS7E_OFF
     switches = ["--families", "flat,round", "--box_draw", "6", "--release_lean", "--carry_via"]
     switches += ["--box_unseen", "size", "--heap_family", "flat", "--passenger_check"]
+    switches += ["--thin_snap"]
     cfg = ge._build_cfg(ge._parse_args(argv + switches))
     cmd = ge._eval_command(cfg, draw)
     at = cmd.index("--families")
-    assert cmd[at : at + 11] == ["--families", "round,flat", *switches[2:]]
+    assert cmd[at : at + 12] == ["--families", "round,flat", *switches[2:]]
     block = ge.ms7e_block(cfg)
     assert block == {
         "families": ["round", "flat"],
@@ -1304,15 +1305,15 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
         "heap_family": "flat",
         "passenger_check": True,
         "wall_band_cont": False,  # the continuous gripper's switch, its own test
+        "thin_snap": True,
     }
     off = set(ge._eval_command(plain, draw))
-    assert (
-        not {"--families", "--box_draw", "--release_lean", "--carry_via", "--passenger_check"} & off
-    )
+    ms7e_flags = {"--families", "--box_draw", "--release_lean", "--carry_via", "--passenger_check"}
+    assert not (ms7e_flags | {"--thin_snap"}) & off
     path = tmp_path / "gate" / "eval_000.json"
     path.parent.mkdir(parents=True)
 
-    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None, "loop": {"pick_snap": True}}
 
     def hit(gate_cfg, **extra):
         payload = _heap_payload(draw, inference=served, desk_boxes=4, **extra)
@@ -1324,6 +1325,9 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
     assert hit(plain, ms7e={k: v for k, v in ge.MS7E_OFF.items() if k != "carry_via"})
     with pytest.raises(ValueError, match="needs --release_lean"):
         ge._build_cfg(ge._parse_args(argv + ["--carry_via"]))
+    no_snap = [a for a in argv if a != "--pick_snap"]
+    with pytest.raises(ValueError, match="needs --pick_snap"):
+        ge._build_cfg(ge._parse_args(no_snap + ["--thin_snap"]))
     assert hit(cfg, ms7e=block) and not hit(cfg) and not hit(cfg, ms7e=ge.MS7E_OFF)
     for name, other in (
         ("families", ["round"]),
@@ -1333,6 +1337,7 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
         ("box_unseen", "rim"),
         ("heap_family", "round"),
         ("passenger_check", False),
+        ("thin_snap", False),
     ):
         assert not hit(cfg, ms7e=block | {name: other}), name
     ledger = _fake_ledger(tmp_path)

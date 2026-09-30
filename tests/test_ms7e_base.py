@@ -113,6 +113,7 @@ def test_with_every_switch_off_the_catalog_split_heap_and_classes_are_ms7ds():
         "heap_family": None,
         "passenger_check": False,
         "wall_band_cont": False,
+        "thin_snap": False,
     }
 
 

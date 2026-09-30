@@ -554,9 +554,9 @@ def test_rearm_hold_serves_the_rules_again_after_a_hold_with_no_lift(monkeypatch
     stops = []
 
     def spy(name, real):
-        def rule(*args, held=False):
+        def rule(*args, held=False, **kwargs):
             stops.append((name, held))
-            return real(*args, held=held)
+            return real(*args, held=held, **kwargs)
 
         return rule
 
@@ -1077,6 +1077,30 @@ def _box_draw_scene(monkeypatch):
     return _teacher_scene(monkeypatch, parts.PART_CLASSES, box_draw=6)
 
 
+def _thin_snap_scene(monkeypatch):
+    """The teacher scene with a 2x4 plate and a 2x2 tile for two of its bricks, under the eight
+    MS7e classes and ``thin_snap`` (MS7e ledger R13 S2): the loop serves flat rows."""
+    flat = [
+        parts.make_part("brick", 2, 4),
+        parts.make_part("plate", 2, 4),
+        parts.make_part("tile", 2, 2),
+    ]
+    env, rig = _env_and_rig(part_list=flat, class_names=parts.PART_CLASSES)
+    _place(env, [SPREAD[0], (0.195, 0.0, 0.0026, -0.8), (0.195, 0.045, 0.0026, 1.2)])
+    switches = {
+        "select_at_release": True,
+        "squeeze_floor": True,
+        "square_wrist": True,
+        "pick_snap": True,
+        "dwell_close": True,
+        "part_failures": True,
+        "adopt_held": True,
+        "park_done": True,
+        "thin_snap": True,
+    }
+    return env, rig, _Teacher(env, rig.oracle_factory), 4, switches
+
+
 def test_a_box_draw_episode_records_its_boxes(monkeypatch):
     """The census rebuilds each drawn box from the episode record (MS7e ledger R11)."""
     env, rig, policy, budget, switches = _box_draw_scene(monkeypatch)
@@ -1159,7 +1183,15 @@ def test_every_ms7d_switch_at_once_runs_the_teacher_scene_to_its_end(monkeypatch
 
 @pytest.mark.parametrize("ms7d", [{}, MS7D_ON])
 @pytest.mark.parametrize(
-    "scene", [_teacher_scene, _rake_scene, _eight_class_scene, _box_draw_scene, _wall_band_scene]
+    "scene",
+    [
+        _teacher_scene,
+        _rake_scene,
+        _eight_class_scene,
+        _box_draw_scene,
+        _wall_band_scene,
+        _thin_snap_scene,
+    ],
 )
 def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):
     """MS7c design section 10: under perceived no decision path reads the truth.

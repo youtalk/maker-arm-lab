@@ -143,6 +143,12 @@ def add_ms7e_arguments(parser) -> None:
         help="MS7e serving lever S3 (ledger R13), with --gripper continuous: the grasp model's "
         "wall test puts the fingers at the continuous jaws' landing gap, not the binary hold band",
     )
+    parser.add_argument(
+        "--thin_snap",
+        action="store_true",
+        help="MS7e serving lever S2 (ledger R13), with --pick_snap: a served row whose half "
+        "height is at most loop.THIN_SNAP_MAX_HALF_HEIGHT snaps to desk contact, not row z + 3 mm",
+    )
 
 
 def check_ms7e(parser, args) -> None:
@@ -173,6 +179,8 @@ def check_ms7e(parser, args) -> None:
         parser.error("--passenger_check keeps passengers out of other boxes: it needs --desk_boxes")
     if getattr(args, "wall_band_cont", False) and getattr(args, "gripper", "") != "continuous":
         parser.error("--wall_band_cont is the continuous jaws' band: it needs --gripper continuous")
+    if getattr(args, "thin_snap", False) and not getattr(args, "pick_snap", False):
+        parser.error("--thin_snap moves pick_snap's floor: it needs --pick_snap")
 
 
 def ms7e_switches(args) -> dict:
@@ -187,6 +195,7 @@ def ms7e_switches(args) -> dict:
         "heap_family": getattr(args, "heap_family", None),
         "passenger_check": bool(getattr(args, "passenger_check", False)),
         "wall_band_cont": bool(getattr(args, "wall_band_cont", False)),
+        "thin_snap": bool(getattr(args, "thin_snap", False)),
     }
 
 

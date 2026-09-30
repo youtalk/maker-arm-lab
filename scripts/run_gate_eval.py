@@ -104,6 +104,7 @@ class GateCfg:
     heap_family: str | None = None
     passenger_check: bool = False
     wall_band_cont: bool = False
+    thin_snap: bool = False
 
 
 FAMILY_KEYS = ("round", "ldraw", "flat")
@@ -136,6 +137,7 @@ MS7E_OFF = {
     "heap_family": None,
     "passenger_check": False,
     "wall_band_cont": False,
+    "thin_snap": False,
 }
 """The "ms7e" block of a read with every MS7e switch off, what an MS7d payload ran with."""
 
@@ -152,6 +154,7 @@ def ms7e_block(cfg: "GateCfg") -> dict:
         "heap_family": cfg.heap_family,
         "passenger_check": cfg.passenger_check,
         "wall_band_cont": cfg.wall_band_cont,
+        "thin_snap": cfg.thin_snap,
     }
 
 
@@ -579,6 +582,8 @@ def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
                 prefix.append("--passenger_check")
             if cfg.wall_band_cont:
                 prefix.append("--wall_band_cont")
+            if cfg.thin_snap:
+                prefix.append("--thin_snap")
         prefix += list(cfg.client_flags)
     else:
         prefix = [
@@ -1020,6 +1025,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--wall_band_cont",
     )
     parser.add_argument(
+        "--thin_snap",
+        action="store_true",
+        help="MuJoCo heap only, MS7e serving lever S2 with --pick_snap: forwarded as --thin_snap",
+    )
+    parser.add_argument(
         "--deep_box_floor",
         action="store_true",
         help="MuJoCo heap only, MS7e flat lever 1: forwarded as --deep_box_floor, the desk box "
@@ -1086,6 +1096,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError(
             "--wall_band_cont is the continuous jaws' band: it needs --gripper continuous"
         )
+    if args.thin_snap and not args.pick_snap:
+        raise ValueError("--thin_snap moves pick_snap's floor: it needs --pick_snap")
     families = families_key(args.families)
     if any(getattr(args, name) for name in MS7E_OFF) and (
         args.heap_k <= 0 or args.backend != "mujoco"
@@ -1150,6 +1162,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         heap_family=args.heap_family,
         passenger_check=args.passenger_check,
         wall_band_cont=args.wall_band_cont,
+        thin_snap=args.thin_snap,
         client_flags=tuple(shlex.split(args.client_flags))
         + (("--scripted_place",) if args.scripted_place else ())
         + (("--scripted_rake",) if args.scripted_rake else ())

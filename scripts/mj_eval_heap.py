@@ -468,6 +468,7 @@ def main(argv=None) -> int:
             class_views=args.class_views,
             hold_force=args.hold_force,
             force_cap=args.force_cap,
+            thin_snap=args.thin_snap,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

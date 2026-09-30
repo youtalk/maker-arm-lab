@@ -151,7 +151,7 @@ from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.dagger_loop import DECLINE_COOLDOWN, trigger_reason
 from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _nearest_brick_cm
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
-from maker_arm_lab.core.global_ik import fold_to_half_turn, wrap_to_pi
+from maker_arm_lab.core.global_ik import JAW_TIP_REACH, fold_to_half_turn, wrap_to_pi
 from maker_arm_lab.core.heap_oracle import (
     CANDIDATE_MAX_Z,
     MAX_RAKES,
@@ -539,15 +539,52 @@ pick point 15 to 25 mm above it, over a part whose top is 4 to 8 mm above it, an
 air there. The margin is ``close_gate``'s, the stows' upper quartile on run m."""
 SNAP_Z_TOL = 0.001
 """m: ``snap_hold`` lets the jaws go once the served pick point is this close to its floor."""
+THIN_SNAP_MAX_HALF_HEIGHT = 0.002  # INITIAL: the MS7e ledger R13 rows read the lever
+"""m: under ``thin_snap`` a served row whose half height is at most this is a flat part (a
+plate or a tile, 3.2 mm tall), and its snap floor is ``DESK_CONTACT_Z``.
+
+The row's half height is the perceived one under ``perceived``: the vertical extent carries
+twice ``perception.SIZE_SIGMA_M``, so a plate row reads 1.6 +- 1.0 mm and about two in three
+plate rows take the snap, and a brick row (4.8 +- 1.0 mm) about one in 400."""
+DESK_CONTACT_Z = JAW_TIP_REACH + PICK_OFFSET_MEASURED[2]
+"""m: the pick point's height (2.1 mm) with level jaw tips on the desk, which is z = 0 inside
+the tray too: the plates reach ``JAW_TIP_REACH`` past grasp_center, the pick point sits
+``PICK_OFFSET_MEASURED`` along the same axis. The teacher's flat DESCEND asks for the tips
+``global_ik.FLAT_TIP_PRESS`` under the desk; the snap never takes the served point under the
+desk, and a policy command already lower is kept. No press is needed on this gripper: the
+lone-part table of 2026-09-29 (``scripts/mj_part_table.py --families plate,tile --trials 12
+--deep_box_floor`` at f8faeee) lifts 120 of 120 flat parts with the teacher's tips at the desk
+(``FLAT_TIP_PRESS`` 0, 119 stowed), as at 1 mm and 2 mm of press (120 and 120)."""
 
 
-def snap_shift(cmd, pick, row, shift, jaw_gap: float, held: bool = False) -> tuple:
+def snap_floor(row, thin: bool = False) -> float:
+    """``pick_snap``'s floor (m): the lowest height it takes the served pick point to. Pure.
+
+    The row centre plus ``SNAP_Z_MARGIN``. With ``thin`` (``thin_snap``, MS7e ledger R13 S2)
+    a row whose half height ``row[6]`` is at most ``THIN_SNAP_MAX_HALF_HEIGHT`` snaps to
+    ``DESK_CONTACT_Z`` instead. The E1 loss census of 2026-09-29 (screen e_E1_050000_scr): the
+    first close on a flat part sits above its top in 0.60 of its close_miss and held_no_lift
+    cycles (0.33 of its stows), a median 3.1 mm over the centre, because row z + 3 mm is 1.4 mm
+    over a 3.2 mm part's top before the perceived z's bias and noise (2 mm sigma each). The
+    desk floor reads no perceived z. A part under the landing spots stops the tips sooner, and
+    ``snap_hold`` lets go at a stop short. A slope row keeps the margin: at its centre a slope
+    lying on its base stands 7.9 to 9.6 mm, a brick's height, and bricks stow at this margin.
+    """
+    if thin and float(row[6]) <= THIN_SNAP_MAX_HALF_HEIGHT:
+        return DESK_CONTACT_Z
+    return float(row[2]) + SNAP_Z_MARGIN
+
+
+def snap_shift(
+    cmd, pick, row, shift, jaw_gap: float, held: bool = False, thin: bool = False
+) -> tuple:
     """``pick_snap``: the offset (m, world x y z) the loop adds to the commanded pick point. Pure.
 
     ``cmd`` is the commanded pick point (FK of the served arm command plus the pick offset),
     ``pick`` the measured one, ``row`` the served target row (``target_context``), ``shift``
     the offset served on the step before, ``jaw_gap`` the measured gap between the jaws and
     ``held`` the stop flag ``square_wrist`` reads (the cycle has held a part or lifted one).
+    ``thin`` is ``thin_snap``, which moves the floor of a flat row (``snap_floor``).
     The offset is zero with no live row (width 0), after the stop flag, and while the pick
     point is more than ``SNAP_RADIUS`` from the row centre in xy or ``SQUARE_ABOVE`` above its
     top. Inside that window:
@@ -558,9 +595,9 @@ def snap_shift(cmd, pick, row, shift, jaw_gap: float, held: bool = False) -> tup
       closes stow one cycle in three.
     * z: while the pick point is within ``SNAP_Z_RADIUS`` of the row centre and the jaws are
       open wider than the row's width, the offset goes down by at most ``SNAP_Z_STEP`` a step.
-      It never takes the served point under ``row z + SNAP_Z_MARGIN`` (a command already under
-      that height is left alone) and is kept, not grown, while the jaws are closed, so closed
-      tips are never driven into the part or the pile.
+      It never takes the served point under ``snap_floor`` (a command already under that
+      height is left alone) and is kept, not grown, while the jaws are closed, so closed tips
+      are never driven into the part or the pile.
     """
     if held or float(row[5]) <= 0.0:
         return (0.0, 0.0, 0.0)
@@ -576,19 +613,21 @@ def snap_shift(cmd, pick, row, shift, jaw_gap: float, held: bool = False) -> tup
         ex, ey = ex * SNAP_XY_STEP / n, ey * SNAP_XY_STEP / n
     if near <= SNAP_Z_RADIUS and jaw_gap >= float(row[5]):
         dz -= SNAP_Z_STEP
-    floor = min(0.0, float(row[2]) + SNAP_Z_MARGIN - float(cmd[2]))
+    floor = min(0.0, snap_floor(row, thin) - float(cmd[2]))
     return (dx + ex, dy + ey, min(0.0, max(dz, floor)))
 
 
-def snap_hold(cmd, pick, row, shift, descending: bool, held: bool = False) -> bool:
+def snap_hold(
+    cmd, pick, row, shift, descending: bool, held: bool = False, thin: bool = False
+) -> bool:
     """``pick_snap``: hold the jaws at the landing gap now? Pure.
 
-    ``cmd``, ``pick``, ``row`` and ``held`` as in ``snap_shift``, ``shift`` the offset
+    ``cmd``, ``pick``, ``row``, ``held`` and ``thin`` as in ``snap_shift``, ``shift`` the offset
     ``snap_shift`` returned for this step and ``descending`` whether the measured pick point
     came down ``GATE_DESCENT`` over the last ``GATE_WINDOW`` steps. True inside the lowering
     window (``SNAP_Z_RADIUS`` of the row centre, under the row's top plus ``SQUARE_ABOVE``,
-    before the stop flag) while the policy's own command hovers above the floor (row centre
-    plus ``SNAP_Z_MARGIN``) and the lowering is not done: the served point is still more than
+    before the stop flag) while the policy's own command hovers above the floor
+    (``snap_floor``) and the lowering is not done: the served point is still more than
     ``SNAP_Z_TOL`` above the floor, or it is there and the arm is still coming down after it
     and above it. A pick point that stops short (a neighbour under the tips) lets go at once,
     so the hold never outlasts the descent.
@@ -605,7 +644,7 @@ def snap_hold(cmd, pick, row, shift, descending: bool, held: bool = False) -> bo
     top = float(row[2]) + float(row[6])
     if near > SNAP_Z_RADIUS or float(pick[2]) >= top + SQUARE_ABOVE:
         return False
-    floor = float(row[2]) + SNAP_Z_MARGIN
+    floor = snap_floor(row, thin)
     if float(cmd[2]) <= floor:
         return False
     if float(cmd[2]) + float(shift[2]) > floor + SNAP_Z_TOL:
@@ -1550,6 +1589,7 @@ def rollout(
     class_views: bool = False,
     hold_force: bool = False,
     force_cap: bool = False,
+    thin_snap: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1571,6 +1611,9 @@ def rollout(
     The nine MS7d switches are the module docstring's; all but ``hold_force`` and
     ``force_cap`` need ``perceived``. Those two need the env's ``arm_torques``, and a
     ``hold_trace`` row then carries the force too.
+    ``thin_snap`` (MS7e ledger R13 S2) moves ``pick_snap``'s floor of a flat row to the desk
+    (``snap_floor``); it needs ``pick_snap``, and the heap client records it in the payload's
+    "ms7e" block.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1641,6 +1684,8 @@ def rollout(
     ):
         if on and (gripper_mode != "continuous" or ctx_target is None):
             raise EvalFailure(name, "needs the continuous gripper and a served target row")
+    if thin_snap and not pick_snap:
+        raise EvalFailure("thin_snap", "moves pick_snap's floor: it needs pick_snap")
     if contact_hold and not perceived:
         raise EvalFailure("contact_hold", "the stop flag's contact fallback needs perceived")
     if perceived:
@@ -2067,11 +2112,12 @@ def rollout(
                             c.snap,
                             2.0 * GRIPPER_OPEN_POS * float(openings[i]),
                             held=held_so_far,
+                            thin=thin_snap,
                         )
                         hist = pick_z_hist[i]
                         descending = len(hist) > GATE_WINDOW and hist[0] - hist[-1] > GATE_DESCENT
                         hold_open = snap_hold(
-                            cmd, picks[i], row, c.snap, descending, held=held_so_far
+                            cmd, picks[i], row, c.snap, descending, held=held_so_far, thin=thin_snap
                         )
                         if any(c.snap):
                             snapped = snapped_arm(rig.ik, action_cpu[i, :6], c.snap)
