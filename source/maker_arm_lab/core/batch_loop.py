@@ -487,7 +487,12 @@ def build_run(args) -> tuple[dict, layout.BinLayout, oracle.OracleNoise]:
         hover_height=(0.12 - 0.02 * args.noise_scale, 0.12 + 0.02 * args.noise_scale),
         lateral_offset=0.003 * args.noise_scale,
         yaw_offset=0.0873 * args.noise_scale,
-        gain_scale=(1.0 - 0.3 * args.noise_scale, 1.0),
+        gain_scale=(
+            1.0 - 0.3 * args.noise_scale
+            if getattr(args, "gain_min", None) is None
+            else args.gain_min,
+            1.0,
+        ),
         action_noise_std=0.05 * args.noise_scale,
         via_jitter=0.02 * args.noise_scale,
         # Outside --noise_scale on purpose: it removes a SHORTCUT (the fixed R,B,Y,G,R,B
@@ -536,6 +541,7 @@ def run_meta(
         "noise_scale": args.noise_scale,
         "start_pose_offset_rad": args.start_pose_offset_rad,
         "transport_speed": args.transport_speed,
+        "gain_min": getattr(args, "gain_min", None),
         # What was CONFIGURED; each episode's own "pick_order" records what was picked.
         "randomize_pick_order": noise.randomize_pick_order,
         "nearest_first_pick_order": noise.nearest_first_pick_order,
@@ -981,6 +987,13 @@ def add_batch_arguments(parser) -> None:
         help="Multiplier on the pace of the transport legs (HOVER, LIFT, RAISE, EXTEND, "
         "RETREAT) under the minimum-jerk walk; 1.0 is the old staircase's pace, the default "
         "is the speed-ladder read. DESCEND is never scaled.",
+    )
+    parser.add_argument(
+        "--gain_min",
+        type=float,
+        default=None,
+        help="MS7f S1, the recorder: the lower bound of the per-episode gain_scale draw (the "
+        "walks' pace), in place of 1 - 0.3 * --noise_scale; unset keeps that",
     )
     parser.add_argument(
         "--induce_prob",

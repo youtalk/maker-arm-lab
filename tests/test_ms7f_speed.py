@@ -159,3 +159,15 @@ def test_the_close_guard_gives_a_retry_the_full_close():
         mj_eval_heap.parse_args(["--close_steps", "25", "--close_guard"]),
     )
     assert (orc.close_steps, orc.close_guard) == (25, True)
+
+
+def test_the_recorder_gain_floor_moves_only_the_gain_draw():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    batch_loop.add_batch_arguments(parser)
+    today = batch_loop.build_run(parser.parse_args(["--out_dir", "x"]))[2]
+    assert today.gain_scale == (0.7, 1.0)
+    floor = batch_loop.build_run(parser.parse_args(["--out_dir", "x", "--gain_min", "0.9"]))[2]
+    assert floor.gain_scale == (0.9, 1.0)
+    assert {**vars(floor), "gain_scale": today.gain_scale} == vars(today)
