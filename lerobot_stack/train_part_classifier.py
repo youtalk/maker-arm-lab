@@ -346,11 +346,13 @@ def read(model, data: dict, device) -> dict:
             },
         }
 
-    missed = lift & (data["riders"] > 0) & ~flagged
+    # A lift with no part between the jaws has no passenger: its ``riders`` count the part the
+    # jaws lifted without pressing it, which the force read missed.
+    missed = lift & part & (data["riders"] > 0) & ~flagged
 
     def passenger(mask, label="riders") -> dict:
         truth = data[label] > 0
-        mask = mask & (data[label] >= 0)
+        mask = mask & part & (data[label] >= 0)
         pos, neg = mask & truth, mask & ~truth
         return {
             "passengers": int(pos.sum()),
@@ -381,9 +383,11 @@ def read(model, data: dict, device) -> dict:
         "passenger_wrist": passenger(wrist),
         "passenger_lift_t2_rule": passenger(lift, "passengers"),
         "riders_in_frame": {
-            "lift_frames_with_riders_labelled": int((lift & (data["rider_seen"] >= 0)).sum()),
-            "rider_seen_at_all": int((lift & (data["rider_seen"] > 0)).sum()),
-            "rider_half_seen": int((lift & (data["rider_seen"] >= 0.5)).sum()),
+            "lift_frames_with_riders_labelled": int(
+                (lift & part & (data["rider_seen"] >= 0)).sum()
+            ),
+            "rider_seen_at_all": int((lift & part & (data["rider_seen"] > 0)).sum()),
+            "rider_half_seen": int((lift & part & (data["rider_seen"] >= 0.5)).sum()),
         },
         "passenger_threshold": float(model.passenger_threshold),
         "confusion_lift": confusion(lift),
