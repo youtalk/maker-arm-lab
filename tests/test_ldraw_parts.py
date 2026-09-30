@@ -20,7 +20,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 GENERATOR = ROOT / "scripts" / "ldraw_parts.py"
 LDRAW = [parts.ldraw_part(i) for i in parts.LDRAW_IDS]
 MS7F = {f: ids for f, ids in parts.LDRAW_FAMILY_IDS.items() if f != "ldraw"}
-EVERY = [parts.ldraw_part(i, f) for f, ids in parts.LDRAW_FAMILY_IDS.items() for i in ids]
+EXTRA = [p for p in map(parts.extra_part, parts.CLASSIFIER_EXTRA) if p.hulls]
+EVERY = [parts.ldraw_part(i, f) for f, ids in parts.LDRAW_FAMILY_IDS.items() for i in ids] + EXTRA
 
 
 def _json(part):
@@ -36,7 +37,8 @@ def _generator():
 
 def test_every_json_part_loads_with_its_rules():
     gen = _generator()
-    assert tuple(gen.PARTS) == tuple(i for ids in parts.LDRAW_FAMILY_IDS.values() for i in ids)
+    catalog_ids = tuple(i for ids in parts.LDRAW_FAMILY_IDS.values() for i in ids)
+    assert tuple(gen.PARTS) == catalog_ids + tuple(_json(p)["id"] for p in EXTRA)
     assert {p.name for p in parts.catalog(("ldraw",))[29:]} == {
         f"ldraw_{i}" for i in parts.LDRAW_IDS
     }
@@ -64,13 +66,14 @@ def test_every_ms7f_part_loads_with_its_rules():
     """MS7f design section 7: graspable (at most 45 mm across its footprint's short side), the
     H2 mass floored, the generator's closing axes, at most MAX_HULLS hulls inside the box."""
     gen = _generator()
-    for family, ids in MS7F.items():
-        members = parts.catalog((family,))[29:]
-        assert [p.name for p in members] == [f"{family}_{i}" for i in ids]
+    for family, ids in {**MS7F, "extra": ()}.items():
+        members = EXTRA if family == "extra" else parts.catalog((family,))[29:]
+        if family != "extra":
+            assert [p.name for p in members] == [f"{family}_{i}" for i in ids]
         for part in members:
             rec = _json(part)
-            assert part == parts.ldraw_part(rec["id"], family) and parts.by_name([part.name])
-            assert part.family == family and parts.part_class(part) == "special"
+            assert part == parts.ldraw_part(rec["id"], part.family) and parts.by_name([part.name])
+            assert parts.part_class(part) == "special"
             assert part.size == tuple(rec["size"]) and part.size[0] >= part.size[1]
             assert min(part.size[:2]) <= parts.MAX_GRASP_WIDTH
             assert part.mass == parts.part_mass(part.size) >= parts.MASS_FLOOR_KG
@@ -80,9 +83,9 @@ def test_every_ms7f_part_loads_with_its_rules():
             half = np.array(part.size) / 2 + 1e-6
             for _, verts in part.hulls:
                 assert (np.abs(np.array(verts)) <= half).all(), part.name
-            assert rec["id"] not in gen.HORIZONTAL_FILL
+            assert (rec["id"] in gen.HORIZONTAL_FILL) == (part.family == "ldraw")
     notice = (parts.LDRAW_DIR / "NOTICE").read_text()
-    assert all(f"{i} (" in notice for ids in parts.LDRAW_FAMILY_IDS.values() for i in ids)
+    assert all(f"{i} (" in notice for i in gen.PARTS)
 
 
 def test_each_ms7f_family_holds_out_a_fifth_on_its_own_generator():

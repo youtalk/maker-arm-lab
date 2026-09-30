@@ -150,6 +150,7 @@ def test_a_round_part_on_its_side_stops_rolling_under_the_switch(round_physics):
 
 
 LDRAW = [parts.ldraw_part(i, f) for f, ids in parts.LDRAW_FAMILY_IDS.items() for i in ids]
+LDRAW += [p for p in parts.by_name(parts.CLASSIFIER_EXTRA) if p.hulls]
 
 
 @pytest.fixture(scope="module")
@@ -181,7 +182,7 @@ def test_every_ldraw_part_rests_on_the_desk(ldraw_built):
     model, h = ldraw_built
     data = mujoco.MjData(model)
     for b, adr in enumerate(h.brick_qpos):
-        data.qpos[adr : adr + 3] = (0.10 + 0.05 * (b % 4), -0.15 + 0.05 * (b // 4), 0.03)
+        data.qpos[adr : adr + 3] = (0.10 + 0.07 * (b % 3), -0.42 + 0.05 * (b // 3), 0.03)
         data.qpos[adr + 3 : adr + 7] = (1.0, 0.0, 0.0, 0.0)
     mujoco.mj_forward(model, data)
     mujoco.mj_step(model, data, nstep=720)

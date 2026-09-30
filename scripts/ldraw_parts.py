@@ -105,6 +105,33 @@ PARTS = {
     "3624": ((0, 1, 2), "a police hat: z from its flat top to the rim, x and y across it"),
     "3838": ((0, 1, 2), "air tanks: x across the two tanks, y front to back, z end to end"),
     "4349": ((0, 1, 2), "a loudhailer: x end to end, y across the cone, z cone to handle"),
+    # MS7f classifier extras (core.parts.CLASSIFIER_EXTRA): in no catalog and no split.
+    "3037": ((0, 2), "4 studs wide on x, the slope runs along y; x on the flat ends, z as 3660's"),
+    "3298": ((1, 2), "the 33 degree slope runs along x; y on the flat sides, z as a slope's"),
+    "3665a": ((1, 2), "the inverted slope runs along x, where a jaw would meet it"),
+    "3702": ((0, 1, 2), "box-shaped like 3700; x (64 mm) is over the grasp limit"),
+    "32000": ((0, 1, 2), "box-shaped like 3700"),
+    "6541": ((0, 1, 2), "box-shaped like 3700"),
+    "4070": ((0, 2), "y runs through the side headlight, as 87087's side stud"),
+    "30414": ((0, 2), "y runs through the four side studs, as 11211's"),
+    "32054": ((0, 1, 2), "a pin as 6558: x on the flat ends, y and z across the stop bush"),
+    "32002": ((0, 1, 2), "a pin as 2780"),
+    "6628": ((1, 2), "a pin with a towball: x would put one jaw on the ball"),
+    "63868": ((1, 2), "a 1x2 plate; x puts one jaw on the end clip, as 4081b's x"),
+    "60470a": ((0, 2), "a 1x2 plate; y puts the jaws on the two side clips, as 14417's y"),
+    "4276b": ((0, 1, 2), "a 1x2 plate; x meets the hinge fingers, as 14418's socket end"),
+    "44301a": ((0, 1, 2), "a 1x2 plate; x meets the single hinge finger, as 14418's socket end"),
+    "2430": ((0, 1, 2), "a plate with the hinge knuckle at one corner"),
+    "14419": ((1, 2), "a 1x2 plate with a socket and a ball on its ends, where x would close"),
+    "6132": ((0, 1, 2), "hair with a beard: x and y across the head ring, z top to beard"),
+    "3625": ((0, 1, 2), "hair with pigtails, as 3901"),
+    "3959": ((0, 1, 2), "a torch: x end to end, y across the head, z head to handle"),
+    "973c01": ((0, 1, 2), "a torso with its arms as one body, as 973"),
+    "30162": ((0, 1, 2), "binoculars: a small box within a millimeter"),
+    "86035": ((0, 1, 2), "a cap as 3624: z top to rim, x and y across the crown and the peak"),
+    "30135": ((0, 1, 2), "a kepi as 3624: z top to rim, x and y across the crown and the peak"),
+    "4530": ((0, 1, 2), "shoulder-length hair, as 3901"),
+    "6025": ((0, 1, 2), "islander hair, as 3901"),
 }
 """Part id -> (closing axes, reason). The axes are body axes after this tool's orientation.
 
@@ -119,9 +146,10 @@ against 1.2 to 1.8 N across x on the table, or nothing). On the joint heap read 
 + i, layout 20303550 + i, 2026-09-30) the loop took 3938 as its target in 56 cycles for 18
 parts: 113877 of the joint read's 168738 steps, a median of 10 close edges a cycle."""
 HORIZONTAL_FILL = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")
-"""The MS7e parts fill their horizontal slices only, so 3700's pin hole stays open. Every later
-part fills its slices across all three axes: a pin lies along x, and only its x slices close
-its bore (MS7f design section 13)."""
+HORIZONTAL_FILL += ("3037", "3298", "3665a", "3702", "32000", "6541", "4070", "30414")
+"""The ``ldraw`` family's parts (MS7e and the classifier extras) fill their horizontal slices
+only, so 3700's pin hole stays open. Every joint and minifig part fills its slices across all
+three axes: a pin lies along x, and only its x slices close its bore (MS7f design section 13)."""
 
 
 class _TokenEmittingParser(argparse.ArgumentParser):

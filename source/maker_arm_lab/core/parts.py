@@ -97,6 +97,32 @@ the minifig heap read (run 20303500 + i, layout 20303550 + i) its 21 cycles took
 each against 346 for the parts of the same seeds without the new families."""
 LDRAW_FAMILY_IDS = {"ldraw": LDRAW_IDS, "joint": JOINT_IDS, "minifig": MINIFIG_IDS}
 """Every family read from ``LDRAW_DIR``, with its part ids in catalog order."""
+CLASSIFIER_EXTRA = (
+    *("brick_1x1x2", "brick_1x1x5", "brick_1x4x3", "brick_2x2x2", "brick_2x4x2"),
+    *("brick_1x10", "brick_2x10"),
+    *("ldraw_3037", "ldraw_3298", "ldraw_3665a", "ldraw_3702", "ldraw_32000", "ldraw_6541"),
+    *("ldraw_4070", "ldraw_30414"),
+    *("plate_1x3", "plate_1x8", "plate_2x3", "plate_2x8"),
+    *("tile_1x3", "tile_1x6", "tile_1x8", "tile_2x3"),
+    *("round_1x1x2", "round_1x1x3", "round_2x2x3", "round_4x4x2"),
+    *("joint_32054", "joint_32002", "joint_6628", "joint_63868", "joint_60470a"),
+    *("joint_4276b", "joint_44301a", "joint_2430", "joint_14419"),
+    *("minifig_6132", "minifig_3625", "minifig_3959", "minifig_973c01", "minifig_30162"),
+    *("minifig_86035", "minifig_30135", "minifig_4530", "minifig_6025"),
+)
+"""Kinds only the category classifier's render set sees (MS7f, the controller's deviation of
+2026-09-30): in no catalog, no split and no ``catalog_index``, so the catalog's held-out kinds
+stay unseen by the policy and the classifier. ``by_name`` builds them (``extra_part``), and
+each family's ``FAMILY_CATEGORY`` gives its category. They add category cues the ~50 train
+kinds lack: other bricks, slopes, Technic bricks, arches and side-stud bricks, other plate and
+tile footprints, taller round bricks, other pins, clip, hinge and ball plates, and other
+helmets, hair and accessories. No primitive extra repeats a catalog kind's family and size,
+and none has a category a shape leaves open (a round plate would be round and flat). The domed
+helmets 3833 and 3844 stayed out: dropped on the desk, they rocked on their domes for 1 s after
+a 3 s settle (up to 21 mm), on 3 and 2 of 5 drops. So did every kind the heap teacher stowed
+under 9 of 12 times alone (``scripts/mj_part_table.py``, 2026-09-30): the arches 3455 (6) and
+3307 (5), which offer no closing axis on their side, the fire helmet 3834 (8), the radio 3962b
+(8) and the pickaxe 3841 (0). The camera 4360 did not build (a degenerate CoACD hull)."""
 LDRAW_DIR = Path(__file__).resolve().parents[3] / "assets" / "parts"
 FLAT_FAMILIES = ("plate", "tile")  # in the catalog only under ``--families flat``
 RETIRED_FAMILIES = ("round",)
@@ -355,13 +381,23 @@ def catalog_index(name: str) -> int:
     return names.index(name)
 
 
+def extra_part(name: str) -> Part:
+    """A ``CLASSIFIER_EXTRA`` kind from its name: an LDraw-built family's JSON part, or a
+    primitive from its ``<family>_<nx>x<ny>[x<nz>]`` name."""
+    family, spec = name.split("_", 1)
+    if family in LDRAW_FAMILY_IDS:
+        return ldraw_part(spec, family)
+    return make_part(family, *(int(n) for n in spec.split("x")))
+
+
 def _replayable() -> list[Part]:
     """The catalog plus the flat, retired and LDraw-built parts other shards were recorded
-    with."""
+    with, and the classifier's extras."""
     flat = [make_part(f, nx, ny) for f in FLAT_FAMILIES for nx, ny in _BOX_FOOTPRINTS]
     retired = [make_part(*spec) for spec in _RETIRED]
     ldraw = [p for f in LDRAW_FAMILY_IDS for p in _family_parts(f)]
-    return catalog() + [p for p in flat if graspable(p)] + retired + ldraw
+    extra = [extra_part(n) for n in CLASSIFIER_EXTRA]
+    return catalog() + [p for p in flat if graspable(p)] + retired + ldraw + extra
 
 
 def split(parts: Sequence[Part], seed: int) -> tuple[list[Part], list[Part]]:
