@@ -318,7 +318,11 @@ def read(model, data: dict, device) -> dict:
         "sum_log_prob": names[(logp[t_over] + logp[t_lift] + logp[t_carry]).argmax(axis=1)],
         "sum_log_prob_wrist": names[(logp[t_lift] + logp[t_carry]).argmax(axis=1)],
     }
+    # The loop draws the carry view only when the lift and overhead reads differ.
+    split = reads["lift"] != guess[t_over]
+    reads["loop_sum"] = np.where(split, reads["sum_log_prob"], reads["lift"])
     t_truth, t_held = labels[t_lift], held[t_lift]
+    vote_ok = reads["loop_vote"] == t_truth
 
     def fused(rule) -> dict:
         ok = reads[rule] == t_truth
@@ -336,6 +340,10 @@ def read(model, data: dict, device) -> dict:
             "heldout": r(t_held),
             "train_kinds": r(~t_held),
             **{c: r(t_truth == c) for c in active},
+            "vs_loop_vote": {
+                "better": int((ok & ~vote_ok).sum()),
+                "worse": int((~ok & vote_ok).sum()),
+            },
         }
 
     missed = lift & (data["riders"] > 0) & ~flagged
