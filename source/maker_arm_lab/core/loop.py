@@ -1729,7 +1729,8 @@ def rollout(
     ``stows_per_hour`` (``stows_per_hour``) and the ``events`` of ``EVENT_NAMES``.
     ``box_empty`` (MS7f H2, design 5.4) and an env built with ``tray_refill`` (MS7f
     H1') run a person's events between an env's cycles, before its next selection
-    (``between_cycles``); ``box_empty`` needs desk boxes.
+    (``between_cycles``); ``box_empty`` needs desk boxes. An env with a deep tray or a refill
+    also records the hidden share at each selection (``hidden_share``, MS7f design 5.5).
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1819,6 +1820,7 @@ def rollout(
     if box_empty and not per_part:
         raise EvalFailure("box_empty", "empties the desk boxes: it needs desk boxes")
     refill = bool(getattr(env, "tray_refill", False))  # MS7f H1': the env parks the waiting parts
+    ms7f_tray = refill or bool(getattr(env, "deep_tray", False))
     if perceived:
         if policy is None:
             raise EvalFailure("perceived", "serves a policy; the oracle driver reads the truth")
@@ -1956,6 +1958,7 @@ def rollout(
     # MS7f H2: per part the grade and the box of an emptying.
     emptied_ok = torch.zeros(num_envs, k, dtype=torch.bool)
     emptied_box = torch.full((num_envs, k), -1, dtype=torch.long)
+    hidden = [[] for _ in range(num_envs)]  # the hidden share at each selection (design 5.5)
 
     started = time.monotonic()
     max_steps = int(env.max_episode_length)
@@ -2145,6 +2148,8 @@ def rollout(
                 wait_capped=waited >= int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET),
                 target_in_box=None if boxed is None else bool(boxed[i, target]),
             )
+            if ms7f_tray:
+                hidden[i].append(hidden_share(env, pos[i], truth.quat[i], top_picks[i]))
             if perceived:
                 # The row, the frozen marker and the box of the class perceived overhead all
                 # come from the target's detection; ``env.target_part`` stays -1.
@@ -2603,6 +2608,8 @@ def rollout(
                 **boxes,
             }
         )
+        if ms7f_tray:
+            episodes[-1]["hidden_share"] = hidden[i]
         if sensors is not None:
             episodes[-1]["torque"] = {
                 **{name: st.counts[name] for name in TORQUE_COUNTS},
@@ -2667,6 +2674,9 @@ def rollout(
             },
         },
     }
+    if ms7f_tray:
+        shares = [v for h in hidden for v in h]
+        payload["hidden_share_mean"] = sum(shares) / len(shares) if shares else None
     if sensors is not None:
         payload["torque"] = {
             "hold_force": bool(hold_force),
@@ -2713,6 +2723,21 @@ def between_cycles(env, i: int, counts, emptied_ok, emptied_box, box_empty, refi
         counts["tray_refill"] += 1
         fired = True
     return fired
+
+
+def hidden_share(env, pos, quat, tool) -> float:
+    """MS7f design 5.5: the share of the parts in the tray (``layout.in_tray``) that
+    the perceived state's two structural rules hide from the overhead camera
+    (``perception._hidden``: covered from above, or near the ``tool`` point). ``pos`` and
+    ``quat`` are one env's (K, 3) and (K, 4) metric reads. A metric; no decision reads it."""
+    lean = float(getattr(env, "tray_lean_deg", 0.0))
+    height = getattr(env, "tray_wall_height", layout.TRAY_WALL_HEIGHT)
+    idx = [b for b in range(pos.shape[0]) if layout.in_tray(pos[b].tolist(), lean, height)]
+    if not idx:
+        return 0.0
+    sizes = torch.tensor([env.parts[b].size for b in idx])
+    seen = perception._hidden(pos[idx], quat[idx], sizes, tuple(tool[:2].tolist()))
+    return len(seen) / len(idx)
 
 
 def _sum_box_rows(episodes: list[dict]) -> dict:

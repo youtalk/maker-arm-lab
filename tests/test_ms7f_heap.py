@@ -211,3 +211,22 @@ def test_an_emptied_boxs_parts_are_graded_once_at_the_emptying(monkeypatch):
     assert not loop.between_cycles(env, 0, counts, ok, box, True, False)
     assert counts["box_empty"] == 1 and torch.equal(ok, graded)
     env.close()
+
+
+def test_the_hidden_share_counts_the_covered_parts_in_the_tray():
+    """MS7f design 5.5: of the parts in the tray, the share the two structural rules hide.
+    A part under another, a part near the tool and one in the open: 2 of 3, and a part off the
+    tray (a box, the park) is not in the count."""
+
+    class _Env:
+        tray_lean_deg = 30.0
+        tray_wall_height = layout.DEEP_TRAY_WALL_HEIGHT
+        parts = [parts.make_part("brick", 2, 4)] * 4
+
+    x, y = layout.TRAY_CENTER
+    pos = torch.tensor([[x, y, 0.005], [x, y, 0.015], [x - 0.04, y + 0.06, 0.005], [3.0, 0.3, 1.0]])
+    quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]] * 4)
+    tool = torch.tensor([x - 0.04, y + 0.07, 0.12])
+    assert loop.hidden_share(_Env(), pos, quat, tool) == pytest.approx(2 / 3)
+    far = torch.tensor([0.5, 0.3, 0.12])
+    assert loop.hidden_share(_Env(), pos, quat, far) == pytest.approx(1 / 3)
