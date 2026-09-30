@@ -14,8 +14,8 @@ torchvision never reaches the loop.
         --train ~/data/maker-arm-ms7/f/tables/cls/rs/render_*.npz \\
         --read ~/data/maker-arm-ms7/f/tables/cls/c1/render_*.npz --out ~/data/.../cls/model_v1
 
-Training drops wrist frames with nothing between the jaws and overhead frames that show the part
-on fewer than ``MIN_PART_PX`` pixels (the arm stands in front of it). A tenth of the files
+Training drops wrist frames with nothing between the jaws and overhead frames whose camera sees
+less than ``MIN_SEEN`` of the part (the arm stands in front of it). A tenth of the files
 (``--val_fraction``) is kept out for the passenger operating point: the lowest logit threshold
 whose false-alarm rate on those wrist frames is at most ``PASSENGER_FALSE_ALARMS``.
 
@@ -46,7 +46,7 @@ from torch import nn
 
 CATEGORIES = ("brick", "special", "flat", "round", "joint", "minifig")
 VIEWS = ("overhead", "lift", "carry")
-MIN_PART_PX = 200  # INITIAL: a 1x1 plate from above is about 240 px at 0.5 mm a pixel
+MIN_SEEN = 0.5  # INITIAL: the share of a part's sample points the overhead camera sees
 PASSENGER_FALSE_ALARMS = 0.01  # the operating point's cap, half the C1 bar's 0.02
 BARS = {"lift_accuracy": 0.97, "category_accuracy": 0.90, "recall": 0.8, "false_alarms": 0.02}
 """C1 (design section 6.7): the wrist view at the lift reads the right category on at least 0.97
@@ -88,9 +88,9 @@ def load(paths) -> dict[str, np.ndarray]:
 
 
 def usable(data: dict) -> np.ndarray:
-    """The frames training reads: a part in view (``MIN_PART_PX``) or between the jaws."""
+    """The frames training reads: a part in view (``MIN_SEEN``) or between the jaws."""
     over = data["view"] == "overhead"
-    return (data["category"] != "") & (~over | (data["part_px"] >= MIN_PART_PX))
+    return (data["category"] != "") & (~over | (data["part_seen"] >= MIN_SEEN))
 
 
 def augment(frames: torch.Tensor, gen: torch.Generator) -> torch.Tensor:
@@ -186,7 +186,7 @@ def read(model, data: dict, device) -> dict:
     part = labels != ""
     views = {v: data["view"] == v for v in VIEWS}
     held = data["heldout"].astype(bool)
-    visible = ~views["overhead"] | (data["part_px"] >= MIN_PART_PX)
+    visible = ~views["overhead"] | (data["part_seen"] >= MIN_SEEN)
 
     def row(mask) -> dict:
         m = mask & part

@@ -13,7 +13,7 @@ at its event from the state the heap loop's frame of that step shows.
   parts in the tray, each aimed at the part's centre plus a perceived-like error
   (``AIM_SIGMA_M``). Only parts the perceived state would see (``perception._hidden``): the
   loop never classifies a hidden part. The arm may still stand between the camera and the part,
-  as it may in the loop, so each overhead frame records how many of its pixels show the part.
+  as it may in the loop, so each overhead frame records how much of the part the camera sees.
 * lift: the wrist frame of the step a ``hold.HoldDetector`` fed the loop's inputs (the measured
   jaw gap, the last command's gap, the FK pick point's height) reads the lift.
 * carry: the wrist frame ``loop.CARRY_VIEW_STEPS`` later, if the detector still reads a lift.
@@ -22,8 +22,7 @@ Labels read the simulator, a recording tool and not a decision (design section 6
 category and name and whether its kind is held out; on a wrist frame the part both jaws press
 (``checker.held_brick_from_forces``, as ``loop.wrist_class``; -1 and category "" with none) and
 the passenger count, ``oracle.passengers`` against the heights at the HOVER start; on an
-overhead frame the part's pixel count (``part_px``), from the same view rendered again as a
-segmentation.
+overhead frame the share of the part the camera sees (``part_seen``, ``_seen``).
 
     MUJOCO_GL=egl PYTHONPATH=$PWD/source .venv/bin/python scripts/mj_render_set.py \\
         --out_dir /tmp/rs --num_envs 1 --heap_k 50 --cycle_budget 65 --parts_split train \\
@@ -42,6 +41,7 @@ per ``LABELS`` name, plus ``args`` (the command line as JSON). Prints exactly on
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import math
 import os
@@ -53,6 +53,7 @@ from pathlib import Path
 
 os.environ.setdefault("MUJOCO_GL", "egl")
 
+import mujoco
 import numpy as np
 import torch
 
@@ -87,14 +88,14 @@ LABELS = (
     "heldout",
     "passengers",
     "held",
-    "part_px",
+    "part_seen",
     "env",
     "step",
 )
 """The label arrays beside ``frames``: the view (overhead, lift, carry), the category and name of
 the part the view is of, whether its kind is held out, the passenger count (-1 on an overhead
-frame), the part index (-1 on a wrist frame with nothing between the jaws), the pixels of that
-part in an overhead frame (-1 on a wrist frame), the env and the control step."""
+frame), the part index (-1 on a wrist frame with nothing between the jaws), the share of that
+part the overhead camera sees (-1 on a wrist frame), the env and the control step."""
 
 
 class _TokenEmittingParser(argparse.ArgumentParser):
@@ -210,8 +211,27 @@ def _in_tray(xy) -> bool:
     return x0 <= float(xy[0]) <= x1 and y0 <= float(xy[1]) <= y1
 
 
+def _seen(env, i: int, b: int) -> float:
+    """The share of part ``b``'s nine sample points, its centre and its bounding box's corners
+    pulled 40 % in, that a ray from the overhead camera meets on the part first: 0 behind the
+    arm, 1 in the open. (A segmentation render would count pixels, but its multisampled edges
+    blend geom ids past the scene's, and MuJoCo 3.13's remap then raises.)"""
+    m, d, h = env.models[i], env.datas[i], env.handles
+    eye = d.cam_xpos[env._cam_overhead].copy()
+    body = h.brick_bodies[b]
+    centre, rot = d.xpos[body], d.xmat[body].reshape(3, 3)
+    half = 0.3 * np.asarray(env.parts[b].size)
+    corners = [rot @ (half * np.array(s)) for s in itertools.product((-1.0, 1.0), repeat=3)]
+    geom = np.zeros(1, dtype=np.int32)
+    hits = 0
+    for point in [centre] + [centre + c for c in corners]:
+        mujoco.mj_ray(m, d, eye, point - eye, None, 1, -1, geom)
+        hits += int(geom[0]) in h.body_geoms[b]
+    return hits / 9.0
+
+
 def _overhead_views(env, i, target, pick, aim_rng, extra, jitter) -> list[tuple]:
-    """The narrow views of one selection: (frame, part, part pixels) for the target and up to
+    """The narrow views of one selection: (frame, part, share seen) for the target and up to
     ``extra`` other parts in the tray, each only if the perceived state would see it."""
     pos, quat = _positions(env, i)
     sizes = torch.tensor([p.size for p in env.parts])
@@ -222,19 +242,10 @@ def _overhead_views(env, i, target, pick, aim_rng, extra, jitter) -> list[tuple]
     chosen = ([target] if target in seen else []) + others[:extra]
     if chosen and jitter:
         env.jitter_overhead(i)  # one frame: the real rig crops every part out of it
-    r, geoms = env.renderers[i], env.handles.body_geoms
     views = []
     for b in chosen:
         aim = [float(v) + s * aim_rng.gauss(0.0, 1.0) for v, s in zip(pos[b], AIM_SIGMA_M)]
-        frame = env.narrow_overhead(i, aim)
-        # The same view once more as a segmentation (narrow_overhead renders what the renderer
-        # is set to): the pixels whose geom belongs to part b.
-        r.enable_segmentation_rendering()
-        try:
-            ids = env.narrow_overhead(i, aim)[:, :, 0]
-        finally:
-            r.disable_segmentation_rendering()
-        views.append((frame, b, int(np.isin(ids, geoms[b]).sum())))
+        views.append((env.narrow_overhead(i, aim), b, _seen(env, i, b)))
     return views
 
 
@@ -253,11 +264,11 @@ def record(env, rig, args, heldout: set[str], deadline: float) -> tuple[list, li
     gap_cmd = robot.data.joint_pos[:, jaw_ids].sum(dim=-1).tolist()
     frames, rows = [], []
 
-    def keep(frame, view, part, passengers, part_px, i, step):
+    def keep(frame, view, part, passengers, seen, i, step):
         cat = _parts.part_category(env.parts[part]) if part >= 0 else ""
         name = env.parts[part].name if part >= 0 else ""
         frames.append(frame)
-        rows.append((view, cat, name, name in heldout, passengers, part, part_px, i, step))
+        rows.append((view, cat, name, name in heldout, passengers, part, seen, i, step))
 
     step = 0
     while not all(finished):
@@ -287,8 +298,8 @@ def record(env, rig, args, heldout: set[str], deadline: float) -> tuple[list, li
                 views = _overhead_views(
                     env, i, target, pick, aims[i], args.extra_overhead, args.frame_jitter
                 )
-                for frame, b, px in views:
-                    keep(frame, "overhead", b, -1, px, i, step)
+                for frame, b, seen in views:
+                    keep(frame, "overhead", b, -1, seen, i, step)
             wrist = []
             if d.lift_started and start_z[i] is not None:
                 wrist.append("lift")

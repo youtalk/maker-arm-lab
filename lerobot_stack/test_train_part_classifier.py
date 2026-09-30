@@ -38,7 +38,7 @@ def _render_file(path: Path, seed: int, n: int = 12) -> Path:
         heldout=np.array([k % 5 == 0 for k in range(n)]),
         passengers=np.array(riders),
         held=np.arange(n),
-        part_px=np.array([500 if v == "overhead" else -1 for v in views]),
+        part_seen=np.array([1.0 if v == "overhead" else -1.0 for v in views]),
         env=np.zeros(n, dtype=int),
         step=np.arange(n),
         args=np.array("{}"),
