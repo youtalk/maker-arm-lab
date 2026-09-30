@@ -1101,6 +1101,13 @@ def _thin_snap_scene(monkeypatch):
     return env, rig, _Teacher(env, rig.oracle_factory), 4, switches
 
 
+def _snap_closed_scene(monkeypatch):
+    """The flat scene under ``snap_closed`` too (MS7e flat study, 2026-09-30): ``snap_hold``
+    reads the measured jaw gap, a proprioceptive read."""
+    env, rig, policy, budget, switches = _thin_snap_scene(monkeypatch)
+    return env, rig, policy, budget, switches | {"snap_closed": True}
+
+
 def test_a_box_draw_episode_records_its_boxes(monkeypatch):
     """The census rebuilds each drawn box from the episode record (MS7e ledger R11)."""
     env, rig, policy, budget, switches = _box_draw_scene(monkeypatch)
@@ -1191,6 +1198,7 @@ def test_every_ms7d_switch_at_once_runs_the_teacher_scene_to_its_end(monkeypatch
         _box_draw_scene,
         _wall_band_scene,
         _thin_snap_scene,
+        _snap_closed_scene,
     ],
 )
 def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):

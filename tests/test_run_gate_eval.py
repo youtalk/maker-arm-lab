@@ -1290,11 +1290,11 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
     assert plain.families == () and ge.ms7e_block(plain) == ge.MS7E_OFF
     switches = ["--families", "flat,round", "--box_draw", "6", "--release_lean", "--carry_via"]
     switches += ["--box_unseen", "size", "--heap_family", "flat", "--passenger_check"]
-    switches += ["--thin_snap"]
+    switches += ["--thin_snap", "--snap_closed"]
     cfg = ge._build_cfg(ge._parse_args(argv + switches))
     cmd = ge._eval_command(cfg, draw)
     at = cmd.index("--families")
-    assert cmd[at : at + 12] == ["--families", "round,flat", *switches[2:]]
+    assert cmd[at : at + 13] == ["--families", "round,flat", *switches[2:]]
     block = ge.ms7e_block(cfg)
     assert block == {
         "families": ["round", "flat"],
@@ -1306,10 +1306,11 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
         "passenger_check": True,
         "wall_band_cont": False,  # the continuous gripper's switch, its own test
         "thin_snap": True,
+        "snap_closed": True,
     }
     off = set(ge._eval_command(plain, draw))
     ms7e_flags = {"--families", "--box_draw", "--release_lean", "--carry_via", "--passenger_check"}
-    assert not (ms7e_flags | {"--thin_snap"}) & off
+    assert not (ms7e_flags | {"--thin_snap", "--snap_closed"}) & off
     path = tmp_path / "gate" / "eval_000.json"
     path.parent.mkdir(parents=True)
 
@@ -1326,8 +1327,9 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
     with pytest.raises(ValueError, match="needs --release_lean"):
         ge._build_cfg(ge._parse_args(argv + ["--carry_via"]))
     no_snap = [a for a in argv if a != "--pick_snap"]
-    with pytest.raises(ValueError, match="needs --pick_snap"):
-        ge._build_cfg(ge._parse_args(no_snap + ["--thin_snap"]))
+    for flag in ("--thin_snap", "--snap_closed"):
+        with pytest.raises(ValueError, match="needs --pick_snap"):
+            ge._build_cfg(ge._parse_args(no_snap + [flag]))
     assert hit(cfg, ms7e=block) and not hit(cfg) and not hit(cfg, ms7e=ge.MS7E_OFF)
     for name, other in (
         ("families", ["round"]),
@@ -1338,6 +1340,7 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
         ("heap_family", "round"),
         ("passenger_check", False),
         ("thin_snap", False),
+        ("snap_closed", False),
     ):
         assert not hit(cfg, ms7e=block | {name: other}), name
     ledger = _fake_ledger(tmp_path)

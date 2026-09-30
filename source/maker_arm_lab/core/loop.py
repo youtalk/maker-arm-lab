@@ -555,6 +555,20 @@ desk, and a policy command already lower is kept. No press is needed on this gri
 lone-part table of 2026-09-29 (``scripts/mj_part_table.py --families plate,tile --trials 12
 --deep_box_floor`` at f8faeee) lifts 120 of 120 flat parts with the teacher's tips at the desk
 (``FLAT_TIP_PRESS`` 0, 119 stowed), as at 1 mm and 2 mm of press (120 and 120)."""
+SNAP_CLOSED_MARGIN = 0.002  # INITIAL: the MS7e flat study's paired row reads it
+"""m: under ``snap_closed`` the landing hold ends once the measured jaw gap is under the served
+row's width plus this: the jaws closed on the part, whatever the hold detector says.
+
+The MS7e flat study of 2026-09-30. On a flat part the detector (``core/hold.py``) misses real
+pinches: the tips sink 1.9 to 2.5 mm into each side of a 7.8 mm wide plate through the soft
+contact, so the measured gap creeps past ``hold.STABLE`` or drops under ``hold.MIN_GAP`` before
+a lift. With no hold the stop flag stays off, the policy's lift raises its command over the
+floor, and ``snap_hold`` forced the jaws open under a closed policy command in 111 of 222 first
+flat closes (E2 policy, runs 7000/7001, layouts 8000/8001). The paired read with the rule (4
+seeds, 1000 parts an arm, the E2 official protocol): flat stows per cycle 0.497 -> 0.750, other
+parts 0.891 -> 0.925, stowed 857 -> 903, cycles per correct stow 1.321 -> 1.145, all 4 pairs
+up. The landing gap is the width plus 8 mm (``grasp.landing_half_gap``), so a descent keeps
+its hold."""
 
 
 def snap_floor(row, thin: bool = False) -> float:
@@ -618,7 +632,14 @@ def snap_shift(
 
 
 def snap_hold(
-    cmd, pick, row, shift, descending: bool, held: bool = False, thin: bool = False
+    cmd,
+    pick,
+    row,
+    shift,
+    descending: bool,
+    held: bool = False,
+    thin: bool = False,
+    jaw_gap: float | None = None,
 ) -> bool:
     """``pick_snap``: hold the jaws at the landing gap now? Pure.
 
@@ -637,8 +658,14 @@ def snap_hold(
     cycles, 2026-09-23): the policy commands the close it believes is at grasp height. So
     the jaws stay open only while ``snap_shift`` brings the point down, and the policy's own
     close then acts at the grasp height.
+
+    ``jaw_gap`` is ``snap_closed``'s measured gap between the jaws, None with the switch off.
+    A gap under the row's width plus ``SNAP_CLOSED_MARGIN`` ends the hold: the jaws closed on
+    the part, and a pinch the hold detector missed must not be opened by the policy's lift.
     """
     if held or float(row[5]) <= 0.0:
+        return False
+    if jaw_gap is not None and jaw_gap < float(row[5]) + SNAP_CLOSED_MARGIN:
         return False
     near = math.hypot(float(pick[0]) - float(row[0]), float(pick[1]) - float(row[1]))
     top = float(row[2]) + float(row[6])
@@ -1590,6 +1617,7 @@ def rollout(
     hold_force: bool = False,
     force_cap: bool = False,
     thin_snap: bool = False,
+    snap_closed: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1613,7 +1641,9 @@ def rollout(
     ``hold_trace`` row then carries the force too.
     ``thin_snap`` (MS7e ledger R13 S2) moves ``pick_snap``'s floor of a flat row to the desk
     (``snap_floor``); it needs ``pick_snap``, and the heap client records it in the payload's
-    "ms7e" block.
+    "ms7e" block. ``snap_closed`` (the MS7e flat study, 2026-09-30) ends ``pick_snap``'s
+    landing hold once the measured jaws closed on the part (``snap_hold``); it needs
+    ``pick_snap`` and is recorded the same way.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1686,6 +1716,8 @@ def rollout(
             raise EvalFailure(name, "needs the continuous gripper and a served target row")
     if thin_snap and not pick_snap:
         raise EvalFailure("thin_snap", "moves pick_snap's floor: it needs pick_snap")
+    if snap_closed and not pick_snap:
+        raise EvalFailure("snap_closed", "ends pick_snap's landing hold: it needs pick_snap")
     if contact_hold and not perceived:
         raise EvalFailure("contact_hold", "the stop flag's contact fallback needs perceived")
     if perceived:
@@ -2116,8 +2148,16 @@ def rollout(
                         )
                         hist = pick_z_hist[i]
                         descending = len(hist) > GATE_WINDOW and hist[0] - hist[-1] > GATE_DESCENT
+                        measured_gap = 2.0 * GRIPPER_OPEN_POS * float(openings[i])
                         hold_open = snap_hold(
-                            cmd, picks[i], row, c.snap, descending, held=held_so_far, thin=thin_snap
+                            cmd,
+                            picks[i],
+                            row,
+                            c.snap,
+                            descending,
+                            held=held_so_far,
+                            thin=thin_snap,
+                            jaw_gap=measured_gap if snap_closed else None,
                         )
                         if any(c.snap):
                             snapped = snapped_arm(rig.ik, action_cpu[i, :6], c.snap)
