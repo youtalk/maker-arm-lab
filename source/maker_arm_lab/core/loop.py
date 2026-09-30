@@ -2536,7 +2536,7 @@ def rollout(
                     if classifier is not None:
                         # The stand-in above drew what it draws without the switch; the wrist
                         # frame decides (MS7f view 2), or ends the cycle on a passenger.
-                        frame = env.obs_buf["images"]["wrist_rgb"][i].numpy()
+                        frame = classifier.wrist_frame(env, i)
                         logp, rider = classifier.log_probs(
                             frame, class_names, wrist=True, size=c.seen_size
                         )
@@ -2574,7 +2574,7 @@ def rollout(
                     if not detectors[i].lifted:
                         st.counts["votes_lost"] += 1
                         continue
-                    frame = env.obs_buf["images"]["wrist_rgb"][i].numpy()
+                    frame = classifier.wrist_frame(env, i)
                     lighter = {
                         cls: desk_boxes.lighter_box(own, st.box_load)
                         for cls, own in class_boxes[i].items()

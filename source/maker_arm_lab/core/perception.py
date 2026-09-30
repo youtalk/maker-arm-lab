@@ -517,7 +517,9 @@ class PartClassifier:
     passenger model, a TorchScript file from ``lerobot_stack/train_part_classifier.py``, on the
     CPU. The file carries its category names (``categories``) and its passenger operating point
     (``passenger_threshold``, a logit); it takes uint8 (N, 224, 224, 3) frames and whether they are
-    wrist frames, which it crops itself, and with ``size_input`` the part's perceived size."""
+    wrist frames, which it crops itself, and with ``size_input`` the part's perceived size. A model
+    with ``wrist_input`` "crop" reads the env's native-pixel fingertip crop
+    (``MjLegoSortEnv.wrist_crop``) in place of the policy's 224 px wrist frame."""
 
     def __init__(self, path):
         self.path = str(path)
@@ -525,6 +527,13 @@ class PartClassifier:
         self.categories = tuple(self.model.categories)
         self.threshold = float(self.model.passenger_threshold)
         self.size_input = bool(getattr(self.model, "size_input", False))
+        self.wrist_crop = getattr(self.model, "wrist_input", "frame") == "crop"
+
+    def wrist_frame(self, env, i: int):
+        """Env ``i``'s wrist frame as this model reads it: the fingertip crop or the policy's."""
+        if self.wrist_crop:
+            return env.wrist_crop(i)
+        return env.obs_buf["images"]["wrist_rgb"][i].numpy()
 
     @torch.no_grad()
     def log_probs(

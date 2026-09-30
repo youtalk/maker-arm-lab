@@ -199,6 +199,27 @@ def test_a_size_reading_model_gets_the_detection_size_in_every_view(tmp_path):
     assert seen["third_views"] > 0 and seen["votes_changed"] == 0
 
 
+def test_a_crop_model_reads_the_env_s_fingertip_crop(tmp_path):
+    """The cameras-off env's policy wrist frames are black and its crop is bright: a crop model
+    reads slope on the overhead view and wide on the crop, so the vote moves every box to wide."""
+    env, rig, policy = _scene()
+    env.wrist_crop = lambda i: np.full((224, 224, 3), BRIGHT, dtype=np.uint8)
+    names = parts.BASE_CLASSES
+    stub = _Stub(names, names.index("wide"), names.index("slope"), -1.0)
+    stub.wrist_input = "crop"
+    path = tmp_path / "crop.pt"
+    torch.jit.script(stub).save(str(path))
+    classifier = perception.PartClassifier(path)
+    assert classifier.wrist_crop
+    env.narrow_overhead = lambda i, point: np.zeros((224, 224, 3), dtype=np.uint8)
+    payload = _rollout(
+        env, rig, policy, perceived=True, classifier=classifier, class_views=True, **SWITCHES
+    )
+    env.close()
+    # A black policy frame would read slope, as the overhead view does, and draw no carry view.
+    assert payload["perception"]["third_views"] > 0
+
+
 def test_the_passenger_response_opens_the_jaws_only_over_the_tray(tmp_path):
     reasons = {}
     for tray, drop in ((True, True), (True, False), (False, True)):
