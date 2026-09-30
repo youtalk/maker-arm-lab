@@ -23,8 +23,11 @@ at its event from the state the heap loop's frame of that step shows.
 Labels read the simulator, a recording tool and not a decision (design section 6.4): the part's
 category and name and whether its kind is held out; on a wrist frame the part both jaws press
 (``checker.held_brick_from_forces``, as ``loop.wrist_class``; -1 and category "" with none) and
-the passenger count, ``oracle.passengers`` against the heights at the HOVER start; on an
-overhead frame the share of the part the camera sees (``part_seen``, ``_seen``).
+the passenger count, ``oracle.passengers`` against the heights at the HOVER start, and of those
+the riders, which rose at least ``RIDE_SHARE`` of the jaws' own rise since the hold began; on an
+overhead frame the share of the part the camera sees (``part_seen``, ``_seen``). T2's rule reads
+the LIFT gate 0.10 m up; at the detector's lift, 0.05 m up, a neighbour the grasp pushed 2 cm up
+the heap still counts: most of the 16 such C1 lift frames looked at (2026-09-30) show no rider.
 
     MUJOCO_GL=egl PYTHONPATH=$PWD/source .venv/bin/python scripts/mj_render_set.py \\
         --out_dir /tmp/rs --num_envs 1 --heap_k 50 --cycle_budget 65 --parts_split train \\
@@ -83,20 +86,23 @@ AIM_SIGMA_M = tuple(
 )
 """m per axis: the narrow view aims at the part's centre plus this Gaussian error, the perceived
 centre's episode bias and per-look noise together, as the loop aims at a detection."""
+RIDE_SHARE = 0.5  # INITIAL: the C1 read's passenger label
+"""A passenger rides when it rose at least this share of the jaws' rise since the hold began."""
 LABELS = (
     "view",
     "category",
     "part",
     "heldout",
     "passengers",
+    "riders",
     "held",
     "part_seen",
     "env",
     "step",
 )
 """The label arrays beside ``frames``: the view (overhead, lift, carry), the category and name of
-the part the view is of, whether its kind is held out, the passenger count (-1 on an overhead
-frame), the part index (-1 on a wrist frame with nothing between the jaws), the share of that
+the part the view is of, whether its kind is held out, the passenger and rider counts (-1 on an
+overhead frame), the part index (-1 on a wrist frame with nothing between the jaws), the share of that
 part the overhead camera sees (-1 on a wrist frame), the env and the control step."""
 
 
@@ -273,11 +279,12 @@ def record(env, rig, args, heldout: set[str], deadline: float) -> tuple[list, li
     gap_cmd = robot.data.joint_pos[:, jaw_ids].sum(dim=-1).tolist()
     frames, rows = [], []
 
-    def keep(frame, view, part, passengers, seen, i, step):
+    def keep(frame, view, part, passengers, seen, i, step, riders=-1):
         cat = _parts.part_category(env.parts[part]) if part >= 0 else ""
         name = env.parts[part].name if part >= 0 else ""
         frames.append(frame)
-        rows.append((view, cat, name, name in heldout, passengers, part, seen, i, step))
+        row = (view, cat, name, name in heldout, passengers, riders, part, seen, i, step)
+        rows.append(row)
 
     step = 0
     while not all(finished):
@@ -322,10 +329,13 @@ def record(env, rig, args, heldout: set[str], deadline: float) -> tuple[list, li
                 wrist.append("wrist")
             for view in wrist:
                 held = _held(env, i)
-                riders = oracle.passengers(_positions(env, i)[0], start_z[i], pick, held)
+                pos = _positions(env, i)[0]
+                others = oracle.passengers(pos, start_z[i], pick, held)
+                jaws = RIDE_SHARE * (float(pick[2]) - d.start_z)
+                rode = [b for b in others if float(pos[b, 2] - start_z[i][b]) >= jaws]
                 r = env.renderers[i]
                 r.update_scene(env.datas[i], camera="wrist")
-                keep(r.render().copy(), view, held, len(riders), -1, i, step)
+                keep(r.render().copy(), view, held, len(others), -1, i, step, len(rode))
             if orc is not None and orc.phase in (oracle.Phase.DONE, oracle.Phase.ABANDON):
                 finished[i] = True
         action = rig.actions()
@@ -363,6 +373,7 @@ def run(args) -> dict:
         "frames": len(frames),
         "by_view": {v: views.count(v) for v in ("overhead", "lift", "carry", "wrist")},
         "passenger_frames": int((columns["passengers"] > 0).sum()),
+        "rider_frames": int((columns["riders"] > 0).sum()),
         "empty_wrist": int(((columns["held"] < 0) & (columns["view"] != "overhead")).sum()),
     }
 

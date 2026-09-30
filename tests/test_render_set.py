@@ -107,10 +107,12 @@ def test_the_render_set_labels_equal_the_truth(tmp_path, monkeypatch):
             assert bool(z["heldout"][n]) == (name in {p.name for p in heldout})
     over = [n for n, v in enumerate(views) if v == "overhead"]
     assert aims == [int(z["held"][n]) for n in over]
-    assert all(z["passengers"][n] == -1 and 0.0 <= z["part_seen"][n] <= 1.0 for n in over)
+    assert all(z["passengers"][n] == z["riders"][n] == -1 for n in over)
+    assert all(0.0 <= z["part_seen"][n] <= 1.0 for n in over)
     assert max(z["part_seen"][n] for n in over) == 1.0
     wrist = [n for n, v in enumerate(views) if v != "overhead"]
     assert [b for b, _ in lifted] == [int(z["held"][n]) for n in wrist]
+    assert all(0 <= z["riders"][n] <= z["passengers"][n] for n in wrist)
     for n, (b, height) in zip(wrist, lifted):
         if b >= 0 and views[n] == "lift":
             assert height > 0.04, (n, b, height)  # the part rose with the jaws
