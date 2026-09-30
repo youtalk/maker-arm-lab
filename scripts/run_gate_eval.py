@@ -186,6 +186,7 @@ MS7F_OFF = {
     "lift_budget": 0,
     "close_guard": False,
     "quiet_landing": False,
+    "landing_steps": 0,
 }
 """``core.batch_loop.MS7F_OFF``, copied because the supervisor imports no maker_arm_lab; the test
 pins it. The "ms7f" block of a read with every MS7f switch off, what an MS7e payload ran with."""
@@ -206,6 +207,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "lift_budget",
         "close_guard",
         "quiet_landing",
+        "landing_steps",
     }
 )
 """``core.batch_loop.MS7F_READY``, copied and pinned the same way: any other MS7f switch at a
@@ -1269,7 +1271,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=MS7F_OFF["descend_speed"],
         help="MuJoCo heap only, MS7f S1: forwarded as --descend_speed X, DESCEND's pace",
     )
-    for name in ("close_steps", "lift_hold_steps", "release_steps"):
+    for name in ("close_steps", "lift_hold_steps", "release_steps", "landing_steps"):
         parser.add_argument(
             f"--{name}",
             type=int,

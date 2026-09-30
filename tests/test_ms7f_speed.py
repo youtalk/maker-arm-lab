@@ -194,3 +194,26 @@ def test_a_quiet_landing_drops_the_noise_only_after_descends_walk():
     for name in ("mj_eval_heap.py", "mj_generate_batch.py"):
         text = (Path(mj_eval_heap.__file__).parent / name).read_text()
         assert text.count("quiet_landing=args.quiet_landing") == 1
+
+
+def test_the_landing_budget_ends_a_noisy_descend_after_its_walk():
+    import torch
+
+    goal = oracle.Goal(oracle.Phase.DESCEND, torch.tensor([0.2, 0.0, 0.0]), 0.0, 0.0, 1.0,
+                       0.0008, oracle.DESCEND_STALL_STEPS, 300, 0)  # fmt: skip
+
+    def result(landing, since_walk):
+        rig = SimpleNamespace(
+            unplanned=[False], holding=[False], plans=[[]], quiet=[0], device="cpu",
+            previous_pick_point=[torch.tensor([0.2, 0.0, 0.05])], walk_steps=[40],
+            steps_in_phase=[40 + since_walk], landing_steps=landing,
+            pick_point=lambda i: torch.tensor([0.2, 0.001, 0.05]),  # 1 mm a step: never quiet
+        )  # fmt: skip
+        return oracle_runtime.OracleRig._phase_result(rig, 0, goal)
+
+    assert result(0, 100) is None and result(15, 14) is None
+    assert result(15, 15).outcome == "stalled"
+    assert mj_eval_heap.parse_args([]).landing_steps == 0
+    for name in ("mj_eval_heap.py", "mj_generate_batch.py"):
+        text = (Path(mj_eval_heap.__file__).parent / name).read_text()
+        assert text.count("landing_steps=args.landing_steps") == 1

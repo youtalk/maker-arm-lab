@@ -225,6 +225,8 @@ def check_teacher_waits(parser, args) -> None:
     """Refuse a wait under one step or a pace at or under zero with ``parser.error``."""
     if not args.descend_speed > 0.0:
         parser.error("--descend_speed must be positive")
+    if args.landing_steps < 0:
+        parser.error("--landing_steps must be 0 (off) or more")
     for name in TEACHER_WAITS:
         if getattr(args, name) < 1:
             parser.error(f"--{name} must be at least 1")
@@ -271,6 +273,7 @@ MS7F_OFF: dict = {
     "lift_budget": 0,
     "close_guard": False,
     "quiet_landing": False,
+    "landing_steps": 0,
 }
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
 of a run with every one off, what an MS7e run ran with. categories is the base track's;
@@ -294,6 +297,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "lift_budget",
         "close_guard",
         "quiet_landing",
+        "landing_steps",
     }
 )
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
@@ -378,6 +382,13 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
         action="store_true",
         help="MS7f S1: the rig commands no joint noise once DESCEND has walked its leg, so the "
         "stall test ends a noisy landing (OracleRig.quiet_landing)",
+    )
+    parser.add_argument(
+        "--landing_steps",
+        type=int,
+        default=0,
+        help="MS7f S1: DESCEND also ends this many steps after its walk, the joint noise kept "
+        "(OracleRig.landing_steps); 0 is off",
     )
     parser.add_argument(
         "--lift_hold_steps",

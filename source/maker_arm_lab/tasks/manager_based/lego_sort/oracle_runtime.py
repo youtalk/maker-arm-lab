@@ -505,6 +505,7 @@ class OracleRig:
         passenger_check: bool = False,
         descend_speed: float = 1.0,
         quiet_landing: bool = False,
+        landing_steps: int = 0,
     ):
         self.env = env
         # MS7e rung B2: EXTEND leans toward its box (LEAN_AZIMUTH's note, `_leg_lean`).
@@ -528,6 +529,8 @@ class OracleRig:
         self.descend_speed = descend_speed
         # MS7f: no command noise once DESCEND has walked its leg (`_command_noise`).
         self.quiet_landing = quiet_landing
+        # MS7f: DESCEND also ends this many steps after its walk (0: off; `_phase_result`).
+        self.landing_steps = landing_steps
         self.bl = bl
         self.noise = noise
         self.rng = rng
@@ -1121,6 +1124,11 @@ class OracleRig:
             self.quiet[i] = self.quiet[i] + 1 if moved < STALL_EPS else 0
             self.previous_pick_point[i] = now.clone()
             stalled = self.quiet[i] >= goal.stall_steps
+            if self.landing_steps and goal.phase == oracle.Phase.DESCEND and not self.plans[i]:
+                # The recorder's joint noise keeps the pick point moving over STALL_EPS, so the
+                # stall test alone waits a noisy landing out toward the phase budget.
+                landed = self.steps_in_phase[i] - self.walk_steps[i]
+                stalled = stalled or landed >= self.landing_steps
         budget = self.steps_in_phase[i] >= goal.max_steps
         if not (converged or stalled or budget):
             return None
