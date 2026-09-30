@@ -79,7 +79,9 @@ def test_a_tiny_run_trains_exports_and_reads_as_the_loop_loads_it(tmp_path):
     assert list(served.categories) == list(tpc.CATEGORIES)
     assert isinstance(served.passenger_threshold, float)
     for wrist in (False, True):
-        logits, rider = served(torch.zeros(2, 224, 224, 3, dtype=torch.uint8), wrist)
+        logits, rider = served(
+            torch.zeros(2, 224, 224, 3, dtype=torch.uint8), wrist, torch.zeros(2, 3)
+        )
         assert logits.shape == (2, 6) and rider.shape == (2,)
     assert list(served.wrist_roi) == list(tpc.WRIST_ROI)
     assert list(served.overhead_roi) == list(tpc.OVERHEAD_ROI)
@@ -130,3 +132,11 @@ def test_the_loop_vote_takes_the_third_view_only_on_a_split():
         np.array(v) for v in (["a", "a", "a", "a"], ["a", "b", "b", "b"], ["c", "a", "b", "c"])
     )
     assert tpc.loop_vote(over, lift, carry).tolist() == ["a", "a", "b", "c"]
+
+
+def test_load_reads_the_size_beside_each_file(tmp_path):
+    a = _render_file(tmp_path / "render_1.npz", 1, n=4)
+    b = _render_file(tmp_path / "render_2.npz", 2, n=3)
+    np.save(tmp_path / "render_1.size.npy", np.full((4, 3), 0.01, np.float32))
+    size = tpc.load([a, b])["size"]
+    assert size.shape == (7, 3) and (size[:4] == 0.01).all() and (size[4:] == -1.0).all()

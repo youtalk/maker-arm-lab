@@ -4,11 +4,14 @@ A torchvision ResNet18 with ImageNet weights (ACT's backbone) and two heads, tra
 files (``scripts/mj_render_set.py``'s ``render_<seed>.npz``): the category, over ``CATEGORIES``
 (``core.parts.PART_CATEGORIES``, pinned as text by ``tests/test_lerobot_schema_pin.py``), on every
 frame of a part, and the passenger (a rider, another part that rose with the jaws: the render
-set's ``riders``) on the wrist frames of the files that label it. The export is a TorchScript file: (N, 224, 224, 3) uint8 frames and whether they are wrist frames
-in, (category logits (N, 6), passenger logit (N,)) out, the ImageNet normalisation, the wrist
-frame's crop around the jaws (``WRIST_ROI``) and the overhead frame's crop around the target
-(``OVERHEAD_ROI``) inside, the names in ``categories`` and the
-passenger operating point in ``passenger_threshold``. The heap loop loads it with
+set's ``riders``) on the wrist frames of the files that label it. The category head also reads
+the perceived size of the part (``scripts/render_set_sizes.py``'s ``render_<seed>.size.npy``: the
+loop's noisy detection size, sorted, the cycle target's on a wrist frame) through a small MLP
+beside the CNN features. The export is a TorchScript file: (N, 224, 224, 3) uint8 frames, whether
+they are wrist frames and the (N, 3) sizes in metres in, (category logits (N, 6), passenger logit
+(N,)) out, the ImageNet normalisation, the wrist frame's crop around the jaws (``WRIST_ROI``) and
+the overhead frame's crop around the target (``OVERHEAD_ROI``) inside, the names in
+``categories``, ``size_input`` and the passenger operating point in ``passenger_threshold``. The heap loop loads it with
 ``torch.jit.load`` on the CPU of the uv venv (``core.perception.PartClassifier``), so this venv's
 torchvision never reaches the loop.
 
@@ -89,13 +92,15 @@ class PartClassifier(nn.Module):
     passenger_threshold: float
     wrist_roi: List[int]  # noqa: UP006
     overhead_roi: List[int]  # noqa: UP006
+    size_input: bool
 
     def __init__(self, weights=None):
         super().__init__()
         net = torchvision.models.resnet18(weights=weights)
         net.fc = nn.Identity()
         self.backbone = net
-        self.category = nn.Linear(512, len(CATEGORIES))
+        self.size_net = nn.Sequential(nn.Linear(4, 64), nn.ReLU(), nn.Linear(64, 64), nn.ReLU())
+        self.category = nn.Linear(512 + 64, len(CATEGORIES))
         self.passenger = nn.Linear(512, 1)
         self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
@@ -103,15 +108,23 @@ class PartClassifier(nn.Module):
         self.passenger_threshold = 0.0
         self.wrist_roi = list(WRIST_ROI)
         self.overhead_roi = list(OVERHEAD_ROI)
+        self.size_input = True
 
-    def forward(self, frames: torch.Tensor, wrist: bool) -> Tuple[torch.Tensor, torch.Tensor]:  # noqa: UP006
+    def forward(
+        self, frames: torch.Tensor, wrist: bool, size: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:  # noqa: UP006
         x = frames.permute(0, 3, 1, 2).float() / 255.0
         y0, y1, x0, x1 = self.wrist_roi if wrist else self.overhead_roi
         x = nn.functional.interpolate(
             x[:, :, y0:y1, x0:x1], size=(224, 224), mode="bilinear", align_corners=False
         )
         features = self.backbone((x - self.mean) / self.std)
-        return self.category(features), self.passenger(features).squeeze(-1)
+        # The perceived size (N, 3) in metres, sorted, and the view: an unknown size (-1) reads 0.
+        extra = torch.cat(
+            [size.float().clamp(min=0.0) * 100.0, torch.full_like(size[:, :1], float(wrist))], 1
+        )
+        both = torch.cat([features, self.size_net(extra.to(features.dtype))], 1)
+        return self.category(both), self.passenger(features).squeeze(-1)
 
 
 def load(paths) -> dict[str, np.ndarray]:
@@ -132,6 +145,13 @@ def load(paths) -> dict[str, np.ndarray]:
         out["frames"][at : at + n] = z["frames"]
         at += n
     out["file"] = np.concatenate([np.full(len(z["view"]), n) for n, z in enumerate(parts)])
+    sizes = [Path(p).with_name(Path(p).name.removesuffix(".npz") + ".size.npy") for p in paths]
+    out["size"] = np.concatenate(
+        [
+            np.load(f) if f.exists() else np.full((len(z["view"]), 3), -1.0, np.float32)
+            for f, z in zip(sizes, parts)
+        ]
+    )
     return out
 
 
@@ -163,6 +183,7 @@ def augment(frames: torch.Tensor, gen: torch.Generator) -> torch.Tensor:
 
 def train(model, data, idx, args, device) -> None:
     frames = torch.from_numpy(data["frames"])
+    size = torch.from_numpy(data["size"])
     cat = torch.tensor([CATEGORIES.index(c) if c else -1 for c in data["category"].tolist()])
     wrist = torch.from_numpy(data["view"] != "overhead")
     known = torch.from_numpy(data["riders"] >= 0)  # the frames the rider label covers
@@ -193,7 +214,7 @@ def train(model, data, idx, args, device) -> None:
                 on = view.to(device)
                 amp = device.type == "cuda"
                 with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
-                    logits, rider = model(x[on], is_wrist)
+                    logits, rider = model(x[on], is_wrist, size[b][view].to(device))
                 share = float(view.sum()) / len(b)
                 loss = loss + share * ce(logits.float(), cat[b][view].to(device))
                 told = known[b][view]
@@ -210,9 +231,11 @@ def train(model, data, idx, args, device) -> None:
 
 
 @torch.no_grad()
-def infer(model, frames: np.ndarray, wrist: np.ndarray, device, batch: int = 64):
+def infer(model, frames: np.ndarray, wrist: np.ndarray, size: np.ndarray, device, batch: int = 64):
     """Category logits (N, 6) and passenger logits (N,) of ``frames``, ``wrist`` (N,) saying
-    which are wrist frames."""
+    which are wrist frames and ``size`` (N, 3) the perceived sizes, which an export from before
+    the size input (no ``size_input``) does not read."""
+    sized = bool(getattr(model, "size_input", False))
     model.eval()
     logits = np.zeros((len(frames), len(CATEGORIES)), dtype=np.float32)
     riders = np.zeros(len(frames), dtype=np.float32)
@@ -220,7 +243,11 @@ def infer(model, frames: np.ndarray, wrist: np.ndarray, device, batch: int = 64)
         rows = np.flatnonzero(wrist == is_wrist)
         for start in range(0, len(rows), batch):
             at = rows[start : start + batch]
-            a, b = model(torch.from_numpy(frames[at]).to(device), is_wrist)
+            x = torch.from_numpy(frames[at]).to(device)
+            if sized:
+                a, b = model(x, is_wrist, torch.from_numpy(size[at]).to(device))
+            else:
+                a, b = model(x, is_wrist)
             logits[at], riders[at] = a.float().cpu().numpy(), b.float().cpu().numpy()
     return logits, riders
 
@@ -271,7 +298,7 @@ def _rate(hit: int, total: int) -> float | None:
 
 def read(model, data: dict, device) -> dict:
     """C1 (design section 6.7): the rows, the bars and the confusion matrices."""
-    logits, riders = infer(model, data["frames"], data["view"] != "overhead", device)
+    logits, riders = infer(model, data["frames"], data["view"] != "overhead", data["size"], device)
     labels = data["category"]
     active = [c for c in CATEGORIES if c in set(labels.tolist())]
     cols = [CATEGORIES.index(c) for c in active]
@@ -482,7 +509,9 @@ def run(args) -> dict:
         wrist = keep & (data["view"] != "overhead")
         wrist &= data["riders"] >= 0
         check = wrist & val if (wrist & val).any() else wrist
-        _, riders = infer(model, data["frames"][check], np.ones(check.sum(), bool), device)
+        _, riders = infer(
+            model, data["frames"][check], np.ones(check.sum(), bool), data["size"][check], device
+        )
         model.passenger_threshold = operating_point(riders, data["riders"][check] > 0)
         summary |= {
             "train_frames": len(idx),
