@@ -5,8 +5,9 @@ files (``scripts/mj_render_set.py``'s ``render_<seed>.npz``): the category, over
 (``core.parts.PART_CATEGORIES``, pinned as text by ``tests/test_lerobot_schema_pin.py``), on every
 frame of a part, and the passenger (a rider, another part that rose with the jaws: the render
 set's ``riders``) on the wrist frames of the files that label it. The export is a TorchScript file: (N, 224, 224, 3) uint8 frames and whether they are wrist frames
-in, (category logits (N, 6), passenger logit (N,)) out, the ImageNet normalisation and the wrist
-frame's crop around the jaws (``WRIST_ROI``) inside, the names in ``categories`` and the
+in, (category logits (N, 6), passenger logit (N,)) out, the ImageNet normalisation, the wrist
+frame's crop around the jaws (``WRIST_ROI``) and the overhead frame's crop around the target
+(``OVERHEAD_ROI``) inside, the names in ``categories`` and the
 passenger operating point in ``passenger_threshold``. The heap loop loads it with
 ``torch.jit.load`` on the CPU of the uv venv (``core.perception.PartClassifier``), so this venv's
 torchvision never reaches the loop.
@@ -58,6 +59,17 @@ WRIST_ROI = (76, 188, 58, 170)  # INITIAL: the C1 training ladder, 2026-09-30
 224 px: 112 px around the pick point, which projects to (114, 144) at 8.9 cm; the heap under the
 jaws fills the rest of the frame. On the preliminary set (36 train heaps read on 4 others, 134
 lifts) the lift view read 0.69 on the whole frame, 0.82 on a 144 px crop and 0.85 on this one."""
+OVERHEAD_ROI = (
+    56,
+    168,
+    56,
+    168,
+)  # INITIAL: the controller's review of the train frames, 2026-09-30
+"""Rows and columns of the narrow overhead frame the category head reads, scaled back up to 224
+px: the middle 112 px, 56 mm at the camera's 0.5 mm a pixel (design 6.3 fixes the sampling, not
+the crop). The whole 112 mm frame shows a dozen parts, and only its centre says which is the
+target: on a teacher-driven C1 heap the target's projected centre and the centroid of its own
+pixels both sit within 10 px of (112, 112), the aim's perceived-like error."""
 LATER_LABELS = {"riders", "rider_seen", "tilt"}  # render set labels an older file does not carry
 MIN_SEEN = 0.5  # INITIAL: the share of a part's sample points the overhead camera sees
 PASSENGER_FALSE_ALARMS = 0.01  # the operating point's cap, half the C1 bar's 0.02
@@ -76,6 +88,7 @@ class PartClassifier(nn.Module):
     categories: List[str]  # noqa: UP006
     passenger_threshold: float
     wrist_roi: List[int]  # noqa: UP006
+    overhead_roi: List[int]  # noqa: UP006
 
     def __init__(self, weights=None):
         super().__init__()
@@ -89,14 +102,14 @@ class PartClassifier(nn.Module):
         self.categories = list(CATEGORIES)
         self.passenger_threshold = 0.0
         self.wrist_roi = list(WRIST_ROI)
+        self.overhead_roi = list(OVERHEAD_ROI)
 
     def forward(self, frames: torch.Tensor, wrist: bool) -> Tuple[torch.Tensor, torch.Tensor]:  # noqa: UP006
         x = frames.permute(0, 3, 1, 2).float() / 255.0
-        if wrist:
-            y0, y1, x0, x1 = self.wrist_roi
-            x = nn.functional.interpolate(
-                x[:, :, y0:y1, x0:x1], size=(224, 224), mode="bilinear", align_corners=False
-            )
+        y0, y1, x0, x1 = self.wrist_roi if wrist else self.overhead_roi
+        x = nn.functional.interpolate(
+            x[:, :, y0:y1, x0:x1], size=(224, 224), mode="bilinear", align_corners=False
+        )
         features = self.backbone((x - self.mean) / self.std)
         return self.category(features), self.passenger(features).squeeze(-1)
 

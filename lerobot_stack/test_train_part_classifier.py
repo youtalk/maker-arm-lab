@@ -82,6 +82,7 @@ def test_a_tiny_run_trains_exports_and_reads_as_the_loop_loads_it(tmp_path):
         logits, rider = served(torch.zeros(2, 224, 224, 3, dtype=torch.uint8), wrist)
         assert logits.shape == (2, 6) and rider.shape == (2,)
     assert list(served.wrist_roi) == list(tpc.WRIST_ROI)
+    assert list(served.overhead_roi) == list(tpc.OVERHEAD_ROI)
     c1 = json.loads(Path(summary["c1"]).read_text())
     assert c1["frames"] == 12 and c1["lift"]["total"] == 4
     assert set(c1["confusion_lift"]) == set(c1["categories"]) == set(tpc.CATEGORIES[:4])
