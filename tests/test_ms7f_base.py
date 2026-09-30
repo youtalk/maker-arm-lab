@@ -102,7 +102,7 @@ def test_every_catalog_kind_has_one_category():
         "flat": 10,
         "round": 4,
         "joint": 8,
-        "minifig": 8,
+        "minifig": 7,
     }
     assert set(parts.FAMILY_CATEGORY) >= set(parts.FAMILIES)
     assert set(parts.FAMILY_CATEGORY.values()) == set(parts.PART_CATEGORIES)

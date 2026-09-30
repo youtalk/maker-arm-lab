@@ -177,8 +177,7 @@ def test_every_ldraw_part_rests_on_the_desk(ldraw_built):
     """Dropped upright, as LDraw builds it, each part comes to rest with its lowest hull vertex
     on the desk top. The MS7e parts rest level; 3901 (hair) settles back onto its long back
     edge, and a pin may roll a few degrees on its collar. At rest is a pose that holds for
-    another second: 3629 (cowboy hat) keeps a solver velocity of 0.18 rad/s and creeps by 8e-4
-    of a quaternion component in that second."""
+    another second."""
     model, h = ldraw_built
     data = mujoco.MjData(model)
     for b, adr in enumerate(h.brick_qpos):
@@ -199,4 +198,4 @@ def test_every_ldraw_part_rests_on_the_desk(ldraw_built):
         lowest = (verts @ rot.reshape(3, 3).T)[:, 2].min() + z
         assert lowest == pytest.approx(0.0, abs=0.001), (part.name, lowest)
         moved = np.abs(data.qpos[adr : adr + 7] - settled[adr : adr + 7]).max()
-        assert moved < 2e-3, (part.name, moved)
+        assert moved < 1e-4, (part.name, moved)

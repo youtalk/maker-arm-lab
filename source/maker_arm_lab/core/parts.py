@@ -89,9 +89,12 @@ LDRAW_IDS = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")
 JOINT_IDS = ("2780", "6558", "43093", "3937", "3938", "14417", "14418", "4081b")
 """MS7f joint family: three Technic pins (friction, long, axle pin), the two halves of a 1x2
 hinge brick, a 1x2 plate with a side ball, one with a socket and a 1x1 plate with a clip."""
-MINIFIG_IDS = ("3626b", "973", "3815c01", "3901", "3624", "3629", "3838", "4349")
+MINIFIG_IDS = ("3626b", "973", "3815c01", "3901", "3624", "3838", "4349")
 """MS7f minifig family, each part one rigid body: a head, a torso without arms, the hips and
-legs as one assembly, male hair, a police hat, a cowboy hat, air tanks and a loudhailer."""
+legs as one assembly, male hair, a police hat, air tanks and a loudhailer. The cowboy hat 3629
+left on 2026-09-30: upright it offers only its brim's edge, which the jaws ride over, and on
+the minifig heap read (run 20303500 + i, layout 20303550 + i) its 21 cycles took 1009 steps
+each against 346 for the parts of the same seeds without the new families."""
 LDRAW_FAMILY_IDS = {"ldraw": LDRAW_IDS, "joint": JOINT_IDS, "minifig": MINIFIG_IDS}
 """Every family read from ``LDRAW_DIR``, with its part ids in catalog order."""
 LDRAW_DIR = Path(__file__).resolve().parents[3] / "assets" / "parts"

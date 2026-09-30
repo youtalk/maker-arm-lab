@@ -103,7 +103,6 @@ PARTS = {
     "3815c01": ((0, 1, 2), "the hips and legs as one body, a box to within a millimeter"),
     "3901": ((0, 1, 2), "hair: x and y across its round side, z from the crown to the rim"),
     "3624": ((0, 1, 2), "a police hat: z from its flat top to the rim, x and y across it"),
-    "3629": ((0, 1, 2), "a cowboy hat: x and y on the brim's edge, z from crown to brim"),
     "3838": ((0, 1, 2), "air tanks: x across the two tanks, y front to back, z end to end"),
     "4349": ((0, 1, 2), "a loudhailer: x end to end, y across the cone, z cone to handle"),
 }

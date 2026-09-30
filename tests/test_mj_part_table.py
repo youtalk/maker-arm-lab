@@ -60,7 +60,7 @@ def test_the_ms7e_part_order_and_its_families():
         assert order.index(name) == index, name
     assert [parts.catalog_index(n) for n in order] == list(range(len(order)))
     assert table.family_parts("joint") == order[51:59] == [f"joint_{i}" for i in parts.JOINT_IDS]
-    assert table.family_parts("minifig") == order[59:67]
+    assert table.family_parts("minifig") == order[59:]
     assert table.family_parts("round") == order[29:33]
     assert table.family_parts("flat") == order[41:51]
     assert table.family_parts("tile") == order[47:51]
