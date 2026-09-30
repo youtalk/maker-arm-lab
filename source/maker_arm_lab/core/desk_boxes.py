@@ -550,6 +550,39 @@ def class_map(rng: random.Random, n: int, classes: Sequence[str] = BASE_CLASSES)
     return tuple(b % n for b in boxes)
 
 
+BOX_VOLUME_PER_PART_VOLUME = 2.0  # INITIAL: MS7e ledger R11 measures it
+"""The box draw's capacity floor: a box's interior volume over the summed bounding volume of
+the parts it receives. The teacher smoke of 2026-09-29 (six train heaps of 50, base families,
+``--box_draw 6``) spilled parts from the three boxes under 1.4 (1.14: 16 of 23 stowed, 1.21:
+13 of 20, 1.35: 15 of 21), and the boxes at 1.76 and over held all but at most three."""
+FOLD_TRIES = 200
+
+
+def fitted_class_map(
+    rng: random.Random,
+    sizes: Sequence[Sequence[float]],
+    classes: Sequence[str],
+    class_volumes: Sequence[float],
+) -> tuple[int, ...]:
+    """The box draw's class map (MS7e ledger R11): ``class_map`` drawn again until every box's
+    interior volume (``sizes``) is at least BOX_VOLUME_PER_PART_VOLUME times the volume its
+    classes bring (``class_volumes``, each class's summed part bounding volume), up to
+    FOLD_TRIES draws, then the draw with the largest least ratio. Every fold stays a uniform
+    draw, so no class keeps a box across episodes; only the folds that overfill a box go."""
+    best, best_ratio = (), -math.inf
+    for _ in range(FOLD_TRIES):
+        fold = class_map(rng, len(sizes), classes)
+        load = [0.0] * len(sizes)
+        for c, b in enumerate(fold):
+            load[b] += class_volumes[c]
+        ratio = min(math.prod(s) / v for s, v in zip(sizes, load) if v > 0)
+        if ratio >= BOX_VOLUME_PER_PART_VOLUME:
+            return fold
+        if ratio > best_ratio:
+            best, best_ratio = fold, ratio
+    return best
+
+
 def part_destinations(
     parts: Sequence[Part], class_to_box: Sequence[int], classes: Sequence[str] = BASE_CLASSES
 ) -> list[int]:

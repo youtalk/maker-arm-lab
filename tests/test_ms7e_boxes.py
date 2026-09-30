@@ -92,6 +92,43 @@ def test_the_unseen_rows_draw_only_boxes_training_never_drew(unseen, check):
         assert all(check(s) for s in env.desk_box_sizes[0, :n])
 
 
+def _least_ratio(fold, sizes, volumes):
+    load = [0.0] * len(sizes)
+    for c, b in enumerate(fold):
+        load[b] += volumes[c]
+    return min(math.prod(s) / v for s, v in zip(sizes, load) if v > 0)
+
+
+def test_the_fitted_fold_keeps_every_box_over_its_volume_floor_and_stays_random():
+    """MS7e ledger R11: a fold that would overfill a box is drawn again."""
+    sizes = [(0.07, 0.07, 0.03), (0.10, 0.10, 0.05), (0.08, 0.08, 0.04), (0.09, 0.07, 0.04)]
+    volumes = [40e-6, 45e-6, 10e-6, 10e-6, 20e-6, 30e-6, 15e-6, 15e-6]  # m^3 per class
+    homes = {c: set() for c in range(8)}
+    plain = []
+    for seed in range(100):
+        fold = desk_boxes.fitted_class_map(random.Random(seed), sizes, parts.PART_CLASSES, volumes)
+        assert fold == desk_boxes.fitted_class_map(
+            random.Random(seed), sizes, parts.PART_CLASSES, volumes
+        )
+        assert _least_ratio(fold, sizes, volumes) >= desk_boxes.BOX_VOLUME_PER_PART_VOLUME
+        for c, b in enumerate(fold):
+            homes[c].add(b)
+        plain.append(
+            _least_ratio(
+                desk_boxes.class_map(random.Random(seed), 4, parts.PART_CLASSES), sizes, volumes
+            )
+        )
+    assert min(plain) < desk_boxes.BOX_VOLUME_PER_PART_VOLUME  # the plain fold overfills some
+    assert all(len(b) == 4 for b in homes.values())  # no class keeps a box
+
+
+def test_with_no_fold_over_the_floor_the_fitted_fold_takes_the_roomiest():
+    sizes = [(0.07, 0.07, 0.03)] * 4
+    volumes = [100e-6] * 8
+    fold = desk_boxes.fitted_class_map(random.Random(1), sizes, parts.PART_CLASSES, volumes)
+    assert sorted(fold) == [0, 0, 1, 1, 2, 2, 3, 3]  # the best any fold does: two a box
+
+
 def test_the_grader_reads_each_boxs_own_interior():
     """Two parts at the same offset from their box centres: the one in the 12 cm box is in, the
     one in the 7 cm box is not."""

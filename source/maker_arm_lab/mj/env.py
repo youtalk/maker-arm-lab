@@ -84,7 +84,7 @@ from maker_arm_lab.core import profile as _profile
 from maker_arm_lab.core.cameras import OVERHEAD_B2_BACK_M
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.heap_oracle import STOW_HALF_EXTENTS
-from maker_arm_lab.core.parts import BASE_CLASSES, Part
+from maker_arm_lab.core.parts import BASE_CLASSES, Part, part_class
 from maker_arm_lab.core.quat import compose_offset_rot, quat_apply, quat_mul, rpy_from_quat
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.core.target import target_brick
@@ -375,6 +375,11 @@ class MjLegoSortEnv:
         # The episode's box per class, in class_names order (MS7a design, classes): the active
         # class list, core.parts.PART_CLASSES when an MS7e switch is on (MS7e design section 5).
         self.class_names = tuple(class_names)
+        # The heap's bounding volume per class, the load the box draw's fold fits to its boxes.
+        self._class_volumes = [
+            sum(math.prod(p.size) for p in self.parts or () if part_class(p) == c)
+            for c in self.class_names
+        ]
         self.class_to_box = np.zeros((num_envs, len(self.class_names)), dtype=np.int64)
         self.context_mode = context
         self.context_camera = np.zeros((num_envs, CONTEXT_DIMS["camera"]), dtype=np.float32)
@@ -843,7 +848,12 @@ class MjLegoSortEnv:
             else:
                 self.place_desk_boxes(i, _boxes.sample_boxes(self._rng, self.desk_boxes))
             n = int(self.box_count[i])
-            self.class_to_box[i] = _boxes.class_map(self._rng, n, self.class_names)
+            if self.box_draw:
+                self.class_to_box[i] = _boxes.fitted_class_map(
+                    self._rng, sizes, self.class_names, self._class_volumes
+                )
+            else:
+                self.class_to_box[i] = _boxes.class_map(self._rng, n, self.class_names)
             self.destination_bins[i] = torch.tensor(
                 _boxes.part_destinations(self.parts, self.class_to_box[i], self.class_names)
             )
