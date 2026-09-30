@@ -1604,18 +1604,12 @@ WRIST_COUNTS = ("wrist_looks", "wrist_misses", "wrist_covered", "wrist_shift_mm"
 wrist looks, those that missed and those whose target another part covered, and over the
 looks that found it, the sums of the serving row's xy move (mm) and heading turn (degrees),
 both against the row at selection."""
-CLASSIFIER_COUNTS = (
-    "passenger_reads",
-    "passenger_lifts",
-    "passenger_hits",
-    "passenger_drops",
-    "votes_lost",
-)
+CLASSIFIER_COUNTS = ("passenger_reads", "passenger_drops", "votes_lost")
 """``classifier``'s ``perception`` counts, in the payload only with the switch on: the lifts whose
-wrist frame read a passenger, the lifts a second part rose with (``oracle.passengers``, a metric
-read), the lifts with both, the cycles ``passenger_drop`` ended, and the votes whose carry view
+wrist frame read a passenger, the cycles ``passenger_drop`` ended, and the votes whose carry view
 came after the part left the jaws. Under the switch ``third_views``, ``votes_changed`` and
-``wrong_voted_class`` count the carry views taken."""
+``wrong_voted_class`` count the carry views taken. The passenger head's recall is C1's
+(``lerobot_stack/train_part_classifier.py``); the loop reads no passenger truth."""
 TORQUE_COUNTS = ("force_capped", "hold_blocked", "hold_blocked_cycles")
 """The ``torque`` block's counts under ``hold_force`` or ``force_cap``: the steps L7 held the arm,
 the hold entries L6 refused (one per confirmed run of the jaw-gap rule) and the cycles with one."""
@@ -2527,10 +2521,7 @@ def rollout(
                         # frame decides (MS7f view 2), or ends the cycle on a passenger.
                         frame = env.obs_buf["images"]["wrist_rgb"][i].numpy()
                         read, rider = classifier.read(frame, class_names)
-                        riders = oracle.passengers(pos[i], c.start_z, pick, part)
                         st.counts["passenger_reads"] += rider
-                        st.counts["passenger_lifts"] += bool(riders)
-                        st.counts["passenger_hits"] += rider and bool(riders)
                         if passenger_drop and rider and tray and over_tray(pick, lean, wall_height):
                             st.counts["passenger_drops"] += 1
                             st.fail_mem.book(c.target_xy)

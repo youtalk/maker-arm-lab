@@ -5,6 +5,8 @@ test (MS7c design section 10), on the three-part MuJoCo heap with four desk boxe
 
 import math
 import random
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -1103,7 +1105,13 @@ def _ms7f_scene(monkeypatch):
     """The teacher scene with every MS7f switch the commit builds (``batch_loop.MS7F_READY``):
     the six categories over the drawn boxes, a category's second boxes chosen by the loop's
     own release record (MS7f design section 6.2). A track that readies a loop switch adds it
-    here, so the no-truth test runs with every ready switch on (design section 12.2)."""
+    here, so the no-truth test runs with every ready switch on (design section 12.2).
+    ``classifier`` and ``passenger_drop`` (track C) read a stub TorchScript model on a stand-in
+    narrow view (the cameras are off). It reads no passenger: every lift of this tray scene is
+    over the tray interior, where a passenger read ends the cycle, and the scene's one lifting
+    cycle must place. ``test_classifier_loop`` runs the drop on its own tray scene."""
+    from test_classifier_loop import _classifier  # it imports this module
+
     # Track S's teacher pace and waits drive the rig, which serves no loop decision, and
     # end_at_done ends the recorder's episodes.
     teacher = {
@@ -1120,7 +1128,7 @@ def _ms7f_scene(monkeypatch):
     }
     ready = {"categories", "deep_tray", "tray_refill", "box_empty", "book_miss"}
     # abandon_cycle is the recorder's and near_tracking the rig's watchdog: no loop decision
-    ready |= {"lift_budget", "abandon_cycle", "near_tracking"}
+    ready |= {"lift_budget", "abandon_cycle", "near_tracking", "classifier", "passenger_drop"}
     assert batch_loop.MS7F_READY == ready | teacher, "turn it on in this scene"
     # Two of the three bricks start in the tray and one part fills a box, so the refill and
     # an emptying both run between cycles. Set before the build: the box draw reads the ratio.
@@ -1137,9 +1145,12 @@ def _ms7f_scene(monkeypatch):
         deep_tray=True,
         tray_refill=True,
     )
+    env.narrow_overhead = lambda i, point: np.full((224, 224, 3), 255, dtype=np.uint8)
+    stub = _classifier(Path(tempfile.mkdtemp()), "special", "brick", names=parts.PART_CATEGORIES)
     # A lift budget under the 800-step cycle budget: the tray scene's first three cycles lift
     # nothing and end on it, and the fourth places its part at step 487 (150 cuts it too).
     on = {"box_empty": True, "book_miss": True, "lift_budget": 750}
+    on |= {"classifier": stub, "passenger_drop": True}
     return env, rig, policy, budget, switches | on
 
 

@@ -352,6 +352,15 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
     check_ms7e(parser, args)
     check_ms7f(parser, args)
     check_teacher_waits(parser, args)
+    if args.classifier and not (args.perceived and args.categories):
+        parser.error(
+            "--classifier reads the categories on the perceived views: it needs --perceived and "
+            "--categories"
+        )
+    if args.passenger_drop and not args.classifier:
+        parser.error(
+            "--passenger_drop reads the classifier's passenger head: it needs --classifier"
+        )
     if args.desk_boxes < 0:
         parser.error("--desk_boxes must be 0 or more")
     if args.perceived:
@@ -524,6 +533,8 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             box_empty=args.box_empty,
             book_miss=args.book_miss,
             lift_budget=args.lift_budget,
+            classifier=perception.PartClassifier(args.classifier) if args.classifier else None,
+            passenger_drop=args.passenger_drop,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

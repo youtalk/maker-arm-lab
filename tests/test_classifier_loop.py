@@ -2,7 +2,9 @@
 TorchScript model drives the box, the passenger response opens the jaws only over the tray
 interior, the stand-in's draws stay paired, and no decision reads the truth."""
 
+import importlib.util
 import math
+from pathlib import Path
 from typing import List, Tuple  # noqa: UP035 -- TorchScript reads the typing names
 
 import numpy as np
@@ -34,6 +36,7 @@ SWITCHES = {
     "part_failures": True,
     "park_done": True,
 }
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 BRIGHT = 255  # the stub's overhead frame; a cameras-off env serves black wrist frames
 
 
@@ -191,8 +194,7 @@ def test_the_stand_in_draws_the_same_under_the_classifier(tmp_path, monkeypatch)
 
 def test_no_decision_reads_the_truth_under_the_classifier(tmp_path, monkeypatch):
     """``test_perceived_loop.test_no_decision_reads_the_truth`` with both MS7f switches and the
-    MS7d levers on, in the tray with a passenger read at every lift. The two passenger truth
-    counts are metric reads fed by the replaced accessor, so they are left out."""
+    MS7d levers on, in the tray with a passenger read at every lift."""
     stub = _classifier(tmp_path, "slope", "wide", rider=1.0)
     kwargs = {"perceived": True, "classifier": stub, "passenger_drop": True} | MS7D_ON | SWITCHES
 
@@ -220,6 +222,30 @@ def test_no_decision_reads_the_truth_under_the_classifier(tmp_path, monkeypatch)
     ep, blind_ep = first["episodes"][0], second["episodes"][0]
     for key in ("cycle_reasons", "cycle_targets", "cycle_steps", "done_reason"):
         assert ep[key] == blind_ep[key], key
-    drop = ("passenger_lifts", "passenger_hits")
-    counts = [{k: v for k, v in p["perception"].items() if k not in drop} for p in (first, second)]
-    assert counts[0] == counts[1] and counts[0]["passenger_drops"] > 0
+    assert first["perception"] == second["perception"]
+    assert first["perception"]["passenger_drops"] > 0
+
+
+def _usage(script: str, argv: list[str], capsys) -> str:
+    spec = importlib.util.spec_from_file_location(script, SCRIPTS / f"{script}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with pytest.raises(SystemExit) as exit_info:
+        module.main(argv)
+    assert exit_info.value.code == 2
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1
+    return out[0]
+
+
+def test_the_clients_take_the_switches_only_where_the_loop_serves_them(capsys):
+    heap = ["--heap_k", "3", "--desk_boxes", "4", "--box_draw", "4", "--gripper", "continuous"]
+    line = _usage("mj_eval_heap", heap + ["--perceived", "--classifier", "m.pt"], capsys)
+    assert line.startswith("EVAL_FAIL ") and "needs --perceived and --categories" in line
+    line = _usage(
+        "mj_eval_heap", heap + ["--perceived", "--categories", "--passenger_drop"], capsys
+    )
+    assert line.startswith("EVAL_FAIL ") and "it needs --classifier" in line
+    for flag in (["--classifier", "m.pt"], ["--passenger_drop"]):
+        line = _usage("mj_generate_batch", ["--out_dir", "/tmp/x", "--heap_k", "3"] + flag, capsys)
+        assert line.startswith("BATCH_FAIL usage: ") and "the recorder has none" in line

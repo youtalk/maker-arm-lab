@@ -296,6 +296,8 @@ MS7F_READY: frozenset[str] = frozenset(
         "book_miss",
         "abandon_cycle",
         "near_tracking",
+        "classifier",
+        "passenger_drop",
         "transport_speed",
         "descend_speed",
         "close_steps",
