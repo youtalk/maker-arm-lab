@@ -24,10 +24,12 @@ from pathlib import Path
 import torch
 
 from maker_arm_lab.core import desk_boxes, layout, oracle, perception, trajectory
+from maker_arm_lab.core import loop as _loop
 from maker_arm_lab.core import parts as _parts
 from maker_arm_lab.core.layout import sample_run_draw
 
 CAMPAIGN_TARGET_SUCCESSES = 50
+EVENTS = _loop.EVENT_NAMES  # MS7f: a heap run's events, counted per episode by its track
 
 PARTS_SPLITS = ("train", "heldout", "all")
 LEGACY_EPISODE_LENGTH_S = 180.0
@@ -62,6 +64,14 @@ def heap_parts(args) -> list[_parts.Part] | None:
     heap = _parts.sample_parts(rng, own, half) + _parts.sample_parts(rng, rest, args.heap_k - half)
     rng.shuffle(heap)
     return heap
+
+
+def heldout_names(args) -> frozenset[str]:
+    """The part kinds of the held-out split of the run's catalog (``--families``, ``--parts_seed``),
+    the kinds neither the policy nor the classifier saw: the held-out row of MS7f design section
+    4.4, meaningful under ``--parts_split all``."""
+    catalog = _parts.catalog(getattr(args, "families", ()))
+    return frozenset(p.name for p in _parts.split(catalog, args.parts_seed)[1])
 
 
 def heap_classes(args) -> tuple[str, ...]:
@@ -439,6 +449,7 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
     clamped_steps = 0
     attempts = 0
     cycle_bricks: list[set[int]] = [set() for _ in range(rig.num_envs)]
+    episode_steps = [0] * rig.num_envs  # control steps of each env's episode so far
     motion = trajectory.MotionStats(rig.num_envs)
     start = time.time()
     heap = getattr(env, "parts", None) is not None
@@ -468,6 +479,7 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
                     env.oracle_actor[i] = actor
             out = rig.step()
             control_steps += 1
+            episode_steps = [n + 1 for n in episode_steps]
             if heap and recorder is not None:
                 for i in range(rig.num_envs):
                     orc = rig.oracles[i]
@@ -496,9 +508,16 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
                         outcome = "abandoned"
                         abandon_reasons[stats["abandon"] or "unknown"] += 1
                     episodes.append(
-                        {"env": i, "outcome": outcome, "cycles": len(cycle_bricks[i]), **stats}
+                        {
+                            "env": i,
+                            "outcome": outcome,
+                            "cycles": len(cycle_bricks[i]),
+                            "steps": episode_steps[i],
+                            **stats,
+                        }
                     )
                     cycle_bricks[i] = set()
+                    episode_steps[i] = 0
                     seen_outcomes[i] = 0
                 attempts += len(env_ids)
                 abandoned_ids = out["abandoned"].nonzero(as_tuple=False).squeeze(-1).tolist()
@@ -594,6 +613,11 @@ def run_stats(
         stats["pushes"] = sum(int(e.get("pushes", 0)) for e in episodes)
         stats["rakes"] = sum(int(e.get("rakes", 0)) for e in episodes)
         stats["cycles_per_stowed"] = stats["cycles"] / stowed if stowed else None
+        # MS7f design section 4.1: every step of every episode counts, the events take none.
+        steps = sum(int(e.get("steps", 0)) for e in episodes)
+        stats["steps_total"] = steps
+        stats["stows_per_hour"] = _loop.stows_per_hour(stowed, steps)
+        stats["events"] = {n: sum(e.get("events", {}).get(n, 0) for e in episodes) for n in EVENTS}
     if probe:
         # A heap probe grades on every episode the recorder wrote, not the fully-stowed
         # count: the same "exported_written" gate `exported_count` (mj_generate_batch.py)

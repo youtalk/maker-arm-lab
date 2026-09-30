@@ -1471,3 +1471,74 @@ def test_the_supervisor_forwards_categories_and_its_cache_matches_it(tmp_path, c
     cfg.ms7f = {"categories": True}
     results = ge.run_gate(cfg, lambda d: _heap_payload(d), lambda: _FakeServer([]))
     assert results["ms7f"] == {"categories": True}
+
+
+def test_the_gate_sums_the_throughput_and_the_heldout_row_and_gates_them_only_when_set():
+    """MS7f design section 4.2: with both bars unset the verdict is MS7e's; each set bar gates."""
+    from maker_arm_lab.core import loop
+
+    assert ge.CONTROL_HZ == loop.CONTROL_HZ and ge.INTERVAL_NAMES == loop.INTERVAL_NAMES
+    eps = [
+        dict(
+            _episode(0),
+            num_bricks=150,
+            bricks_stowed=140,
+            steps=54000,
+            cycles=150,
+            stowed_heldout={"stowed": 17, "total": 20},
+            events={"tray_refill": 2, "box_empty": 1},
+            cycle_classes=["stowed", "held_no_lift"],
+            cycle_intervals=[[1, 2, 3, 4], [5, 6, 0, 0]],
+            stowed_by_category={"brick": {"stowed": 90, "total": 95}},
+        ),
+        dict(
+            _episode(0),
+            num_bricks=150,
+            bricks_stowed=136,
+            steps=54000,
+            cycles=150,
+            stowed_heldout={"stowed": 16, "total": 20},
+            events={"tray_refill": 1, "box_empty": 0},
+            cycle_classes=["stowed"],
+            cycle_intervals=[[10, 20, 30, 40]],
+            stowed_by_category={"brick": {"stowed": 80, "total": 90}},
+        ),
+    ]
+    payload = {"episodes": eps}
+    plain = ge.aggregate_gate([payload], 0.9)
+    gate = plain["gate"]
+    assert gate["passed"] and gate["steps_total"] == 108000
+    assert gate["stows_per_hour"] == pytest.approx(3600 * 276 / (108000 / 30))  # 276 an hour
+    assert gate["heldout"]["stowed"] == 33 and gate["heldout"]["total"] == 40
+    assert gate["heldout"]["rate"] == pytest.approx(0.825) and gate["heldout_passed"]
+    assert gate["stows_per_hour_passed"] and gate["min_stows_per_hour"] is None
+    assert not ge.aggregate_gate([payload], 0.9, min_stows_per_hour=300)["gate"]["passed"]
+    assert ge.aggregate_gate([payload], 0.9, min_stows_per_hour=270)["gate"]["passed"]
+    assert not ge.aggregate_gate([payload], 0.9, heldout_threshold=0.85)["gate"]["passed"]
+    assert ge.aggregate_gate([payload], 0.9, heldout_threshold=0.80)["gate"]["passed"]
+    empty = {"episodes": [dict(e, stowed_heldout={"stowed": 0, "total": 0}) for e in eps]}
+    assert not ge.aggregate_gate([empty], 0.9, heldout_threshold=0.0)["gate"]["heldout_passed"]
+    rows = plain["secondary"]
+    assert rows["events"] == {"box_empty": 1, "tray_refill": 3}
+    assert rows["stowed_by_category"] == {"brick": {"stowed": 170, "total": 185}}
+    assert rows["cycle_intervals"]["by_outcome"] == loop.interval_sums(eps)["by_outcome"]
+    # An MS7e payload has none of the MS7f rows and the same verdict.
+    old = {"episodes": [_episode(3, num_bricks=6)]}
+    assert "events" not in ge.aggregate_gate([old], 0.4)["secondary"]
+    assert ge.aggregate_gate([old], 0.4)["gate"]["passed"]
+
+
+def test_the_bars_reach_the_gate_results_from_the_command_line(tmp_path):
+    argv = _argv(tmp_path) + MS7E_HEAP
+    cfg = ge._build_cfg(ge._parse_args(argv))
+    assert cfg.min_stows_per_hour is None and cfg.heldout_threshold is None
+    more = ["--min_stows_per_hour", "300", "--heldout_threshold", "0.85"]
+    cfg = ge._build_cfg(ge._parse_args(argv + more))
+    assert cfg.min_stows_per_hour == 300.0 and cfg.heldout_threshold == 0.85
+    ledger = _fake_ledger(tmp_path)
+    cfg = _cfg(tmp_path, ledger, processes=1, backend="mujoco", heap_k=50)
+    cfg.min_stows_per_hour, cfg.heldout_threshold = 300.0, 0.85
+    results = ge.run_gate(cfg, lambda d: _heap_payload(d), lambda: _FakeServer([]))
+    gate = results["gate"]
+    assert gate["min_stows_per_hour"] == 300.0 and gate["heldout_threshold"] == 0.85
+    assert not gate["passed"] and not gate["heldout_passed"]  # no held-out part in the read

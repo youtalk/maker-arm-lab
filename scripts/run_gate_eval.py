@@ -86,6 +86,9 @@ class GateCfg:
     parts_split: str = "heldout"
     cycle_budget: int | None = None  # None: the client's default, ceil(1.3 * K)
     max_cycles_per_stowed: float | None = None  # the second gate rule, None: not applied
+    # MS7f design section 4.2: the throughput bar and the held-out row's bar, None: not applied.
+    min_stows_per_hour: float | None = None
+    heldout_threshold: float | None = None
     gripper: str = "binary"  # MuJoCo only: the checkpoint's handshake (MS6 phase B design 5.4)
     desk_boxes: int = 0  # MuJoCo heap only: MS7a desk boxes; 0 is the MS6 shelf bin
     tray: bool = False  # MuJoCo heap only: the heap drops into the tray (MS7a)
@@ -368,8 +371,18 @@ def wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple[float
     return (max(0.0, center - half), min(1.0, center + half))
 
 
+CONTROL_HZ = 30.0
+"""``core.loop.CONTROL_HZ``, copied because the supervisor imports no maker_arm_lab; pinned."""
+INTERVAL_NAMES = ("select_to_close", "close_to_lift", "lift_to_release", "release_to_next")
+"""``core.loop.INTERVAL_NAMES``, the S0 intervals (MS7f design section 8.1); pinned."""
+
+
 def aggregate_gate(
-    process_payloads: list[dict], threshold: float, max_cycles_per_stowed: float | None = None
+    process_payloads: list[dict],
+    threshold: float,
+    max_cycles_per_stowed: float | None = None,
+    min_stows_per_hour: float | None = None,
+    heldout_threshold: float | None = None,
 ) -> dict:
     """Per-brick success rate = bricks delivered to their correct bin / (num_bricks x
     episodes), as RolloutTracker grades it, gated against `threshold`. Everything else is
@@ -378,7 +391,13 @@ def aggregate_gate(
 
     `max_cycles_per_stowed` (MS6 phase B design 5.3) is the heap gate's second rule: pick
     cycles per stowed part at most this. None (the six-brick task) reports cycles but does
-    not gate on them."""
+    not gate on them.
+
+    MS7f design section 4.2 adds two bars, each gated only when set: ``min_stows_per_hour``, the
+    correct stows per simulated hour over every step of every episode (3600 x stowed / (steps /
+    30)), and ``heldout_threshold``, the stowed share of the held-out row (each episode's
+    ``stowed_heldout``: parts of kinds neither the policy nor the classifier saw), which fails
+    when the read holds no held-out part. With both unset the verdict is MS7e's."""
     episodes = [ep for p in process_payloads for ep in p["episodes"]]
     if max_cycles_per_stowed is not None and any("cycles" not in ep for ep in episodes):
         # A six-brick payload has no cycles; counting it as 0 would pass the rule for free.
@@ -392,6 +411,16 @@ def aggregate_gate(
         cycles_per_stowed is not None and cycles_per_stowed <= max_cycles_per_stowed
     )
     steps_total = sum(ep["steps"] for ep in episodes)
+    per_hour = 3600.0 * bricks_stowed * CONTROL_HZ / steps_total if steps_total else 0.0
+    hour_ok = min_stows_per_hour is None or per_hour >= min_stows_per_hour
+    held = {
+        k: sum(ep.get("stowed_heldout", {}).get(k, 0) for ep in episodes)
+        for k in ("stowed", "total")
+    }
+    held_rate = held["stowed"] / held["total"] if held["total"] else None
+    held_ok = heldout_threshold is None or (
+        held_rate is not None and held_rate >= heldout_threshold
+    )
     grasp_attempts = sum(ep.get("grasp_attempts", 0) for ep in episodes)
     grasp_successes = sum(ep.get("grasp_successes", 0) for ep in episodes)
     grasp_successes_strict = sum(ep.get("grasp_successes_strict", 0) for ep in episodes)
@@ -465,7 +494,18 @@ def aggregate_gate(
             "cycles_total": cycles_total,
             "cycles_per_stowed": cycles_per_stowed,
             "max_cycles_per_stowed": max_cycles_per_stowed,
-            "passed": rate >= threshold and cycles_ok,
+            "steps_total": steps_total,
+            "stows_per_hour": per_hour,
+            "min_stows_per_hour": min_stows_per_hour,
+            "stows_per_hour_passed": hour_ok,
+            "heldout": {
+                **held,
+                "rate": held_rate,
+                "wilson95": list(wilson_interval(held["stowed"], held["total"])),
+            },
+            "heldout_threshold": heldout_threshold,
+            "heldout_passed": held_ok,
+            "passed": rate >= threshold and cycles_ok and hour_ok and held_ok,
         },
         "secondary": {
             "all_six_episode_rate": (
@@ -506,8 +546,40 @@ def aggregate_gate(
             ],
             "mean_steps": (steps_total / len(episodes)) if episodes else None,
             **box_rows,
+            **_ms7f_rows(episodes),
         },
     }
+
+
+def _ms7f_rows(episodes: list[dict]) -> dict:
+    """The MS7f rows of a read (interface item 4): the events, the rows per category under
+    --categories and the S0 intervals summed per cycle outcome (``core.loop.interval_sums``, a
+    stdlib copy). Absent on a payload that predates them."""
+    rows: dict = {}
+    events = [ep["events"] for ep in episodes if "events" in ep]
+    if events:
+        rows["events"] = {n: sum(e.get(n, 0) for e in events) for n in sorted(set().union(*events))}
+    by_category: dict[str, dict] = {}
+    for ep in episodes:
+        for name, row in ep.get("stowed_by_category", {}).items():
+            total = by_category.setdefault(name, {"stowed": 0, "total": 0})
+            for k in ("stowed", "total"):
+                total[k] += row[k]
+    if by_category:
+        rows["stowed_by_category"] = by_category
+    timed = [ep for ep in episodes if "cycle_intervals" in ep]
+    if timed:
+        by: dict[str, dict] = {}
+        for ep in timed:
+            for outcome, four in zip(ep["cycle_classes"], ep["cycle_intervals"]):
+                row = by.setdefault(outcome, {"cycles": 0, "steps": [0, 0, 0, 0]})
+                row["cycles"] += 1
+                row["steps"] = [a + b for a, b in zip(row["steps"], four)]
+        rows["cycle_intervals"] = {
+            "names": list(INTERVAL_NAMES),
+            "by_outcome": dict(sorted(by.items())),
+        }
+    return rows
 
 
 def _extract_json_line(text: str, token: str) -> dict:
@@ -796,7 +868,13 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
         finally:
             server.stop()
     ordered = [payloads[k] for k in sorted(payloads)]
-    results = aggregate_gate(ordered, cfg.threshold, cfg.max_cycles_per_stowed)
+    results = aggregate_gate(
+        ordered,
+        cfg.threshold,
+        cfg.max_cycles_per_stowed,
+        cfg.min_stows_per_hour,
+        cfg.heldout_threshold,
+    )
     results["checkpoint"] = cfg.checkpoint
     results["seed"] = cfg.seed
     results["ledger"] = str(cfg.ledger)
@@ -926,6 +1004,20 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help="the second gate rule of MS6 phase B: pick cycles per stowed part at most this "
         "(default 1.3 when --heap_k > 0, else not applied)",
+    )
+    parser.add_argument(
+        "--min_stows_per_hour",
+        type=float,
+        default=None,
+        help="MS7f design section 4.2: the throughput bar, correct stows per simulated hour over "
+        "every step of every episode; not applied by default",
+    )
+    parser.add_argument(
+        "--heldout_threshold",
+        type=float,
+        default=None,
+        help="MS7f design section 4.2: the held-out row's bar, the stowed share of parts of "
+        "held-out kinds (meaningful under --parts_split all); not applied by default",
     )
     parser.add_argument(
         "--gripper",
@@ -1249,6 +1341,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         parts_split=args.parts_split,
         cycle_budget=args.cycle_budget,
         max_cycles_per_stowed=args.max_cycles_per_stowed,
+        min_stows_per_hour=args.min_stows_per_hour,
+        heldout_threshold=args.heldout_threshold,
         gripper=args.gripper,
         desk_boxes=args.desk_boxes,
         tray=args.tray,

@@ -278,6 +278,19 @@ def test_the_teacher_spreads_a_category_over_its_boxes_and_stows_them_correct():
     assert ep["stowed_by_category"] == ep["stowed_by_class"]
     assert payload["stowed_by_category"]["brick"]["stowed"] == ep["bricks_stowed"]
     assert sum(loads[0][m] > 0 for m in brick) >= 2
+    # The payload fields of MS7f (interface item 4) on the teacher's cycles: the first
+    # selection is at step 0, so the S0 intervals cover every step of the episode.
+    assert payload["steps_total"] == ep["steps"] == sum(map(sum, ep["cycle_intervals"]))
+    assert len(ep["cycle_intervals"]) == ep["cycles"] and min(map(min, ep["cycle_intervals"])) >= 0
+    rows = payload["cycle_intervals"]["by_outcome"]
+    assert rows["stowed"]["cycles"] == ep["cycle_classes"].count("stowed")
+    assert sum(sum(r["steps"]) for r in rows.values()) == ep["steps"]
+    stowed = rows["stowed"]["steps"]
+    assert all(v > 0 for v in stowed), stowed  # a teacher's stow closes, lifts and releases
+    per_hour = 3600.0 * ep["bricks_stowed"] / (ep["steps"] / 30.0)
+    assert payload["stows_per_hour"] == pytest.approx(per_hour)
+    assert payload["events"] == {"tray_refill": 0, "box_empty": 0} == ep["events"]
+    assert payload["stowed_heldout"] == {"stowed": 0, "total": 0}  # no held-out names given
 
 
 # -- the class path under categories --------------------------------------------------------
@@ -365,3 +378,86 @@ def test_the_clients_refuse_categories_without_the_box_draw(name, argv, token, c
     args = script.parse_args(argv + ["--categories", "--box_draw", "4"])
     assert batch_loop.ms7f_switches(args) == {**batch_loop.MS7F_OFF, "categories": True}
     assert batch_loop.ms7f_switches(script.parse_args(argv)) == batch_loop.MS7F_OFF
+
+
+# -- the payload's throughput and the S0 intervals (design sections 4.1 and 8.1) ------------
+
+
+def test_the_throughput_counts_stows_per_simulated_hour():
+    assert loop.stows_per_hour(300, 30 * 3600) == pytest.approx(300.0)
+    # The MS7e official read (design section 3): 5299 stows over 3,417,355 steps, 167 an hour.
+    assert loop.stows_per_hour(5299, 3_417_355) == pytest.approx(167.5, abs=0.05)
+    assert loop.stows_per_hour(0, 0) == 0.0
+
+
+def _events(**fired):
+    names = ("started", "lift_started", "lost")
+    return argparse.Namespace(**{n: fired.get(n, False) for n in names})
+
+
+@pytest.mark.parametrize(
+    "events, end, want",
+    [
+        # a stow: close at 12, lift at 40, release at 90, the next selection at 130
+        ({12: "started", 40: "lift_started", 90: "lost"}, 130, [2, 28, 50, 40]),
+        ({}, 50, [40, 0, 0, 0]),  # never closed: every step before the close
+        ({20: "started"}, 50, [10, 30, 0, 0]),  # held, never lifted
+        ({20: "started", 30: "lift_started"}, 50, [10, 10, 20, 0]),  # carrying at the end
+        # a lift whose hold began before the span, then a second hold after the release
+        ({15: "lift_started", 25: "lost", 35: "started"}, 45, [5, 0, 10, 20]),
+    ],
+)
+def test_the_four_s0_intervals_add_up_to_the_cycles_steps(events, end, want):
+    span = [10, None, None, None]
+    for step in range(10, end):
+        name = events.get(step)
+        loop.stamp_span(span, _events(**({name: True} if name else {})), step)
+    got = loop.span_intervals(span, end)
+    assert got == want and sum(got) == end - 10
+
+
+def test_the_intervals_sum_per_cycle_outcome():
+    eps = [
+        {
+            "cycle_classes": ["stowed", "held_no_lift"],
+            "cycle_intervals": [[1, 2, 3, 4], [5, 6, 0, 0]],
+        },
+        {"cycle_classes": ["stowed"], "cycle_intervals": [[10, 20, 30, 40]]},
+    ]
+    got = loop.interval_sums(eps)
+    assert got["names"] == list(loop.INTERVAL_NAMES)
+    assert got["by_outcome"] == {
+        "held_no_lift": {"cycles": 1, "steps": [5, 6, 0, 0]},
+        "stowed": {"cycles": 2, "steps": [11, 22, 33, 44]},
+    }
+
+
+def test_the_heldout_names_are_the_catalogs_heldout_kinds():
+    args = argparse.Namespace(families=FAMILIES, parts_seed=20260915)
+    names = batch_loop.heldout_names(args)
+    catalog = parts.catalog(FAMILIES)
+    assert names == {p.name for p in parts.split(catalog, 20260915)[1]} and len(names) == 13
+    heap = batch_loop.heap_parts(argparse.Namespace(**PIN_HEAP, families=FAMILIES))
+    assert {p.name for p in heap} & names and {p.name for p in heap} - names  # "all" mixes both
+
+
+def test_the_recorders_run_stats_carry_the_throughput_and_the_events():
+    eps = [
+        {"env": 0, "outcome": "time_out", "bricks_delivered": 40, "cycles": 45, "steps": 18000},
+        {"env": 1, "outcome": "time_out", "bricks_delivered": 50, "cycles": 52, "steps": 36000},
+    ]
+    counters = {
+        "episodes": eps,
+        "abandon_reasons": {},
+        "control_steps": 36000,
+        "clamped_steps": 0,
+        "attempts": 2,
+        "wall_seconds": 10.0,
+        "exported": 0,
+        "motion": {},
+    }
+    stats = batch_loop.run_stats(
+        counters, target_attempts=2, num_envs=2, probe=False, num_bricks=50
+    )
+    assert stats["steps_total"] == 54000 and stats["stows_per_hour"] == pytest.approx(180.0)
+    assert stats["events"] == {"tray_refill": 0, "box_empty": 0}

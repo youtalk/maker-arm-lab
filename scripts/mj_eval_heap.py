@@ -35,6 +35,7 @@ from maker_arm_lab.core.batch_loop import (
     check_ms7f,
     heap_classes,
     heap_parts,
+    heldout_names,
     ms7e_switches,
     ms7f_switches,
 )
@@ -481,6 +482,7 @@ def main(argv=None) -> int:
             force_cap=args.force_cap,
             thin_snap=args.thin_snap,
             snap_closed=args.snap_closed,
+            heldout=heldout_names(args),
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

@@ -239,6 +239,50 @@ DESK_REST_MAX_Z = desk_boxes.DESK_BOX_RELEASE_Z - oracle.LIFT_MIN_RISE
 reach, a lift's rise under the release. A teacher-driven policy's cycle ended out_of_reach at
 its own release, the part in the opening jaws at z 0.098 m over its box (2026-09-23)."""
 FRAME_EVERY = 10
+CONTROL_HZ = 30.0
+"""Control steps per simulated second, the env's (``mj.env.CONTROL_HZ``)."""
+EVENT_NAMES = ("tray_refill", "box_empty")
+"""The between-cycle events of MS7f design sections 5.3 and 5.4 (``EnvState.events``), counted
+per episode in the payload's ``events``: 0 while their switches are off. An event takes zero
+simulated time (design section 4.1)."""
+
+
+INTERVAL_NAMES = ("select_to_close", "close_to_lift", "lift_to_release", "release_to_next")
+"""MS7f design section 8.1 (S0): the four intervals of a cycle, in control steps, split at the
+hold detector's events (``stamp_span``, ``span_intervals``)."""
+
+
+def stamp_span(span: list, detector: HoldDetector, step: int) -> None:
+    """S0: stamp this step's hold detector events on a cycle's span, ``[selection, first close,
+    lift, release]`` in absolute steps, None until seen. The first close is the detector's first
+    hold (``started``), the lift its ``lift_started`` and the release its ``lost``, a lifted
+    hold's end. An event stamps its own slot and every earlier slot still None, so the stamps
+    never run backwards: a lift whose hold began before the span stamps the close too, and a
+    second hold after a release changes nothing. Pure except for ``span``."""
+    for k, fired in enumerate((detector.started, detector.lift_started, detector.lost), 1):
+        if fired and span[k] is None:
+            for j in range(1, k + 1):
+                span[j] = step if span[j] is None else span[j]
+
+
+def span_intervals(span: list, end: int) -> list[int]:
+    """S0: the four ``INTERVAL_NAMES`` intervals of a span that ends at ``end``, the next
+    selection or the episode's end. An event never seen takes the next one's time, so a cycle
+    that never closed spends all its steps before the close; the four add up to ``end`` minus
+    the selection. Pure."""
+    times = [span[0], *span[1:], end]
+    for k in range(3, 0, -1):
+        times[k] = times[k + 1] if times[k] is None else times[k]
+    return [times[k + 1] - times[k] for k in range(4)]
+
+
+def stows_per_hour(stowed: int, steps: int, control_hz: float = CONTROL_HZ) -> float:
+    """MS7f design section 4.1: correct stows per simulated hour, 3600 x ``stowed`` / (``steps`` /
+    30), where ``steps`` sums every step of every episode, the steps after its last stow too.
+    0 with no steps. Pure."""
+    return 3600.0 * stowed * control_hz / steps if steps else 0.0
+
+
 """Steps between two frames ``rollout``'s ``on_frame`` dump receives."""
 SELECT_WAIT_FRACTION = 0.375
 """The share of ``CYCLE_STEP_BUDGET`` the loop waits for the retreat at most before it selects
@@ -961,6 +1005,9 @@ class EnvState:
     look_since: int | None = None  # the step a streak of empty selections began (look_again)
     wrist: perception.WristCamera | None = None  # ``wrist_fix``: this env's wrist look
     forces: list[float] = field(default_factory=list)  # MS7d: N, each approach step's force
+    events: Counter = field(default_factory=Counter)  # MS7f: EVENT_NAMES this episode ran
+    span: list | None = None  # S0: the open cycle span's stamps (``stamp_span``)
+    intervals: list = field(default_factory=list)  # S0: each closed span's four intervals
     # MS7f --categories: m^3 per desk box, the volume this loop's own cycles released there
     # (``desk_boxes.lighter_box`` picks between a category's two boxes by it), never the truth.
     box_load: list[float] = field(default_factory=list)
@@ -1626,6 +1673,7 @@ def rollout(
     park_done: bool = False,
     rake_turn: bool = False,
     hold_trace: list | None = None,
+    heldout: frozenset[str] = frozenset(),
     perceived: bool = False,
     noise_scales: dict | None = None,
     contact_hold: bool = False,
@@ -1666,6 +1714,10 @@ def rollout(
     "ms7e" block. ``snap_closed`` (the MS7e flat study, 2026-09-30) ends ``pick_snap``'s
     landing hold once the measured jaws closed on the part (``snap_hold``); it needs
     ``pick_snap`` and is recorded the same way.
+    ``heldout`` names the part kinds of the held-out split: each episode's ``stowed_heldout``
+    counts its parts of those kinds and the ones stowed (MS7f design section 4.4, the held-out
+    row), read on the grader's final mask. The payload also carries ``steps_total``,
+    ``stows_per_hour`` (``stows_per_hour``) and the ``events`` of ``EVENT_NAMES``.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1919,6 +1971,8 @@ def rollout(
             if not bool(tracker.done[i]):
                 gate = not hold_force or forces[i] < HOLD_FORCE_MAX_N  # L6's entry gate
                 d.update(float(gaps[i]), gap_cmd[i], float(top_picks[i][2]), gate)
+                if states[i].span is not None:
+                    stamp_span(states[i].span, d, step)
                 if d.blocked:
                     _count_blocked(states[i])
         # 1. Grade and select on the envs the loop holds: episode live, rig idle.
@@ -2042,6 +2096,9 @@ def rollout(
                 continue
             waited = 0 if st.idle_since is None else step - st.idle_since
             chosen = getattr(st.selector, "grasp", None)
+            if st.span is not None:  # S0: the last cycle's span ends at this selection
+                st.intervals.append(span_intervals(st.span, step))
+            st.span = [step, None, None, None]
             st.cycle = Cycle(
                 ordinal=len(st.outcomes) + 1,
                 target=target,
@@ -2408,6 +2465,7 @@ def rollout(
         # 5. Episode ends: the env's own (auto-reset) and the loop's.
         success = env.termination_manager.get_term("success").to("cpu")
         newly_env = dones & ~tracker.done
+        was_done = tracker.done.clone()
         tracker.record_step(step, dones | loop_done, truncated.cpu(), success)
         for i in torch.nonzero(newly_env).flatten().tolist():
             st = states[i]
@@ -2429,6 +2487,11 @@ def rollout(
             st.done_reason = st.done_reason or ("all_stowed" if bool(success[i]) else "time_out")
             rig.rearm([i], idle=True)
             env.oracle_actor[i] = 0
+        for i in torch.nonzero(tracker.done & ~was_done).flatten().tolist():
+            st = states[i]
+            if st.span is not None:  # S0: the last span ends with the episode, step + 1 steps
+                st.intervals.append(span_intervals(st.span, step + 1))
+                st.span = None
         if recorder is not None:
             # An episode the loop ends (selector dry or cycle budget spent) never reaches the
             # env's own end: export its takeover frames here. No takeover runs on a loop-done
@@ -2450,6 +2513,7 @@ def rollout(
             "incomplete", f"{int((~tracker.done).sum())} envs still running at {max_steps}"
         )
     episodes = []
+    held = [p for p in range(k) if env.parts[p].name in heldout]
     for i, result in enumerate(tracker.results):
         st = states[i]
         final = tracker.stowed_mask(i)
@@ -2489,6 +2553,12 @@ def rollout(
                 "cycle_first_close_cm": list(st.first_close_cm),
                 "cycle_census": list(st.census),
                 "stowed_families": sorted(env.parts[p].family for p in range(k) if final[p]),
+                "stowed_heldout": {
+                    "stowed": sum(bool(final[p]) for p in held),
+                    "total": len(held),
+                },
+                "events": {name: st.events[name] for name in EVENT_NAMES},
+                "cycle_intervals": list(st.intervals),
                 "done_reason": st.done_reason,
                 "takeovers": st.takeovers,
                 "takeovers_stowed": st.takeovers_stowed,
@@ -2530,6 +2600,13 @@ def rollout(
         "cycles_total": cycles_total,
         "stowed_total": stowed_total,
         "cycles_per_stowed": (cycles_total / stowed_total) if stowed_total else None,
+        "steps_total": steps_total,
+        "stows_per_hour": stows_per_hour(stowed_total, steps_total),
+        "stowed_heldout": {
+            key: sum(e["stowed_heldout"][key] for e in episodes) for key in ("stowed", "total")
+        },
+        "events": {name: sum(e["events"][name] for e in episodes) for name in EVENT_NAMES},
+        "cycle_intervals": interval_sums(episodes),
         **(_sum_box_rows(episodes) if per_part else {}),
         "takeovers": sum(e["takeovers"] for e in episodes),
         "takeovers_stowed": sum(e["takeovers_stowed"] for e in episodes),
@@ -2568,6 +2645,19 @@ def rollout(
             "approach_force": force_summary([f for st in states for f in st.forces]),
         }
     return payload
+
+
+def interval_sums(episodes: list[dict]) -> dict:
+    """S0 (MS7f design section 8.1): each episode's ``cycle_intervals`` summed per cycle outcome,
+    the census class of ``cycle_classes`` (``stowed``, ``wrong_box``, ``held_no_lift`` and the
+    rest), with the cycles of each. Pure."""
+    by: dict[str, dict] = {}
+    for ep in episodes:
+        for outcome, four in zip(ep["cycle_classes"], ep["cycle_intervals"]):
+            row = by.setdefault(outcome, {"cycles": 0, "steps": [0, 0, 0, 0]})
+            row["cycles"] += 1
+            row["steps"] = [a + b for a, b in zip(row["steps"], four)]
+    return {"names": list(INTERVAL_NAMES), "by_outcome": dict(sorted(by.items()))}
 
 
 def _sum_box_rows(episodes: list[dict]) -> dict:
