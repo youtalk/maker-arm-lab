@@ -92,7 +92,7 @@ from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.heap_oracle import STOW_HALF_EXTENTS
 from maker_arm_lab.core.parts import BASE_CLASSES, Part, part_category, part_class
 from maker_arm_lab.core.quat import compose_offset_rot, quat_apply, quat_mul, rpy_from_quat
-from maker_arm_lab.core.stowed import parts_resting_box, per_brick_stowed
+from maker_arm_lab.core.stowed import parts_in_desk_boxes, parts_resting_box, per_brick_stowed
 from maker_arm_lab.core.target import target_brick
 from maker_arm_lab.mj import overlay, scene
 from maker_arm_lab.mj.context_names import (
@@ -1100,6 +1100,53 @@ class MjLegoSortEnv:
             mujoco.mj_forward(self.models[i], self.datas[i])
             self._refresh([i], images=True)
         return out
+
+    def stray_parts(self, i: int) -> list[int]:
+        """MS7f stretch rule 2 (MS7f design 10.4): env ``i``'s parts at rest outside the tray
+        and outside every desk box, no higher than layout.IN_TRAY_MAX_Z (on the desk, or on the
+        floor under it); parked parts never. A person sees them, so this reads the simulator."""
+        d, h, k = self.datas[i], self.handles, self.cfg.num_bricks
+        boxed = parts_in_desk_boxes(self)[i].tolist() if self.desk_boxes else [False] * k
+        out = []
+        for b, body in enumerate(h.brick_bodies):
+            if bool(self.parked[i, b]) or boxed[b] or self._in_tray(d.xpos[body]):
+                continue
+            speed = float(np.linalg.norm(d.qvel[h.brick_dof[b] : h.brick_dof[b] + 3]))
+            if speed <= layout.STACKED_SETTLE_SPEED and d.xpos[body][2] <= layout.IN_TRAY_MAX_Z:
+                out.append(b)
+        return out
+
+    def jaw_parts(self, i: int) -> list[int]:
+        """MS7f stretch rule 3: the parts touching either finger of env ``i`` (the contacts)."""
+        left = self.scene["finger_left_brick"]._force[i, 0]
+        right = self.scene["finger_right_brick"]._force[i, 0]
+        return [b for b in range(self.cfg.num_bricks) if left[b].any() or right[b].any()]
+
+    def tray_top_parts(self, i: int) -> list[int]:
+        """MS7f stretch rule 3: env ``i``'s parts over the tray higher than its walls."""
+        d, h = self.datas[i], self.handles
+        return [
+            b
+            for b, body in enumerate(h.brick_bodies)
+            if not bool(self.parked[i, b])
+            and self._in_tray(d.xpos[body])
+            and d.xpos[body][2] > self.tray_wall_height
+        ]
+
+    def return_to_tray(self, i: int, parts) -> None:
+        """MS7f stretch runs: a person puts ``parts`` back into env ``i``'s tray, a stacked
+        drop and a settle with the arm held where it is (``refill_tray``'s). No control step."""
+        if not parts:
+            return
+        self._drop_batches(i, list(parts), None, stacked=True)
+        self._settle(i, stacked=True)
+        self._refresh([i], images=True)
+
+    def remove_parts(self, i: int, parts) -> None:
+        """MS7f stretch rule 1: a person takes ``parts`` off env ``i``'s desk; they stay parked."""
+        self._park(i, parts)
+        mujoco.mj_forward(self.models[i], self.datas[i])
+        self._refresh([i], images=True)
 
     def _initial_state(self, i: int) -> dict[str, np.ndarray]:
         d, h, bl = self.datas[i], self.handles, self.bin_layouts[i]

@@ -284,6 +284,10 @@ def stows_per_hour(stowed: int, steps: int, control_hz: float = CONTROL_HZ) -> f
 
 
 """Steps between two frames ``rollout``'s ``on_frame`` dump receives."""
+STRETCH_MISS_STREAK = 10
+"""MS7f stretch rule 3 (MS7f design 10.4): ``stretch`` ends an env's episode after this many
+cycles in a row closed with no new correct stow; a person clears the jaws and the tray top and
+the loop starts again (``scripts/mj_stretch_run.py``)."""
 SELECT_WAIT_FRACTION = 0.375
 """The share of ``CYCLE_STEP_BUDGET`` the loop waits for the retreat at most before it selects
 anyway: 300 steps at the 800-step budget, and the teacher's RETREAT converges in 91 to 147 of
@@ -1697,6 +1701,7 @@ def rollout(
     thin_snap: bool = False,
     snap_closed: bool = False,
     box_empty: bool = False,
+    stretch: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1731,6 +1736,10 @@ def rollout(
     H1') run a person's events between an env's cycles, before its next selection
     (``between_cycles``); ``box_empty`` needs desk boxes. An env with a deep tray or a refill
     also records the hidden share at each selection (``hidden_share``, MS7f design 5.5).
+    ``stretch`` runs two person rules of a stretch run (MS7f design 10.4): between cycles a
+    part at rest outside the tray and every box goes back into the tray (rule 2, counted per
+    part), and ``STRETCH_MISS_STREAK`` cycles in a row with no new correct stow end the episode
+    ``miss_streak`` (rule 3, ``miss_streak``). The person watches the grader.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1959,6 +1968,10 @@ def rollout(
     emptied_ok = torch.zeros(num_envs, k, dtype=torch.bool)
     emptied_box = torch.full((num_envs, k), -1, dtype=torch.long)
     hidden = [[] for _ in range(num_envs)]  # the hidden share at each selection (design 5.5)
+    # ``stretch``: the person interventions per env, and each env's correct stows at the last
+    # cycle close and the cycles closed since they last grew (rule 3).
+    interventions = [Counter(strays=0, miss_streak=0) for _ in range(num_envs)]
+    streaks = [(0, 0)] * num_envs
 
     started = time.monotonic()
     max_steps = int(env.max_episode_length)
@@ -2045,6 +2058,14 @@ def rollout(
                     st.idle_since = step
             if st.cycle is not None:
                 continue
+            if stretch and st.idle_since == step:  # a cycle closed on this step
+                count = int((per_brick[i] | emptied_ok[i]).sum())
+                streaks[i] = miss_streak(count, *streaks[i])
+                if streaks[i][1] >= STRETCH_MISS_STREAK:
+                    interventions[i]["miss_streak"] += 1
+                    loop_done[i] = True
+                    st.done_reason = "miss_streak"
+                    continue
             if not perceived and bool(per_brick[i].all()):
                 loop_done[i] = True
                 st.done_reason = "all_stowed"
@@ -2069,8 +2090,15 @@ def rollout(
                 if not ready:
                     st.select_wait_steps += 1
                     continue
-            if (box_empty or refill) and between_cycles(
-                env, i, st.events, emptied_ok, emptied_box, box_empty, refill
+            if (box_empty or refill or stretch) and between_cycles(
+                env,
+                i,
+                st.events,
+                emptied_ok,
+                emptied_box,
+                box_empty,
+                refill,
+                interventions[i] if stretch else None,
             ):
                 # The event moved parts: the truth of this step is stale for env i.
                 truth = truth_reads(env, per_part)
@@ -2610,6 +2638,15 @@ def rollout(
         )
         if ms7f_tray:
             episodes[-1]["hidden_share"] = hidden[i]
+        if box_empty:
+            # Each emptied part: (part, the box it was emptied from, graded correct).
+            episodes[-1]["emptied_parts"] = [
+                [b, int(emptied_box[i, b]), bool(emptied_ok[i, b])]
+                for b in range(k)
+                if int(emptied_box[i, b]) >= 0
+            ]
+        if stretch:
+            episodes[-1]["interventions"] = dict(interventions[i])
         if sensors is not None:
             episodes[-1]["torque"] = {
                 **{name: st.counts[name] for name in TORQUE_COUNTS},
@@ -2704,15 +2741,25 @@ def interval_sums(episodes: list[dict]) -> dict:
     return {"names": list(INTERVAL_NAMES), "by_outcome": dict(sorted(by.items()))}
 
 
-def between_cycles(env, i: int, counts, emptied_ok, emptied_box, box_empty, refill) -> bool:
+def between_cycles(
+    env, i: int, counts, emptied_ok, emptied_box, box_empty, refill, strays=None
+) -> bool:
     """MS7f: a person's events between env ``i``'s cycles, before its next selection, at zero
     simulated time (MS7f design 4.1, 5.3 and 5.4). ``box_empty`` empties every full box
     (``env.empty_full_boxes``): each of its parts is graded at that moment, once, into
     ``emptied_ok`` and ``emptied_box`` (row ``i``), then parked, and the perceived state never
     sees it again. ``refill`` refills the tray (``env.refill_tray``). ``counts`` books each
-    event. The person reads the simulator; no loop decision reads what they read. Returns
-    whether an event moved a part."""
+    event. ``strays``, a stretch run's interventions (MS7f design 10.4 rule 2), first puts every
+    part at rest outside the tray and every box back into the tray and books one per part. The
+    person reads the simulator; no loop decision reads what they read. Returns whether an event
+    moved a part."""
     fired = False
+    if strays is not None:
+        lost = env.stray_parts(i)
+        if lost:
+            env.return_to_tray(i, lost)
+            strays["strays"] += len(lost)
+            fired = True
     if box_empty:
         for box, parts, ok in env.empty_full_boxes(i):
             counts["box_empty"] += 1
@@ -2723,6 +2770,13 @@ def between_cycles(env, i: int, counts, emptied_ok, emptied_box, box_empty, refi
         counts["tray_refill"] += 1
         fired = True
     return fired
+
+
+def miss_streak(count: int, seen: int, misses: int) -> tuple[int, int]:
+    """MS7f stretch rule 3: after a cycle closes with ``count`` correct stows in the episode so
+    far, the new (correct stows seen, cycles closed since they last grew). A stow settles after
+    its cycle closed, so it resets the streak at the next close. Pure."""
+    return (count, 0) if count > seen else (seen, misses + 1)
 
 
 def hidden_share(env, pos, quat, tool) -> float:

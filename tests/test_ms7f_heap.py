@@ -13,6 +13,8 @@ import torch
 from maker_arm_lab.core import desk_boxes, layout, loop, parts, perception
 from maker_arm_lab.core.stowed import parts_resting_box
 from maker_arm_lab.mj.env import MjLegoSortEnv
+from test_perceived_loop import _env_and_rig as _loop_env
+from test_perceived_loop import _rollout, _Still
 
 FAMILIES = ("round", "ldraw", "flat")
 
@@ -230,3 +232,49 @@ def test_the_hidden_share_counts_the_covered_parts_in_the_tray():
     assert loop.hidden_share(_Env(), pos, quat, tool) == pytest.approx(2 / 3)
     far = torch.tensor([0.5, 0.3, 0.12])
     assert loop.hidden_share(_Env(), pos, quat, far) == pytest.approx(1 / 3)
+
+
+def test_a_stray_part_goes_back_into_the_tray_and_counts_one_intervention():
+    """Stretch rule 2 (MS7f design 10.4): between cycles a part at rest on the desk outside the
+    tray and every box goes back into the tray, one intervention per part; parts in the tray
+    stay where they are."""
+    env = _env(6)
+    env.reset(seed=2)
+    assert env.stray_parts(0) == []
+    _take_out(env, 1)
+    (stray,) = env.stray_parts(0)
+    assert not env._in_tray(_pos(env, stray))
+    strays = Counter(strays=0, miss_streak=0)
+    ok = torch.zeros(1, 6, dtype=torch.bool)
+    box = torch.full((1, 6), -1, dtype=torch.long)
+    events = Counter(tray_refill=0, box_empty=0)
+    assert loop.between_cycles(env, 0, events, ok, box, False, False, strays)
+    assert strays == {"strays": 1, "miss_streak": 0} and env._in_tray(_pos(env, stray))
+    assert env.stray_parts(0) == [] and env.tray_count(0) == 6
+    assert not loop.between_cycles(env, 0, events, ok, box, False, False, strays)
+    env.close()
+
+
+def test_the_miss_streak_grows_on_a_close_with_no_new_stow_and_resets_on_one():
+    assert loop.miss_streak(0, 0, 0) == (0, 1)
+    assert loop.miss_streak(0, 0, 9) == (0, 10)
+    assert loop.miss_streak(3, 2, 7) == (3, 0)
+
+
+def test_ten_cycles_with_no_correct_stow_end_a_stretch_episode(monkeypatch):
+    """Stretch rule 3: a driver that never stows (the arm held still, jaws open) closes every
+    cycle on its budget; the tenth close in a row ends the episode ``miss_streak``, one
+    intervention. Without ``stretch`` the episode runs on."""
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 20)
+    five = [parts.make_part("brick", 2, 4)] * 5
+    for stretch in (True, False):
+        env, rig = _loop_env(part_list=five, budget=15)
+        payload = _rollout(env, rig, _Still(), budget=15, stretch=stretch, part_failures=True)
+        env.close()
+        ep = payload["episodes"][0]
+        if stretch:
+            assert ep["done_reason"] == "miss_streak", ep["done_reason"]
+            assert ep["cycles"] == loop.STRETCH_MISS_STREAK
+            assert ep["interventions"] == {"strays": 0, "miss_streak": 1}
+        else:
+            assert ep["cycles"] > loop.STRETCH_MISS_STREAK and "interventions" not in ep
