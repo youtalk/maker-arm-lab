@@ -1116,6 +1116,7 @@ def _ms7f_scene(monkeypatch):
         "quiet_landing",
         "landing_steps",
         "end_at_done",
+        "net_stall",
     }
     ready = {"categories", "deep_tray", "tray_refill", "box_empty", "book_miss"}
     ready |= {"lift_budget"}

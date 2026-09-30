@@ -206,7 +206,7 @@ def test_the_landing_budget_ends_a_noisy_descend_after_its_walk():
         rig = SimpleNamespace(
             unplanned=[False], holding=[False], plans=[[]], quiet=[0], device="cpu",
             previous_pick_point=[torch.tensor([0.2, 0.0, 0.05])], walk_steps=[40],
-            steps_in_phase=[40 + since_walk], landing_steps=landing,
+            steps_in_phase=[40 + since_walk], landing_steps=landing, net_stall=False,
             pick_point=lambda i: torch.tensor([0.2, 0.001, 0.05]),  # 1 mm a step: never quiet
         )  # fmt: skip
         return oracle_runtime.OracleRig._phase_result(rig, 0, goal)
@@ -262,3 +262,34 @@ def test_the_recorder_ends_at_done_with_the_same_episodes(tmp_path, capsys):
     with pytest.raises(SystemExit):
         mj_eval_heap.parse_args(["--end_at_done"])
     assert "EVAL_FAIL" in capsys.readouterr().out
+
+
+def test_the_net_stall_ends_a_jittering_landing_and_not_a_slow_descent():
+    import torch
+
+    goal = oracle.Goal(oracle.Phase.DESCEND, torch.tensor([0.2, 0.0, 0.0]), 0.0, 0.0, 1.0,
+                       0.0008, oracle.DESCEND_STALL_STEPS, 300, 0)  # fmt: skip
+
+    def steps_to_stall(path, net):
+        start = torch.tensor([0.2, 0.0, 0.05], dtype=torch.float64)
+        rig = SimpleNamespace(
+            unplanned=[False], holding=[False], plans=[[]], quiet=[0], device="cpu",
+            previous_pick_point=[start], stall_window=[[start]], net_stall=net,
+            landing_steps=0, steps_in_phase=[0],
+        )  # fmt: skip
+        rig.pick_point = lambda i: start + path[rig.steps_in_phase[0]]
+        for n in range(1, 100):
+            rig.steps_in_phase[0] = n
+            if oracle_runtime.OracleRig._phase_result(rig, 0, goal) is not None:
+                return n
+        return None
+
+    jitter = [torch.tensor([0.0, 1e-4 * (-1) ** n, 0.0], dtype=torch.float64) for n in range(100)]
+    descent = [torch.tensor([0.0, 0.0, -1e-4 * n], dtype=torch.float64) for n in range(100)]
+    assert steps_to_stall(jitter, False) is None  # 0.2 mm a step: never quiet
+    assert steps_to_stall(jitter, True) == oracle.DESCEND_STALL_STEPS
+    assert steps_to_stall(descent, True) is None  # 0.1 mm a step down: still landing
+    assert mj_eval_heap.parse_args([]).net_stall is False
+    for name in ("mj_eval_heap.py", "mj_generate_batch.py"):
+        text = (Path(mj_eval_heap.__file__).parent / name).read_text()
+        assert text.count("net_stall=args.net_stall") == 1

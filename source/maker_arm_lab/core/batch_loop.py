@@ -275,6 +275,7 @@ MS7F_OFF: dict = {
     "quiet_landing": False,
     "landing_steps": 0,
     "end_at_done": False,
+    "net_stall": False,
 }
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
 of a run with every one off, what an MS7e run ran with. categories is the base track's;
@@ -300,6 +301,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "quiet_landing",
         "landing_steps",
         "end_at_done",
+        "net_stall",
     }
 )
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
@@ -391,6 +393,12 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
         default=0,
         help="MS7f S1: DESCEND also ends this many steps after its walk, the joint noise kept "
         "(OracleRig.landing_steps); 0 is off",
+    )
+    parser.add_argument(
+        "--net_stall",
+        action="store_true",
+        help="MS7f S1: DESCEND's stall test reads the pick point's net motion over its window, "
+        "so a landing under joint noise ends (OracleRig.net_stall)",
     )
     parser.add_argument(
         "--lift_hold_steps",

@@ -506,6 +506,7 @@ class OracleRig:
         descend_speed: float = 1.0,
         quiet_landing: bool = False,
         landing_steps: int = 0,
+        net_stall: bool = False,
     ):
         self.env = env
         # MS7e rung B2: EXTEND leans toward its box (LEAN_AZIMUTH's note, `_leg_lean`).
@@ -531,6 +532,9 @@ class OracleRig:
         self.quiet_landing = quiet_landing
         # MS7f: DESCEND also ends this many steps after its walk (0: off; `_phase_result`).
         self.landing_steps = landing_steps
+        # MS7f: DESCEND's stall test reads the net motion over its window (`_phase_result`).
+        self.net_stall = net_stall
+        self.stall_window: list[list[torch.Tensor]] = [[] for _ in range(env.num_envs)]
         self.bl = bl
         self.noise = noise
         self.rng = rng
@@ -1124,6 +1128,15 @@ class OracleRig:
             self.quiet[i] = self.quiet[i] + 1 if moved < STALL_EPS else 0
             self.previous_pick_point[i] = now.clone()
             stalled = self.quiet[i] >= goal.stall_steps
+            if self.net_stall and goal.phase == oracle.Phase.DESCEND:
+                # The recorder's joint noise moves the pick point ~0.1 mm a step, over STALL_EPS,
+                # but jitters around the landing: over the window its net motion stays under
+                # stall_steps * STALL_EPS, which a descent at STALL_EPS a step reaches.
+                window = self.stall_window[i]
+                window.append(now.clone())
+                del window[: -goal.stall_steps - 1]
+                net = (window[-1] - window[0]).norm().item()
+                stalled = len(window) > goal.stall_steps and net < goal.stall_steps * STALL_EPS
             if self.landing_steps and goal.phase == oracle.Phase.DESCEND and not self.plans[i]:
                 # The recorder's joint noise keeps the pick point moving over STALL_EPS, so the
                 # stall test alone waits a noisy landing out toward the phase budget.
@@ -1268,6 +1281,7 @@ class OracleRig:
         self._plan_leg(i, goal)
         if goal.stall_steps:
             self.previous_pick_point[i] = self.pick_point(i).clone()
+            self.stall_window[i] = [self.previous_pick_point[i]]
 
     # -- planning ------------------------------------------------------------
 
