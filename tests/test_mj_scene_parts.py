@@ -174,15 +174,29 @@ def test_each_ldraw_hull_is_a_collider_with_the_brick_contacts(ldraw_built):
 
 
 def test_every_ldraw_part_rests_on_the_desk(ldraw_built):
+    """Dropped upright, as LDraw builds it, each part comes to rest with its lowest hull vertex
+    on the desk top. The MS7e parts rest level; 3901 (hair) settles back onto its long back
+    edge, and a pin may roll a few degrees on its collar. At rest is a pose that holds for
+    another second: 3629 (cowboy hat) keeps a solver velocity of 0.18 rad/s and creeps by 8e-4
+    of a quaternion component in that second."""
     model, h = ldraw_built
     data = mujoco.MjData(model)
     for b, adr in enumerate(h.brick_qpos):
-        data.qpos[adr : adr + 3] = (0.10 + 0.05 * (b % 4), -0.06 + 0.06 * (b // 4), 0.03)
+        data.qpos[adr : adr + 3] = (0.10 + 0.05 * (b % 4), -0.15 + 0.05 * (b // 4), 0.03)
         data.qpos[adr + 3 : adr + 7] = (1.0, 0.0, 0.0, 0.0)
     mujoco.mj_forward(model, data)
     mujoco.mj_step(model, data, nstep=720)
+    settled = data.qpos.copy()
+    mujoco.mj_step(model, data, nstep=240)
     for b, part in enumerate(LDRAW):
-        z = data.qpos[h.brick_qpos[b] + 2]
-        assert z == pytest.approx(part.size[2] / 2, abs=0.001), (part.name, z)
-        speed = np.linalg.norm(data.qvel[h.brick_dof[b] : h.brick_dof[b] + 6])
-        assert speed < 0.02, (part.name, speed)
+        adr = h.brick_qpos[b]
+        z = data.qpos[adr + 2]
+        if part.family == "ldraw":
+            assert z == pytest.approx(part.size[2] / 2, abs=0.001), (part.name, z)
+        rot = np.zeros(9)
+        mujoco.mju_quat2Mat(rot, data.qpos[adr + 3 : adr + 7])
+        verts = np.concatenate([np.array(v) for _, v in part.hulls])
+        lowest = (verts @ rot.reshape(3, 3).T)[:, 2].min() + z
+        assert lowest == pytest.approx(0.0, abs=0.001), (part.name, lowest)
+        moved = np.abs(data.qpos[adr : adr + 7] - settled[adr : adr + 7]).max()
+        assert moved < 2e-3, (part.name, moved)

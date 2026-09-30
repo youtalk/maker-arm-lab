@@ -15,7 +15,8 @@ def test_catalog_has_29_parts_in_a_fixed_order_and_no_flat_or_round_part():
     assert names[0] == "brick_1x1" and names[-1] == "slope_2x4"
     assert "brick_1x2x5" in names and "slope_1x2" in names
     assert not [n for n in names if n.startswith(parts.FLAT_FAMILIES + parts.RETIRED_FAMILIES)]
-    assert parts.FAMILIES == ("brick", "slope", "round", "ldraw", "plate", "tile", "joint")
+    assert parts.FAMILIES[:7] == ("brick", "slope", "round", "ldraw", "plate", "tile", "joint")
+    assert parts.FAMILIES[7:] == ("minifig",)
     assert [p.name for p in parts.catalog(())] == names
 
 

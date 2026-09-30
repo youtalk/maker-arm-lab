@@ -101,7 +101,7 @@ def family(name: str) -> str:
     return "flat" if prefix in ("plate", "tile") else prefix
 
 
-FAMILIES = ("brick", "slope", "round", "ldraw", "flat", "plate", "tile", "joint")
+FAMILIES = ("brick", "slope", "round", "ldraw", "flat", "plate", "tile", "joint", "minifig")
 
 
 def family_parts(fam: str) -> list[str]:

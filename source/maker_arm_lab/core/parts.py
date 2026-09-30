@@ -42,7 +42,7 @@ collider is up to four convex hulls (``Part.hulls``) and its studs are visual
 its volume holds (MS7e design section 6.1).
 
 MS7f (MS7f design section 7) adds two more families the same generator builds: joint
-(``JOINT_IDS``). Its parts are named ``<family>_<id>``, come after tile in ``FAMILIES`` so no
+(``JOINT_IDS``) and minifig (``MINIFIG_IDS``). Their parts are named ``<family>_<id>``, come after tile in ``FAMILIES`` so no
 catalog index moves, split on their own generator and class as ``special`` while the eight
 MS7e classes sort.
 """
@@ -69,7 +69,7 @@ MASS_FLOOR_KG = 0.0005  # solver health on 1x1 plates (0.12 g solid)
 # 7 mm under the 52.4 mm per-jaw travel; the full gap is 104.8 mm (robots.frames.JAW_FULL_GAP)
 MAX_GRASP_WIDTH = 0.045
 HELDOUT_FRACTION = 0.2
-FAMILIES = ("brick", "slope", "round", "ldraw", "plate", "tile", "joint")
+FAMILIES = ("brick", "slope", "round", "ldraw", "plate", "tile", "joint", "minifig")
 """Catalog order. The MS7e families come after brick and slope, so ``split`` draws the base
 split unchanged (MS7e design section 5), and the MS7f families after tile."""
 FAMILY_KEYS = {
@@ -77,9 +77,10 @@ FAMILY_KEYS = {
     "ldraw": ("ldraw",),
     "flat": ("plate", "tile"),
     "joint": ("joint",),
+    "minifig": ("minifig",),
 }
 """The keys ``--families`` accepts, and the families each brings into the catalog."""
-READY_FAMILIES: frozenset[str] = frozenset({"round", "ldraw", "flat", "joint"})
+READY_FAMILIES: frozenset[str] = frozenset({"round", "ldraw", "flat", "joint", "minifig"})
 """The ``FAMILY_KEYS`` keys whose behaviour is in this commit. Each family track adds its key
 when it lands; ``--families`` with any other key is a usage error (MS7e design section 10.2)."""
 LDRAW_IDS = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")
@@ -88,7 +89,10 @@ LDRAW_IDS = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")
 JOINT_IDS = ("2780", "6558", "43093", "3937", "3938", "14417", "14418", "4081b")
 """MS7f joint family: three Technic pins (friction, long, axle pin), the two halves of a 1x2
 hinge brick, a 1x2 plate with a side ball, one with a socket and a 1x1 plate with a clip."""
-LDRAW_FAMILY_IDS = {"ldraw": LDRAW_IDS, "joint": JOINT_IDS}
+MINIFIG_IDS = ("3626b", "973", "3815c01", "3901", "3624", "3629", "3838", "4349")
+"""MS7f minifig family, each part one rigid body: a head, a torso without arms, the hips and
+legs as one assembly, male hair, a police hat, a cowboy hat, air tanks and a loudhailer."""
+LDRAW_FAMILY_IDS = {"ldraw": LDRAW_IDS, "joint": JOINT_IDS, "minifig": MINIFIG_IDS}
 """Every family read from ``LDRAW_DIR``, with its part ids in catalog order."""
 LDRAW_DIR = Path(__file__).resolve().parents[3] / "assets" / "parts"
 FLAT_FAMILIES = ("plate", "tile")  # in the catalog only under ``--families flat``

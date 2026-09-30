@@ -117,10 +117,10 @@ class GateCfg:
     ms7f: dict = field(default_factory=dict)
 
 
-FAMILY_KEYS = ("round", "ldraw", "flat", "joint")
+FAMILY_KEYS = ("round", "ldraw", "flat", "joint", "minifig")
 """``core.parts.FAMILY_KEYS``'s keys, in order, copied because the supervisor imports no
 maker_arm_lab; the test pins it."""
-READY_FAMILIES: frozenset[str] = frozenset({"round", "ldraw", "flat", "joint"})
+READY_FAMILIES: frozenset[str] = frozenset({"round", "ldraw", "flat", "joint", "minifig"})
 """``core.parts.READY_FAMILIES``, copied and pinned the same way: ``--families`` with another
 key is refused before a server starts (MS7e design section 10.2)."""
 UNBUILT_SWITCHES: tuple[str, ...] = ()

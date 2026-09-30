@@ -97,6 +97,15 @@ PARTS = {
     "14417": ((0, 1, 2), "a 1x2 plate; y puts one jaw on the side ball, at its equator"),
     "14418": ((0, 1, 2), "a 1x2 plate; x puts one jaw on the socket's round end"),
     "4081b": ((0, 1, 2), "a 1x1 plate; x puts one jaw on the outside of the side clip"),
+    # MS7f minifig family: each part as LDraw builds it upright, one rigid body.
+    "3626b": ((0, 1, 2), "a head: x and y across its round side, z from the top to the neck"),
+    "973": ((0, 1, 2), "a torso: y on the flat front and back, x on the tapered sides"),
+    "3815c01": ((0, 1, 2), "the hips and legs as one body, a box to within a millimeter"),
+    "3901": ((0, 1, 2), "hair: x and y across its round side, z from the crown to the rim"),
+    "3624": ((0, 1, 2), "a police hat: z from its flat top to the rim, x and y across it"),
+    "3629": ((0, 1, 2), "a cowboy hat: x and y on the brim's edge, z from crown to brim"),
+    "3838": ((0, 1, 2), "air tanks: x across the two tanks, y front to back, z end to end"),
+    "4349": ((0, 1, 2), "a loudhailer: x end to end, y across the cone, z cone to handle"),
 }
 """Part id -> (closing axes, reason). The axes are body axes after this tool's orientation."""
 HORIZONTAL_FILL = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")
