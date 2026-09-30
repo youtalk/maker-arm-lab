@@ -234,6 +234,7 @@ def teacher_waits(orc, args):
     """``orc`` (an ``EnvOracle``) with the waits of ``args``; returns it."""
     for name in TEACHER_WAITS:
         setattr(orc, name, getattr(args, name))
+    orc.close_guard = args.close_guard
     return orc
 
 
@@ -268,6 +269,7 @@ MS7F_OFF: dict = {
     "lift_hold_steps": oracle.LIFT_HOLD_STEPS,
     "release_steps": oracle.RELEASE_STEPS,
     "lift_budget": 0,
+    "close_guard": False,
 }
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
 of a run with every one off, what an MS7e run ran with. categories is the base track's;
@@ -289,6 +291,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "lift_hold_steps",
         "release_steps",
         "lift_budget",
+        "close_guard",
     }
 )
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
@@ -362,6 +365,11 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
         type=int,
         default=oracle.CLOSE_STEPS,
         help="MS7f S1: control steps the teacher's CLOSE holds",
+    )
+    parser.add_argument(
+        "--close_guard",
+        action="store_true",
+        help="MS7f S1: a retry's CLOSE holds oracle.CLOSE_STEPS whatever --close_steps says",
     )
     parser.add_argument(
         "--lift_hold_steps",

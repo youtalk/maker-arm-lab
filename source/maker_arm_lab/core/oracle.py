@@ -732,6 +732,9 @@ class EnvOracle:
         self.close_steps = CLOSE_STEPS
         self.lift_hold_steps = LIFT_HOLD_STEPS
         self.release_steps = RELEASE_STEPS
+        # MS7f: with a trimmed close_steps, a retry (retries_used > 0) closes for CLOSE_STEPS:
+        # a part the short hold cannot lift gets the full squeeze on its next attempt.
+        self.close_guard = False
         self.release_tilt = RELEASE_TILT_RAD
         """The tool tilt EXTEND, RELEASE and RETREAT hold: the shelf's measured release attitude.
         ``HeapOracle`` over desk boxes holds the pick tilt instead (MS7a design, desk boxes)."""
@@ -1067,16 +1070,9 @@ class EnvOracle:
         if self.phase == Phase.DESCEND:
             return self.descend_goal(self._target_yaw(scene))
         if self.phase == Phase.CLOSE:
+            steps = CLOSE_STEPS if self.close_guard and self.retries_used else self.close_steps
             return self._goal(
-                Phase.CLOSE,
-                None,
-                None,
-                PICK_TILT_RAD,
-                -1.0,
-                None,
-                0,
-                self.close_steps,
-                hold=self.close_steps,
+                Phase.CLOSE, None, None, PICK_TILT_RAD, -1.0, None, 0, steps, hold=steps
             )
         if self.phase == Phase.LIFT:
             target = scene.pick_point.clone()

@@ -134,3 +134,28 @@ def test_a_cycle_that_lifts_nothing_ends_at_the_lift_budget(monkeypatch):
     assert err.value.reason == "lift_budget"
     with pytest.raises(SystemExit):
         mj_eval_heap.parse_args(["--lift_budget", "300"])  # needs --perceived
+
+
+def _close_holds(guard: bool) -> list[int]:
+    """The CLOSE holds of a pick whose first LIFT fails, at --close_steps 12."""
+    draw = oracle.sample_episode_draw(random.Random(0), oracle.OracleNoise())
+    orc = oracle.EnvOracle(layout.DEFAULT_BIN_LAYOUT, num_bricks=1, draw=draw)
+    orc.close_steps, orc.close_guard = 12, guard
+    holds, scene = [], _snapshot()
+    for lifted in (None, None, None, None, False, None, None, None, None):
+        goal = orc.next_goal(scene)
+        if goal.phase == oracle.Phase.CLOSE:
+            holds.append(goal.hold_steps)
+        orc.report(oracle.PhaseResult(outcome="converged", pinch_ok=True, lifted=lifted), scene)
+    return holds
+
+
+def test_the_close_guard_gives_a_retry_the_full_close():
+    assert _close_holds(False) == [12, 12]
+    assert _close_holds(True) == [12, oracle.CLOSE_STEPS]
+    assert mj_eval_heap.parse_args([]).close_guard is False
+    orc = batch_loop.teacher_waits(
+        oracle.EnvOracle(layout.DEFAULT_BIN_LAYOUT, 1, oracle.nominal_draw()),
+        mj_eval_heap.parse_args(["--close_steps", "25", "--close_guard"]),
+    )
+    assert (orc.close_steps, orc.close_guard) == (25, True)
