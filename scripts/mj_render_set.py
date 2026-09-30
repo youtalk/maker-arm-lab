@@ -17,6 +17,8 @@ at its event from the state the heap loop's frame of that step shows.
 * lift: the wrist frame of the step a ``hold.HoldDetector`` fed the loop's inputs (the measured
   jaw gap, the last command's gap, the FK pick point's height) reads the lift.
 * carry: the wrist frame ``loop.CARRY_VIEW_STEPS`` later, if the detector still reads a lift.
+* wrist (``--wrist_every S``, off by default): more wrist frames of the same lift for training,
+  every S steps up to twice the carry view's offset while the detector reads a lift.
 
 Labels read the simulator, a recording tool and not a decision (design section 6.4): the part's
 category and name and whether its kind is held out; on a wrist frame the part both jaws press
@@ -109,6 +111,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = _TokenEmittingParser(description=__doc__)
     add_batch_arguments(parser)
     add_ms7e_arguments(parser)
+    parser.add_argument(
+        "--wrist_every",
+        type=int,
+        default=0,
+        help="extra wrist frames (view 'wrist') every this many steps after a lift; 0 is off",
+    )
     parser.add_argument(
         "--extra_overhead",
         type=int,
@@ -258,6 +266,7 @@ def record(env, rig, args, heldout: set[str], deadline: float) -> tuple[list, li
     aims = [random.Random(f"render:{args.run_seed}:{i}") for i in range(n)]
     start_z: list[torch.Tensor | None] = [None] * n
     carry_at = [-1] * n
+    lift_at = [-1] * n
     selected = [None] * n  # the part of the env's last selection
     preselected = [None] * n  # and the teacher's last preselection
     finished = [False] * n
@@ -303,9 +312,14 @@ def record(env, rig, args, heldout: set[str], deadline: float) -> tuple[list, li
             wrist = []
             if d.lift_started and start_z[i] is not None:
                 wrist.append("lift")
-                carry_at[i] = step + CARRY_VIEW_STEPS
+                carry_at[i], lift_at[i] = step + CARRY_VIEW_STEPS, step
             if step == carry_at[i] and d.lifted:
                 wrist.append("carry")
+            since = step - lift_at[i]
+            every = args.wrist_every
+            extra = every and d.lifted and 0 < since <= 2 * CARRY_VIEW_STEPS and since % every == 0
+            if extra and step != carry_at[i]:
+                wrist.append("wrist")
             for view in wrist:
                 held = _held(env, i)
                 riders = oracle.passengers(_positions(env, i)[0], start_z[i], pick, held)
@@ -347,7 +361,7 @@ def run(args) -> dict:
     return {
         "out": str(out),
         "frames": len(frames),
-        "by_view": {v: views.count(v) for v in ("overhead", "lift", "carry")},
+        "by_view": {v: views.count(v) for v in ("overhead", "lift", "carry", "wrist")},
         "passenger_frames": int((columns["passengers"] > 0).sum()),
         "empty_wrist": int(((columns["held"] < 0) & (columns["view"] != "overhead")).sum()),
     }
