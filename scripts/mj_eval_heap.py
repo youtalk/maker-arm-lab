@@ -120,6 +120,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         action="store_true",
         help="MS7e flat track: each desk box floor's collider reaches under the desk top",
     )
+    parser.add_argument(
+        "--render",
+        action="store_true",
+        help="MS7f H0: render the policy cameras under --oracle_driver too, to time a read's scene",
+    )
     parser.add_argument("--server", type=str, default="tcp://127.0.0.1:5555")
     parser.add_argument("--out", type=str, default="", help="write the EVAL_OK payload here too")
     parser.add_argument(
@@ -391,7 +396,7 @@ def main(argv=None) -> int:
             draw,
             num_bricks=len(parts),
             parts=parts,
-            cameras=not args.oracle_driver,
+            cameras=not args.oracle_driver or args.render,
             episode_draws=args.episode_draws,
             frame_jitter=args.frame_jitter,
             spatial_scale=args.spatial_scale,
