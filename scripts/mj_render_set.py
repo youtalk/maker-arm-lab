@@ -24,8 +24,9 @@ Labels read the simulator, a recording tool and not a decision (design section 6
 category and name and whether its kind is held out; on a wrist frame the part both jaws press
 (``checker.held_brick_from_forces``, as ``loop.wrist_class``; -1 and category "" with none) and
 the passenger count, ``oracle.passengers`` against the heights at the HOVER start, and of those
-the riders, which rose at least ``RIDE_SHARE`` of the jaws' own rise since the hold began; on an
-overhead frame the share of the part the camera sees (``part_seen``, ``_seen``). T2's rule reads
+the riders, which rose at least ``RIDE_SHARE`` of the jaws' own rise since the hold began, with
+the largest share of a rider the wrist camera sees in its frame (``rider_seen``); on an overhead
+frame the share of the part the camera sees (``part_seen``, ``_seen``). T2's rule reads
 the LIFT gate 0.10 m up and the lift frame is 0.05 m up, so the riders guard the label against a
 neighbour the grasp only nudged. Measured on the first four re-rendered C1 heaps (2026-09-30) they
 equal the passengers on 27 of 28 wrist frames: the passengers ride, and most of 16 such lift
@@ -79,6 +80,7 @@ from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.hold import HoldDetector, commanded_gap
 from maker_arm_lab.core.loop import CARRY_VIEW_STEPS
+from maker_arm_lab.mj import overlay
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.robots.frames import GRIPPER_JOINT_NAMES
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
@@ -99,13 +101,16 @@ LABELS = (
     "riders",
     "held",
     "part_seen",
+    "rider_seen",
     "env",
     "step",
 )
 """The label arrays beside ``frames``: the view (overhead, lift, carry), the category and name of
 the part the view is of, whether its kind is held out, the passenger and rider counts (-1 on an
 overhead frame), the part index (-1 on a wrist frame with nothing between the jaws), the share of that
-part the overhead camera sees (-1 on a wrist frame), the env and the control step."""
+part the overhead camera sees (-1 on a wrist frame), the largest share of a rider the wrist
+camera sees in its frame (-1 with no rider or on an overhead frame), the env and the control
+step."""
 
 
 class _TokenEmittingParser(argparse.ArgumentParser):
@@ -227,20 +232,26 @@ def _in_tray(xy) -> bool:
     return x0 <= float(xy[0]) <= x1 and y0 <= float(xy[1]) <= y1
 
 
-def _seen(env, i: int, b: int) -> float:
+def _seen(env, i: int, b: int, cam: int | None = None) -> float:
     """The share of part ``b``'s nine sample points, its centre and its bounding box's corners
-    pulled 40 % in, that a ray from the overhead camera meets on the part first: 0 behind the
-    arm, 1 in the open. (A segmentation render would count pixels, but its multisampled edges
-    blend geom ids past the scene's, and MuJoCo 3.13's remap then raises.)"""
+    pulled 40 % in, that a ray from the camera ``cam`` (the overhead one by default) meets on
+    the part first, of those inside the camera's frame: 0 hidden, 1 in the open. (A
+    segmentation render would count pixels, but its multisampled edges blend geom ids past the
+    scene's, and MuJoCo 3.13's remap then raises.)"""
     m, d, h = env.models[i], env.datas[i], env.handles
-    eye = d.cam_xpos[env._cam_overhead].copy()
+    cam = env._cam_overhead if cam is None else cam
+    eye = d.cam_xpos[cam].copy()
     body = h.brick_bodies[b]
     centre, rot = d.xpos[body], d.xmat[body].reshape(3, 3)
     half = 0.3 * np.asarray(env.parts[b].size)
     corners = [rot @ (half * np.array(s)) for s in itertools.product((-1.0, 1.0), repeat=3)]
     geom = np.zeros(1, dtype=np.int32)
     hits = 0
+    fovy = float(m.cam_fovy[cam])
     for point in [centre] + [centre + c for c in corners]:
+        uv = overlay.project_point(eye, d.cam_xmat[cam], fovy, 224, 224, point)
+        if uv is None or not (0.0 <= uv[0] < 224.0 and 0.0 <= uv[1] < 224.0):
+            continue
         mujoco.mj_ray(m, d, eye, point - eye, None, 1, -1, geom)
         hits += int(geom[0]) in h.body_geoms[b]
     return hits / 9.0
@@ -281,11 +292,23 @@ def record(env, rig, args, heldout: set[str], deadline: float) -> tuple[list, li
     gap_cmd = robot.data.joint_pos[:, jaw_ids].sum(dim=-1).tolist()
     frames, rows = [], []
 
-    def keep(frame, view, part, passengers, seen, i, step, riders=-1):
+    def keep(frame, view, part, passengers, seen, i, step, riders=-1, rider_seen=-1.0):
         cat = _parts.part_category(env.parts[part]) if part >= 0 else ""
         name = env.parts[part].name if part >= 0 else ""
         frames.append(frame)
-        row = (view, cat, name, name in heldout, passengers, riders, part, seen, i, step)
+        row = (
+            view,
+            cat,
+            name,
+            name in heldout,
+            passengers,
+            riders,
+            part,
+            seen,
+            rider_seen,
+            i,
+            step,
+        )
         rows.append(row)
 
     step = 0
@@ -337,7 +360,8 @@ def record(env, rig, args, heldout: set[str], deadline: float) -> tuple[list, li
                 rode = [b for b in others if float(pos[b, 2] - start_z[i][b]) >= jaws]
                 r = env.renderers[i]
                 r.update_scene(env.datas[i], camera="wrist")
-                keep(r.render().copy(), view, held, len(others), -1, i, step, len(rode))
+                shown = max((_seen(env, i, b, env._cam_wrist) for b in rode), default=-1.0)
+                keep(r.render().copy(), view, held, len(others), -1, i, step, len(rode), shown)
             if orc is not None and orc.phase in (oracle.Phase.DONE, oracle.Phase.ABANDON):
                 finished[i] = True
         action = rig.actions()

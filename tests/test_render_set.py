@@ -113,6 +113,8 @@ def test_the_render_set_labels_equal_the_truth(tmp_path, monkeypatch):
     wrist = [n for n, v in enumerate(views) if v != "overhead"]
     assert [b for b, _ in lifted] == [int(z["held"][n]) for n in wrist]
     assert all(0 <= z["riders"][n] <= z["passengers"][n] for n in wrist)
+    assert all((z["rider_seen"][n] >= 0.0) == (z["riders"][n] > 0) for n in wrist)
+    assert all(z["rider_seen"][n] == -1.0 for n in over)
     for n, (b, height) in zip(wrist, lifted):
         if b >= 0 and views[n] == "lift":
             assert height > 0.04, (n, b, height)  # the part rose with the jaws
