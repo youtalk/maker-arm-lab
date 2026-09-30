@@ -35,6 +35,7 @@ ON = {
     "close_guard": ["--close_guard"],
     "quiet_landing": ["--quiet_landing"],
     "landing_steps": ["--landing_steps", "15"],
+    "end_at_done": ["--end_at_done"],
 }
 """Each MS7f switch at a value that is not its off value. A track that adds a switch adds it
 here too (the first test holds the table to ``MS7F_OFF``)."""

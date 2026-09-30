@@ -124,6 +124,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     check_teacher_waits(parser, args)
     if args.lift_budget:
         parser.error("--lift_budget cuts a served cycle: the recorder serves no policy")
+    if args.end_at_done and args.attempts != args.num_envs:
+        parser.error("--end_at_done ends one episode an env: it needs --attempts == --num_envs")
     if args.perceived and (args.heap_k <= 0 or args.desk_boxes <= 0):
         parser.error(
             "--perceived records a heap sorted into desk boxes: it needs --heap_k > 0 "
@@ -235,7 +237,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         episode_length_s=episode_length_s,
     )
     print("RUN_META " + json.dumps(meta), flush=True)
-    counters = run_batch(env, rig, args.attempts, args.max_wall_minutes)
+    counters = run_batch(env, rig, args.attempts, args.max_wall_minutes, args.end_at_done)
     stats = run_stats(
         counters,
         target_attempts=args.attempts,

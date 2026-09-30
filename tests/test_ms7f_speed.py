@@ -217,3 +217,48 @@ def test_the_landing_budget_ends_a_noisy_descend_after_its_walk():
     for name in ("mj_eval_heap.py", "mj_generate_batch.py"):
         text = (Path(mj_eval_heap.__file__).parent / name).read_text()
         assert text.count("landing_steps=args.landing_steps") == 1
+
+
+def _h5_items(path: Path) -> dict:
+    """Every dataset's dtype, shape and bytes and every attribute of an HDF5 file, by path."""
+    import h5py
+
+    items = {}
+    with h5py.File(path) as f:
+        items["/"] = dict(f.attrs)
+
+        def visit(name, obj):
+            items[name] = dict(obj.attrs)
+            if isinstance(obj, h5py.Dataset):
+                items[name]["data"] = (obj.dtype.str, obj.shape, obj[()].tobytes())
+
+        f.visititems(visit)
+    return items
+
+
+def test_the_recorder_ends_at_done_with_the_same_episodes(tmp_path, capsys):
+    import mj_generate_batch
+
+    def record(name, *extra):
+        argv = ["--out_dir", str(tmp_path), "--shard_name", name, "--attempts", "1",
+                "--num_envs", "1", "--heap_k", "3", "--cycle_budget", "1", "--run_seed", "11",
+                "--layout_seed", "5", "--no_cameras", "--episode_length_s", "60", "--probe",
+                "--gripper", "continuous", *extra]  # fmt: skip
+        assert mj_generate_batch.main(argv) == 0
+        meta = json.loads((tmp_path / f"{name}.meta.json").read_text())
+        return meta, _h5_items(next(tmp_path.glob(f"{name}*.hdf5")))
+
+    (meta, today), (cut_meta, cut) = record("today"), record("cut", "--end_at_done")
+    assert [m["run_meta"]["ms7f"]["end_at_done"] for m in (meta, cut_meta)] == [False, True]
+    # One cycle of three parts: the teacher is DONE with parts left, so today idles to 1800.
+    # Cameras off: the EGL renderer differs by a level or two between two identical runs.
+    (episode,), (cut_episode,) = meta["episodes"], cut_meta["episodes"]
+    assert episode["steps"] == 1800 and cut_episode["steps"] < 1800
+    assert {**cut_episode, "steps": 0} == {**episode, "steps": 0}
+    assert cut == today and len([k for k in today if k.startswith("data/demo_")]) > 0
+    with pytest.raises(SystemExit):
+        mj_generate_batch.parse_args(["--out_dir", "x", "--attempts", "2", "--end_at_done"])
+    assert "BATCH_FAIL usage" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        mj_eval_heap.parse_args(["--end_at_done"])
+    assert "EVAL_FAIL" in capsys.readouterr().out

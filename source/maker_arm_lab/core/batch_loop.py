@@ -274,13 +274,14 @@ MS7F_OFF: dict = {
     "close_guard": False,
     "quiet_landing": False,
     "landing_steps": 0,
+    "end_at_done": False,
 }
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
 of a run with every one off, what an MS7e run ran with. categories is the base track's;
 deep_tray, tray_refill, box_empty and book_miss track H's (design section 5); classifier and
 passenger_drop track C's (design section 6); transport_speed (the teacher walk's pace),
 descend_speed and the teacher waits (TEACHER_WAITS) track S's (design section 8), and so is
-lift_budget, a serving trim of the heap client. The gate supervisor keeps a stdlib copy (``scripts/run_gate_eval.py``),
+lift_budget, a serving trim of the heap client, and end_at_done, the recorder's. The gate supervisor keeps a stdlib copy (``scripts/run_gate_eval.py``),
 pinned by a test."""
 MS7F_READY: frozenset[str] = frozenset(
     {
@@ -298,6 +299,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "close_guard",
         "quiet_landing",
         "landing_steps",
+        "end_at_done",
     }
 )
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
@@ -401,6 +403,12 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
         type=int,
         default=oracle.RELEASE_STEPS,
         help="MS7f S1: control steps the teacher's RELEASE holds",
+    )
+    parser.add_argument(
+        "--end_at_done",
+        action="store_true",
+        help="MS7f S, the recorder with --attempts equal to --num_envs: end the episodes once "
+        "every env's teacher is DONE instead of stepping on to the time-out (run_batch)",
     )
     parser.add_argument(
         "--lift_budget",
@@ -638,11 +646,18 @@ def run_meta(
     }
 
 
-def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
+def run_batch(
+    env, rig, target_attempts: int, max_wall_minutes: float, end_at_done: bool = False
+) -> dict:
     """Drive ``rig`` until ``target_attempts`` episodes concluded or the deadline passed.
 
     Returns the raw counters ``run_stats`` turns into RUN_STATS. Closes the env on every
     exit path (the recorder's export count is read before that), as generate_batch.py did.
+
+    ``end_at_done`` (MS7f S, a heap run with one episode an env): once every env's teacher is
+    DONE or its episode concluded, the next step is the time-out of every episode still open.
+    DONE frames are not recorded (``cycle_actor``), so the exported episodes are the ones the
+    time-out writes; only the unrecorded idle tail is cut.
     """
     episodes: list[dict] = []
     abandon_reasons: Counter = Counter()
@@ -656,6 +671,7 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
     heap = getattr(env, "parts", None) is not None
     recorder = getattr(env, "recorder", None)
     seen_outcomes = [0] * rig.num_envs
+    concluded = [False] * rig.num_envs
     if heap:
         env.oracle_actor = torch.zeros(rig.num_envs, dtype=torch.int16)
     deadline = start + max_wall_minutes * 60
@@ -728,7 +744,12 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
                     env.reset(env_ids=torch.tensor(abandoned_ids, device=env.device))
                 for i in env_ids:
                     motion.reset(i)
+                    concluded[i] = True
                 rig.rearm(env_ids)
+            if end_at_done and heap and all_done(rig, concluded):
+                for i in range(rig.num_envs):
+                    if not concluded[i]:
+                        env.episode_length_buf[i] = env.max_episode_length - 1
     finally:
         wall_seconds = time.time() - start
         exported = env.recorder_manager.exported_successful_episode_count
@@ -749,6 +770,14 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
         "exported_written": exported_written,
         "motion": motion.summary(),
     }
+
+
+def all_done(rig, concluded: list[bool]) -> bool:
+    """Is every env's episode concluded or its teacher DONE (``run_batch``'s end_at_done)?"""
+    return all(
+        concluded[i] or (orc is not None and orc.phase == oracle.Phase.DONE)
+        for i, orc in enumerate(rig.oracles)
+    )
 
 
 def run_stats(

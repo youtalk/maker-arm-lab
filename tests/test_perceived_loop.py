@@ -1104,7 +1104,8 @@ def _ms7f_scene(monkeypatch):
     the six categories over the drawn boxes, a category's second boxes chosen by the loop's
     own release record (MS7f design section 6.2). A track that readies a loop switch adds it
     here, so the no-truth test runs with every ready switch on (design section 12.2)."""
-    # Track S's teacher pace and waits drive the rig, which serves no loop decision.
+    # Track S's teacher pace and waits drive the rig, which serves no loop decision, and
+    # end_at_done ends the recorder's episodes.
     teacher = {
         "transport_speed",
         "descend_speed",
@@ -1114,6 +1115,7 @@ def _ms7f_scene(monkeypatch):
         "close_guard",
         "quiet_landing",
         "landing_steps",
+        "end_at_done",
     }
     ready = {"categories", "deep_tray", "tray_refill", "box_empty", "book_miss"}
     ready |= {"lift_budget"}
