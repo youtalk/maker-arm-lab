@@ -376,9 +376,15 @@ def aggregate_gate(
             },
             "stowed_by_family": by_family,
             "stowed_by_box_count": dict(sorted(by_count.items(), key=lambda kv: int(kv[0]))),
+            # Under the box draw an episode lists only its own boxes, so the lists differ in length.
             "stowed_by_box": [
-                {k: sum(ep["stowed_by_box"][m][k] for ep in boxed) for k in ("stowed", "total")}
-                for m in range(len(boxed[0]["stowed_by_box"]))
+                {
+                    k: sum(
+                        ep["stowed_by_box"][m][k] for ep in boxed if m < len(ep["stowed_by_box"])
+                    )
+                    for k in ("stowed", "total")
+                }
+                for m in range(max(len(ep["stowed_by_box"]) for ep in boxed))
             ],
             "wrong_box_parts": sum(ep["wrong_box_parts"] for ep in boxed),
             "wrong_box_cycles": sum(ep["cycle_classes"].count("wrong_box") for ep in boxed),

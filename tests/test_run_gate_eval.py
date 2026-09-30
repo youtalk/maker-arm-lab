@@ -1339,7 +1339,8 @@ def test_the_gate_sums_the_family_and_box_count_rows():
             cycle_classes=[],
             stowed_by_class={"round": {"stowed": 1, "total": 2}},
             stowed_by_family=families,
-            stowed_by_box=[{"stowed": stowed, "total": 4}] + [{"stowed": 0, "total": 0}] * 3,
+            stowed_by_box=[{"stowed": stowed, "total": 4}]
+            + [{"stowed": 0, "total": 0}] * (count - 1),
             box_count=count,
             wrong_box_parts=0,
         )
@@ -1356,3 +1357,5 @@ def test_the_gate_sums_the_family_and_box_count_rows():
         "5": {"stowed": 4, "total": 8},
     }
     assert list(rows["stowed_by_box_count"]) == ["4", "5"]
+    # The box draw gives each episode its own number of boxes (a crash on 2026-09-29).
+    assert rows["stowed_by_box"] == [{"stowed": 7, "total": 12}] + [{"stowed": 0, "total": 0}] * 4
