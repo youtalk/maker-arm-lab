@@ -110,6 +110,7 @@ def test_the_render_set_labels_equal_the_truth(tmp_path, monkeypatch):
     views = z["view"].tolist()
     assert summary["by_view"]["overhead"] > 0 and summary["by_view"]["lift"] > 0
     assert z["frames"].shape == (len(views), 224, 224, 3) and z["frames"].dtype == np.uint8
+    assert z["wrist_crop"].tolist() == [448, 152, 376, 116, 340]
     for n, name in enumerate(z["part"].tolist()):
         if name:
             assert z["category"][n] == parts.part_category(by_name[name])

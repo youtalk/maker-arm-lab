@@ -15,7 +15,9 @@ at its event from the state the heap loop's frame of that step shows.
   loop never classifies a hidden part. The arm may still stand between the camera and the part,
   as it may in the loop, so each overhead frame records how much of the part the camera sees.
 * lift: the wrist frame of the step a ``hold.HoldDetector`` fed the loop's inputs (the measured
-  jaw gap, the last command's gap, the FK pick point's height) reads the lift.
+  jaw gap, the last command's gap, the FK pick point's height) reads the lift. Every wrist frame
+  is the classifier's own (``MjLegoSortEnv.wrist_crop``): the fingertip crop of a 448 px render
+  at native pixels, not the policy's 224 px frame; ``wrist_crop`` in the file says so.
 * carry: the wrist frame ``loop.CARRY_VIEW_STEPS`` later, if the detector still reads a lift.
 * wrist (``--wrist_every S``, off by default): more wrist frames of the same lift for training,
   every S steps up to twice the carry view's offset while the detector reads a lift.
@@ -67,7 +69,7 @@ import mujoco
 import numpy as np
 import torch
 
-from maker_arm_lab.core import layout, oracle, perception
+from maker_arm_lab.core import cameras, layout, oracle, perception
 from maker_arm_lab.core import parts as _parts
 from maker_arm_lab.core.batch_loop import (
     add_batch_arguments,
@@ -368,11 +370,9 @@ def record(env, rig, args, heldout: set[str], deadline: float) -> tuple[list, li
                 others = oracle.passengers(pos, start_z[i], pick, held)
                 jaws = RIDE_SHARE * (float(pick[2]) - d.start_z)
                 rode = [b for b in others if float(pos[b, 2] - start_z[i][b]) >= jaws]
-                r = env.renderers[i]
-                r.update_scene(env.datas[i], camera="wrist")
                 shown = max((_seen(env, i, b, env._cam_wrist) for b in rode), default=-1.0)
                 tilt = _tilt(quat[held]) if held >= 0 else -1.0
-                frame = r.render().copy()
+                frame = env.wrist_crop(i)
                 keep(frame, view, held, len(others), -1, i, step, tilt, len(rode), shown)
             if orc is not None and orc.phase in (oracle.Phase.DONE, oracle.Phase.ABANDON):
                 finished[i] = True
@@ -402,7 +402,11 @@ def run(args) -> dict:
     out = Path(args.out_dir) / f"render_{args.run_seed}.npz"
     tmp = out.with_suffix(".tmp.npz")
     np.savez_compressed(
-        tmp, frames=np.stack(frames), args=np.array(json.dumps(vars(args))), **columns
+        tmp,
+        frames=np.stack(frames),
+        args=np.array(json.dumps(vars(args))),
+        wrist_crop=np.array([cameras.WRIST_CLASSIFIER_PX, *cameras.WRIST_CLASSIFIER_CROP]),
+        **columns,
     )
     tmp.replace(out)
     views = columns["view"].tolist()

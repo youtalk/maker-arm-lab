@@ -471,6 +471,7 @@ class MjLegoSortEnv:
             for geoms in self.handles.body_geoms
         )
         self.renderers = [mujoco.Renderer(m, 224, 224) for m in self.models] if cameras else []
+        self._wrist_hires: list = [None] * len(self.models)  # ``wrist_crop``'s, on first use
         self._cam_wrist = base_model.camera("wrist").id if cameras else -1
         self._cam_overhead = base_model.camera("overhead").id if cameras else -1
         self.profile = _profile.sim_profile()
@@ -847,10 +848,24 @@ class MjLegoSortEnv:
             m.cam_quat[c], m.cam_fovy[c] = saved
             mujoco.mj_camlight(m, d)
 
+    def wrist_crop(self, i: int) -> np.ndarray:
+        """MS7f design section 6.3, view 2 at native pixels: env ``i``'s wrist camera now,
+        rendered at ``cameras.WRIST_CLASSIFIER_PX`` (same pose and field of view as the policy's
+        224 px frame), cropped to ``cameras.WRIST_CLASSIFIER_CROP``: a (224, 224, 3) uint8 frame
+        around the fingertips. It draws nothing. 1.04 ms a call against 0.98 ms at 224 px (EGL,
+        RTX 5090, 2026-09-30)."""
+        if self._wrist_hires[i] is None:
+            px = cameras.WRIST_CLASSIFIER_PX
+            self._wrist_hires[i] = mujoco.Renderer(self.models[i], px, px)
+        r = self._wrist_hires[i]
+        r.update_scene(self.datas[i], camera=self._cam_wrist)
+        y0, y1, x0, x1 = cameras.WRIST_CLASSIFIER_CROP
+        return r.render()[y0:y1, x0:x1].copy()
+
     def close(self) -> None:
-        for r in self.renderers:
+        for r in self.renderers + [r for r in self._wrist_hires if r is not None]:
             r.close()
-        self.renderers = []
+        self.renderers, self._wrist_hires = [], [None] * len(self.models)
         if self.recorder is not None:
             self.recorder.close()
 

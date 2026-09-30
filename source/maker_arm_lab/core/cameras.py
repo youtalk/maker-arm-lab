@@ -31,6 +31,14 @@ IMAGE_HEIGHT = 224
 # column instead of the workspace. At the home pose the frame covers 0.32 m of desk at
 # 0.23 m range, spanning core.layout's scatter band.
 WRIST_FOV_DEG = 70.0
+WRIST_CLASSIFIER_PX = 448
+WRIST_CLASSIFIER_CROP = (152, 376, 116, 340)
+"""The MS7f part classifier's wrist view (``MjLegoSortEnv.wrist_crop``): the wrist camera at the
+same pose and field of view rendered at 448 px, and the rows and columns of the 224 px crop
+around the fingertips at native pixels, the 112 px region of a 224 px frame that the classifier
+read before. The pick point sits about 0.089 m from the camera, so the crop spans 0.062 m at
+0.28 mm a pixel there: the assumption for the real rig is a wrist camera that gives about 0.3 mm
+a pixel at the jaws. The policy's 224 px wrist frames do not change."""
 
 # Overhead camera: straight down over the desk, framing the brick scatter zone AND all four
 # bins. Every number is derived from core.layout so that moving the scatter zone or the bins
