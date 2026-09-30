@@ -189,6 +189,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         oracle_factory=factory,
         perceivers=perceivers,
         release_lean=args.release_lean,
+        carry_via=args.carry_via,
     )
     meta = run_meta(
         args,

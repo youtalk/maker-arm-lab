@@ -99,6 +99,7 @@ class GateCfg:
     families: tuple = ()
     box_draw: int = 0
     release_lean: bool = False
+    carry_via: bool = False
     box_unseen: str | None = None
     heap_family: str | None = None
 
@@ -128,6 +129,7 @@ MS7E_OFF = {
     "families": [],
     "box_draw": 0,
     "release_lean": False,
+    "carry_via": False,
     "box_unseen": None,
     "heap_family": None,
 }
@@ -141,6 +143,7 @@ def ms7e_block(cfg: "GateCfg") -> dict:
         "families": list(cfg.families),
         "box_draw": cfg.box_draw,
         "release_lean": cfg.release_lean,
+        "carry_via": cfg.carry_via,
         "box_unseen": cfg.box_unseen,
         "heap_family": cfg.heap_family,
     }
@@ -560,6 +563,8 @@ def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
                 prefix += ["--box_draw", str(cfg.box_draw)]
             if cfg.release_lean:
                 prefix.append("--release_lean")
+            if cfg.carry_via:
+                prefix.append("--carry_via")
             if cfg.box_unseen:
                 prefix += ["--box_unseen", cfg.box_unseen]
             if cfg.heap_family:
@@ -646,8 +651,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
             and float(payload.get("tray_lean", 0.0)) == cfg.tray_lean
             # A payload that predates the deep floor ran without it.
             and payload.get("deep_box_floor", False) == cfg.deep_box_floor
-            # A payload that predates the MS7e switches ran with every one off.
-            and payload.get("ms7e", MS7E_OFF) == ms7e_block(cfg)
+            # A payload that predates the MS7e switches, or a later one, ran with them off.
+            and MS7E_OFF | payload.get("ms7e", {}) == ms7e_block(cfg)
         )
     # The served inference configuration is part of what a draw measured. An open-loop read
     # (the checkpoint's own n_action_steps) must never stand in for a temporal-ensemble read.
@@ -976,6 +981,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="MuJoCo heap only, MS7e B2: forwarded as --release_lean",
     )
     parser.add_argument(
+        "--carry_via",
+        action="store_true",
+        help="MuJoCo heap only, MS7e R12 T1 with --release_lean: forwarded as --carry_via",
+    )
+    parser.add_argument(
         "--box_unseen",
         choices=("size", "rim"),
         default=None,
@@ -1061,6 +1071,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
             raise ValueError(f"--{name} is not built on this commit")
     if args.heap_family and args.heap_family not in families:
         raise ValueError("--heap_family must name one of --families")
+    if args.carry_via and not args.release_lean:
+        raise ValueError("--carry_via bends the B2 carry: it needs --release_lean")
     if args.heap_k > 0:
         if args.backend != "mujoco":
             raise ValueError("--heap_k needs --backend mujoco: the Isaac env has no heap")
@@ -1104,6 +1116,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         families=families,
         box_draw=args.box_draw,
         release_lean=args.release_lean,
+        carry_via=args.carry_via,
         box_unseen=args.box_unseen,
         heap_family=args.heap_family,
         client_flags=tuple(shlex.split(args.client_flags))

@@ -1288,21 +1288,24 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
     argv = _argv(tmp_path / "gate") + MS7E_HEAP
     plain = ge._build_cfg(ge._parse_args(argv))
     assert plain.families == () and ge.ms7e_block(plain) == ge.MS7E_OFF
-    switches = ["--families", "flat,round", "--box_draw", "6", "--release_lean"]
+    switches = ["--families", "flat,round", "--box_draw", "6", "--release_lean", "--carry_via"]
     switches += ["--box_unseen", "size", "--heap_family", "flat"]
     cfg = ge._build_cfg(ge._parse_args(argv + switches))
     cmd = ge._eval_command(cfg, draw)
     at = cmd.index("--families")
-    assert cmd[at : at + 9] == ["--families", "round,flat", *switches[2:]]
+    assert cmd[at : at + 10] == ["--families", "round,flat", *switches[2:]]
     block = ge.ms7e_block(cfg)
     assert block == {
         "families": ["round", "flat"],
         "box_draw": 6,
         "release_lean": True,
+        "carry_via": True,
         "box_unseen": "size",
         "heap_family": "flat",
     }
-    assert not {"--families", "--box_draw", "--release_lean"} & set(ge._eval_command(plain, draw))
+    assert not {"--families", "--box_draw", "--release_lean", "--carry_via"} & set(
+        ge._eval_command(plain, draw)
+    )
     path = tmp_path / "gate" / "eval_000.json"
     path.parent.mkdir(parents=True)
 
@@ -1313,11 +1316,16 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
         return ge._cached_payload(gate_cfg, draw) is not None
 
     assert hit(plain) and hit(plain, ms7e=ge.MS7E_OFF) and not hit(plain, ms7e=block)
+    # a payload whose block predates --carry_via ran with it off
+    assert hit(plain, ms7e={k: v for k, v in ge.MS7E_OFF.items() if k != "carry_via"})
+    with pytest.raises(ValueError, match="needs --release_lean"):
+        ge._build_cfg(ge._parse_args(argv + ["--carry_via"]))
     assert hit(cfg, ms7e=block) and not hit(cfg) and not hit(cfg, ms7e=ge.MS7E_OFF)
     for name, other in (
         ("families", ["round"]),
         ("box_draw", 8),
         ("release_lean", False),
+        ("carry_via", False),
         ("box_unseen", "rim"),
         ("heap_family", "round"),
     ):

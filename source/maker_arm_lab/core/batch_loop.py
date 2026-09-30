@@ -113,6 +113,12 @@ def add_ms7e_arguments(parser) -> None:
         "band widens",
     )
     parser.add_argument(
+        "--carry_via",
+        action="store_true",
+        help="MS7e R12 T1, with --release_lean: an EXTEND that would pass the arm base walks "
+        "an arc about it",
+    )
+    parser.add_argument(
         "--box_unseen",
         choices=("size", "rim"),
         default=None,
@@ -145,6 +151,8 @@ def check_ms7e(parser, args) -> None:
             f"--box_draw draws {lo} to at most {hi} boxes ({'B2' if b2 else 'B1'}) and needs "
             "--desk_boxes"
         )
+    if getattr(args, "carry_via", False) and not b2:
+        parser.error("--carry_via bends the B2 carry: it needs --release_lean")
     if args.box_unseen and not args.box_draw:
         parser.error("--box_unseen draws the unseen boxes of --box_draw")
     if getattr(args, "deep_box_floor", False) and getattr(args, "desk_boxes", 0) <= 0:
@@ -158,6 +166,7 @@ def ms7e_switches(args) -> dict:
         "families": list(getattr(args, "families", ())),
         "box_draw": int(getattr(args, "box_draw", 0)),
         "release_lean": bool(getattr(args, "release_lean", False)),
+        "carry_via": bool(getattr(args, "carry_via", False)),
         "box_unseen": getattr(args, "box_unseen", None),
         "heap_family": getattr(args, "heap_family", None),
     }

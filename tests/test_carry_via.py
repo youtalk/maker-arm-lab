@@ -2,13 +2,15 @@
 EXTEND whose straight line would pass the arm base walks an arc about it; with it off, and on
 every carry that clears the base, the plans are the straight ones."""
 
+import argparse
 import itertools
 import math
+import pathlib
 import random
 
 import pytest
 
-from maker_arm_lab.core import layout, oracle, parts
+from maker_arm_lab.core import batch_loop, layout, oracle, parts
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.mj.env import HEAP_PARK_X, MjLegoSortEnv
@@ -157,3 +159,23 @@ def test_a_carry_that_clears_the_base_is_straight_under_the_switch(cycles):
     off, on = cycles[(FRONT, False)], cycles[(FRONT, True)]
     assert off["extend_min_radius"] >= CARRY_MIN_RADIUS_M
     assert [(p, q.tolist()) for p, q in off["steps"]] == [(p, q.tolist()) for p, q in on["steps"]]
+
+
+def _checked(argv):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--desk_boxes", type=int, default=0)
+    batch_loop.add_ms7e_arguments(parser)
+    args = parser.parse_args(argv)
+    batch_loop.check_ms7e(parser, args)
+    return args
+
+
+def test_the_switch_needs_the_release_lean_and_every_client_passes_it():
+    with pytest.raises(SystemExit):
+        _checked(["--desk_boxes", "4", "--carry_via"])
+    args = _checked(["--desk_boxes", "4", "--release_lean", "--carry_via"])
+    assert batch_loop.ms7e_switches(args)["carry_via"] is True
+    assert batch_loop.ms7e_switches(argparse.Namespace())["carry_via"] is False
+    root = pathlib.Path(__file__).resolve().parents[1] / "scripts"
+    for name in ("mj_eval_heap.py", "mj_generate_batch.py"):
+        assert (root / name).read_text().count("carry_via=args.carry_via") == 1

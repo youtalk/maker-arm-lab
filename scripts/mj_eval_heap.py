@@ -423,6 +423,7 @@ def main(argv=None) -> int:
             rig_rng,
             oracle_factory=factory,
             release_lean=args.release_lean,
+            carry_via=args.carry_via,
         )
         policy = None if args.oracle_driver else policy_client.ServerPolicy(args.server)
         trace = [] if args.hold_trace else None
