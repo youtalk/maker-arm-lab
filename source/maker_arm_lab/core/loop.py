@@ -288,6 +288,10 @@ STRETCH_MISS_STREAK = 10
 """MS7f stretch rule 3 (MS7f design 10.4): ``stretch`` ends an env's episode after this many
 cycles in a row closed with no new correct stow; a person clears the jaws and the tray top and
 the loop starts again (``scripts/mj_stretch_run.py``)."""
+CARRY_VIEW_STEPS = 15  # INITIAL: the MS7f C1 read measures the carry view at this offset
+"""Control steps (0.5 s) from the detector's lift to the wrist frame of MS7f view 3, the third
+vote during the carry (MS7f design section 6.3). ``scripts/mj_render_set.py`` records its
+carry frames at the same offset."""
 SELECT_WAIT_FRACTION = 0.375
 """The share of ``CYCLE_STEP_BUDGET`` the loop waits for the retreat at most before it selects
 anyway: 300 steps at the 800-step budget, and the teacher's RETREAT converges in 91 to 147 of
