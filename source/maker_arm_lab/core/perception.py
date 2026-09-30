@@ -512,6 +512,27 @@ class ClassViews:
         return _other_class(true_cls, pick, self.classes) if fires else true_cls
 
 
+class PartClassifier:
+    """``--classifier`` (MS7f design sections 6.3 to 6.6): the render-trained category and
+    passenger model, a TorchScript file from ``lerobot_stack/train_part_classifier.py``, on the
+    CPU. The file carries its category names (``categories``) and its passenger operating point
+    (``passenger_threshold``, a logit); it takes uint8 (N, 224, 224, 3) frames."""
+
+    def __init__(self, path):
+        self.path = str(path)
+        self.model = torch.jit.load(self.path, map_location="cpu").eval()
+        self.categories = tuple(self.model.categories)
+        self.threshold = float(self.model.passenger_threshold)
+
+    @torch.no_grad()
+    def read(self, frame, active: Sequence[str]) -> tuple[str, bool]:
+        """One (224, 224, 3) uint8 frame: the category it reads among the run's ``active``
+        ones, and whether the passenger head reads a second part in the jaws."""
+        logits, rider = self.model(torch.as_tensor(frame)[None])
+        cols = [self.categories.index(c) for c in active]
+        return active[int(logits[0, cols].argmax())], float(rider[0]) >= self.threshold
+
+
 class PositionMemory:
     """Counts kept by perceived position: the failure memory and the rake counter.
 

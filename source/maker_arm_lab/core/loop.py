@@ -131,6 +131,17 @@ loop's own end-to-end check. A takeover holds the env until the rig hands it bac
 RETREAT, DONE or ABANDON, and the loop grades only while the rig is idle, so one takeover is
 one loop cycle.
 
+Two MS7f switches (MS7f design section 6), off by default. ``classifier`` (a
+``perception.PartClassifier``, under ``perceived``) replaces the class stand-in in each view of the
+MS7d vote with the render-trained model on a rendered frame: the narrow overhead view of the
+target's detection at selection (``env.narrow_overhead``) sets the box, the wrist frame at the
+detector's lift can move it (``lift_class_box``), and with ``class_views`` a disagreement waits
+for the wrist frame ``CARRY_VIEW_STEPS`` later as the third vote. The stand-in still draws every
+value it draws without the switch, so knob rows stay paired. ``passenger_drop`` (with it) opens
+the jaws and ends the cycle ``passenger`` when the lift's wrist frame reads a second part over the
+tray interior (``over_tray``); the failure memory books the cycle, and anywhere else the reading
+is ignored. The ``perception`` block then carries ``CLASSIFIER_COUNTS``.
+
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
 """
@@ -327,9 +338,10 @@ def release_ready(open_fraction: float, waited: int, after_stow: bool) -> bool:
     return open_fraction >= SELECT_OPEN_FRACTION
 
 
-RELEASE_ENDS = ("stowed", "released", "placed", "dropped")
+RELEASE_ENDS = ("stowed", "released", "placed", "dropped", "passenger")
 """The cycle ends a release makes; ``release_ready`` waits for the jaws' full gap after them.
-``placed`` and ``dropped`` are ``perceived``'s (``perceived_cycle_end``)."""
+``placed`` and ``dropped`` are ``perceived``'s (``perceived_cycle_end``), ``passenger`` is
+``passenger_drop``'s."""
 RELEASE_OPEN_M = 0.010  # INITIAL: the MS7d isolation row R1 measures it
 """m: ``release_gap`` (L2) completes a perceived release once the measured jaw gap is this much
 wider than it was when the hold ended (MS7d design section 4.2). The MS7c rule alone waited
@@ -978,6 +990,10 @@ class Cycle:
     seen_class: str | None = None  # its class perceived overhead
     box: int = -1  # the box served now: the overhead class's, then the class drawn at a lift
     volume: float = 0.0  # m^3, the bounding volume the loop books into ``box`` at a release end
+    read_class: str | None = None  # ``classifier``: the class its narrow overhead view read
+    # ``classifier`` with ``class_views``: a lift that read another class than ``read_class``
+    # waits for the carry view, (the lift's class, the true class at the lift, the view's step).
+    vote: tuple | None = None
     # ``perceived_release``: a lifted hold ended over a box (True) or off one (False), and the
     # jaws have not yet opened to ``SELECT_OPEN_FRACTION``; None with no release under way.
     release_over: bool | None = None
@@ -1033,6 +1049,7 @@ class EnvState:
     # MS7f --categories: m^3 per desk box, the volume this loop's own cycles released there
     # (``desk_boxes.lighter_box`` picks between a category's two boxes by it), never the truth.
     box_load: list[float] = field(default_factory=list)
+    opening: bool = False  # ``passenger_drop``: the jaws are held open until the next selection
 
 
 def _layout_of(rig, i: int):
@@ -1143,6 +1160,17 @@ def tool_clear_of_tray(xy, lean_deg: float, height: float = layout.TRAY_WALL_HEI
     dx = max(x0 - grow - float(xy[0]), 0.0, float(xy[0]) - x1 - grow)
     dy = max(y0 - grow - float(xy[1]), 0.0, float(xy[1]) - y1 - grow)
     return math.hypot(dx, dy) > perception.TOOL_OCCLUSION_RADIUS_M
+
+
+def over_tray(xy, lean_deg: float, height: float = layout.TRAY_WALL_HEIGHT) -> bool:
+    """``passenger_drop``: does the point ``xy`` lie over the tray interior? The footprint at the
+    rim, the wider of floor and rim, as ``tool_clear_of_tray`` reads it (walls ``height``
+    high): parts the jaws let go of there fall back into the tray. Known geometry and the FK
+    tool point only. Pure."""
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    grow = layout.tray_rim_growth(lean_deg, height)
+    x, y = float(xy[0]), float(xy[1])
+    return x0 - grow <= x <= x1 + grow and y0 - grow <= y <= y1 + grow
 
 
 def look_again(
@@ -1576,6 +1604,18 @@ WRIST_COUNTS = ("wrist_looks", "wrist_misses", "wrist_covered", "wrist_shift_mm"
 wrist looks, those that missed and those whose target another part covered, and over the
 looks that found it, the sums of the serving row's xy move (mm) and heading turn (degrees),
 both against the row at selection."""
+CLASSIFIER_COUNTS = (
+    "passenger_reads",
+    "passenger_lifts",
+    "passenger_hits",
+    "passenger_drops",
+    "votes_lost",
+)
+"""``classifier``'s ``perception`` counts, in the payload only with the switch on: the lifts whose
+wrist frame read a passenger, the lifts a second part rose with (``oracle.passengers``, a metric
+read), the lifts with both, the cycles ``passenger_drop`` ended, and the votes whose carry view
+came after the part left the jaws. Under the switch ``third_views``, ``votes_changed`` and
+``wrong_voted_class`` count the carry views taken."""
 TORQUE_COUNTS = ("force_capped", "hold_blocked", "hold_blocked_cycles")
 """The ``torque`` block's counts under ``hold_force`` or ``force_cap``: the steps L7 held the arm,
 the hold entries L6 refused (one per confirmed run of the jaw-gap rule) and the cycles with one."""
@@ -1728,6 +1768,8 @@ def rollout(
     stretch: bool = False,
     book_miss: bool = False,
     lift_budget: int = 0,
+    classifier=None,
+    passenger_drop: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1768,6 +1810,8 @@ def rollout(
     ``miss_streak`` (rule 3, ``miss_streak``). The person watches the grader.
     ``book_miss`` (MS7f H) books a failure against the target of a cycle that stowed only other
     parts (``books_failure``), on the truth-graded path; a ``--perceived`` cycle is unchanged.
+    ``classifier`` (a ``perception.PartClassifier`` or None) and ``passenger_drop`` are the
+    MS7f switches of the module docstring; both need ``perceived``, and the second the first.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1891,6 +1935,15 @@ def rollout(
             raise EvalFailure(name, "changes a perceived decision: it needs perceived")
     if rearm_hold and contact_hold:
         raise EvalFailure("rearm_hold", "clears the detector's flag; contact_hold reads contacts")
+    if classifier is not None and not perceived:
+        raise EvalFailure("classifier", "reads the perceived views: it needs perceived")
+    if passenger_drop and classifier is None:
+        raise EvalFailure("passenger_drop", "reads the classifier's passenger head")
+    if classifier is not None and not set(class_names) <= set(classifier.categories):
+        raise EvalFailure(
+            "classifier", f"reads {classifier.categories}; the run sorts by {class_names}"
+        )
+    tray = bool(getattr(env, "tray", False))
     limits = robot.data.joint_pos_limits[:, arm_ids, :].to("cpu")
     tracker = RolloutTracker(num_envs, k)
     recorder = getattr(env, "recorder", None)
@@ -1985,6 +2038,8 @@ def rollout(
         "contact_hold": bool(contact_hold),
         **ms7d,
     }
+    if classifier is not None:
+        switches |= {"classifier": classifier.path, "passenger_drop": bool(passenger_drop)}
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
     pick_z_hist = [deque(maxlen=GATE_WINDOW + 1) for _ in range(num_envs)]
@@ -2218,14 +2273,19 @@ def rollout(
                 # come from the target's detection; ``env.target_part`` stays -1.
                 seen = next(d for d in state.detections if d.sim_index == target)
                 st.cycle.target_xy = seen.centre[:2]
-                st.cycle.seen_class = seen.cls
+                st.cycle.seen_class = cls = seen.cls
+                if classifier is not None:
+                    # MS7f view 1: the narrow overhead view of the detection.
+                    frame = env.narrow_overhead(i, seen.centre)
+                    st.cycle.read_class = cls = classifier.read(frame, class_names)[0]
+                    st.opening = False
                 st.cycle.seen_yaw = float(scene.brick_yaw[target])
-                st.cycle.box = desk_boxes.lighter_box(class_boxes[i][seen.cls], st.box_load)
+                st.cycle.box = desk_boxes.lighter_box(class_boxes[i][cls], st.box_load)
                 st.cycle.volume = math.prod(seen.size)
                 env.marker_points[i] = torch.tensor(seen.centre)
                 env.set_context_box(i, st.cycle.box)
                 st.counts["selections"] += 1
-                st.counts["wrong_overhead_class"] += seen.cls != true_classes[target]
+                st.counts["wrong_overhead_class"] += cls != true_classes[target]
                 if box_walls:
                     st.counts["box_wall_refusals"] += box_wall_refusals(st.selector, scene, target)
                 if st.marker is not None:
@@ -2406,6 +2466,9 @@ def rollout(
                             gap = floored
                             st.cycle.floored_steps += 1
                     action_cpu[i, 6] = gap
+        for i, st in enumerate(states):
+            if st.opening:
+                action_cpu[i, 6] = 2.0 * GRIPPER_OPEN_POS  # ``passenger_drop``: let both go
         signal = open_signal(action_cpu[:, 6], gripper_mode, close_below)
         tracker.record_gripper(signal)
         for i, st in enumerate(states):
@@ -2459,15 +2522,63 @@ def rollout(
                         seen=c.seen_class,
                         third=None if views is None else partial(views.view, part),
                     )
+                    if classifier is not None:
+                        # The stand-in above drew what it draws without the switch; the wrist
+                        # frame decides (MS7f view 2), or ends the cycle on a passenger.
+                        frame = env.obs_buf["images"]["wrist_rgb"][i].numpy()
+                        read, rider = classifier.read(frame, class_names)
+                        riders = oracle.passengers(pos[i], c.start_z, pick, part)
+                        st.counts["passenger_reads"] += rider
+                        st.counts["passenger_lifts"] += bool(riders)
+                        st.counts["passenger_hits"] += rider and bool(riders)
+                        if passenger_drop and rider and tray and over_tray(pick, lean, wall_height):
+                            st.counts["passenger_drops"] += 1
+                            st.fail_mem.book(c.target_xy)
+                            _close_cycle(st, "passenger", [], step, None)
+                            st.idle_since, st.opening = step, True
+                            continue
+                        drawn = None if true_cls is None else read
+                        if class_views and read != c.read_class:
+                            c.vote = (read, true_cls, step + CARRY_VIEW_STEPS)
+                            taken = box = None
+                        else:
+                            _, taken, box = lift_class_box(read, lambda x: x, lighter, c.box)
                     if drawn is None:
                         st.counts["lifts_empty"] += 1
                     else:
                         st.counts["lifts_classified"] += 1
                         st.counts["wrong_wrist_class"] += drawn != true_cls
-                        if views is not None:
+                        if views is not None and classifier is None:
                             st.counts["third_views"] += drawn != c.seen_class
                             st.counts["votes_changed"] += taken != drawn
                             st.counts["wrong_voted_class"] += taken != true_cls
+                    if box is not None:
+                        c.box = box
+                        env.set_context_box(i, box)
+                        replan[i] = True
+                if c.vote is not None and step >= c.vote[2]:
+                    # MS7f view 3: the carry frame is the third vote, if the part is still up.
+                    read, true_cls, _ = c.vote
+                    c.vote = None
+                    if not detectors[i].lifted:
+                        st.counts["votes_lost"] += 1
+                        continue
+                    frame = env.obs_buf["images"]["wrist_rgb"][i].numpy()
+                    lighter = {
+                        cls: desk_boxes.lighter_box(own, st.box_load)
+                        for cls, own in class_boxes[i].items()
+                    }
+                    _, taken, box = lift_class_box(
+                        read,
+                        lambda x: x,
+                        lighter,
+                        c.box,
+                        seen=c.read_class,
+                        third=lambda _, f=frame: classifier.read(f, class_names)[0],
+                    )
+                    st.counts["third_views"] += 1
+                    st.counts["votes_changed"] += taken != read
+                    st.counts["wrong_voted_class"] += true_cls is not None and taken != true_cls
                     if box is not None:
                         c.box = box
                         env.set_context_box(i, box)
@@ -2743,6 +2854,7 @@ def rollout(
                 + (BOX_WALL_COUNTS if box_walls else ())
                 + (MARKER_COUNTS if marker_bias else ())
                 + (WRIST_COUNTS if wrist_fix else ())
+                + (CLASSIFIER_COUNTS if classifier is not None else ())
             },
         },
     }
