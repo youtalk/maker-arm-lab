@@ -26,7 +26,9 @@ category and name and whether its kind is held out; on a wrist frame the part bo
 the passenger count, ``oracle.passengers`` against the heights at the HOVER start, and of those
 the riders, which rose at least ``RIDE_SHARE`` of the jaws' own rise since the hold began, with
 the largest share of a rider the wrist camera sees in its frame (``rider_seen``); on an overhead
-frame the share of the part the camera sees (``part_seen``, ``_seen``). T2's rule reads
+frame the share of the part the camera sees (``part_seen``, ``_seen``); on every frame with a
+part the angle of the part's own z axis, its studs' axis, from world up (``tilt``: near 0 upright,
+near 180 upside down, a side between; the tray's lean leans only its walls). T2's rule reads
 the LIFT gate 0.10 m up and the lift frame is 0.05 m up, so the riders guard the label against a
 neighbour the grasp only nudged. Measured on the first four re-rendered C1 heaps (2026-09-30) they
 equal the passengers on 27 of 28 wrist frames: the passengers ride, and most of 16 such lift
@@ -104,13 +106,14 @@ LABELS = (
     "rider_seen",
     "env",
     "step",
+    "tilt",
 )
 """The label arrays beside ``frames``: the view (overhead, lift, carry), the category and name of
 the part the view is of, whether its kind is held out, the passenger and rider counts (-1 on an
 overhead frame), the part index (-1 on a wrist frame with nothing between the jaws), the share of that
 part the overhead camera sees (-1 on a wrist frame), the largest share of a rider the wrist
-camera sees in its frame (-1 with no rider or on an overhead frame), the env and the control
-step."""
+camera sees in its frame (-1 with no rider or on an overhead frame), the env, the control
+step and the part's tilt in degrees (``_tilt``, -1 with no part)."""
 
 
 class _TokenEmittingParser(argparse.ArgumentParser):
@@ -218,6 +221,12 @@ def _positions(env, i: int) -> tuple[torch.Tensor, torch.Tensor]:
     )
 
 
+def _tilt(quat) -> float:
+    """Degrees between the z axis of a part at orientation ``quat`` (w, x, y, z) and world up."""
+    _, x, y, _ = (float(v) for v in quat)
+    return math.degrees(math.acos(max(-1.0, min(1.0, 1.0 - 2.0 * (x * x + y * y)))))
+
+
 def _held(env, i: int) -> int:
     """The part both jaws press, or -1: ``loop.wrist_class``'s read."""
     forces = [
@@ -258,7 +267,7 @@ def _seen(env, i: int, b: int, cam: int | None = None) -> float:
 
 
 def _overhead_views(env, i, target, pick, aim_rng, extra, jitter) -> list[tuple]:
-    """The narrow views of one selection: (frame, part, share seen) for the target and up to
+    """The narrow views of one selection: (frame, part, share seen, tilt) for the target and up to
     ``extra`` other parts in the tray, each only if the perceived state would see it."""
     pos, quat = _positions(env, i)
     sizes = torch.tensor([p.size for p in env.parts])
@@ -272,7 +281,7 @@ def _overhead_views(env, i, target, pick, aim_rng, extra, jitter) -> list[tuple]
     views = []
     for b in chosen:
         aim = [float(v) + s * aim_rng.gauss(0.0, 1.0) for v, s in zip(pos[b], AIM_SIGMA_M)]
-        views.append((env.narrow_overhead(i, aim), b, _seen(env, i, b)))
+        views.append((env.narrow_overhead(i, aim), b, _seen(env, i, b), _tilt(quat[b])))
     return views
 
 
@@ -292,7 +301,7 @@ def record(env, rig, args, heldout: set[str], deadline: float) -> tuple[list, li
     gap_cmd = robot.data.joint_pos[:, jaw_ids].sum(dim=-1).tolist()
     frames, rows = [], []
 
-    def keep(frame, view, part, passengers, seen, i, step, riders=-1, rider_seen=-1.0):
+    def keep(frame, view, part, passengers, seen, i, step, tilt, riders=-1, rider_seen=-1.0):
         cat = _parts.part_category(env.parts[part]) if part >= 0 else ""
         name = env.parts[part].name if part >= 0 else ""
         frames.append(frame)
@@ -308,6 +317,7 @@ def record(env, rig, args, heldout: set[str], deadline: float) -> tuple[list, li
             rider_seen,
             i,
             step,
+            tilt,
         )
         rows.append(row)
 
@@ -339,8 +349,8 @@ def record(env, rig, args, heldout: set[str], deadline: float) -> tuple[list, li
                 views = _overhead_views(
                     env, i, target, pick, aims[i], args.extra_overhead, args.frame_jitter
                 )
-                for frame, b, seen in views:
-                    keep(frame, "overhead", b, -1, seen, i, step)
+                for frame, b, seen, tilt in views:
+                    keep(frame, "overhead", b, -1, seen, i, step, tilt)
             wrist = []
             if d.lift_started and start_z[i] is not None:
                 wrist.append("lift")
@@ -354,14 +364,16 @@ def record(env, rig, args, heldout: set[str], deadline: float) -> tuple[list, li
                 wrist.append("wrist")
             for view in wrist:
                 held = _held(env, i)
-                pos = _positions(env, i)[0]
+                pos, quat = _positions(env, i)
                 others = oracle.passengers(pos, start_z[i], pick, held)
                 jaws = RIDE_SHARE * (float(pick[2]) - d.start_z)
                 rode = [b for b in others if float(pos[b, 2] - start_z[i][b]) >= jaws]
                 r = env.renderers[i]
                 r.update_scene(env.datas[i], camera="wrist")
                 shown = max((_seen(env, i, b, env._cam_wrist) for b in rode), default=-1.0)
-                keep(r.render().copy(), view, held, len(others), -1, i, step, len(rode), shown)
+                tilt = _tilt(quat[held]) if held >= 0 else -1.0
+                frame = r.render().copy()
+                keep(frame, view, held, len(others), -1, i, step, tilt, len(rode), shown)
             if orc is not None and orc.phase in (oracle.Phase.DONE, oracle.Phase.ABANDON):
                 finished[i] = True
         action = rig.actions()

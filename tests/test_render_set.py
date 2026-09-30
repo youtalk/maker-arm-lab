@@ -42,6 +42,15 @@ def test_usage_errors_print_the_fail_token():
 
 
 @pytest.mark.skipif(not _can_render(), reason="no MuJoCo GL context on this host")
+def test_tilt_reads_the_part_axis_from_world_up():
+    tilt = _load()._tilt
+    c = np.cos(np.pi / 4)
+    assert tilt((1.0, 0.0, 0.0, 0.0)) == 0.0
+    assert tilt((0.0, 0.0, 0.0, 1.0)) == 0.0  # a turn about z leaves it upright
+    assert tilt((c, c, 0.0, 0.0)) == pytest.approx(90.0)
+    assert tilt((0.0, 1.0, 0.0, 0.0)) == pytest.approx(180.0)
+
+
 def test_the_render_set_labels_equal_the_truth(tmp_path, monkeypatch):
     """Every row names a part of the heap with its own category and split side, each overhead
     view aims at its part, and each wrist view's part is the one up in the jaws."""
@@ -115,6 +124,9 @@ def test_the_render_set_labels_equal_the_truth(tmp_path, monkeypatch):
     assert all(0 <= z["riders"][n] <= z["passengers"][n] for n in wrist)
     assert all((z["rider_seen"][n] >= 0.0) == (z["riders"][n] > 0) for n in wrist)
     assert all(z["rider_seen"][n] == -1.0 for n in over)
+    has_part = z["held"] >= 0
+    assert ((0.0 <= z["tilt"]) & (z["tilt"] <= 180.0) == has_part).all()
+    assert (z["tilt"][~has_part] == -1.0).all()
     for n, (b, height) in zip(wrist, lifted):
         if b >= 0 and views[n] == "lift":
             assert height > 0.04, (n, b, height)  # the part rose with the jaws

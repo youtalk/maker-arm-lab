@@ -55,7 +55,7 @@ WRIST_ROI = (76, 188, 58, 170)  # INITIAL: the C1 training ladder, 2026-09-30
 224 px: 112 px around the pick point, which projects to (114, 144) at 8.9 cm; the heap under the
 jaws fills the rest of the frame. On the preliminary set (36 train heaps read on 4 others, 134
 lifts) the lift view read 0.69 on the whole frame, 0.82 on a 144 px crop and 0.85 on this one."""
-LATER_LABELS = {"riders", "rider_seen"}  # render set labels an older file does not carry
+LATER_LABELS = {"riders", "rider_seen", "tilt"}  # render set labels an older file does not carry
 MIN_SEEN = 0.5  # INITIAL: the share of a part's sample points the overhead camera sees
 PASSENGER_FALSE_ALARMS = 0.01  # the operating point's cap, half the C1 bar's 0.02
 BARS = {"lift_accuracy": 0.97, "category_accuracy": 0.90, "recall": 0.8, "false_alarms": 0.02}
@@ -97,7 +97,7 @@ class PartClassifier(nn.Module):
 
 def load(paths) -> dict[str, np.ndarray]:
     """The render set files as one set of arrays, plus ``file``, each frame's file index. A file
-    from before a label (``riders``, ``rider_seen``) reads -1 (unknown) there."""
+    from before a label (``riders``, ``rider_seen``, ``tilt``) reads -1 (unknown) there."""
     parts = [np.load(p) for p in paths]
 
     def column(z, k):
