@@ -102,8 +102,15 @@ def load(paths) -> dict[str, np.ndarray]:
     def column(z, k):
         return z[k] if k in z.files else np.full(len(z["view"]), -1)
 
-    keys = [k for k in parts[0].files if k not in ("args", "riders")] + ["riders"]
+    keys = [k for k in parts[0].files if k not in ("args", "riders", "frames")] + ["riders"]
     out = {k: np.concatenate([column(z, k) for z in parts]) for k in keys}
+    # The frames go straight into one array: a concatenation would hold every frame twice.
+    out["frames"] = np.empty((len(out["view"]), 224, 224, 3), dtype=np.uint8)
+    at = 0
+    for z in parts:
+        n = len(z["view"])
+        out["frames"][at : at + n] = z["frames"]
+        at += n
     out["file"] = np.concatenate([np.full(len(z["view"]), n) for n, z in enumerate(parts)])
     return out
 
