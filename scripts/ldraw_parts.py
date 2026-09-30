@@ -93,7 +93,7 @@ PARTS = {
     "6558": ((0, 1, 2), "as 2780: x on the flat ends, y and z across the collar"),
     "43093": ((0, 1, 2), "as 2780: x on the flat ends, y and z across the collar"),
     "3937": ((0, 1, 2), "box-shaped: a 1x2 brick whose top is the two hinge lugs"),
-    "3938": ((0, 1, 2), "a 1x2 plate over the hinge knuckle; z meets the knuckle's lowest line"),
+    "3938": ((0, 2), "a 1x2 plate over the knuckle; y meets only the 1.8 mm rib under it"),
     "14417": ((0, 2), "a 1x2 plate; y puts one jaw on the side ball, which squeezes it out"),
     "14418": ((0, 1, 2), "a 1x2 plate; x puts one jaw on the socket's round end"),
     "4081b": ((1, 2), "a 1x1 plate; x puts one jaw on the side clip's ring, as 14417's y"),
@@ -112,7 +112,13 @@ PARTS = {
 The joint table first offered 14417 its y axis and 4081b its x axis (15.2 mm each, one jaw on
 the ball or on the clip's ring): the part squeezed out at LIFT on 10 of 11 such grasps, with
 no jaw force left at the gate, and the table stowed 4 and 10 of 12 (MS7f lone-part table,
-seeds 20303000 + catalog index, 2026-09-30). The other axes of both parts stowed every lift."""
+seeds 20303000 + catalog index, 2026-09-30). The other axes of both parts stowed every lift.
+
+3938's underside opens sideways, so its fill leaves a 1 mm top slab, the two knuckle lugs at
+the ends and a 1.8 mm rib between them: across y the jaws close on the rib alone (0.5 to 0.7 N
+against 1.2 to 1.8 N across x on the table, or nothing). On the joint heap read (run 20303500
++ i, layout 20303550 + i, 2026-09-30) the loop took 3938 as its target in 56 cycles for 18
+parts: 113877 of the joint read's 168738 steps, a median of 10 close edges a cycle."""
 HORIZONTAL_FILL = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")
 """The MS7e parts fill their horizontal slices only, so 3700's pin hole stays open. Every later
 part fills its slices across all three axes: a pin lies along x, and only its x slices close

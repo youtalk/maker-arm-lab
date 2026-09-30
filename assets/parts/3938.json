@@ -8,10 +8,9 @@
  ],
  "closing_axes": [
   0,
-  1,
   2
  ],
- "closing_axes_reason": "a 1x2 plate over the hinge knuckle; z meets the knuckle's lowest line",
+ "closing_axes_reason": "a 1x2 plate over the knuckle; y meets only the 1.8 mm rib under it",
  "hulls": [
   [
    [
