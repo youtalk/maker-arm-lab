@@ -438,8 +438,7 @@ def cmd_read(args, hosts):
     aggregate = base + args.extra + ["--out_dir", str(tag_dir), "--only_processes", only]
     with contextlib.redirect_stdout(sys.stderr):  # its usage error prints GATE_ERROR
         cfg = ge._build_cfg(ge._parse_args(aggregate))
-    all_draws = ge.make_eval_draws(cfg.processes, cfg.seed)
-    ge.assert_seeds_disjoint(all_draws, json.loads(cfg.ledger.read_text()).get("runs", []))
+    ge.gate_draws(cfg)  # the seed rules, before any host starts
     if tag_dir.exists():
         raise FleetError(f"{tag_dir} exists: a TAG is read once")
     caps = [(name, lanes or hosts[name]["lanes"]) for name, lanes in args.hosts]

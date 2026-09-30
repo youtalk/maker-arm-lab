@@ -105,6 +105,9 @@ class GateCfg:
     passenger_check: bool = False
     wall_band_cont: bool = False
     thin_snap: bool = False
+    # MS7e unseen-box ladder, the seen row (design section 8.3): (RUN0, LAYOUT0), draw i reads a
+    # recorded run's own seeds RUN0 + i and LAYOUT0 + i (make_eval_draws); None is the formula.
+    seen_seeds: tuple | None = None
 
 
 FAMILY_KEYS = ("round", "ldraw", "flat")
@@ -254,17 +257,35 @@ def loop_switches(client_flags) -> dict:
     return found
 
 
-def make_eval_draws(processes: int, seed: int) -> list[EvalDraw]:
+def make_eval_draws(processes: int, seed: int, seen: tuple | None = None) -> list[EvalDraw]:
+    """The draws of ``seed``, or with ``seen`` = (RUN0, LAYOUT0) draw i on the seeds RUN0 + i
+    and LAYOUT0 + i of a recorded corpus run, with the recorder's default permutation."""
     rng = random.Random(f"gate:{seed}")
+    run0, layout0 = seen or (seed * 1000, seed * 1000 + 500)
     return [
         EvalDraw(
             process_index=i,
-            permutation=tuple(rng.choice(ALL_PERMUTATIONS)),
-            run_seed=(seed * 1000 + i) % _SEED_BOUND,
-            layout_seed=(seed * 1000 + 500 + i) % _SEED_BOUND,
+            permutation=(0, 1, 2, 3) if seen else tuple(rng.choice(ALL_PERMUTATIONS)),
+            run_seed=(run0 + i) % _SEED_BOUND,
+            layout_seed=(layout0 + i) % _SEED_BOUND,
         )
         for i in range(processes)
     ]
+
+
+def gate_draws(cfg: "GateCfg") -> list[EvalDraw]:
+    """Every draw of the read, checked against the campaign ledger: a fresh read shares no seed
+    with a recorded run, and a seen read (``cfg.seen_seeds``) reads only recorded runs' pairs."""
+    runs = json.loads(cfg.ledger.read_text()).get("runs", [])
+    draws = make_eval_draws(cfg.processes, cfg.seed, cfg.seen_seeds)
+    if cfg.seen_seeds is None:
+        assert_seeds_disjoint(draws, runs)
+        return draws
+    recorded = {(int(r["seeds"]["run_seed"]), int(r["seeds"]["layout_seed"])) for r in runs}
+    for d in draws:
+        if (d.run_seed, d.layout_seed) not in recorded:
+            raise ValueError(f"--seen_seeds: draw {d.process_index} is no recorded run: {d}")
+    return draws
 
 
 def select_draws(draws: list[EvalDraw], only_processes: tuple | None) -> list[EvalDraw]:
@@ -693,10 +714,7 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
     injected so the orchestration has CPU tests. Finished draws are reused from
     eval_NNN.json; the server is started only if at least one draw still has to run."""
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
-    ledger_runs = json.loads(cfg.ledger.read_text()).get("runs", [])
-    draws = make_eval_draws(cfg.processes, cfg.seed)
-    assert_seeds_disjoint(draws, ledger_runs)
-    selected = select_draws(draws, cfg.only_processes)
+    selected = select_draws(gate_draws(cfg), cfg.only_processes)
     payloads: dict[int, dict] = {}
     todo = []
     for draw in selected:
@@ -783,6 +801,14 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
         flush=True,
     )
     return results
+
+
+def _seed_pair(raw: str) -> tuple:
+    try:
+        run0, layout0 = (int(part) for part in raw.split(","))
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(f"not RUN0,LAYOUT0: {raw!r}") from err
+    return run0, layout0
 
 
 def _process_list(raw: str) -> tuple:
@@ -1036,6 +1062,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "floors' colliders reach under the desk top",
     )
     parser.add_argument(
+        "--seen_seeds",
+        type=_seed_pair,
+        default=None,
+        help="MS7e unseen-box ladder, the seen row: RUN0,LAYOUT0, draw i reads the seeds RUN0 + i "
+        "and LAYOUT0 + i of a recorded run of the ledger (refused otherwise) instead of --seed's. "
+        "With held-out parts only env 0 draws the recorded boxes, so it needs --num_envs 1",
+    )
+    parser.add_argument(
         "--client_flags",
         type=str,
         default="",
@@ -1114,6 +1148,10 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError("--heap_family must name one of --families")
     if args.carry_via and not args.release_lean:
         raise ValueError("--carry_via bends the B2 carry: it needs --release_lean")
+    if args.seen_seeds and args.num_envs != 1:
+        # The env's one generator draws env 0's boxes before any heap; each later env's boxes
+        # follow the heap before it, which held-out parts change.
+        raise ValueError("--seen_seeds reproduces a recorded run's env 0: it needs --num_envs 1")
     if args.heap_k > 0:
         if args.backend != "mujoco":
             raise ValueError("--heap_k needs --backend mujoco: the Isaac env has no heap")
@@ -1163,6 +1201,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         passenger_check=args.passenger_check,
         wall_band_cont=args.wall_band_cont,
         thin_snap=args.thin_snap,
+        seen_seeds=args.seen_seeds,
         client_flags=tuple(shlex.split(args.client_flags))
         + (("--scripted_place",) if args.scripted_place else ())
         + (("--scripted_rake",) if args.scripted_rake else ())
