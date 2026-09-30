@@ -28,7 +28,7 @@ script refuses it with its fail token.
 
 An LDraw part (``ldraw_part``) is read from ``assets/parts/<id>.json``, which
 ``scripts/ldraw_parts.py`` wrote from the LDraw library: its size is the collision box, its
-collider is up to eight convex hulls (``Part.hulls``) and its studs are visual
+collider is up to four convex hulls (``Part.hulls``) and its studs are visual
 (``Part.stud_frames``). Its mass keeps the H2 rule, and each hull carries the share of it that
 its volume holds (MS7e design section 6.1).
 """

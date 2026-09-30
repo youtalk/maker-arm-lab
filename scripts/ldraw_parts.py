@@ -58,7 +58,13 @@ LICENSE_URLS = {
     "CC BY 2.0": "https://creativecommons.org/licenses/by/2.0/",
     "CC BY 4.0": "https://creativecommons.org/licenses/by/4.0/",
 }
-MAX_HULLS = 8  # INITIAL: design section 6.5; the steps-per-second check may drop it to 4
+MAX_HULLS = 4
+"""The hull cap. The design's 8 (section 6.5) dropped to 4 by its steps-per-second rule (D8).
+On the LDraw heap read (Machine B, run seeds 20288000 + i, 4 heaps of 50 on the "all" split, 25
+LDraw parts each), the steps per second of each lane over the same heap without LDraw read
+0.78, 0.70, 0.48 and 0.68 at cap 8 (heap 2 again alone: 0.47), and 0.88, 0.94, 0.64 and 0.86
+at cap 4. At cap 4 the lone-part table stows 94 of 96 and the heap read stows 87 of 100 LDraw
+parts and 96 of 100 others in the correct box (2026-09-29)."""
 HULL_VERTICES = 32  # CoACD's per-hull vertex cap; MuJoCo's support function walks them
 VOXEL_M = 0.0002  # 0.5 LDU: a 1.6 mm wall is 8 voxels, a 4.8 mm pin hole 24
 CONVEX_FILL = 0.97
