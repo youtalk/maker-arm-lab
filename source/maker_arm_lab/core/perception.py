@@ -100,6 +100,10 @@ PARKED_CENTRE = (3.0, 0.0, 1.0)
 over ``heap_oracle.CANDIDATE_MAX_Z``, so the selector never takes it; outside every box and the
 reach band; and so far from the desk that no landing spot or rake start measures against it."""
 _PARKED_PART = Part("undetected", "brick", 0, 0, (0.008, 0.008, 0.008), False, 0.0)
+OWN_AXES = ("special", "joint", "minifig")
+"""The perceived classes whose detections grasp by the part's own closing axes: the MS7e class
+``special`` and, under MS7f's ``--categories``, the joint and minifig categories, whose parts
+each have their own (MS7f design section 7)."""
 
 
 def parse_scales(text: str) -> dict[str, float]:
@@ -148,8 +152,8 @@ class Detection:
     """The simulator's part index: only the metrics and the teacher-side recorder may read it;
     decisions never do."""
     closing_axes: tuple[int, ...] = BOX_AXES
-    """The part's own closing axes, as its shape shows them. Only a ``special`` detection
-    grasps by them: each LDraw part has its own (MS7e design section 6.5)."""
+    """The part's own closing axes, as its shape shows them. Only a detection of an
+    ``OWN_AXES`` class grasps by them: each LDraw part has its own (MS7e design section 6.5)."""
 
 
 @dataclass
@@ -191,7 +195,7 @@ class PerceivedState:
                 False,
                 0.0,
                 closing_axes=(
-                    SLOPE_AXES if slope else d.closing_axes if d.cls == "special" else BOX_AXES
+                    SLOPE_AXES if slope else d.closing_axes if d.cls in OWN_AXES else BOX_AXES
                 ),
             )
         return tuple(out)
