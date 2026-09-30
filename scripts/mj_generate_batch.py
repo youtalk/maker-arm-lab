@@ -33,6 +33,7 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 
 from maker_arm_lab.core import perception
 from maker_arm_lab.core.batch_loop import (
+    MS7F_READY,
     add_batch_arguments,
     add_ms7e_arguments,
     add_ms7f_arguments,
@@ -82,7 +83,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = _TokenEmittingParser(description=__doc__)
     add_batch_arguments(parser)
     add_ms7e_arguments(parser)
-    add_ms7f_arguments(parser)
+    add_ms7f_arguments(parser, transport_speed=False)  # --transport_speed is a batch flag
     parser.add_argument(
         "--perceived",
         action="store_true",
@@ -110,7 +111,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         if not (0 <= getattr(args, name) < 2**32):
             parser.error(f"--{name} is outside numpy's seed range (0 <= seed < 2**32)")
     check_ms7e(parser, args)
-    check_ms7f(parser, args)
+    # The recorder's walk pace predates MS7f (the MS3 speed ladder): it is built here.
+    check_ms7f(parser, args, MS7F_READY | {"transport_speed"})
     if args.perceived and (args.heap_k <= 0 or args.desk_boxes <= 0):
         parser.error(
             "--perceived records a heap sorted into desk boxes: it needs --heap_k > 0 "

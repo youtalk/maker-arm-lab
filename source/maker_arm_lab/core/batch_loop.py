@@ -221,19 +221,31 @@ def ms7e_switches(args) -> dict:
     }
 
 
-MS7F_OFF: dict = {"categories": False}
+MS7F_OFF: dict = {
+    "categories": False,
+    "deep_tray": False,
+    "tray_refill": False,
+    "box_empty": False,
+    "classifier": None,
+    "passenger_drop": False,
+    "transport_speed": trajectory.TRANSPORT_SPEED,
+}
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
-of a run with every one off, what an MS7e run ran with. The gate supervisor keeps a stdlib copy
-(``scripts/run_gate_eval.py``), pinned by a test."""
+of a run with every one off, what an MS7e run ran with. categories is the base track's;
+deep_tray, tray_refill and box_empty track H's (design section 5); classifier and
+passenger_drop track C's (design section 6); transport_speed track S's (design section 8), the
+teacher walk's pace. The gate supervisor keeps a stdlib copy (``scripts/run_gate_eval.py``),
+pinned by a test."""
 MS7F_READY: frozenset[str] = frozenset({"categories"})
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
 a usage error with the script's fail token (MS7f design section 12.2). Each track adds its
 switch in the commit that brings the behaviour; the supervisor's copy is pinned by a test."""
 
 
-def add_ms7f_arguments(parser) -> None:
-    """The MS7f switches (MS7f design section 12.1), shared by the MuJoCo heap scripts. Each
-    defaults off, and off is MS7e."""
+def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
+    """The MS7f switches (MS7f design section 12.1, ``MS7F_OFF``), shared by the MuJoCo heap
+    scripts. Each defaults off, and off is MS7e. ``transport_speed`` False leaves out
+    ``--transport_speed``, which the recorder already takes (``add_batch_arguments``)."""
     parser.add_argument(
         "--categories",
         action="store_true",
@@ -241,6 +253,44 @@ def add_ms7f_arguments(parser) -> None:
         "category with more boxes than it needs taking a second one (desk_boxes.category_map); "
         "needs --box_draw",
     )
+    parser.add_argument(
+        "--deep_tray",
+        action="store_true",
+        help="MS7f H1: the tray's walls rise to the deep tray's height and every part drops in "
+        "at the start",
+    )
+    parser.add_argument(
+        "--tray_refill",
+        action="store_true",
+        help="MS7f H1': the tray holds a share of the heap at the start and is refilled between "
+        "cycles; the waiting parts are parked out of reach",
+    )
+    parser.add_argument(
+        "--box_empty",
+        action="store_true",
+        help="MS7f H2: a full box is emptied between cycles, its parts graded then and parked",
+    )
+    parser.add_argument(
+        "--classifier",
+        type=str,
+        default=None,
+        help="MS7f C: a TorchScript category classifier read on the three views, in place of the "
+        "stand-in",
+    )
+    parser.add_argument(
+        "--passenger_drop",
+        action="store_true",
+        help="MS7f C: open the jaws at the lift when the wrist view reads a passenger over the "
+        "tray interior",
+    )
+    if transport_speed:
+        parser.add_argument(
+            "--transport_speed",
+            type=float,
+            default=trajectory.TRANSPORT_SPEED,
+            help="MS7f S: the teacher walk's pace, the multiplier on the transport legs "
+            "(trajectory.TRANSPORT_SPEED)",
+        )
 
 
 def check_ms7f(parser, args, ready: frozenset[str] = MS7F_READY) -> None:

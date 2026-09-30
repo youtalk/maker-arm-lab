@@ -170,7 +170,15 @@ def ms7e_block(cfg: "GateCfg") -> dict:
     }
 
 
-MS7F_OFF = {"categories": False}
+MS7F_OFF = {
+    "categories": False,
+    "deep_tray": False,
+    "tray_refill": False,
+    "box_empty": False,
+    "classifier": None,
+    "passenger_drop": False,
+    "transport_speed": 4.0,
+}
 """``core.batch_loop.MS7F_OFF``, copied because the supervisor imports no maker_arm_lab; the test
 pins it. The "ms7f" block of a read with every MS7f switch off, what an MS7e payload ran with."""
 MS7F_READY: frozenset[str] = frozenset({"categories"})
@@ -1201,6 +1209,30 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="MuJoCo heap only, MS7f: forwarded as --categories, the six categories over the "
         "drawn boxes; needs --box_draw",
+    )
+    for name, what in (
+        ("deep_tray", "H1, the deep tray"),
+        ("tray_refill", "H1', the tray refill"),
+        ("box_empty", "H2, the box emptying"),
+        ("passenger_drop", "C, the passenger response"),
+    ):
+        parser.add_argument(
+            f"--{name}",
+            action="store_true",
+            help=f"MuJoCo heap only, MS7f {what}: forwarded as --{name}",
+        )
+    parser.add_argument(
+        "--classifier",
+        type=str,
+        default=None,
+        help="MuJoCo heap only, MS7f C: forwarded as --classifier PATH, the TorchScript category "
+        "classifier",
+    )
+    parser.add_argument(
+        "--transport_speed",
+        type=float,
+        default=MS7F_OFF["transport_speed"],
+        help="MuJoCo heap only, MS7f S: forwarded as --transport_speed X, the teacher walk's pace",
     )
     parser.add_argument(
         "--seen_seeds",

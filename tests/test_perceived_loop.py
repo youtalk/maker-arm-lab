@@ -10,7 +10,16 @@ import numpy as np
 import pytest
 import torch
 
-from maker_arm_lab.core import desk_boxes, grasp, layout, loop, oracle, parts, perception
+from maker_arm_lab.core import (
+    batch_loop,
+    desk_boxes,
+    grasp,
+    layout,
+    loop,
+    oracle,
+    parts,
+    perception,
+)
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.hold import HoldDetector
 from maker_arm_lab.core.layout import sample_run_draw
@@ -31,6 +40,7 @@ def _env_and_rig(
     box_draw=0,
     tray_lean=0.0,
     wall_band_cont=False,
+    categories=False,
 ):
     draw = sample_run_draw(random.Random(5))
     draw["slot_colors"] = (0, 1, 2, 3)
@@ -47,11 +57,13 @@ def _env_and_rig(
         episode_length_s=loop.episode_length_s(budget),
         class_names=class_names,
         box_draw=box_draw,
+        categories=categories,
     )
     env.reset(seed=11)
     if not box_draw:
         env.place_desk_boxes(0, FIXED)
     rng = random.Random(1)
+    loads = [[0.0] * env.desk_boxes]  # MS7f --categories: the teacher's release record
 
     def factory(i, bl, episode_draw):
         return HeapOracle(
@@ -66,6 +78,8 @@ def _env_and_rig(
             box_sizes=env.desk_box_sizes[i],
             tray_lean_deg=env.tray_lean_deg,
             wall_band_cont=wall_band_cont,
+            box_sets=env.part_box_sets(i),
+            box_load=loads[i],
         )
 
     rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)
@@ -1001,7 +1015,8 @@ class _TruthlessEnv:
         object.__setattr__(self, "_strict", False)
 
     def __getattr__(self, name):
-        if self._strict and name in ("destination_bins", "desk_box_poses", "desk_box_sizes"):
+        strict = ("destination_bins", "desk_box_poses", "desk_box_sizes", "destination_mask")
+        if self._strict and name in strict + ("class_boxes",):
             raise AssertionError(f"the loop read env.{name} after its setup")
         return getattr(self._env, name)
 
@@ -1049,8 +1064,8 @@ TRUTH_DECISION_READS = (
 """The loop's truth reads besides the three accessors: what its decisions read before MS7c."""
 
 
-def _teacher_scene(monkeypatch, class_names=parts.BASE_CLASSES, box_draw=0):
-    env, rig = _env_and_rig(class_names=class_names, box_draw=box_draw)
+def _teacher_scene(monkeypatch, class_names=parts.BASE_CLASSES, box_draw=0, categories=False):
+    env, rig = _env_and_rig(class_names=class_names, box_draw=box_draw, categories=categories)
     _place(env, SPREAD)
     switches = {
         "select_at_release": True,
@@ -1075,6 +1090,15 @@ def _box_draw_scene(monkeypatch):
     """The teacher scene under the MS7e box draw (``--box_draw 6``): the reset draws the count,
     each box's interior and pose, and the loop perceives each box's size (design section 4.3)."""
     return _teacher_scene(monkeypatch, parts.PART_CLASSES, box_draw=6)
+
+
+def _ms7f_scene(monkeypatch):
+    """The teacher scene with every MS7f switch the commit builds (``batch_loop.MS7F_READY``):
+    the six categories over the drawn boxes, a category's second boxes chosen by the loop's
+    own release record (MS7f design section 6.2). A track that readies a loop switch adds it
+    here, so the no-truth test runs with every ready switch on (design section 12.2)."""
+    assert batch_loop.MS7F_READY == {"categories"}, "turn the new switch on in this scene"
+    return _teacher_scene(monkeypatch, parts.active_categories(), box_draw=6, categories=True)
 
 
 def _thin_snap_scene(monkeypatch):
@@ -1199,6 +1223,7 @@ def test_every_ms7d_switch_at_once_runs_the_teacher_scene_to_its_end(monkeypatch
         _wall_band_scene,
         _thin_snap_scene,
         _snap_closed_scene,
+        _ms7f_scene,
     ],
 )
 def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):

@@ -1470,7 +1470,7 @@ def test_the_supervisor_forwards_categories_and_its_cache_matches_it(tmp_path, c
     cfg = _cfg(tmp_path, ledger, processes=1, backend="mujoco", heap_k=50, box_draw=6)
     cfg.ms7f = {"categories": True}
     results = ge.run_gate(cfg, lambda d: _heap_payload(d), lambda: _FakeServer([]))
-    assert results["ms7f"] == {"categories": True}
+    assert results["ms7f"] == ge.MS7F_OFF | {"categories": True}
 
 
 def test_the_gate_sums_the_throughput_and_the_heldout_row_and_gates_them_only_when_set():
