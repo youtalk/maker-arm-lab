@@ -26,8 +26,10 @@ category and name and whether its kind is held out; on a wrist frame the part bo
 the passenger count, ``oracle.passengers`` against the heights at the HOVER start, and of those
 the riders, which rose at least ``RIDE_SHARE`` of the jaws' own rise since the hold began; on an
 overhead frame the share of the part the camera sees (``part_seen``, ``_seen``). T2's rule reads
-the LIFT gate 0.10 m up; at the detector's lift, 0.05 m up, a neighbour the grasp pushed 2 cm up
-the heap still counts: most of the 16 such C1 lift frames looked at (2026-09-30) show no rider.
+the LIFT gate 0.10 m up and the lift frame is 0.05 m up, so the riders guard the label against a
+neighbour the grasp only nudged. Measured on the first four re-rendered C1 heaps (2026-09-30) they
+equal the passengers on 27 of 28 wrist frames: the passengers ride, and most of 16 such lift
+frames looked at show none of them, hidden under or behind the held part.
 
     MUJOCO_GL=egl PYTHONPATH=$PWD/source .venv/bin/python scripts/mj_render_set.py \\
         --out_dir /tmp/rs --num_envs 1 --heap_k 50 --cycle_budget 65 --parts_split train \\
