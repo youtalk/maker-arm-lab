@@ -797,6 +797,56 @@ class MjLegoSortEnv:
             if uv is not None:
                 overlay.stamp_marker(self._overhead[i], *uv)
 
+    def jitter_overhead(self, i: int) -> None:
+        """Draw env ``i``'s per-frame overhead camera jitter (MS4 lever 1) on top of the
+        episode's camera draw: 3 position and 3 angle draws from the reset rng."""
+        m, d = self.models[i], self.datas[i]
+        pos, rot = scene.overhead_camera_pose(self.episode_draws[i], self.camera_back)
+        jm, jd = FRAME_CAM_JITTER_M, FRAME_CAM_JITTER_DEG
+        dpos = [self._rng.uniform(-jm, jm) for _ in range(3)]
+        drot = [self._rng.uniform(-jd, jd) for _ in range(3)]
+        m.cam_pos[self._cam_overhead] = [p + j for p, j in zip(pos, dpos)]
+        m.cam_quat[self._cam_overhead] = quat_mul(
+            compose_offset_rot(rot, drot), cameras.ROS_TO_MUJOCO_CAM
+        )
+        # Fixed-camera world poses are derived by mj_camlight, which mj_step already ran
+        # before this edit; re-derive them or the renderer uses the old pose.
+        mujoco.mj_camlight(m, d)
+
+    def narrow_overhead(self, i: int, point) -> np.ndarray:
+        """MS7f design section 6.3, view 1: a (224, 224, 3) uint8 frame of env ``i`` around the
+        world ``point``, at ``cameras.NARROW_FOV_DEG``, the stand-in for a 224 px crop of the
+        real rig's frame. The overhead camera stays where its last frame put it (the episode's
+        camera draw and that frame's jitter) and turns by the smallest rotation that puts
+        ``point`` on its optical axis, so the image keeps the overhead frame's up. A crop of the
+        same frame differs by the image plane's tilt, at most 11 degrees over the tray.
+
+        It draws nothing, and it puts the camera's pose and angle back before it returns, so the
+        next frame and every draw are what they would have been without it."""
+        m, d, c = self.models[i], self.datas[i], self._cam_overhead
+        saved = m.cam_quat[c].copy(), float(m.cam_fovy[c])
+        eye, rot = d.cam_xpos[c].copy(), d.cam_xmat[c].reshape(3, 3).copy()
+        ahead = -rot[:, 2]  # a MuJoCo camera looks along its -z
+        want = np.asarray(point, dtype=float) - eye
+        want /= np.linalg.norm(want)
+        axis = np.cross(ahead, want)
+        sin = float(np.linalg.norm(axis))
+        half = 0.5 * math.atan2(sin, float(ahead @ want))
+        turn = (math.cos(half), *(axis * (math.sin(half) / sin if sin > 0.0 else 0.0)))
+        quat = np.zeros(4)
+        mujoco.mju_mat2Quat(quat, rot.flatten())
+        # The overhead camera hangs off the world body, so its model pose is its world pose.
+        m.cam_quat[c] = quat_mul(turn, quat)
+        m.cam_fovy[c] = cameras.NARROW_FOV_DEG
+        try:
+            mujoco.mj_camlight(m, d)
+            r = self.renderers[i]
+            r.update_scene(d, camera=c)
+            return r.render().copy()
+        finally:
+            m.cam_quat[c], m.cam_fovy[c] = saved
+            mujoco.mj_camlight(m, d)
+
     def close(self) -> None:
         for r in self.renderers:
             r.close()
@@ -1230,17 +1280,7 @@ class MjLegoSortEnv:
                             (left if side == 0 else right)[i, 0, b] += world
             if images and self.cameras:
                 if self.cfg.frame_jitter:
-                    pos, rot = scene.overhead_camera_pose(self.episode_draws[i], self.camera_back)
-                    jm, jd = FRAME_CAM_JITTER_M, FRAME_CAM_JITTER_DEG
-                    dpos = [self._rng.uniform(-jm, jm) for _ in range(3)]
-                    drot = [self._rng.uniform(-jd, jd) for _ in range(3)]
-                    m.cam_pos[self._cam_overhead] = [p + j for p, j in zip(pos, dpos)]
-                    m.cam_quat[self._cam_overhead] = quat_mul(
-                        compose_offset_rot(rot, drot), cameras.ROS_TO_MUJOCO_CAM
-                    )
-                    # Fixed-camera world poses are derived by mj_camlight, which mj_step already
-                    # ran before this edit; re-derive them or the renderer uses the old pose.
-                    mujoco.mj_camlight(m, d)
+                    self.jitter_overhead(i)
                 r = self.renderers[i]
                 r.update_scene(d, camera=self._cam_wrist)
                 self._wrist[i] = r.render()
