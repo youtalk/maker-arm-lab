@@ -185,6 +185,7 @@ MS7F_OFF = {
     "release_steps": 20,
     "lift_budget": 0,
     "close_guard": False,
+    "quiet_landing": False,
 }
 """``core.batch_loop.MS7F_OFF``, copied because the supervisor imports no maker_arm_lab; the test
 pins it. The "ms7f" block of a read with every MS7f switch off, what an MS7e payload ran with."""
@@ -204,6 +205,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "release_steps",
         "lift_budget",
         "close_guard",
+        "quiet_landing",
     }
 )
 """``core.batch_loop.MS7F_READY``, copied and pinned the same way: any other MS7f switch at a
@@ -1241,6 +1243,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ("book_miss", "H, the missed target's failure"),
         ("passenger_drop", "C, the passenger response"),
         ("close_guard", "S1, a retry's CLOSE at full length"),
+        ("quiet_landing", "S1, no joint noise after DESCEND's walk"),
     ):
         parser.add_argument(
             f"--{name}",

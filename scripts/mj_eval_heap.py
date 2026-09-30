@@ -468,6 +468,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             carry_via=args.carry_via,
             passenger_check=args.passenger_check,
             descend_speed=args.descend_speed,
+            quiet_landing=args.quiet_landing,
         )
         policy = None if args.oracle_driver else policy_client.ServerPolicy(args.server)
         trace = [] if args.hold_trace else None

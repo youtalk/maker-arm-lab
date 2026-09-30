@@ -1112,6 +1112,7 @@ def _ms7f_scene(monkeypatch):
         "lift_hold_steps",
         "release_steps",
         "close_guard",
+        "quiet_landing",
     }
     ready = {"categories", "deep_tray", "tray_refill", "box_empty", "book_miss"}
     ready |= {"lift_budget"}

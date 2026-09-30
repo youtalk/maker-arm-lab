@@ -504,6 +504,7 @@ class OracleRig:
         carry_via: bool = False,
         passenger_check: bool = False,
         descend_speed: float = 1.0,
+        quiet_landing: bool = False,
     ):
         self.env = env
         # MS7e rung B2: EXTEND leans toward its box (LEAN_AZIMUTH's note, `_leg_lean`).
@@ -525,6 +526,8 @@ class OracleRig:
         self.transport_speed = transport_speed
         # MS7f track S: the multiplier on DESCEND's pace, 1.0 today (LINEAR_PACE_M_PER_S's note).
         self.descend_speed = descend_speed
+        # MS7f: no command noise once DESCEND has walked its leg (`_command_noise`).
+        self.quiet_landing = quiet_landing
         self.bl = bl
         self.noise = noise
         self.rng = rng
@@ -867,6 +870,10 @@ class OracleRig:
             return 0.0
         factor = orc.noise_factor()
         if goal.target_pos is None and factor <= 1.0:
+            return 0.0
+        if self.quiet_landing and goal.phase == oracle.Phase.DESCEND and not self.plans[i]:
+            # The stall test reads the pick point still for DESCEND_STALL_STEPS; the jitter
+            # moves it ~0.1 mm a step, over STALL_EPS, so a noisy landing waited on its budget.
             return 0.0
         std = orc.draw.action_noise_std * factor * JOINT_NOISE_PER_RAW_UNIT
         if std <= 0.0:

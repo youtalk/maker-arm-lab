@@ -270,6 +270,7 @@ MS7F_OFF: dict = {
     "release_steps": oracle.RELEASE_STEPS,
     "lift_budget": 0,
     "close_guard": False,
+    "quiet_landing": False,
 }
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
 of a run with every one off, what an MS7e run ran with. categories is the base track's;
@@ -292,6 +293,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "release_steps",
         "lift_budget",
         "close_guard",
+        "quiet_landing",
     }
 )
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
@@ -370,6 +372,12 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
         "--close_guard",
         action="store_true",
         help="MS7f S1: a retry's CLOSE holds oracle.CLOSE_STEPS whatever --close_steps says",
+    )
+    parser.add_argument(
+        "--quiet_landing",
+        action="store_true",
+        help="MS7f S1: the rig commands no joint noise once DESCEND has walked its leg, so the "
+        "stall test ends a noisy landing (OracleRig.quiet_landing)",
     )
     parser.add_argument(
         "--lift_hold_steps",

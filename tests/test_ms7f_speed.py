@@ -171,3 +171,26 @@ def test_the_recorder_gain_floor_moves_only_the_gain_draw():
     floor = batch_loop.build_run(parser.parse_args(["--out_dir", "x", "--gain_min", "0.9"]))[2]
     assert floor.gain_scale == (0.9, 1.0)
     assert {**vars(floor), "gain_scale": today.gain_scale} == vars(today)
+
+
+def test_a_quiet_landing_drops_the_noise_only_after_descends_walk():
+    orc = SimpleNamespace(noise_factor=lambda: 1.0, draw=SimpleNamespace(action_noise_std=0.05))
+
+    def noise(phase, walking, quiet):
+        goal = SimpleNamespace(phase=phase, target_pos=(0.2, 0.0, 0.01))
+        rig = SimpleNamespace(oracles=[orc], goals=[goal], plans=[[1] if walking else []])
+        rig.quiet_landing = quiet
+        return oracle_runtime.OracleRig._command_noise(rig, 0)
+
+    descend, hover = oracle.Phase.DESCEND, oracle.Phase.HOVER
+    assert isinstance(noise(descend, False, True), float)  # landed: no noise, no RNG draw
+    for phase, walking, quiet in (
+        (descend, True, True),
+        (descend, False, False),
+        (hover, False, True),
+    ):
+        assert noise(phase, walking, quiet).shape == (6,)
+    assert mj_eval_heap.parse_args([]).quiet_landing is False
+    for name in ("mj_eval_heap.py", "mj_generate_batch.py"):
+        text = (Path(mj_eval_heap.__file__).parent / name).read_text()
+        assert text.count("quiet_landing=args.quiet_landing") == 1
