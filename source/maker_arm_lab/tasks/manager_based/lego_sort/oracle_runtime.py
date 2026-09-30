@@ -2003,10 +2003,7 @@ class OracleRig:
             if dones[i] or self.goals[i] is None:
                 continue
             if nan_env[i]:
-                self.abandoned[i] = True
-                self.goals[i] = None
-                if self.stats[i]["abandon"] is None:
-                    self.stats[i]["abandon"] = "nan_state"
+                self._abandon(i, "nan_state")
 
     def _run_watchdog(self, dones: torch.Tensor) -> None:
         """Joint-space watchdog: 30 consecutive flagged steps abandons the env."""
@@ -2035,10 +2032,20 @@ class OracleRig:
                     if not self._push_takeover_over(i):
                         self._enter_phase(i, self.snapshot(i) if fixed is None else fixed)
                     continue
-                self.abandoned[i] = True
-                self.goals[i] = None
-                if self.stats[i]["abandon"] is None:
-                    self.stats[i]["abandon"] = "watchdog"
+                self._abandon(i, "watchdog")
+
+    def _abandon(self, i: int, reason: str) -> None:
+        """Give env ``i`` up. A takeover (``resume``) also hands the env back as failed: its
+        loop waits for ``takeover_result``, and without it the cycle ran on to the episode's
+        time-out. Measured on the MS7e B2 teacher smoke (2026-09-29, run seed 20288900): a
+        HOVER jammed near link_005_joint's stop 36 steps in, and the heap lost 63221 steps and
+        34 of its 50 parts."""
+        self.abandoned[i] = True
+        self.goals[i] = None
+        if self.stats[i]["abandon"] is None:
+            self.stats[i]["abandon"] = reason
+        if self.single_cycle[i]:
+            self._go_idle(i, False)
 
     # -- frames --------------------------------------------------------------
     #
