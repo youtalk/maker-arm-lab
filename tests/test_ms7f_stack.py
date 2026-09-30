@@ -31,6 +31,7 @@ ON = {
     "close_steps": ["--close_steps", "15"],
     "lift_hold_steps": ["--lift_hold_steps", "10"],
     "release_steps": ["--release_steps", "10"],
+    "lift_budget": ["--lift_budget", "450"],
 }
 """Each MS7f switch at a value that is not its off value. A track that adds a switch adds it
 here too (the first test holds the table to ``MS7F_OFF``)."""

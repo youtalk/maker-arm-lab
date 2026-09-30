@@ -267,12 +267,14 @@ MS7F_OFF: dict = {
     "close_steps": oracle.CLOSE_STEPS,
     "lift_hold_steps": oracle.LIFT_HOLD_STEPS,
     "release_steps": oracle.RELEASE_STEPS,
+    "lift_budget": 0,
 }
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
 of a run with every one off, what an MS7e run ran with. categories is the base track's;
 deep_tray, tray_refill, box_empty and book_miss track H's (design section 5); classifier and
 passenger_drop track C's (design section 6); transport_speed (the teacher walk's pace),
-descend_speed and the teacher waits (TEACHER_WAITS) track S's (design section 8). The gate supervisor keeps a stdlib copy (``scripts/run_gate_eval.py``),
+descend_speed and the teacher waits (TEACHER_WAITS) track S's (design section 8), and so is
+lift_budget, a serving trim of the heap client. The gate supervisor keeps a stdlib copy (``scripts/run_gate_eval.py``),
 pinned by a test."""
 MS7F_READY: frozenset[str] = frozenset(
     {
@@ -286,6 +288,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "close_steps",
         "lift_hold_steps",
         "release_steps",
+        "lift_budget",
     }
 )
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
@@ -371,6 +374,13 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
         type=int,
         default=oracle.RELEASE_STEPS,
         help="MS7f S1: control steps the teacher's RELEASE holds",
+    )
+    parser.add_argument(
+        "--lift_budget",
+        type=int,
+        default=0,
+        help="MS7f S2, the heap client with --perceived: end a cycle that has lifted nothing and "
+        "holds nothing this many steps after its selection (loop.lift_budget_ends); 0 is off",
     )
 
 

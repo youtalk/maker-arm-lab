@@ -343,6 +343,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         parser.error(f"--heap_k {args.heap_k} exceeds {MAX_HEAP_K}, the MS7f heap (MAX_HEAP_K)")
     if not args.transport_speed > 0.0:
         parser.error("--transport_speed must be positive")
+    if args.lift_budget < 0:
+        parser.error("--lift_budget must be 0 (off) or more")
     check_ms7e(parser, args)
     check_ms7f(parser, args)
     check_teacher_waits(parser, args)
@@ -365,6 +367,7 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "marker_bias",
         "wrist_fix",
         "class_views",
+        "lift_budget",
     ):
         if getattr(args, name) not in (None, False) and not args.perceived:
             parser.error(f"--{name} needs --perceived")
@@ -512,6 +515,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             heldout=heldout_names(args),
             box_empty=args.box_empty,
             book_miss=args.book_miss,
+            lift_budget=args.lift_budget,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

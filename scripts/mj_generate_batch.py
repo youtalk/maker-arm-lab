@@ -122,6 +122,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     # --book_miss is the heap loop's; the rig driving here keeps its own failure memory.
     check_ms7f(parser, args, (MS7F_READY - {"book_miss"}) | {"transport_speed"})
     check_teacher_waits(parser, args)
+    if args.lift_budget:
+        parser.error("--lift_budget cuts a served cycle: the recorder serves no policy")
     if args.perceived and (args.heap_k <= 0 or args.desk_boxes <= 0):
         parser.error(
             "--perceived records a heap sorted into desk boxes: it needs --heap_k > 0 "

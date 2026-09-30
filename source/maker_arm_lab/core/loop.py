@@ -349,6 +349,16 @@ def released_after_lift(cycle: Cycle, open_fraction: float, held: int) -> bool:
     )
 
 
+def lift_budget_ends(age: int, lifted: bool, holding: bool, budget: int) -> bool:
+    """``lift_budget`` (MS7f design section 8.3, a serving trim): does a ``perceived`` cycle
+    that has lifted nothing end now, ``age`` steps after its selection, before
+    ``CYCLE_STEP_BUDGET``? Yes at ``budget`` steps or more (0: off) while the hold detector has
+    read no lift in the cycle (``lifted``) and holds nothing now (``holding``): a cycle that
+    holds a part keeps its row, as the carry grace does. The MS7e official read spent 43 % of
+    its steps in failed cycles, most of them run to the 800-step budget. Pure."""
+    return 0 < budget <= age and not lifted and not holding
+
+
 CARRY_GRACE_STEPS = 400
 """Control steps ``budget_ends_cycle`` keeps a cycle open past ``CYCLE_STEP_BUDGET`` while
 the jaws hold a part."""
@@ -1713,6 +1723,7 @@ def rollout(
     box_empty: bool = False,
     stretch: bool = False,
     book_miss: bool = False,
+    lift_budget: int = 0,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1843,6 +1854,8 @@ def rollout(
         raise EvalFailure("box_empty", "empties the desk boxes: it needs desk boxes")
     refill = bool(getattr(env, "tray_refill", False))  # MS7f H1': the env parks the waiting parts
     ms7f_tray = refill or bool(getattr(env, "deep_tray", False))
+    if lift_budget and not perceived:
+        raise EvalFailure("lift_budget", "reads the hold detector's lift: it needs perceived")
     if perceived:
         if policy is None:
             raise EvalFailure("perceived", "serves a policy; the oracle driver reads the truth")
@@ -2042,6 +2055,10 @@ def rollout(
                 if select_at_release and reason == "budget" and grace:
                     c.grace_steps += 1
                     reason = None
+                if reason is None and lift_budget_ends(
+                    step - c.start_step, c.lift_detected, d.holding, lift_budget
+                ):
+                    reason = "lift_budget"
                 if reason is not None:
                     if reason != "placed":
                         st.fail_mem.book(c.target_xy)  # never the selector's _mark_failure

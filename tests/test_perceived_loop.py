@@ -1113,6 +1113,7 @@ def _ms7f_scene(monkeypatch):
         "release_steps",
     }
     ready = {"categories", "deep_tray", "tray_refill", "box_empty", "book_miss"}
+    ready |= {"lift_budget"}
     assert batch_loop.MS7F_READY == ready | teacher, "turn it on in this scene"
     # Two of the three bricks start in the tray and one part fills a box, so the refill and
     # an emptying both run between cycles. Set before the build: the box draw reads the ratio.
@@ -1129,7 +1130,10 @@ def _ms7f_scene(monkeypatch):
         deep_tray=True,
         tray_refill=True,
     )
-    return env, rig, policy, budget, switches | {"box_empty": True, "book_miss": True}
+    # A lift budget under the 800-step cycle budget: the tray scene's first three cycles lift
+    # nothing and end on it, and the fourth places its part at step 487 (150 cuts it too).
+    on = {"box_empty": True, "book_miss": True, "lift_budget": 750}
+    return env, rig, policy, budget, switches | on
 
 
 def _thin_snap_scene(monkeypatch):
