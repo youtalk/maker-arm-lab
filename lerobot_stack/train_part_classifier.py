@@ -3,8 +3,8 @@
 A torchvision ResNet18 with ImageNet weights (ACT's backbone) and two heads, trained on render set
 files (``scripts/mj_render_set.py``'s ``render_<seed>.npz``): the category, over ``CATEGORIES``
 (``core.parts.PART_CATEGORIES``, pinned as text by ``tests/test_lerobot_schema_pin.py``), on every
-frame of a part, and the passenger (another part rose with the jaws) on the wrist frames. The
-export is a TorchScript file: (N, 224, 224, 3) uint8 frames and whether they are wrist frames
+frame of a part, and the passenger (a rider, another part that rose with the jaws: the render
+set's ``riders``) on the wrist frames of the files that label it. The export is a TorchScript file: (N, 224, 224, 3) uint8 frames and whether they are wrist frames
 in, (category logits (N, 6), passenger logit (N,)) out, the ImageNet normalisation and the wrist
 frame's crop around the jaws (``WRIST_ROI``) inside, the names in ``categories`` and the
 passenger operating point in ``passenger_threshold``. The heap loop loads it with
@@ -95,10 +95,15 @@ class PartClassifier(nn.Module):
 
 
 def load(paths) -> dict[str, np.ndarray]:
-    """The render set files as one set of arrays, plus ``file``, each frame's file index."""
+    """The render set files as one set of arrays, plus ``file``, each frame's file index. A file
+    from before the ``riders`` label reads -1 (unknown) there."""
     parts = [np.load(p) for p in paths]
-    keys = [k for k in parts[0].files if k != "args"]
-    out = {k: np.concatenate([z[k] for z in parts]) for k in keys}
+
+    def column(z, k):
+        return z[k] if k in z.files else np.full(len(z["view"]), -1)
+
+    keys = [k for k in parts[0].files if k not in ("args", "riders")] + ["riders"]
+    out = {k: np.concatenate([column(z, k) for z in parts]) for k in keys}
     out["file"] = np.concatenate([np.full(len(z["view"]), n) for n, z in enumerate(parts)])
     return out
 
@@ -133,11 +138,13 @@ def train(model, data, idx, args, device) -> None:
     frames = torch.from_numpy(data["frames"])
     cat = torch.tensor([CATEGORIES.index(c) if c else -1 for c in data["category"].tolist()])
     wrist = torch.from_numpy(data["view"] != "overhead")
-    riders = torch.from_numpy((data["passengers"] > 0).astype(np.float32))
+    known = torch.from_numpy(data["riders"] >= 0)  # the frames the rider label covers
+    riders = torch.from_numpy((data["riders"] > 0).astype(np.float32))
     counts = torch.bincount(cat[idx], minlength=len(CATEGORIES)).float()
     weight = torch.where(counts > 0, counts.sum() / counts.clamp(min=1) / (counts > 0).sum(), 0.0)
-    pos = float(riders[idx][wrist[idx]].sum())
-    pos_weight = torch.tensor(min(10.0, (int(wrist[idx].sum()) - pos) / max(pos, 1.0)))
+    told = (wrist & known)[idx]
+    pos = float(riders[idx][told].sum())
+    pos_weight = torch.tensor(min(10.0, (int(told.sum()) - pos) / max(pos, 1.0)))
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     steps = args.epochs * math.ceil(len(idx) / args.batch)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, args.lr, total_steps=steps, pct_start=0.1)
@@ -162,8 +169,10 @@ def train(model, data, idx, args, device) -> None:
                     logits, rider = model(x[on], is_wrist)
                 share = float(view.sum()) / len(b)
                 loss = loss + share * ce(logits.float(), cat[b][view].to(device))
-                if is_wrist:
-                    loss = loss + bce(rider.float(), riders[b][view].to(device))
+                told = known[b][view]
+                if is_wrist and bool(told.any()):
+                    on_told = told.to(device)
+                    loss = loss + bce(rider.float()[on_told], riders[b][view][told].to(device))
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -232,10 +241,11 @@ def read(model, data: dict, device) -> dict:
 
     lift = views["lift"]
     wrist = views["lift"] | views["carry"]
-    truth = data["passengers"] > 0
     flagged = riders >= float(model.passenger_threshold)
 
-    def passenger(mask) -> dict:
+    def passenger(mask, label="riders") -> dict:
+        truth = data[label] > 0
+        mask = mask & (data[label] >= 0)
         pos, neg = mask & truth, mask & ~truth
         return {
             "passengers": int(pos.sum()),
@@ -264,6 +274,7 @@ def read(model, data: dict, device) -> dict:
         },
         "passenger_lift": passenger(lift),
         "passenger_wrist": passenger(wrist),
+        "passenger_lift_t2_rule": passenger(lift, "passengers"),
         "passenger_threshold": float(model.passenger_threshold),
         "confusion_lift": confusion(lift),
         "confusion_overhead_visible": confusion(views["overhead"] & visible),
@@ -336,9 +347,10 @@ def run(args) -> dict:
         train(model, data, idx, args, device)
         summary["train_seconds"] = round(time.time() - started, 1)
         wrist = keep & (data["view"] != "overhead")
-        check = wrist & val if val.any() else wrist
+        wrist &= data["riders"] >= 0
+        check = wrist & val if (wrist & val).any() else wrist
         _, riders = infer(model, data["frames"][check], np.ones(check.sum(), bool), device)
-        model.passenger_threshold = operating_point(riders, data["passengers"][check] > 0)
+        model.passenger_threshold = operating_point(riders, data["riders"][check] > 0)
         summary |= {
             "train_frames": len(idx),
             "val_files": sorted(int(f) for f in val_files),
