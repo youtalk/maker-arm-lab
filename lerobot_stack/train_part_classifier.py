@@ -25,8 +25,11 @@ whose false-alarm rate on those wrist frames is at most ``PASSENGER_FALSE_ALARMS
 
 ``--read`` reads files the training never sees (C1, design section 6.7) with the exported file on
 ``--read_device`` (the CPU, as served): every frame, argmax over the categories the read's labels
-hold, the bars and the confusion matrices, into ``<out>/c1.json``. ``--model FILE`` reads an
-existing export and trains nothing.
+hold, the bars and the confusion matrices, into ``<out>/c1.json``. It also reads the overhead
+view by the part's rest pose (``tilt``), the lifts whose part the loop sees in all three views
+(``cycles``) under the lift alone, the loop's vote (``loop_vote``) and the summed log
+probabilities of the three views, and how much of a missed passenger the lift frame shows.
+``--model FILE`` reads an existing export and trains nothing.
 
 Prints exactly one ``CLS_OK`` or ``CLS_FAIL`` line on every exit path, argparse errors included,
 and exits through ``os._exit``.
@@ -62,6 +65,9 @@ BARS = {"lift_accuracy": 0.97, "category_accuracy": 0.90, "recall": 0.8, "false_
 """C1 (design section 6.7): the wrist view at the lift reads the right category on at least 0.97
 of all parts and on at least 0.90 of each category; the passenger head finds at least 0.8 of the
 passengers with at most 0.02 false alarms."""
+UPRIGHT_DEG = (
+    30.0  # INITIAL: a tilt (the render set's ``tilt``) this close to up or down is not a side
+)
 
 
 class PartClassifier(nn.Module):
@@ -206,6 +212,36 @@ def infer(model, frames: np.ndarray, wrist: np.ndarray, device, batch: int = 64)
     return logits, riders
 
 
+def cycles(data: dict) -> np.ndarray:
+    """(lift, overhead, carry) row triples, one per lift frame with a part between the jaws: the
+    overhead frame of that part at its env's latest selection before the lift (the loop's
+    ``read_class``, -1 with none: the camera did not see it or another part was the target) and
+    the env's next wrist view if it is the carry (-1 when a lift comes first or none does)."""
+    view, held, step = data["view"], data["held"], data["step"]
+    env = data["file"] * 1_000_000 + data["env"]
+    over, carry = view == "overhead", (view == "carry") | (view == "lift")
+    rows = []
+    for n in np.flatnonzero((view == "lift") & (held >= 0)):
+        same = env == env[n]
+        seen = np.flatnonzero(same & over & (step <= step[n]))
+        o = -1
+        if len(seen):
+            last = seen[step[seen] == step[seen].max()]
+            match = last[held[last] == held[n]]
+            o = int(match[0]) if len(match) else -1
+        later = np.flatnonzero(same & carry & (step > step[n]))
+        c = int(later[step[later].argmin()]) if len(later) else -1
+        rows.append((n, o, c if c >= 0 and view[c] == "carry" else -1))
+    return np.array(rows, dtype=int).reshape(-1, 3)
+
+
+def loop_vote(over: np.ndarray, lift: np.ndarray, carry: np.ndarray) -> np.ndarray:
+    """The heap loop's ``class_views`` rule (``core.loop.lift_class_box``): the lift read when it
+    equals the overhead read, else the overhead read if the carry read sides with it, else the
+    carry read."""
+    return np.where(lift == over, lift, np.where(carry == over, over, carry))
+
+
 def operating_point(riders: np.ndarray, truth: np.ndarray) -> float:
     """The lowest logit threshold whose false-alarm rate on ``truth``'s negatives is at most
     ``PASSENGER_FALSE_ALARMS``; +inf with no negatives."""
@@ -250,6 +286,46 @@ def read(model, data: dict, device) -> dict:
     lift = views["lift"]
     wrist = views["lift"] | views["carry"]
     flagged = riders >= float(model.passenger_threshold)
+    kinds = sorted(set(data["part"][part].tolist()))
+    tilt = data["tilt"]
+    near = np.minimum(tilt, 180.0 - tilt)
+    poses = {
+        "upright": (tilt >= 0) & (tilt <= UPRIGHT_DEG),
+        "upside_down": (tilt >= 0) & (near <= UPRIGHT_DEG) & (tilt > 90.0),
+        "side": (tilt >= 0) & (near > UPRIGHT_DEG),
+    }
+    trip = cycles(data)
+    trip = trip[(trip[:, 1] >= 0) & (trip[:, 2] >= 0)]
+    logp = torch.log_softmax(torch.from_numpy(logits[:, cols]), dim=1).numpy()
+    names = np.array(active)
+    t_lift, t_over, t_carry = (trip[:, k] for k in range(3))
+    reads = {
+        "lift": guess[t_lift],
+        "loop_vote": loop_vote(guess[t_over], guess[t_lift], guess[t_carry]),
+        "sum_log_prob": names[(logp[t_over] + logp[t_lift] + logp[t_carry]).argmax(axis=1)],
+        "sum_log_prob_wrist": names[(logp[t_lift] + logp[t_carry]).argmax(axis=1)],
+    }
+    t_truth, t_held = labels[t_lift], held[t_lift]
+
+    def fused(rule) -> dict:
+        ok = reads[rule] == t_truth
+
+        def r(m) -> dict:
+            return {
+                "right": int(ok[m].sum()),
+                "total": int(m.sum()),
+                "rate": _rate(ok[m].sum(), m.sum()),
+            }
+
+        every = np.ones(len(ok), dtype=bool)
+        return {
+            "all": r(every),
+            "heldout": r(t_held),
+            "train_kinds": r(~t_held),
+            **{c: r(t_truth == c) for c in active},
+        }
+
+    missed = lift & (data["riders"] > 0) & ~flagged
 
     def passenger(mask, label="riders") -> dict:
         truth = data[label] > 0
@@ -290,6 +366,25 @@ def read(model, data: dict, device) -> dict:
         },
         "passenger_threshold": float(model.passenger_threshold),
         "confusion_lift": confusion(lift),
+        "overhead_visible_by_pose": {
+            pose: {c: row(views["overhead"] & visible & m & (labels == c)) for c in active}
+            for pose, m in poses.items()
+        },
+        "overhead_visible_by_kind_pose": {
+            k: {
+                pose: row(views["overhead"] & visible & m & (data["part"] == k))
+                for pose, m in poses.items()
+            }
+            for k in kinds
+        },
+        "three_views": {"lifts": int((lift & part).sum()), "with_all_three": len(trip)},
+        "fused": {rule: fused(rule) for rule in reads},
+        "passenger_misses_in_frame": {
+            "misses": int(missed.sum()),
+            "labelled": int((missed & (data["rider_seen"] >= 0)).sum()),
+            "rider_seen_at_all": int((missed & (data["rider_seen"] > 0)).sum()),
+            "rider_half_seen": int((missed & (data["rider_seen"] >= 0.5)).sum()),
+        },
         "confusion_overhead_visible": confusion(views["overhead"] & visible),
     }
     rates = [out["lift_by_category"][c]["rate"] for c in active]

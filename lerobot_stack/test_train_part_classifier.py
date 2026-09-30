@@ -108,3 +108,24 @@ def test_a_file_without_the_rider_label_reads_unknown(tmp_path):
     data = tpc.load([new, tmp_path / "render_2.npz"])
     assert (data["riders"][12:] == -1).all() and (data["riders"][:12] >= -1).all()
     assert (data["riders"][:12] == data["passengers"][:12]).all()
+
+
+def test_cycles_pair_each_lift_with_its_selection_and_carry():
+    # env 0: select part 3 (and 5) at step 0, lift 3 at 10, carry at 25; a lift of 5 at 40 with
+    # no selection of 5 since the one at step 30 (part 4) and no carry. env 1: its own selection.
+    view = ["overhead", "overhead", "lift", "carry", "overhead", "lift", "overhead", "lift"]
+    data = {
+        "view": np.array(view),
+        "held": np.array([3, 5, 3, 3, 4, 5, 3, 3]),
+        "step": np.array([0, 0, 10, 25, 30, 40, 0, 12]),
+        "env": np.array([0, 0, 0, 0, 0, 0, 1, 1]),
+        "file": np.zeros(8, dtype=int),
+    }
+    assert tpc.cycles(data).tolist() == [[2, 0, 3], [5, -1, -1], [7, 6, -1]]
+
+
+def test_the_loop_vote_takes_the_third_view_only_on_a_split():
+    over, lift, carry = (
+        np.array(v) for v in (["a", "a", "a", "a"], ["a", "b", "b", "b"], ["c", "a", "b", "c"])
+    )
+    assert tpc.loop_vote(over, lift, carry).tolist() == ["a", "a", "b", "c"]
