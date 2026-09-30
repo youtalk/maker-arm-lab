@@ -90,6 +90,7 @@ class GateCfg:
     desk_boxes: int = 0  # MuJoCo heap only: MS7a desk boxes; 0 is the MS6 shelf bin
     tray: bool = False  # MuJoCo heap only: the heap drops into the tray (MS7a)
     tray_lean: float = 0.0  # MuJoCo heap only: the tray walls lean outward, degrees
+    deep_box_floor: bool = False  # MuJoCo heap only: MS7e flat lever 1, deeper box floors
     # MuJoCo only: extra flags handed to the eval client verbatim, e.g. the heap loop's
     # protocol switches. A cached payload must have run with the same switches.
     client_flags: tuple = ()
@@ -551,6 +552,8 @@ def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
                 prefix += ["--tray_lean", str(cfg.tray_lean)]
             if cfg.tray:
                 prefix.append("--tray")
+            if cfg.deep_box_floor:
+                prefix.append("--deep_box_floor")
             if cfg.families:
                 prefix += ["--families", ",".join(cfg.families)]
             if cfg.box_draw:
@@ -641,6 +644,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
             and payload.get("desk_boxes", 0) == cfg.desk_boxes
             and payload.get("tray", False) == cfg.tray
             and float(payload.get("tray_lean", 0.0)) == cfg.tray_lean
+            # A payload that predates the deep floor ran without it.
+            and payload.get("deep_box_floor", False) == cfg.deep_box_floor
             # A payload that predates the MS7e switches ran with every one off.
             and payload.get("ms7e", MS7E_OFF) == ms7e_block(cfg)
         )
@@ -984,6 +989,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "must be in --families",
     )
     parser.add_argument(
+        "--deep_box_floor",
+        action="store_true",
+        help="MuJoCo heap only, MS7e flat lever 1: forwarded as --deep_box_floor, the desk box "
+        "floors' colliders reach under the desk top",
+    )
+    parser.add_argument(
         "--client_flags",
         type=str,
         default="",
@@ -1034,6 +1045,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError("--tray_lean leans the tray's walls: it needs --tray")
     if args.tray and args.heap_k <= 0:
         raise ValueError("--tray needs --heap_k > 0: the tray holds a heap")
+    if args.deep_box_floor and args.desk_boxes <= 0:
+        raise ValueError("--deep_box_floor deepens the desk box floors: it needs --desk_boxes")
     families = families_key(args.families)
     if any(getattr(args, name) for name in MS7E_OFF) and (
         args.heap_k <= 0 or args.backend != "mujoco"
@@ -1087,6 +1100,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         desk_boxes=args.desk_boxes,
         tray=args.tray,
         tray_lean=args.tray_lean,
+        deep_box_floor=args.deep_box_floor,
         families=families,
         box_draw=args.box_draw,
         release_lean=args.release_lean,

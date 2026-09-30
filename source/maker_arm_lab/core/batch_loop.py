@@ -147,6 +147,8 @@ def check_ms7e(parser, args) -> None:
         )
     if args.box_unseen and not args.box_draw:
         parser.error("--box_unseen draws the unseen boxes of --box_draw")
+    if getattr(args, "deep_box_floor", False) and getattr(args, "desk_boxes", 0) <= 0:
+        parser.error("--deep_box_floor deepens the desk box floors: it needs --desk_boxes")
 
 
 def ms7e_switches(args) -> dict:

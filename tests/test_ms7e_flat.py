@@ -6,6 +6,7 @@ import argparse
 import random
 
 import numpy as np
+import pytest
 
 from maker_arm_lab.core import batch_loop, parts
 from maker_arm_lab.core.layout import sample_run_draw
@@ -69,3 +70,9 @@ def test_the_deep_floor_changes_the_desk_box_floors_and_nothing_else():
             m.geom_pos[m.geom(name).id][2] + m.geom_size[m.geom(name).id][2] for m in (plain, deep)
         ]
         assert np.isclose(*top)
+
+
+def test_the_deep_floor_needs_desk_boxes():
+    with pytest.raises(SystemExit):
+        _heap_args("--deep_box_floor")
+    assert _heap_args("--deep_box_floor", "--desk_boxes", "4").deep_box_floor

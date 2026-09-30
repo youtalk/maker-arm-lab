@@ -1328,6 +1328,29 @@ def test_the_supervisor_forwards_every_ms7e_switch_and_its_cache_matches_them(
     assert results["ms7e"] == ge.MS7E_OFF | {"box_draw": 6}
 
 
+def test_the_supervisor_forwards_deep_box_floor_and_its_cache_matches_it(tmp_path):
+    """MS7e flat lever 1. A payload that predates the switch ran with it off."""
+    draw = ge.make_eval_draws(1, 1)[0]
+    argv = _argv(tmp_path / "gate") + MS7E_HEAP + ["--desk_boxes", "4"]
+    plain = ge._build_cfg(ge._parse_args(argv))
+    deep = ge._build_cfg(ge._parse_args(argv + ["--deep_box_floor"]))
+    assert "--deep_box_floor" in ge._eval_command(deep, draw)
+    assert "--deep_box_floor" not in ge._eval_command(plain, draw)
+    with pytest.raises(ValueError, match="--deep_box_floor"):
+        ge._build_cfg(ge._parse_args(_argv(tmp_path) + MS7E_HEAP + ["--deep_box_floor"]))
+    path = tmp_path / "gate" / "eval_000.json"
+    path.parent.mkdir(parents=True)
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+
+    def hit(gate_cfg, **extra):
+        payload = _heap_payload(draw, inference=served, desk_boxes=4, **extra)
+        path.write_text(json.dumps(payload))
+        return ge._cached_payload(gate_cfg, draw) is not None
+
+    assert hit(plain) and not hit(deep)
+    assert hit(deep, deep_box_floor=True) and not hit(plain, deep_box_floor=True)
+
+
 def test_the_gate_sums_the_family_and_box_count_rows():
     draw = ge.make_eval_draws(1, 20261400)[0]
 
