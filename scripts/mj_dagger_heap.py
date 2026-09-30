@@ -206,6 +206,7 @@ def main(argv=None) -> int:
                 rng=rig_rng,
                 cycle_budget=args.cycle_budget,
                 boxes=env.desk_box_poses[i],
+                box_sizes=env.desk_box_sizes[i],
                 tray=env.tray,
                 tray_lean_deg=env.tray_lean_deg,
             )

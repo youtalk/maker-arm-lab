@@ -1,0 +1,102 @@
+{
+ "id": "87087",
+ "title": "Brick 1 x 1 with Stud on 1 Side",
+ "size": [
+  0.008,
+  0.008,
+  0.0096
+ ],
+ "closing_axes": [
+  0,
+  2
+ ],
+ "closing_axes_reason": "y runs through the side stud, which a real jaw meets 1.6 mm early",
+ "hulls": [
+  [
+   [
+    0.004,
+    0.004,
+    0.0048
+   ],
+   [
+    -0.004,
+    0.004,
+    0.0048
+   ],
+   [
+    0.004,
+    -0.004,
+    0.0048
+   ],
+   [
+    0.004,
+    0.004,
+    -0.0048
+   ],
+   [
+    -0.004,
+    -0.004,
+    0.0048
+   ],
+   [
+    -0.004,
+    0.004,
+    -0.0048
+   ],
+   [
+    0.004,
+    -0.004,
+    -0.0048
+   ],
+   [
+    -0.004,
+    -0.004,
+    -0.0048
+   ]
+  ]
+ ],
+ "hull_volumes": [
+  6.144e-07
+ ],
+ "studs": [
+  {
+   "base": [
+    0.0,
+    -0.004,
+    0.0008
+   ],
+   "axis": [
+    0.0,
+    -1.0,
+    0.0
+   ],
+   "height": 0.0016,
+   "radius": 0.0024001
+  },
+  {
+   "base": [
+    0.0,
+    0.0,
+    0.0048
+   ],
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "height": 0.0016,
+   "radius": 0.0024001
+  }
+ ],
+ "source": {
+  "file": "87087.dat",
+  "author": "Magnus Forsberg [MagFors]",
+  "license": "Licensed under CC BY 4.0 : see CAreadme.txt",
+  "update": "Part UPDATE 2024-06",
+  "files": 9,
+  "triangles": {
+   "collision": 104,
+   "visual": 248
+  }
+ }
+}

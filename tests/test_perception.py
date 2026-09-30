@@ -3,6 +3,7 @@ the position memory and the adapters that feed the heap selector."""
 
 import math
 import random
+from dataclasses import replace
 
 import pytest
 import torch
@@ -414,3 +415,18 @@ def test_the_wrist_draws_are_paired_across_scales_and_outcomes():
         )
     first = random.Random("wrist:5:1").gauss(0.0, 1.0)
     assert base[0][0] == first * perception.WRIST_BIAS_SIGMA_M
+
+
+def test_a_special_detection_grasps_by_the_parts_own_closing_axes():
+    """An LDraw part's own axes reach the selector through the perceived state (MS7e design
+    section 6.5); every other class keeps the MS7d rule, slope axes for a slope and box axes
+    otherwise, whatever the part."""
+    ldraw = parts.ldraw_part("3660")
+    part_list = [ldraw, SLOPE, BRICK]
+    truth = _truth(SPREAD[:3], part_list)
+    truth = replace(truth, closing_axes=tuple(p.closing_axes for p in part_list))
+    got = _perceiver(scales=ZERO).perceive(truth).parts(3)
+    assert ldraw.closing_axes not in (parts.BOX_AXES, parts.SLOPE_AXES)
+    assert [p.closing_axes for p in got] == [ldraw.closing_axes, parts.SLOPE_AXES, parts.BOX_AXES]
+    wrong = Detection(SPREAD[0], IDENTITY, BRICK.size, "wide", 0, ldraw.closing_axes)
+    assert perception.PerceivedState([wrong], ()).parts(1)[0].closing_axes == parts.BOX_AXES

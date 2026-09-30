@@ -149,15 +149,26 @@ class HeapOracle(oracle.EnvOracle):
         boxes: Sequence[Sequence[float]] = (),
         tray: bool = False,
         tray_lean_deg: float = 0.0,
+        box_sizes: Sequence[Sequence[float]] | None = None,
+        wall_band_cont: bool = False,
     ):
         """``destination`` is the MS6 bin index, or with ``boxes`` (one (x, y, yaw) per desk
-        box) the box index of every part, (K,), or one index for them all."""
+        box) the box index of every part, (K,), or one index for them all. ``box_sizes`` is
+        each box's interior (MS7e box draw), the MS7a box of ``desk_boxes.interior`` by
+        default. ``wall_band_cont`` (MS7e ledger R13 S3, continuous gripper only) tests the
+        walls at the continuous jaws' landing gap, ``grasp.CONT_HOLD_BAND``."""
         super().__init__(bl, len(parts), draw, induction=induction, rng=rng)
         # MS7a design, the tray: the heap lies inside four walls that ``core.grasp`` ranks
         # against (``grasp.wall_allows``). Off, the heap lies on the bare desk as in MS6.
         self.walls = grasp.tray_walls(tray_lean_deg) if tray else ()
+        self.hold_band = grasp.CONT_HOLD_BAND if wall_band_cont else grasp.JAW_HOLD_BAND
         self.parts = tuple(parts)
         self.boxes = tuple(tuple(float(v) for v in box) for box in boxes)
+        self.box_sizes = (
+            desk_boxes.interiors(len(self.boxes))
+            if box_sizes is None
+            else tuple(tuple(float(v) for v in size) for size in box_sizes)
+        )
         if self.boxes:
             dest = torch.as_tensor(destination).long()
             self.part_boxes = (
@@ -232,9 +243,9 @@ class HeapOracle(oracle.EnvOracle):
 
     def _box_tensor(self) -> tuple[torch.Tensor, torch.Tensor]:
         """(1,M,4) grader boxes and their half extents, as ``stowed.env_desk_boxes`` builds."""
-        z, half = desk_boxes.stow_region(len(self.boxes))
-        boxes = torch.tensor([[(x, y, z, yaw) for x, y, yaw in self.boxes]])
-        return boxes, torch.tensor(half)
+        regions = [desk_boxes.stow_region(size) for size in self.box_sizes]
+        boxes = torch.tensor([[(x, y, z, yaw) for (x, y, yaw), (z, _) in zip(self.boxes, regions)]])
+        return boxes, torch.tensor([[half for _, half in regions]])
 
     def _stowed(self, scene: oracle.SceneSnapshot) -> set[int]:
         if self.boxes:
@@ -305,9 +316,8 @@ class HeapOracle(oracle.EnvOracle):
             # A part in any box, its own or another, is out of play: the grasp model knows no
             # walls, and a part in another box is the class branch's wrong_box, not a target.
             if self.box_filter_xy:
-                n = len(self.boxes)
                 xy = scene.brick_pos[:, :2].tolist()
-                boxed = [desk_boxes.in_outer_footprint(p, self.boxes, n) for p in xy]
+                boxed = [desk_boxes.in_outer_footprint(p, self.boxes, self.box_sizes) for p in xy]
             else:
                 boxes, half = self._box_tensor()
                 boxed = checker.in_boxes(scene.brick_pos.unsqueeze(0), boxes, half)[0].any(-1)
@@ -335,6 +345,7 @@ class HeapOracle(oracle.EnvOracle):
             oracle.PICK_TILT_RAD,
             [p.closing_axes for p in self.parts],
             self.walls,
+            self.hold_band,
         )
 
     def _push_heading(self, center: tuple[float, float]) -> float:

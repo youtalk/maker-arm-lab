@@ -31,8 +31,8 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from maker_arm_lab.core import grasp, oracle
-from maker_arm_lab.core.parts import BOX_AXES, PART_CLASSES, SLOPE_AXES, Part
+from maker_arm_lab.core import desk_boxes, grasp, oracle
+from maker_arm_lab.core.parts import BASE_CLASSES, BOX_AXES, SLOPE_AXES, Part
 from maker_arm_lab.core.quat import quat_apply, quat_mul
 
 KNOBS = (
@@ -147,6 +147,9 @@ class Detection:
     sim_index: int
     """The simulator's part index: only the metrics and the teacher-side recorder may read it;
     decisions never do."""
+    closing_axes: tuple[int, ...] = BOX_AXES
+    """The part's own closing axes, as its shape shows them. Only a ``special`` detection
+    grasps by them: each LDraw part has its own (MS7e design section 6.5)."""
 
 
 @dataclass
@@ -187,7 +190,9 @@ class PerceivedState:
                 d.size,
                 False,
                 0.0,
-                closing_axes=SLOPE_AXES if slope else BOX_AXES,
+                closing_axes=(
+                    SLOPE_AXES if slope else d.closing_axes if d.cls == "special" else BOX_AXES
+                ),
             )
         return tuple(out)
 
@@ -201,6 +206,7 @@ class Truth:
     sizes: torch.Tensor  # (K, 3) catalog extents along the body axes
     classes: Sequence[str]  # (K,) PART_CLASSES names
     tool_xy: tuple[float, float]  # the tool point the arm hides parts around
+    closing_axes: Sequence[tuple[int, ...]] = ()  # (K,) catalog closing axes; () is BOX_AXES
 
 
 def covered(
@@ -248,20 +254,34 @@ class Perceiver:
     a knob sweep compares on.
     """
 
-    def __init__(self, run_seed: int, env_index: int, scales: dict[str, float] | None = None):
+    def __init__(
+        self,
+        run_seed: int,
+        env_index: int,
+        scales: dict[str, float] | None = None,
+        classes: Sequence[str] = BASE_CLASSES,
+    ):
         unknown = set(scales or {}) - set(KNOBS + EXTRA_KNOBS)
         if unknown:
             raise ValueError(f"unknown perception knobs {sorted(unknown)}; knobs: {KNOBS}")
         self.scales = {**dict.fromkeys(KNOBS + EXTRA_KNOBS, 1.0), **(scales or {})}
         self.rng = random.Random(f"perceive:{run_seed}:{env_index}")
+        self.classes = tuple(classes)  # the active class list a wrong class is drawn from
         self._bias = (0.0, 0.0, 0.0)
         self._box_poses: tuple[tuple[float, float, float], ...] = ()
+        self._box_sizes: tuple[tuple[float, float, float], ...] = ()
         self.views: ClassViews | None = None  # ``class_views`` (L5): the per-part class model
 
     @property
     def box_poses(self) -> tuple[tuple[float, float, float], ...]:
         """The episode's perceived (x, y, yaw) per desk box, fixed until ``reset_episode``."""
         return self._box_poses
+
+    @property
+    def box_sizes(self) -> tuple[tuple[float, float, float], ...]:
+        """The episode's perceived interior per desk box (MS7e design section 4.3), or with no
+        true sizes given to ``reset_episode`` the MS7a box of ``desk_boxes.interior``."""
+        return self._box_sizes or desk_boxes.interiors(len(self._box_poses))
 
     @property
     def bias(self) -> tuple[float, float, float]:
@@ -277,8 +297,13 @@ class Perceiver:
         pos = self.scales["pos"]
         return (pos, pos, pos * self.scales["pos_z"])
 
-    def reset_episode(self, true_boxes: Sequence[Sequence[float]]) -> None:
-        """Draw the episode's position bias, then each box's bias in box order."""
+    def reset_episode(
+        self, true_boxes: Sequence[Sequence[float]], true_sizes: Sequence[Sequence[float]] = ()
+    ) -> None:
+        """Draw the episode's position bias, then each box's bias in box order, then with
+        ``true_sizes`` (the MS7e box draw) each box's interior noise: 3 draws a box, the
+        ``box`` knob times BOX_SIGMA_M on each side and on the depth, so on the rim (MS7e design
+        section 4.3). With no sizes the draws are MS7d's."""
         box = self.scales["box"]
         self._bias = tuple(
             a * s * self._gauss() for a, s in zip(self._pos_axes(), POS_BIAS_SIGMA_M)
@@ -294,16 +319,19 @@ class Perceiver:
                 )
             )
         self._box_poses = tuple(poses)
+        self._box_sizes = tuple(
+            tuple(float(v) + box * BOX_SIGMA_M * self._gauss() for v in size) for size in true_sizes
+        )
 
     def classify(self, true_cls: str, part: int | None = None) -> str:
         """One classification: the true class, or at the class knob's rate one of the other
-        three, uniformly. Always two draws. Under ``views`` a classification of part ``part``
+        active classes, uniformly. Always two draws. Under ``views`` a classification of part ``part``
         goes through that part's model (``ClassViews.view``) on the same two draws."""
         if self.views is not None and part is not None:
             return self.views.view(part, true_cls, self.rng)
         fires = self.rng.random() < min(1.0, CLASS_ERROR_PROBABILITY * self.scales["class"])
         pick = self.rng.random()
-        return _other_class(true_cls, pick) if fires else true_cls
+        return _other_class(true_cls, pick, self.classes) if fires else true_cls
 
     def perceive(self, truth: Truth) -> PerceivedState:
         """Every part's draws in index order, then the structural rules and the miss, then the
@@ -335,6 +363,7 @@ class Perceiver:
                     size=tuple(max(0.0, e + n) for e, n in zip(sizes[b].tolist(), dsize)),
                     cls=cls,
                     sim_index=b,
+                    closing_axes=truth.closing_axes[b] if truth.closing_axes else BOX_AXES,
                 )
             )
         return PerceivedState(detections, self._box_poses)
@@ -424,9 +453,10 @@ class WristCamera:
         )
 
 
-def _other_class(true_cls: str, pick: float) -> str:
-    """The wrong class a uniform draw ``pick`` in [0, 1) names among the other three."""
-    others = [c for c in PART_CLASSES if c != true_cls]
+def _other_class(true_cls: str, pick: float, classes: Sequence[str]) -> str:
+    """The wrong class a uniform draw ``pick`` in [0, 1) names among the other active
+    ``classes``: three with the MS7a classes, seven with MS7e's."""
+    others = [c for c in classes if c != true_cls]
     return others[int(pick * len(others))]
 
 
@@ -438,14 +468,22 @@ class ClassViews:
     ``class`` knob and the share is ``CLASS_PERSISTENT_SHARE`` times the ``rho`` knob, both
     capped at 1. The rollout runs one episode per env, so the constructor is the episode's
     reset: each part draws once whether it is persistent, at share times p, and a fixed wrong
-    class, uniformly from the other three. Every view of a persistent part returns that class.
-    Any other part is wrong at ``rate`` q = p (1 - share) / (1 - share p), so a single view
-    still errs at p; at a share of 0, q is p and a view is the MS7c classification, draw for
+    class, uniformly from the other active classes. Every view of a persistent part returns
+    that class. Any other part is wrong at ``rate`` q = p (1 - share) / (1 - share p), so a view
+    alone still errs at p; at a share of 0, q is p and a view is the MS7c classification, draw for
     draw. The generator is seeded like the ``Perceiver``'s, from the name ``class_views``, and
     every part and every view draws twice whatever the scales, so knob rows stay paired.
     """
 
-    def __init__(self, run_seed: int, env_index: int, scales: dict[str, float], num_parts: int):
+    def __init__(
+        self,
+        run_seed: int,
+        env_index: int,
+        scales: dict[str, float],
+        num_parts: int,
+        classes: Sequence[str] = BASE_CLASSES,
+    ):
+        self.classes = tuple(classes)
         p = min(1.0, CLASS_ERROR_PROBABILITY * scales["class"])
         share = min(1.0, CLASS_PERSISTENT_SHARE * scales["rho"])
         self.rate = 0.0 if share * p >= 1.0 else p * (1.0 - share) / (1.0 - share * p)
@@ -463,8 +501,8 @@ class ClassViews:
         pick = rng.random()
         fixed = self.persistent[part]
         if fixed is not None:
-            return _other_class(true_cls, fixed)
-        return _other_class(true_cls, pick) if fires else true_cls
+            return _other_class(true_cls, fixed, self.classes)
+        return _other_class(true_cls, pick, self.classes) if fires else true_cls
 
 
 class PositionMemory:

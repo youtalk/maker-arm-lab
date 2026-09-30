@@ -151,7 +151,7 @@ from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.dagger_loop import DECLINE_COOLDOWN, trigger_reason
 from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _nearest_brick_cm
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
-from maker_arm_lab.core.global_ik import fold_to_half_turn, wrap_to_pi
+from maker_arm_lab.core.global_ik import JAW_TIP_REACH, fold_to_half_turn, wrap_to_pi
 from maker_arm_lab.core.heap_oracle import (
     CANDIDATE_MAX_Z,
     MAX_RAKES,
@@ -159,7 +159,7 @@ from maker_arm_lab.core.heap_oracle import (
     target_context,
 )
 from maker_arm_lab.core.hold import HoldDetector, agreement, commanded_gap
-from maker_arm_lab.core.parts import PART_CLASSES, part_class
+from maker_arm_lab.core.parts import BASE_CLASSES, FAMILIES, part_class
 from maker_arm_lab.core.quat import quat_apply
 from maker_arm_lab.core.stowed import (
     _brick_states,
@@ -539,15 +539,52 @@ pick point 15 to 25 mm above it, over a part whose top is 4 to 8 mm above it, an
 air there. The margin is ``close_gate``'s, the stows' upper quartile on run m."""
 SNAP_Z_TOL = 0.001
 """m: ``snap_hold`` lets the jaws go once the served pick point is this close to its floor."""
+THIN_SNAP_MAX_HALF_HEIGHT = 0.002  # INITIAL: the MS7e ledger R13 rows read the lever
+"""m: under ``thin_snap`` a served row whose half height is at most this is a flat part (a
+plate or a tile, 3.2 mm tall), and its snap floor is ``DESK_CONTACT_Z``.
+
+The row's half height is the perceived one under ``perceived``: the vertical extent carries
+twice ``perception.SIZE_SIGMA_M``, so a plate row reads 1.6 +- 1.0 mm and about two in three
+plate rows take the snap, and a brick row (4.8 +- 1.0 mm) about one in 400."""
+DESK_CONTACT_Z = JAW_TIP_REACH + PICK_OFFSET_MEASURED[2]
+"""m: the pick point's height (2.1 mm) with level jaw tips on the desk, which is z = 0 inside
+the tray too: the plates reach ``JAW_TIP_REACH`` past grasp_center, the pick point sits
+``PICK_OFFSET_MEASURED`` along the same axis. The teacher's flat DESCEND asks for the tips
+``global_ik.FLAT_TIP_PRESS`` under the desk; the snap never takes the served point under the
+desk, and a policy command already lower is kept. No press is needed on this gripper: the
+lone-part table of 2026-09-29 (``scripts/mj_part_table.py --families plate,tile --trials 12
+--deep_box_floor`` at f8faeee) lifts 120 of 120 flat parts with the teacher's tips at the desk
+(``FLAT_TIP_PRESS`` 0, 119 stowed), as at 1 mm and 2 mm of press (120 and 120)."""
 
 
-def snap_shift(cmd, pick, row, shift, jaw_gap: float, held: bool = False) -> tuple:
+def snap_floor(row, thin: bool = False) -> float:
+    """``pick_snap``'s floor (m): the lowest height it takes the served pick point to. Pure.
+
+    The row centre plus ``SNAP_Z_MARGIN``. With ``thin`` (``thin_snap``, MS7e ledger R13 S2)
+    a row whose half height ``row[6]`` is at most ``THIN_SNAP_MAX_HALF_HEIGHT`` snaps to
+    ``DESK_CONTACT_Z`` instead. The E1 loss census of 2026-09-29 (screen e_E1_050000_scr): the
+    first close on a flat part sits above its top in 0.60 of its close_miss and held_no_lift
+    cycles (0.33 of its stows), a median 3.1 mm over the centre, because row z + 3 mm is 1.4 mm
+    over a 3.2 mm part's top before the perceived z's bias and noise (2 mm sigma each). The
+    desk floor reads no perceived z. A part under the landing spots stops the tips sooner, and
+    ``snap_hold`` lets go at a stop short. A slope row keeps the margin: at its centre a slope
+    lying on its base stands 7.9 to 9.6 mm, a brick's height, and bricks stow at this margin.
+    """
+    if thin and float(row[6]) <= THIN_SNAP_MAX_HALF_HEIGHT:
+        return DESK_CONTACT_Z
+    return float(row[2]) + SNAP_Z_MARGIN
+
+
+def snap_shift(
+    cmd, pick, row, shift, jaw_gap: float, held: bool = False, thin: bool = False
+) -> tuple:
     """``pick_snap``: the offset (m, world x y z) the loop adds to the commanded pick point. Pure.
 
     ``cmd`` is the commanded pick point (FK of the served arm command plus the pick offset),
     ``pick`` the measured one, ``row`` the served target row (``target_context``), ``shift``
     the offset served on the step before, ``jaw_gap`` the measured gap between the jaws and
     ``held`` the stop flag ``square_wrist`` reads (the cycle has held a part or lifted one).
+    ``thin`` is ``thin_snap``, which moves the floor of a flat row (``snap_floor``).
     The offset is zero with no live row (width 0), after the stop flag, and while the pick
     point is more than ``SNAP_RADIUS`` from the row centre in xy or ``SQUARE_ABOVE`` above its
     top. Inside that window:
@@ -558,9 +595,9 @@ def snap_shift(cmd, pick, row, shift, jaw_gap: float, held: bool = False) -> tup
       closes stow one cycle in three.
     * z: while the pick point is within ``SNAP_Z_RADIUS`` of the row centre and the jaws are
       open wider than the row's width, the offset goes down by at most ``SNAP_Z_STEP`` a step.
-      It never takes the served point under ``row z + SNAP_Z_MARGIN`` (a command already under
-      that height is left alone) and is kept, not grown, while the jaws are closed, so closed
-      tips are never driven into the part or the pile.
+      It never takes the served point under ``snap_floor`` (a command already under that
+      height is left alone) and is kept, not grown, while the jaws are closed, so closed tips
+      are never driven into the part or the pile.
     """
     if held or float(row[5]) <= 0.0:
         return (0.0, 0.0, 0.0)
@@ -576,19 +613,21 @@ def snap_shift(cmd, pick, row, shift, jaw_gap: float, held: bool = False) -> tup
         ex, ey = ex * SNAP_XY_STEP / n, ey * SNAP_XY_STEP / n
     if near <= SNAP_Z_RADIUS and jaw_gap >= float(row[5]):
         dz -= SNAP_Z_STEP
-    floor = min(0.0, float(row[2]) + SNAP_Z_MARGIN - float(cmd[2]))
+    floor = min(0.0, snap_floor(row, thin) - float(cmd[2]))
     return (dx + ex, dy + ey, min(0.0, max(dz, floor)))
 
 
-def snap_hold(cmd, pick, row, shift, descending: bool, held: bool = False) -> bool:
+def snap_hold(
+    cmd, pick, row, shift, descending: bool, held: bool = False, thin: bool = False
+) -> bool:
     """``pick_snap``: hold the jaws at the landing gap now? Pure.
 
-    ``cmd``, ``pick``, ``row`` and ``held`` as in ``snap_shift``, ``shift`` the offset
+    ``cmd``, ``pick``, ``row``, ``held`` and ``thin`` as in ``snap_shift``, ``shift`` the offset
     ``snap_shift`` returned for this step and ``descending`` whether the measured pick point
     came down ``GATE_DESCENT`` over the last ``GATE_WINDOW`` steps. True inside the lowering
     window (``SNAP_Z_RADIUS`` of the row centre, under the row's top plus ``SQUARE_ABOVE``,
-    before the stop flag) while the policy's own command hovers above the floor (row centre
-    plus ``SNAP_Z_MARGIN``) and the lowering is not done: the served point is still more than
+    before the stop flag) while the policy's own command hovers above the floor
+    (``snap_floor``) and the lowering is not done: the served point is still more than
     ``SNAP_Z_TOL`` above the floor, or it is there and the arm is still coming down after it
     and above it. A pick point that stops short (a neighbour under the tips) lets go at once,
     so the hold never outlasts the descent.
@@ -605,7 +644,7 @@ def snap_hold(cmd, pick, row, shift, descending: bool, held: bool = False) -> bo
     top = float(row[2]) + float(row[6])
     if near > SNAP_Z_RADIUS or float(pick[2]) >= top + SQUARE_ABOVE:
         return False
-    floor = float(row[2]) + SNAP_Z_MARGIN
+    floor = snap_floor(row, thin)
     if float(cmd[2]) <= floor:
         return False
     if float(cmd[2]) + float(shift[2]) > floor + SNAP_Z_TOL:
@@ -762,8 +801,8 @@ def box_wall_refusals(selector, scene, target: int) -> int:
         selector.parts[target].closing_axes,
     )
     tray = [w for w in selector.walls if not w.box]
-    return len(grasp.candidate_grasps(*args, tray)) - len(
-        grasp.candidate_grasps(*args, selector.walls)
+    return len(grasp.candidate_grasps(*args, tray, selector.hold_band)) - len(
+        grasp.candidate_grasps(*args, selector.walls, selector.hold_band)
     )
 
 
@@ -1015,13 +1054,17 @@ def look_again(tool_xy, lean_deg: float, streak: int) -> bool:
     return not tool_clear_of_tray(tool_xy, lean_deg) and streak < cap
 
 
-def over_box(xy, boxes) -> bool:
+def over_box(xy, boxes, sizes) -> bool:
     """Does the point ``xy`` lie over a desk box? Each box is an (x, y, yaw), the perceived
-    pose under ``perceived``, with the grader's footprint (``desk_boxes.stow_region``). Pure."""
-    z, half = desk_boxes.stow_region(len(boxes))
-    frames = torch.tensor([[(float(x), float(y), z, float(yaw)) for x, y, yaw in boxes]])
-    point = torch.tensor([[[float(xy[0]), float(xy[1]), z]]])
-    return bool(checker.in_boxes(point, frames, torch.tensor(half)).any())
+    pose under ``perceived``, with the grader's footprint of its interior in ``sizes``
+    (``desk_boxes.stow_region``). Pure."""
+    regions = [desk_boxes.stow_region(size) for size in sizes]
+    frames = [(float(x), float(y), z, float(yaw)) for (x, y, yaw), (z, _) in zip(boxes, regions)]
+    if not frames:
+        return False
+    point = torch.tensor([[[float(xy[0]), float(xy[1]), frames[0][2]]]])
+    half = torch.tensor([[h for _, h in regions]])
+    return bool(checker.in_boxes(point, torch.tensor([frames]), half).any())
 
 
 def voted_class(views) -> str:
@@ -1222,6 +1265,7 @@ def box_census(
     classes: list[str],
     census: list[dict],
     num_boxes: int,
+    class_names=BASE_CLASSES,
 ) -> dict:
     """The desk-box rows of one episode's end (MS7a design, the census). Pure.
 
@@ -1229,8 +1273,9 @@ def box_census(
     own box) and ``resting_box`` the box each part rests in at the end, or -1. A part at rest in
     a box that is not its own is a wrong-box part, and the last ``lifted_lost`` cycle that held
     it becomes ``wrong_box`` in ``classes``, in place (``census`` rows hold ``last_held``).
-    Returns the rows: parts stowed and parts in total per class and per box, and the wrong-box
-    parts.
+    Returns the rows: parts stowed and parts in total per class (every one of the active
+    ``class_names``), per family of the heap (MS7e design section 8.1) and per box, the
+    wrong-box parts and the episode's box count.
     """
     wrong = [
         b
@@ -1242,13 +1287,22 @@ def box_census(
             if classes[j] == "lifted_lost" and census[j].get("last_held") == b:
                 classes[j] = "wrong_box"
                 break
-    by_class = {c: {"stowed": 0, "total": 0} for c in PART_CLASSES}
+    by_class = {c: {"stowed": 0, "total": 0} for c in class_names}
+    present = {p.family for p in parts}
+    by_family = {f: {"stowed": 0, "total": 0} for f in FAMILIES if f in present}
     by_box = [{"stowed": 0, "total": 0} for _ in range(num_boxes)]
     for b, part in enumerate(parts):
-        for row in (by_class[part_class(part)], by_box[int(destination[b])]):
+        rows = (by_class[part_class(part)], by_family[part.family], by_box[int(destination[b])])
+        for row in rows:
             row["total"] += 1
             row["stowed"] += int(bool(stowed[b]))
-    return {"stowed_by_class": by_class, "stowed_by_box": by_box, "wrong_box_parts": len(wrong)}
+    return {
+        "stowed_by_class": by_class,
+        "stowed_by_family": by_family,
+        "stowed_by_box": by_box,
+        "wrong_box_parts": len(wrong),
+        "box_count": num_boxes,
+    }
 
 
 def resting_out_of_reach(pos, speed: float, held: bool, bl, stow_half_xy, in_box=None) -> bool:
@@ -1310,7 +1364,8 @@ def truth_reads(env, per_part: bool) -> TruthReads:
 def perception_truth(env, rig, i: int) -> perception.Truth:
     """``perceived``: the one truth read of a selection, what ``Perceiver.perceive`` turns into
     what the overhead camera reports. Every part's live centre and orientation, the catalog
-    sizes and classes, and the tool point the arm hides parts around (the FK pick point)."""
+    sizes, classes and closing axes, and the tool point the arm hides parts around (the FK pick
+    point)."""
     data = [env.scene[f"brick_{b}"].data for b in range(env.cfg.num_bricks)]
     origin = env.scene.env_origins[i]
     return perception.Truth(
@@ -1319,6 +1374,7 @@ def perception_truth(env, rig, i: int) -> perception.Truth:
         sizes=torch.tensor([p.size for p in env.parts]),
         classes=tuple(part_class(p) for p in env.parts),
         tool_xy=tuple(rig.pick_point(i)[:2].tolist()),
+        closing_axes=tuple(p.closing_axes for p in env.parts),
     )
 
 
@@ -1533,6 +1589,7 @@ def rollout(
     class_views: bool = False,
     hold_force: bool = False,
     force_cap: bool = False,
+    thin_snap: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1554,6 +1611,9 @@ def rollout(
     The nine MS7d switches are the module docstring's; all but ``hold_force`` and
     ``force_cap`` need ``perceived``. Those two need the env's ``arm_torques``, and a
     ``hold_trace`` row then carries the force too.
+    ``thin_snap`` (MS7e ledger R13 S2) moves ``pick_snap``'s floor of a flat row to the desk
+    (``snap_floor``); it needs ``pick_snap``, and the heap client records it in the payload's
+    "ms7e" block.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1592,10 +1652,26 @@ def rollout(
     ctx_target = getattr(env, "context_target", None)
     # MS7a desk boxes: one destination box per part, and the served box part follows the target.
     per_part = torch.as_tensor(env.destination_bins).dim() == 2
+    class_names = getattr(env, "class_names", BASE_CLASSES)  # the active class list (MS7e)
     if per_part:
         # The loop runs one episode per env: its truth, before an env's own end resets it.
         destination = torch.as_tensor(env.destination_bins).clone().to("cpu")
-        class_to_box = [dict(zip(PART_CLASSES, map(int, row))) for row in env.class_to_box]
+        class_to_box = [dict(zip(class_names, map(int, row))) for row in env.class_to_box]
+        # MS7e: the episode's own box count, the boxes the scene built without the box draw.
+        box_count = [
+            int(n) for n in getattr(env, "box_count", [len(p) for p in env.desk_box_poses])
+        ]
+        # MS7e ledger D7: the box draw's extra size-draw rounds, recorded with the draw on.
+        rounds = getattr(env, "box_draw_rounds", None) if getattr(env, "box_draw", 0) else None
+        # And each drawn box's pose and interior, so a read's census rebuilds the boxes.
+        geometry = []
+        if rounds is not None:
+            tables = (("box_poses", env.desk_box_poses), ("box_sizes", env.desk_box_sizes))
+            for i, n in enumerate(box_count):
+                rows = {
+                    key: [[round(float(v), 4) for v in r] for r in t[i][:n]] for key, t in tables
+                }
+                geometry.append(rows)
         final_box = torch.full((num_envs, k), -1, dtype=torch.long)
     if adopt_held and not per_part:
         raise EvalFailure("adopt_held", "needs desk boxes: a part's own box is the one it adopts")
@@ -1608,6 +1684,8 @@ def rollout(
     ):
         if on and (gripper_mode != "continuous" or ctx_target is None):
             raise EvalFailure(name, "needs the continuous gripper and a served target row")
+    if thin_snap and not pick_snap:
+        raise EvalFailure("thin_snap", "moves pick_snap's floor: it needs pick_snap")
     if contact_hold and not perceived:
         raise EvalFailure("contact_hold", "the stop flag's contact fallback needs perceived")
     if perceived:
@@ -1682,22 +1760,24 @@ def rollout(
         true_classes = [part_class(p) for p in env.parts]  # the metric's wrong-class counts
         lean = float(getattr(env, "tray_lean_deg", 0.0)) if getattr(env, "tray", False) else 0.0
         poses = env.desk_box_poses.copy()
+        drawn = bool(getattr(env, "box_draw", 0))  # MS7e: each box's size is perceived too
         for i, st in enumerate(states):
-            st.perceiver = perception.Perceiver(run_seed, i, scales)
-            st.perceiver.reset_episode(poses[i])
+            st.perceiver = perception.Perceiver(run_seed, i, scales, class_names)
+            st.perceiver.reset_episode(poses[i], env.desk_box_sizes[i] if drawn else ())
             if marker_bias:
                 st.marker = perception.MarkerBias(st.perceiver, run_seed, i)
             if class_views:
-                st.perceiver.views = perception.ClassViews(run_seed, i, scales, k)
+                st.perceiver.views = perception.ClassViews(run_seed, i, scales, k, class_names)
             poses[i] = st.perceiver.box_poses
             st.selector.boxes = st.perceiver.box_poses
+            st.selector.box_sizes = st.perceiver.box_sizes
             st.selector.failure_scope = "part"
             st.selector.knows_destinations = False
             st.selector.box_filter_xy = box_filter_xy
             if box_walls:
                 # L9: the grasp model and the rake also read the perceived boxes' walls.
-                boxes = st.perceiver.box_poses
-                st.selector.walls += desk_boxes.box_walls(boxes, len(boxes))
+                boxes, sizes = st.perceiver.box_poses, st.perceiver.box_sizes
+                st.selector.walls += desk_boxes.box_walls(boxes, sizes)
             if wrist_fix:
                 st.wrist = perception.WristCamera(run_seed, i, scales)
         env.perceived_box_poses = poses
@@ -1783,7 +1863,8 @@ def rollout(
             stowed_now = {b for b in range(k) if bool(in_bin[i, b])}
             if st.cycle is not None and perceived:
                 c, d = st.cycle, detectors[i]
-                over = d.lost and over_box(top_picks[i][:2], st.perceiver.box_poses)
+                p = st.perceiver
+                over = d.lost and over_box(top_picks[i][:2], p.box_poses, p.box_sizes)
                 gap = float(gaps[i]) if release_gap else None
                 released = perceived_release(c, d.lost, d.started, over, float(openings[i]), gap)
                 reason = perceived_cycle_end(c, step, released, bool(c.release_over))
@@ -2031,11 +2112,12 @@ def rollout(
                             c.snap,
                             2.0 * GRIPPER_OPEN_POS * float(openings[i]),
                             held=held_so_far,
+                            thin=thin_snap,
                         )
                         hist = pick_z_hist[i]
                         descending = len(hist) > GATE_WINDOW and hist[0] - hist[-1] > GATE_DESCENT
                         hold_open = snap_hold(
-                            cmd, picks[i], row, c.snap, descending, held=held_so_far
+                            cmd, picks[i], row, c.snap, descending, held=held_so_far, thin=thin_snap
                         )
                         if any(c.snap):
                             snapped = snapped_arm(rig.ik, action_cpu[i, :6], c.snap)
@@ -2299,9 +2381,13 @@ def rollout(
                 final_box[i],
                 st.classes,
                 st.census,
-                env.desk_boxes,
+                box_count[i],
+                class_names,
             )
             boxes["class_to_box"] = class_to_box[i]
+            if rounds is not None:
+                boxes["box_draw_rounds"] = int(rounds[i])
+                boxes.update(geometry[i])
         episodes.append(
             {
                 **result.to_json(),
@@ -2397,13 +2483,25 @@ def rollout(
 
 
 def _sum_box_rows(episodes: list[dict]) -> dict:
-    """The payload's desk-box rows: every episode's class and box rows and wrong-box parts."""
-    by_class = {c: {"stowed": 0, "total": 0} for c in PART_CLASSES}
+    """The payload's desk-box rows: every episode's class, family and box rows, its parts per
+    box count (the episode's own count, MS7e design section 8.1) and its wrong-box parts."""
+    by_class: dict[str, dict] = {}
+    by_family: dict[str, dict] = {}
+    by_count: dict[str, dict] = {}
     by_box: list[dict] = []
     for ep in episodes:
-        for c, row in ep["stowed_by_class"].items():
-            for key in ("stowed", "total"):
-                by_class[c][key] += row[key]
+        count_rows = {
+            str(ep["box_count"]): {"stowed": ep["bricks_stowed"], "total": ep["num_bricks"]}
+        }
+        for table, rows in (
+            (by_class, ep["stowed_by_class"]),
+            (by_family, ep["stowed_by_family"]),
+            (by_count, count_rows),
+        ):
+            for name, row in rows.items():
+                total = table.setdefault(name, {"stowed": 0, "total": 0})
+                for key in ("stowed", "total"):
+                    total[key] += row[key]
         for m, row in enumerate(ep["stowed_by_box"]):
             if m == len(by_box):
                 by_box.append({"stowed": 0, "total": 0})
@@ -2411,6 +2509,8 @@ def _sum_box_rows(episodes: list[dict]) -> dict:
                 by_box[m][key] += row[key]
     return {
         "stowed_by_class": by_class,
+        "stowed_by_family": by_family,
+        "stowed_by_box_count": dict(sorted(by_count.items(), key=lambda kv: int(kv[0]))),
         "stowed_by_box": by_box,
         "wrong_box_parts": sum(ep["wrong_box_parts"] for ep in episodes),
         "wrong_box_cycles": sum(ep["cycle_classes"].count("wrong_box") for ep in episodes),

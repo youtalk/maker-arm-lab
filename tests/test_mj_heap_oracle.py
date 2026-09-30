@@ -14,6 +14,7 @@ from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.core.quat import quat_from_rpy_deg
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.robots import frames
+from maker_arm_lab.tasks.manager_based.lego_sort import oracle_runtime as rt
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 
 PARTS = [
@@ -116,6 +117,23 @@ def test_a_takeover_on_a_heap_resumes_with_the_heap_teacher():
     assert rig.oracles[0].destination == int(env.destination_bins[0])
     assert rig.goals[0].phase is oracle.Phase.HOVER
     env.close()
+
+
+def test_a_takeover_the_watchdog_abandons_is_handed_back_failed(monkeypatch):
+    """The loop waits for ``takeover_result``: an abandoned takeover that never reported it
+    held the cycle until the episode timed out (MS7e B2 teacher smoke, 2026-09-29)."""
+    env, rig = _env_and_rig()
+    _place(
+        env, [(0.195, -0.045, 0.006, 0.3), (0.195, 0.0, 0.006, -0.8), (0.195, 0.045, 0.006, 1.2)]
+    )
+    rig.rearm([0], idle=True)
+    assert rig.resume(0)
+    monkeypatch.setattr(oracle, "watchdog_trips", lambda *args, **kwargs: True)
+    for _ in range(rt.WATCHDOG_TRIP_STRIKES):
+        rig.step()
+    env.close()
+    assert rig.abandoned[0] and rig.idle[0] and rig.goals[0] is None
+    assert rig.takeover_result[0] is False and not rig.single_cycle[0]
 
 
 def test_the_snapshot_carries_the_part_quaternions_and_the_pinch_floor_follows_the_width():

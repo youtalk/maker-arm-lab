@@ -26,8 +26,12 @@ consumers and are unchanged):
     initial_state/destination_bin (1,) i64      MS6 heap shards only; (K,) one box per part
         with desk boxes (MS7a)
     initial_state/desk_box_poses (1,M,3) f32    desk box shards only: each box's x, y, yaw
-    initial_state/class_to_box (4,) i64         desk box shards only: the box of each class,
-        in the order of its JSON `names` attr (core.parts.PART_CLASSES)
+    initial_state/desk_box_sizes (1,M,3) f32    box draw shards only (MS7e): each box's
+        interior; initial_state/box_count (1,) i64 the boxes on the desk (the rest are parked)
+        and initial_state/box_draw_rounds (1,) i64 the draw's extra size-draw rounds
+    initial_state/class_to_box (C,) i64         desk box shards only: the box of each class,
+        in the order of its JSON `names` attr (the env's class_names, the four
+        core.parts.BASE_CLASSES unless an MS7e switch is on)
     attrs: parts (JSON list of part names, MS6 heap shards only)
     attrs (file level): gripper_mode ("binary" | "continuous", MS6 phase B design 5.4)
 
@@ -41,12 +45,13 @@ inside the file, which is fine for a shard that is converted and removed run by 
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 import h5py
 import numpy as np
 
-from maker_arm_lab.core.parts import PART_CLASSES
+from maker_arm_lab.core.parts import BASE_CLASSES
 from maker_arm_lab.mj.context_names import (
     CONTEXT_BOX_NAMES,
     CONTEXT_CAMERA_NAMES,
@@ -69,9 +74,11 @@ class ShardRecorder:
         flush_every: int = 256,
         depth: bool = False,
         gripper_mode: str = "binary",
+        class_names: Sequence[str] = BASE_CLASSES,
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._class_names = tuple(class_names)
         self._file = h5py.File(self.path, "w")
         self._data = self._file.create_group("data")
         self._inflight = self._file.create_group("inflight")
@@ -246,9 +253,15 @@ class ShardRecorder:
             init.create_dataset(
                 "desk_box_poses", data=state["desk_box_poses"][None].astype(np.float32)
             )
+        if "desk_box_sizes" in state:  # MS7e box draw
+            init.create_dataset(
+                "desk_box_sizes", data=state["desk_box_sizes"][None].astype(np.float32)
+            )
+            for key in ("box_count", "box_draw_rounds"):
+                init.create_dataset(key, data=state[key].astype(np.int64))
         if "class_to_box" in state:
             ds = init.create_dataset("class_to_box", data=state["class_to_box"].astype(np.int64))
-            ds.attrs["names"] = json.dumps(list(PART_CLASSES))
+            ds.attrs["names"] = json.dumps(list(self._class_names))
         if self._parts[env_index] is not None:
             group.attrs["parts"] = json.dumps(self._parts[env_index])
         rigid = init.create_group("rigid_object")

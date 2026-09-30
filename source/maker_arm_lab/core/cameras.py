@@ -39,6 +39,17 @@ OVERHEAD_FOV_DEG = 60.0
 # Fraction of slack around the region that must be visible.
 OVERHEAD_MARGIN = 1.15
 OVERHEAD_CAM_POS = layout.overhead_view_pose(OVERHEAD_FOV_DEG, OVERHEAD_MARGIN)
+OVERHEAD_B2_BACK_M = 0.139
+"""How far the overhead camera's nominal x moves back under MS7e rung B2 (``--release_lean``,
+MS7e design section 4.4 item 3), m: 0.3011 -> 0.1621. The episode's camera draw around it is
+unchanged (+-0.01 m and +-2 degrees per axis).
+
+The smallest shift that keeps two things in frame at every corner of that draw, by projection
+(2026-09-29): every rim corner of a B2 box at least 4 px inside, and the tray inside. The worst
+box is a 0.10 m square interior, 0.05 m deep, yawed 45 degrees, at the band's back corner x
+-0.07. At 0.139 m its corner keeps 4.18 px (the near edge binds; the sides keep 13.82 px and the
+far edge 49.12 px), and the 30 degree leaned tray keeps 67.51 px. With no shift the same corner
+leaves the frame by 36.6 px at x -0.06."""
 
 # Look straight down with world +x ("away from the arm base", toward the bins) as image-up.
 # In the ROS camera convention (+z = view direction, +x = image-right, +y = image-down) that is

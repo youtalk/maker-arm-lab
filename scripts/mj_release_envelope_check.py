@@ -21,6 +21,14 @@ and the control steps on which an arm geom touched a box.
     MUJOCO_GL=egl PYTHONPATH=$PWD/source .venv/bin/python scripts/mj_release_envelope_check.py \\
         --trials 2 --out /tmp/envelope.json
 
+``--interior X,Y,Z`` sizes the box under test (MS7e design section 4.4), as the box draw does
+per episode: the size floor ``BOX_MIN`` and the B2 envelope run the check with the box they
+certify.
+
+``--pick X,Y`` moves the lone part off the tray centre. MS7e ledger R12 T1 reads the tray's far
+side against the back of the B2 band with it, where a straight EXTEND passes over the arm base
+(``--carry_via`` walks that leg as an arc).
+
 Prints exactly one ``ENVELOPE_OK {json}`` or ``ENVELOPE_FAIL {json}`` line on every exit path,
 argparse errors included, and exits through ``os._exit``.
 """
@@ -54,6 +62,9 @@ PARK_BOX_X = -0.6
 """Where the boxes not under test wait: behind the arm and off the desk."""
 EXTEND_STOP_M = 0.008
 """EXTEND's own stop tolerance (``EnvOracle.extend_goal``), read against the driven arm."""
+RETREAT_STOP_M = 0.01
+"""RETREAT's own stop tolerance (``EnvOracle.next_goal``). Reported, not a pass condition: a
+RETREAT that does not plan leaves the arm over the box, and the next HOVER solves globally."""
 SETTLE_STEPS = 60
 """Hold steps after RETREAT for a part still moving in the box."""
 MAX_STEPS = 3000
@@ -70,6 +81,11 @@ class _TokenEmittingParser(argparse.ArgumentParser):
 def _pair(text: str) -> tuple[float, float]:
     lo, hi = (float(v) for v in text.split(","))
     return lo, hi
+
+
+def _triple(text: str) -> tuple[float, float, float]:
+    x, y, z = (float(v) for v in text.split(","))
+    return x, y, z
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -95,8 +111,35 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="boxes in the scene, which sizes the box (core.desk_boxes.interior); box 0 "
         "stands at the band point and the others wait off the desk",
     )
+    parser.add_argument(
+        "--interior",
+        type=_triple,
+        default=None,
+        help="X,Y,Z: the interior of the box under test, m (MS7e design section 4.4), written "
+        "per trial as the box draw does (MjLegoSortEnv.place_desk_boxes); "
+        "default: core.desk_boxes.interior(--desk_boxes)",
+    )
+    parser.add_argument(
+        "--release_lean",
+        action="store_true",
+        help="MS7e rung B2: EXTEND leans toward the box (OracleRig release_lean)",
+    )
+    parser.add_argument(
+        "--carry_via",
+        action="store_true",
+        help="MS7e R12 T1, with --release_lean: an EXTEND that would pass the arm base walks "
+        "an arc (OracleRig carry_via)",
+    )
+    parser.add_argument(
+        "--pick",
+        type=_pair,
+        default=layout.TRAY_CENTER,
+        help="X,Y: where the lone part lies, m; default: the tray centre",
+    )
     parser.add_argument("--out", type=str, default="", help="write the trial records here")
     args = parser.parse_args(argv)
+    if args.carry_via and not args.release_lean:
+        parser.error("--carry_via bends the B2 carry: it needs --release_lean")
     if args.band_x is None:
         args.band_x = desk_boxes.band_x(args.desk_boxes)
     return args
@@ -108,15 +151,15 @@ def band_points(band_x, band_y) -> list[tuple[float, float]]:
     return [(x0, y0), (x0, y1), (x1, y0), (x1, y1), ((x0 + x1) / 2, (y0 + y1) / 2)]
 
 
-def _place_part(env, part, yaw: float) -> None:
-    """Part 0 at the tray centre at ``yaw`` (rad), settled; part 1 parked off the desk.
+def _place_part(env, part, yaw: float, pick=layout.TRAY_CENTER) -> None:
+    """Part 0 at ``pick`` at ``yaw`` (rad), settled; part 1 parked off the desk.
 
     The parked twin is never stowed, so the env's success never fires and never auto-resets
     the episode under the read (``MjLegoSortEnv.step``).
     """
     m, d, h = env.models[0], env.datas[0], env.handles
     for b, (xyz, a) in enumerate(
-        (((*layout.TRAY_CENTER, part.size[2] / 2 + 0.001), yaw), ((HEAP_PARK_X, 0.0, 0.0), 0.0))
+        (((*pick, part.size[2] / 2 + 0.001), yaw), ((HEAP_PARK_X, 0.0, 0.0), 0.0))
     ):
         adr = h.brick_qpos[b]
         d.qpos[adr : adr + 3] = xyz
@@ -142,12 +185,14 @@ def _joint_margin(rig) -> float:
     return float(torch.minimum(q - rig.limits[:, 0], rig.limits[:, 1] - q).min())
 
 
-def run_trial(env, rig, part, pose, seed: int, part_yaw: float = 0.0) -> dict:
+def run_trial(
+    env, rig, part, pose, seed: int, part_yaw: float = 0.0, interior=None, pick=layout.TRAY_CENTER
+) -> dict:
     env.reset(seed=seed)
     parked = [(PARK_BOX_X, 0.3 * j, 0.0) for j in range(1, env.desk_boxes)]
-    env.place_desk_boxes(0, [pose, *parked])
+    env.place_desk_boxes(0, [pose, *parked], [interior] if interior is not None else ())
     env.destination_bins[0] = 0  # the lone part goes to box 0 whatever the scene's map
-    _place_part(env, part, part_yaw)
+    _place_part(env, part, part_yaw, pick)
     rig.rearm([0])
     m = env.models[0]
     box_geoms = {g for g in range(m.ngeom) if m.body_mocapid[m.geom_bodyid[g]] >= 0}
@@ -192,6 +237,7 @@ def run_trial(env, rig, part, pose, seed: int, part_yaw: float = 0.0) -> dict:
     record["arm_box_contact_steps"] = touches
     record["abandoned"] = bool(rig.abandoned[0])
     record["extend_ok"] = record.get("extend_err_mm", math.inf) < 1000.0 * EXTEND_STOP_M
+    record["retreat_ok"] = record.get("retreat_err_mm", math.inf) < 1000.0 * RETREAT_STOP_M
     record["landed"] = bool(per_brick_stowed(env)[0, 0])
     record["ok"] = record["extend_ok"] and record["landed"]
     return record
@@ -223,9 +269,18 @@ def run(args) -> dict:
             episode_draw,
             rng=rng,
             boxes=env.desk_box_poses[i],
+            box_sizes=env.desk_box_sizes[i],
         )
 
-    rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)
+    rig = OracleRig(
+        env,
+        env.cfg.bin_layout,
+        oracle.OracleNoise(),
+        rng,
+        oracle_factory=factory,
+        release_lean=args.release_lean,
+        carry_via=args.carry_via,
+    )
     points = []
     trial_seed = args.seed
     try:
@@ -237,13 +292,25 @@ def run(args) -> dict:
                     for k in range(args.trials):
                         trial_seed += 1
                         part_yaw = math.radians(args.part_yaws[k % len(args.part_yaws)])
-                        trials.append(run_trial(env, rig, part, pose, trial_seed, part_yaw))
+                        trials.append(
+                            run_trial(
+                                env,
+                                rig,
+                                part,
+                                pose,
+                                trial_seed,
+                                part_yaw,
+                                args.interior,
+                                args.pick,
+                            )
+                        )
                     point = {
                         "x": x,
                         "y": sign * ay,
                         "yaw_deg": yaw_deg,
                         "landed": sum(t["landed"] for t in trials),
                         "extend_ok": sum(t["extend_ok"] for t in trials),
+                        "retreat_ok": sum(t["retreat_ok"] for t in trials),
                         "trials": trials,
                     }
                     points.append(point)
@@ -267,11 +334,15 @@ def run(args) -> dict:
         "part_yaws": args.part_yaws,
         "gripper": args.gripper,
         "desk_boxes": args.desk_boxes,
-        "interior": list(desk_boxes.interior(args.desk_boxes)),
+        "release_lean": args.release_lean,
+        "carry_via": args.carry_via,
+        "pick": list(args.pick),
+        "interior": list(args.interior or desk_boxes.interior(args.desk_boxes)),
         "release_z": desk_boxes.DESK_BOX_RELEASE_Z,
         "trials": n,
         "landed": sum(p["landed"] for p in points),
         "extend_ok": sum(p["extend_ok"] for p in points),
+        "retreat_ok": sum(p["retreat_ok"] for p in points),
         "points": points,
     }
 

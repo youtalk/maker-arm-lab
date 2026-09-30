@@ -33,10 +33,12 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
         takeover keeps the marker on the loop's target), env.tray (MS7a: the heap drops
         inside the four walls of layout.tray_static_boxes)
     desk boxes (MS7a, ``desk_boxes`` > 0, heap mode only): env.desk_boxes, env.desk_box_poses
-        (N, M, 3) float64 per-episode (x, y, yaw) of each box, env.class_to_box (N, 4) int64
-        (the box of each core.parts.PART_CLASSES class, drawn per episode),
+        (N, M, 3) float64 per-episode (x, y, yaw) of each box, env.class_to_box (N, C) int64
+        (the box of each of the C env.class_names classes, drawn per episode; the four
+        core.parts.BASE_CLASSES unless an MS7e switch is on),
         env.destination_bins (N, K) long (part b of env i goes to box destination_bins[i, b],
-        its class's box), env.place_desk_boxes(i, poses),
+        its class's box), env.place_desk_boxes(i, poses), env.deep_box_floor (MS7e flat
+        track: every box floor's collider reaches desk_boxes.DESK_BOX_FLOOR_DEPTH under the desk),
         env.set_context_box(i, box) (the context row's box part, set per target)
     perceived state (MS7c design section 6, heap mode): env.marker_points (N, 3) float32, NaN
         by default and after the env's reset; a finite row is the frozen marker that
@@ -79,9 +81,10 @@ from maker_arm_lab.assets.urdf_prep import gripper_velocity_limit
 from maker_arm_lab.core import cameras, layout
 from maker_arm_lab.core import desk_boxes as _boxes
 from maker_arm_lab.core import profile as _profile
+from maker_arm_lab.core.cameras import OVERHEAD_B2_BACK_M
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.heap_oracle import STOW_HALF_EXTENTS
-from maker_arm_lab.core.parts import PART_CLASSES, Part
+from maker_arm_lab.core.parts import BASE_CLASSES, Part, part_class
 from maker_arm_lab.core.quat import compose_offset_rot, quat_apply, quat_mul, rpy_from_quat
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.core.target import target_brick
@@ -116,6 +119,9 @@ DESK_COLOR_RANGE = {"r": (0.3, 0.7), "g": (0.25, 0.55), "b": (0.2, 0.45)}
 BRICK_MASS_SCALE = (0.7, 1.3)
 BRICK_FRICTION_SCALE = (0.8, 1.2)  # Isaac's static_friction_range; MuJoCo has one coefficient
 HEAP_PARK_X = 3.0
+BOX_PARK_X = -1.0
+"""Where a desk box the episode's count leaves over waits (m along x, behind the arm and off the
+desk), as the scene builds every box before the first reset."""
 """Where a heap part waits (m along x, well past the 0.9 m desk) until its drop batch."""
 # Per-frame camera jitter (MS4 lever 1): resampled on every rendered frame, on top of the
 # per-episode camera draw, so the policy cannot read the camera pose off a static background.
@@ -270,6 +276,12 @@ class MjLegoSortEnv:
         desk_boxes: int = 0,
         tray: bool = False,
         tray_lean_deg: float = 0.0,
+        class_names: Sequence[str] = BASE_CLASSES,
+        box_draw: int = 0,
+        box_unseen: str | None = None,
+        deep_box_floor: bool = False,
+        release_lean: bool = False,
+        round_physics: bool = False,
     ):
         # MS6 phase B design 5.4: "binary" is the raw >= 0 opens contract every corpus before
         # phase B was recorded with; "continuous" reads action[:, 6] as the jaw gap in meters.
@@ -305,6 +317,13 @@ class MjLegoSortEnv:
         if tray_lean_deg and not tray:
             raise ValueError("tray_lean_deg leans the tray's walls; it needs tray=True")
         self.tray_lean_deg = float(tray_lean_deg)
+        if deep_box_floor and desk_boxes <= 0:
+            raise ValueError("deep_box_floor deepens the desk box floors; it needs desk_boxes")
+        self.deep_box_floor = deep_box_floor
+        # MS7e rung B2 (design section 4.5): the overhead camera's nominal x moves back so the
+        # boxes behind the side band stay in frame. The rig's own `release_lean` leans EXTEND.
+        self.release_lean = release_lean
+        self.camera_back = OVERHEAD_B2_BACK_M if release_lean else 0.0
         if self.parts is not None:
             # MS6 rework section 6: heap mode has one bin, at y = 0.0. Flatten the layout
             # this env starts with so self.bin_layouts, the built box, the release target and
@@ -324,12 +343,44 @@ class MjLegoSortEnv:
             raise ValueError(f"context channels hold {CONTEXT_MAX_BRICKS} bricks, got {num_bricks}")
         if desk_boxes < 0 or (desk_boxes > 0 and self.parts is None):
             raise ValueError(f"desk_boxes needs a heap and a count >= 0, got {desk_boxes}")
+        if box_draw and not (
+            desk_boxes and _boxes.BOX_COUNT_MIN <= box_draw <= _boxes.DESK_BOX_SLOTS
+        ):
+            raise ValueError(
+                f"box_draw draws {_boxes.BOX_COUNT_MIN} to {_boxes.DESK_BOX_SLOTS} desk boxes "
+                f"and needs desk_boxes > 0, got box_draw {box_draw}, desk_boxes {desk_boxes}"
+            )
+        if box_unseen is not None and (not box_draw or box_unseen not in _boxes.UNSEEN_DRAWS):
+            raise ValueError(f"box_unseen is one of {sorted(_boxes.UNSEEN_DRAWS)} under box_draw")
+        # MS7e design section 4.2: the box draw builds every slot, draws the count, the sizes
+        # and the poses per episode and parks the boxes the count leaves over off the desk.
+        self.box_draw = box_draw
+        self.box_unseen = box_unseen
+        rung, unseen, ceilings = (
+            (_boxes.B2_DRAW, _boxes.B2_UNSEEN_DRAWS, _boxes.B2_UNSEEN_CEILINGS)
+            if release_lean
+            else (_boxes.B1_DRAW, _boxes.UNSEEN_DRAWS, _boxes.UNSEEN_CEILINGS)
+        )
+        self._box_draw_args = {**rung, **unseen.get(box_unseen, {})}
+        self._box_count_max = min(box_draw, ceilings.get(box_unseen, box_draw))
+        if box_draw:
+            desk_boxes = _boxes.DESK_BOX_SLOTS
         # MS7a design, desk boxes: N boxes on the desk replace the shelf and its heap bin.
         self.desk_boxes = desk_boxes
         self.desk_box_poses = np.zeros((num_envs, desk_boxes, 3))
+        self.desk_box_sizes = np.tile(_boxes.interior(desk_boxes), (num_envs, desk_boxes, 1))
+        self.box_count = np.full(num_envs, desk_boxes, dtype=np.int64)
+        self.box_draw_rounds = np.zeros(num_envs, dtype=np.int64)  # extra size-draw rounds
         self.perceived_box_poses = None  # MS7c: (N, M, 3) when the loop serves perceived boxes
-        # The episode's box per class, in core.parts.PART_CLASSES order (MS7a design, classes).
-        self.class_to_box = np.zeros((num_envs, len(PART_CLASSES)), dtype=np.int64)
+        # The episode's box per class, in class_names order (MS7a design, classes): the active
+        # class list, core.parts.PART_CLASSES when an MS7e switch is on (MS7e design section 5).
+        self.class_names = tuple(class_names)
+        # The heap's bounding volume per class, the load the box draw's fold fits to its boxes.
+        self._class_volumes = [
+            sum(math.prod(p.size) for p in self.parts or () if part_class(p) == c)
+            for c in self.class_names
+        ]
+        self.class_to_box = np.zeros((num_envs, len(self.class_names)), dtype=np.int64)
         self.context_mode = context
         self.context_camera = np.zeros((num_envs, CONTEXT_DIMS["camera"]), dtype=np.float32)
         self.context_privileged = np.zeros((num_envs, CONTEXT_DIMS["privileged"]), dtype=np.float32)
@@ -362,11 +413,28 @@ class MjLegoSortEnv:
             num_desk_boxes=desk_boxes,
             tray=tray,
             tray_lean_deg=self.tray_lean_deg,
+            deep_box_floor=deep_box_floor,
+            camera_back=self.camera_back,
+            round_physics=round_physics,
         )
+        # The part each part geom belongs to: a jaw on a collision stud (round_physics) holds
+        # that part as surely as a jaw on its collider.
+        self._geom_part = {g: b for b, geoms in enumerate(self.handles.body_geoms) for g in geoms}
         self.models = [base_model] + [copy.copy(base_model) for _ in range(num_envs - 1)]
         self.datas = [mujoco.MjData(m) for m in self.models]
         self._nominal_inertia = base_model.body_inertia[list(self.handles.brick_bodies)].copy()
         self._nominal_mass = base_model.body_mass[list(self.handles.brick_bodies)].copy()
+        # A part's colliders are every geom of its body that collides, studs aside: one, or an
+        # LDraw part's hulls. The friction draw reads them all; a round part's collision studs
+        # (round_physics) keep their friction.
+        self._colliders = tuple(
+            tuple(
+                g
+                for g in geoms
+                if base_model.geom_contype[g] and "_stud_" not in base_model.geom(g).name
+            )
+            for geoms in self.handles.body_geoms
+        )
         self.renderers = [mujoco.Renderer(m, 224, 224) for m in self.models] if cameras else []
         self._cam_wrist = base_model.camera("wrist").id if cameras else -1
         self._cam_overhead = base_model.camera("overhead").id if cameras else -1
@@ -396,7 +464,8 @@ class MjLegoSortEnv:
         if self.parts is not None:
             if desk_boxes:
                 self.destination_bins = torch.zeros(num_envs, num_bricks, dtype=torch.long)
-                self.stow_half_extents = torch.tensor(_boxes.stow_region(desk_boxes)[1])
+                interior = _boxes.interior(desk_boxes)
+                self.stow_half_extents = torch.tensor(_boxes.stow_region(interior)[1])
             else:
                 self.destination_bins = torch.zeros(num_envs, dtype=torch.long)
                 self.stow_half_extents = torch.tensor(STOW_HALF_EXTENTS)
@@ -415,6 +484,7 @@ class MjLegoSortEnv:
                 cameras=cameras,
                 depth=self.parts is not None,
                 gripper_mode=gripper_mode,
+                class_names=self.class_names,
             )
             if export_dir is not None
             else None
@@ -610,11 +680,18 @@ class MjLegoSortEnv:
         )
         return (*(torch.from_numpy(r) for r in rows), torch.from_numpy(jac[:, dofs]))
 
-    def place_desk_boxes(self, i: int, poses) -> None:
-        """Stand env ``i``'s desk boxes at ``poses``, one (x, y, yaw) per box, on the desk.
+    def place_desk_boxes(self, i: int, poses, sizes=()) -> None:
+        """Stand env ``i``'s desk boxes at ``poses``, one (x, y, yaw) per box, on the desk, and
+        resize the first ``len(sizes)`` of them to those interiors (``scene.apply_desk_box_size``;
+        a box keeps its size otherwise).
 
         Writes the mocap bodies; the next ``mj_forward`` or step moves the geoms.
         """
+        for j, size in enumerate(sizes):
+            if not np.array_equal(self.desk_box_sizes[i, j], size):
+                depth = _boxes.DESK_BOX_FLOOR_DEPTH if self.deep_box_floor else 0.0
+                scene.apply_desk_box_size(self.models[i], j, size, depth)
+                self.desk_box_sizes[i, j] = size
         d = self.datas[i]
         for j, (x, y, yaw) in enumerate(poses):
             self.desk_box_poses[i, j] = (x, y, yaw)
@@ -683,7 +760,7 @@ class MjLegoSortEnv:
             if not self.desk_boxes:  # desk boxes build no bins
                 scene.apply_bins(m, bl, heap=self.parts is not None)
             scene.apply_lighting(m, ep)
-            scene.apply_cameras(m, ep)
+            scene.apply_cameras(m, ep, self.camera_back)
         # Physics DR first: mj_setConst re-derives the model constants AT qpos0 and resets the
         # data to it, so it has to run before the pose below is written.
         if self.cfg.desk_color:
@@ -693,9 +770,8 @@ class MjLegoSortEnv:
                 scale = random.uniform(*BRICK_MASS_SCALE)
                 m.body_mass[body] = self._nominal_mass[b] * scale
                 m.body_inertia[body] = self._nominal_inertia[b] * scale
-                m.geom_friction[h.brick_geoms[b], 0] = scene.BRICK_FRICTION[0] * random.uniform(
-                    *BRICK_FRICTION_SCALE
-                )
+                friction = scene.BRICK_FRICTION[0] * random.uniform(*BRICK_FRICTION_SCALE)
+                m.geom_friction[list(self._colliders[b]), 0] = friction
             mujoco.mj_setConst(m, d)
         mujoco.mj_resetData(m, d)
         offset = self.cfg.start_pose_offset_rad
@@ -734,7 +810,7 @@ class MjLegoSortEnv:
         d.ctrl[list(h.arm_actuators)] = d.qpos[list(h.joint_qpos[:6])]
         d.ctrl[list(h.gripper_actuators)] = GRIPPER_OPEN_POS
         self._grip_ctrl[i] = GRIPPER_OPEN_POS
-        pos, rot = scene.overhead_camera_pose(self.episode_draws[i])
+        pos, rot = scene.overhead_camera_pose(self.episode_draws[i], self.camera_back)
         self.context_camera[i] = np.array([*pos, *rpy_from_quat(rot)], dtype=np.float32)
         if self.parts is not None:
             self.context_camera_box[i, :6] = self.context_camera[i]
@@ -762,10 +838,24 @@ class MjLegoSortEnv:
         if self.desk_boxes:
             # MS7a design, desk boxes: the boxes stand first, from the same per-reset rng, and
             # the heap drops on the tray footprint beside them, walls or not.
-            self.place_desk_boxes(i, _boxes.sample_boxes(self._rng, self.desk_boxes))
-            self.class_to_box[i] = _boxes.class_map(self._rng, self.desk_boxes)
+            if self.box_draw:
+                n = self._rng.randint(_boxes.BOX_COUNT_MIN, self._box_count_max)
+                poses, sizes, extra = _boxes.draw_boxes(self._rng, n, **self._box_draw_args)
+                self.box_draw_rounds[i] = extra
+                parked = [(BOX_PARK_X, 0.2 * j, 0.0) for j in range(n, self.desk_boxes)]
+                self.place_desk_boxes(i, poses + parked, sizes)
+                self.box_count[i] = n
+            else:
+                self.place_desk_boxes(i, _boxes.sample_boxes(self._rng, self.desk_boxes))
+            n = int(self.box_count[i])
+            if self.box_draw:
+                self.class_to_box[i] = _boxes.fitted_class_map(
+                    self._rng, sizes, self.class_names, self._class_volumes
+                )
+            else:
+                self.class_to_box[i] = _boxes.class_map(self._rng, n, self.class_names)
             self.destination_bins[i] = torch.tensor(
-                _boxes.part_destinations(self.parts, self.class_to_box[i])
+                _boxes.part_destinations(self.parts, self.class_to_box[i], self.class_names)
             )
             zone = layout.tray_bounds()
         else:
@@ -825,6 +915,10 @@ class MjLegoSortEnv:
             # One destination per part and every box pose, so forensics rebuild the scene.
             state["destination_bin"] = self.destination_bins[i].numpy().astype(np.int64)
             state["desk_box_poses"] = self.desk_box_poses[i].astype(np.float32)
+            if self.box_draw:
+                state["desk_box_sizes"] = self.desk_box_sizes[i].astype(np.float32)
+                state["box_count"] = np.array([self.box_count[i]], dtype=np.int64)
+                state["box_draw_rounds"] = np.array([self.box_draw_rounds[i]], dtype=np.int64)
             state["class_to_box"] = self.class_to_box[i].copy()
         elif self.parts is not None:
             state["destination_bin"] = np.array([int(self.destination_bins[i])], dtype=np.int64)
@@ -852,15 +946,14 @@ class MjLegoSortEnv:
                 for side, finger in enumerate(h.finger_geoms):
                     if geoms[0] in finger or geoms[1] in finger:
                         other = geoms[1] if geoms[0] in finger else geoms[0]
-                        if other in h.brick_geoms:
+                        b = self._geom_part.get(other)
+                        if b is not None:
                             mujoco.mj_contactForce(m, d, k, force)
                             world = con.frame.reshape(3, 3).T @ force[:3]
-                            (left if side == 0 else right)[i, 0, h.brick_geoms.index(other)] += (
-                                world
-                            )
+                            (left if side == 0 else right)[i, 0, b] += world
             if images and self.cameras:
                 if self.cfg.frame_jitter:
-                    pos, rot = scene.overhead_camera_pose(self.episode_draws[i])
+                    pos, rot = scene.overhead_camera_pose(self.episode_draws[i], self.camera_back)
                     jm, jd = FRAME_CAM_JITTER_M, FRAME_CAM_JITTER_DEG
                     dpos = [self._rng.uniform(-jm, jm) for _ in range(3)]
                     drot = [self._rng.uniform(-jd, jd) for _ in range(3)]

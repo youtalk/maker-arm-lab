@@ -15,7 +15,8 @@ def test_catalog_has_29_parts_in_a_fixed_order_and_no_flat_or_round_part():
     assert names[0] == "brick_1x1" and names[-1] == "slope_2x4"
     assert "brick_1x2x5" in names and "slope_1x2" in names
     assert not [n for n in names if n.startswith(parts.FLAT_FAMILIES + parts.RETIRED_FAMILIES)]
-    assert parts.FAMILIES == ("brick", "slope")
+    assert parts.FAMILIES == ("brick", "slope", "round", "ldraw", "plate", "tile")
+    assert [p.name for p in parts.catalog(())] == names
 
 
 def test_the_retired_parts_left_the_catalog_and_still_replay():
@@ -88,7 +89,7 @@ def test_split_is_stratified_deterministic_and_disjoint():
     cat = parts.catalog()
     train, held = parts.split(cat, 20260915)
     assert len(held) == 7 and len(train) == 22
-    counts = {f: sum(1 for p in held if p.family == f) for f in parts.FAMILIES}
+    counts = {f: sum(1 for p in held if p.family == f) for f in ("brick", "slope")}
     assert counts == {"brick": 5, "slope": 2}
     assert not {p.name for p in train} & {p.name for p in held}
     again = parts.split(cat, 20260915)
@@ -105,6 +106,15 @@ def test_stud_positions_lie_inside_the_footprint():
     assert all(abs(x) <= 0.012 and abs(y) <= 0.004 for x, y in studs)
     assert parts.stud_positions(parts.make_part("tile", 2, 4)) == []
     assert parts.stud_positions(parts.make_part("slope", 2, 4)) == []
+
+
+def test_a_round_part_keeps_the_studs_on_its_disc():
+    """A round 4x4 has 12 studs, as LEGO's: the grid's corners stood past its rim."""
+    counts = {p.name: len(parts.stud_positions(p)) for p in parts._replayable()}
+    assert [counts[f"round_{n}"] for n in ("1x1", "2x2", "2x2x2", "4x4")] == [1, 4, 4, 12]
+    for p in parts._replayable():
+        if p.family != "round" and p.studs:
+            assert counts[p.name] == p.nx * p.ny, p.name
 
 
 def test_sample_parts_draws_with_replacement():
@@ -124,7 +134,7 @@ def test_by_name_round_trips_the_catalog_and_still_replays_a_flat_part():
 def test_every_catalog_part_has_exactly_one_class():
     classes = Counter(parts.part_class(p) for p in parts.catalog())
     assert classes == {"slope": 6, "tall": 5, "narrow": 8, "wide": 10}
-    assert set(classes) == set(parts.PART_CLASSES)
+    assert set(classes) == set(parts.BASE_CLASSES) == set(parts.PART_CLASSES[:4])
     assert parts.part_class(parts.make_part("brick", 1, 2, 5)) == "tall"
     assert parts.part_class(parts.make_part("brick", 1, 8)) == "narrow"
     assert parts.part_class(parts.make_part("brick", 2, 2)) == "wide"
@@ -134,7 +144,7 @@ def test_every_catalog_part_has_exactly_one_class():
 def test_every_class_holds_a_held_out_part():
     _, heldout = parts.split(parts.catalog(), 20260915)
     by_class = {
-        c: sorted(p.name for p in heldout if parts.part_class(p) == c) for c in parts.PART_CLASSES
+        c: sorted(p.name for p in heldout if parts.part_class(p) == c) for c in parts.BASE_CLASSES
     }
     assert by_class == {
         "slope": ["slope_1x2", "slope_1x3"],

@@ -406,6 +406,64 @@ def test_a_wall_under_the_grip_band_is_no_obstacle():
     assert [round(g.width, 4) for g in found] == [0.0158]
 
 
+LEANED = grasp.tray_walls(30.0)  # the read protocol's tray, --tray_lean 30
+
+
+def _flat_at_left_wall(name: str, centre: float, yaw_deg: float):
+    """``candidate_grasps``'s arguments for a flat part lying ``centre`` (m) off the left wall
+    of the leaned tray, at ``yaw_deg``."""
+    part = parts.by_name([name])[0]
+    pos = torch.tensor([TRAY_MID_X, TY0 + centre, part.size[2] / 2])
+    return (0, _size(part), pos, _yaw(yaw_deg), 0.0, part.closing_axes, LEANED)
+
+
+def test_with_the_switch_off_the_landing_gap_is_the_binary_bands_bit_for_bit():
+    """``--wall_band_cont`` off: every wall and neighbor test reads the MS7d landing gap."""
+    for k in range(1201):
+        w = k * 0.0001
+        ms7d = min(
+            grasp.OPEN_HALF_GAP, 0.5 * w + grasp.JAW_APPROACH_CLEARANCE + grasp.JAW_HOLD_BAND
+        )
+        assert grasp.landing_half_gap(w) == ms7d
+        assert grasp.landing_half_gap(w, grasp.JAW_HOLD_BAND) == ms7d
+    args = _flat_at_left_wall("plate_2x2", 0.013, 60.0)
+    assert grasp.candidate_grasps(*args) == grasp.candidate_grasps(*args, grasp.JAW_HOLD_BAND)
+
+
+@pytest.mark.parametrize(
+    "name, centre_mm, yaw_deg", [("plate_1x2", 13, 30), ("tile_2x2", 14, 45), ("plate_1x4", 13, 20)]
+)
+def test_the_continuous_band_grasps_a_slanted_flat_part_the_binary_band_refuses(
+    name, centre_mm, yaw_deg
+):
+    """MS7e ledger R13 S3: a flat part at a slant, its centre 12 to 15 mm off a wall. The
+    binary band puts a finger 8 mm further out than the continuous jaws land, into the wall,
+    so no grasp ranks; at the continuous band one does, and its finger stroke clears the wall
+    face at the desk, where a flat part's grip band lies."""
+    args = _flat_at_left_wall(name, centre_mm / 1000, yaw_deg)
+    assert grasp.candidate_grasps(*args) == []
+    found = grasp.candidate_grasps(*args, grasp.CONT_HOLD_BAND)
+    assert found
+    pos, left = args[2], _left_wall()
+    for g in found:
+        reach = 0.5 * g.width + grasp.JAW_APPROACH_CLEARANCE + grasp.CONT_HOLD_BAND
+        strokes = grasp.sweep_footprints(pos, g.heading, g.width, reach + grasp.TIP_THICKNESS)
+        assert all(grasp.polygon_distance(s, list(left.footprint)) >= 0.0 for s in strokes)
+
+
+@pytest.mark.parametrize(
+    "name, yaw_deg", [("plate_1x2", 0), ("tile_1x2", 30), ("plate_2x2", 45), ("plate_1x4", 20)]
+)
+def test_a_flat_part_touching_the_wall_keeps_no_grasp_under_the_continuous_band(name, yaw_deg):
+    """The part's footprint on the wall face: every closing axis puts a finger on the wall."""
+    x, y, _ = parts.by_name([name])[0].size
+    th = math.radians(yaw_deg)
+    touch = 0.5 * (x * abs(math.sin(th)) + y * abs(math.cos(th)))
+    args = _flat_at_left_wall(name, touch, yaw_deg)
+    assert grasp.candidate_grasps(*args, grasp.CONT_HOLD_BAND) == []
+    assert grasp.candidate_grasps(*args) == []
+
+
 def test_a_corner_part_keeps_no_heading_and_ranking_honors_the_walls():
     corner = torch.tensor([TX0 + 0.012, TY0 + 0.012, 0.0048])
     assert not grasp.candidate_grasps(0, _size(BRICK), corner, IDENTITY, walls=WALLS)

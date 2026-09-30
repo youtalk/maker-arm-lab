@@ -211,8 +211,11 @@ def in_boxes(
     Args:
         brick_pos_w: (N,B,3) part centres, world frame.
         boxes: (N,M,4) box centre x, y, z and yaw (rad) per env.
-        half_extents: (3,) half extents along the box's own x and y and world z.
+        half_extents: (3,) half extents along the box's own x and y and world z, or (N,M,3)
+            one row per box (the MS7e box draw).
     """
+    if half_extents.dim() == 3:
+        half_extents = half_extents[:, None]  # (N,1,M,3)
     d = brick_pos_w.unsqueeze(2) - boxes[:, None, :, :3]  # (N,B,M,3)
     c, s = torch.cos(boxes[:, None, :, 3]), torch.sin(boxes[:, None, :, 3])  # (N,1,M)
     local = torch.stack(

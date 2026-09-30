@@ -23,7 +23,15 @@ from test_mj_heap_oracle import PARTS, _place
 ZERO = perception.parse_scales("all=0")
 
 
-def _env_and_rig(part_list=PARTS, budget=4, tray=False):
+def _env_and_rig(
+    part_list=PARTS,
+    budget=4,
+    tray=False,
+    class_names=parts.BASE_CLASSES,
+    box_draw=0,
+    tray_lean=0.0,
+    wall_band_cont=False,
+):
     draw = sample_run_draw(random.Random(5))
     draw["slot_colors"] = (0, 1, 2, 3)
     env = MjLegoSortEnv(
@@ -33,12 +41,16 @@ def _env_and_rig(part_list=PARTS, budget=4, tray=False):
         cameras=False,
         desk_boxes=4,
         tray=tray,
+        tray_lean_deg=tray_lean,
         gripper_mode="continuous",
         context="camera_box_target",
         episode_length_s=loop.episode_length_s(budget),
+        class_names=class_names,
+        box_draw=box_draw,
     )
     env.reset(seed=11)
-    env.place_desk_boxes(0, FIXED)
+    if not box_draw:
+        env.place_desk_boxes(0, FIXED)
     rng = random.Random(1)
 
     def factory(i, bl, episode_draw):
@@ -51,6 +63,9 @@ def _env_and_rig(part_list=PARTS, budget=4, tray=False):
             cycle_budget=budget,
             boxes=env.desk_box_poses[i],
             tray=env.tray,
+            box_sizes=env.desk_box_sizes[i],
+            tray_lean_deg=env.tray_lean_deg,
+            wall_band_cont=wall_band_cont,
         )
 
     rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)
@@ -224,16 +239,17 @@ def test_rearm_stop_clears_after_a_hold_with_no_lift_and_keeps_a_lifted_one():
 
 
 def test_over_box_reads_each_boxs_yawed_footprint():
-    _, (h, _, _) = desk_boxes.stow_region(2)  # the footprint is square
+    _, (h, _, _) = desk_boxes.stow_region(desk_boxes.interior(2))  # the footprint is square
     boxes = [(0.10, 0.20, 0.0), (0.10, -0.20, math.pi / 4)]
-    assert loop.over_box((0.10, 0.20), boxes) and loop.over_box((0.10, -0.20), boxes)
-    assert loop.over_box((0.10 + 0.9 * h, 0.20 + 0.9 * h), boxes)  # box 0's corner
-    assert not loop.over_box((0.10 + 1.1 * h, 0.20), boxes)
+    SIZES = desk_boxes.interiors(2)
+    assert loop.over_box((0.10, 0.20), boxes, SIZES) and loop.over_box((0.10, -0.20), boxes, SIZES)
+    assert loop.over_box((0.10 + 0.9 * h, 0.20 + 0.9 * h), boxes, SIZES)  # box 0's corner
+    assert not loop.over_box((0.10 + 1.1 * h, 0.20), boxes, SIZES)
     # Box 1 turned 45 degrees: a corner points along world y, and the square's own corner
     # direction now crosses an edge.
-    assert loop.over_box((0.10, -0.20 + 1.25 * h), boxes)
-    assert not loop.over_box((0.10 + 0.9 * h, -0.20 + 0.9 * h), boxes)
-    assert not loop.over_box((0.30, 0.0), boxes)
+    assert loop.over_box((0.10, -0.20 + 1.25 * h), boxes, SIZES)
+    assert not loop.over_box((0.10 + 0.9 * h, -0.20 + 0.9 * h), boxes, SIZES)
+    assert not loop.over_box((0.30, 0.0), boxes, SIZES)
 
 
 def test_the_class_at_lift_serves_the_box_of_the_class_drawn_for_the_part_in_the_jaws():
@@ -331,7 +347,7 @@ def test_box_filter_xy_tests_the_outer_footprint_plus_the_margin_and_not_z():
     4 mm off the outer wall of box 3, yawed 0.6 rad: only the first clears the 5 mm margin.
     Part 3 lies on the open desk."""
     z = parts.make_part("brick", 2, 4).size[2] / 2
-    _, hy = desk_boxes.outer_half(len(FIXED))
+    _, hy = desk_boxes.outer_half(desk_boxes.interior(len(FIXED)))
     positions = [
         _in_box(FIXED[2], 0.0, -0.035, desk_boxes.DESK_BOX_WALL + z - 0.005),
         _in_box(FIXED[3], 0.0, hy + 0.020, z),
@@ -538,9 +554,9 @@ def test_rearm_hold_serves_the_rules_again_after_a_hold_with_no_lift(monkeypatch
     stops = []
 
     def spy(name, real):
-        def rule(*args, held=False):
+        def rule(*args, held=False, **kwargs):
             stops.append((name, held))
-            return real(*args, held=held)
+            return real(*args, held=held, **kwargs)
 
         return rule
 
@@ -592,7 +608,9 @@ def test_the_box_walls_join_the_selectors_walls_only_with_the_switch(monkeypatch
         runs[on] = _rollout(env, rig, _Still(), budget=3, perceived=True, box_walls=on)
         boxes = env.perceived_box_poses[0].copy()
         env.close()
-        expected = grasp.tray_walls() + (desk_boxes.box_walls(boxes, 4) if on else ())
+        expected = grasp.tray_walls() + (
+            desk_boxes.box_walls(boxes, desk_boxes.interiors(4)) if on else ()
+        )
         assert walls and all(w == expected for w in walls)
     off, on = runs[False], runs[True]
     assert off["episodes"][0]["cycles"] == 3 and on["episodes"] == off["episodes"]
@@ -634,7 +652,7 @@ def test_the_row_marker_and_box_are_the_detections_at_selection_and_stay_frozen(
     assert not np.allclose(boxes, true_boxes)  # the box knob's episode bias
     for j, target in enumerate(ep["cycle_targets"]):
         seen = next(d for d in states[j].detections if d.sim_index == target)
-        box = boxes[class_to_box[parts.PART_CLASSES.index(seen.cls)]]
+        box = boxes[class_to_box[parts.BASE_CLASSES.index(seen.cls)]]
         for row, box_row, marker, marked, _ in served[40 * j : 40 * (j + 1)]:
             assert np.allclose(row[:3], seen.centre, atol=1e-6)
             assert np.allclose(marker.numpy(), seen.centre, atol=1e-6) and marked == -1
@@ -983,7 +1001,7 @@ class _TruthlessEnv:
         object.__setattr__(self, "_strict", False)
 
     def __getattr__(self, name):
-        if self._strict and name in ("destination_bins", "desk_box_poses"):
+        if self._strict and name in ("destination_bins", "desk_box_poses", "desk_box_sizes"):
             raise AssertionError(f"the loop read env.{name} after its setup")
         return getattr(self._env, name)
 
@@ -1031,8 +1049,8 @@ TRUTH_DECISION_READS = (
 """The loop's truth reads besides the three accessors: what its decisions read before MS7c."""
 
 
-def _teacher_scene(monkeypatch):
-    env, rig = _env_and_rig()
+def _teacher_scene(monkeypatch, class_names=parts.BASE_CLASSES, box_draw=0):
+    env, rig = _env_and_rig(class_names=class_names, box_draw=box_draw)
     _place(env, SPREAD)
     switches = {
         "select_at_release": True,
@@ -1045,6 +1063,54 @@ def _teacher_scene(monkeypatch):
         "park_done": True,
     }
     return env, rig, _Teacher(env, rig.oracle_factory), 4, switches
+
+
+def _eight_class_scene(monkeypatch):
+    """The teacher scene under the eight MS7e classes, the one MS7e switch this commit builds
+    into the loop (MS7e design section 10.2)."""
+    return _teacher_scene(monkeypatch, parts.PART_CLASSES)
+
+
+def _box_draw_scene(monkeypatch):
+    """The teacher scene under the MS7e box draw (``--box_draw 6``): the reset draws the count,
+    each box's interior and pose, and the loop perceives each box's size (design section 4.3)."""
+    return _teacher_scene(monkeypatch, parts.PART_CLASSES, box_draw=6)
+
+
+def _thin_snap_scene(monkeypatch):
+    """The teacher scene with a 2x4 plate and a 2x2 tile for two of its bricks, under the eight
+    MS7e classes and ``thin_snap`` (MS7e ledger R13 S2): the loop serves flat rows."""
+    flat = [
+        parts.make_part("brick", 2, 4),
+        parts.make_part("plate", 2, 4),
+        parts.make_part("tile", 2, 2),
+    ]
+    env, rig = _env_and_rig(part_list=flat, class_names=parts.PART_CLASSES)
+    _place(env, [SPREAD[0], (0.195, 0.0, 0.0026, -0.8), (0.195, 0.045, 0.0026, 1.2)])
+    switches = {
+        "select_at_release": True,
+        "squeeze_floor": True,
+        "square_wrist": True,
+        "pick_snap": True,
+        "dwell_close": True,
+        "part_failures": True,
+        "adopt_held": True,
+        "park_done": True,
+        "thin_snap": True,
+    }
+    return env, rig, _Teacher(env, rig.oracle_factory), 4, switches
+
+
+def test_a_box_draw_episode_records_its_boxes(monkeypatch):
+    """The census rebuilds each drawn box from the episode record (MS7e ledger R11)."""
+    env, rig, policy, budget, switches = _box_draw_scene(monkeypatch)
+    n = int(env.box_count[0])
+    poses, sizes = env.desk_box_poses[0, :n].tolist(), env.desk_box_sizes[0, :n].tolist()
+    ep = _rollout(env, rig, policy, budget=budget, perceived=True, **switches)["episodes"][0]
+    env.close()
+    assert ep["box_count"] == n and ep["box_draw_rounds"] == 0
+    assert np.allclose(ep["box_poses"], poses, atol=1e-4)
+    assert np.allclose(ep["box_sizes"], sizes, atol=1e-4)
 
 
 def _rake_scene(monkeypatch):
@@ -1064,6 +1130,25 @@ def _rake_scene(monkeypatch):
         "square_wrist": True,
     }
     return env, rig, _Still(), 4, switches
+
+
+def _wall_band_scene(monkeypatch):
+    """MS7e ledger R13 S3 (``--wall_band_cont``): a 1x2 plate at 30 degrees, 13 mm off the left
+    wall of the 30 degree tray, which ranks a grasp only at the continuous band, and a 2x2
+    brick in the open tray. The selector and the teacher policy both rank at that band."""
+    pair = [parts.by_name(["plate_1x2"])[0], parts.make_part("brick", 2, 2)]
+    env, rig = _env_and_rig(
+        part_list=pair,
+        tray=True,
+        class_names=parts.PART_CLASSES,
+        tray_lean=30.0,
+        wall_band_cont=True,
+    )
+    (_, _), (y0, _) = layout.tray_bounds()
+    x = layout.TRAY_CENTER[0]
+    _place(env, [(x, y0 + 0.013, 0.0016, math.radians(30.0)), (x, y0 + 0.09, 0.0049, 0.3)])
+    switches = {"select_at_release": True, "square_wrist": True, "pick_snap": True}
+    return env, rig, _Teacher(env, rig.oracle_factory), 4, switches
 
 
 MS7D_ON = {
@@ -1097,7 +1182,17 @@ def test_every_ms7d_switch_at_once_runs_the_teacher_scene_to_its_end(monkeypatch
 
 
 @pytest.mark.parametrize("ms7d", [{}, MS7D_ON])
-@pytest.mark.parametrize("scene", [_teacher_scene, _rake_scene])
+@pytest.mark.parametrize(
+    "scene",
+    [
+        _teacher_scene,
+        _rake_scene,
+        _eight_class_scene,
+        _box_draw_scene,
+        _wall_band_scene,
+        _thin_snap_scene,
+    ],
+)
 def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):
     """MS7c design section 10: under perceived no decision path reads the truth.
 
@@ -1148,7 +1243,9 @@ def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):
         assert ep[key] == blind_ep[key], key
     assert first["perception"] == second["perception"]
     assert first["perception"]["selections"] > 0
-    if scene is _teacher_scene:
-        assert "placed" in ep["cycle_reasons"] and first["perception"]["lifts_classified"] > 0
-    else:
+    if scene is _rake_scene:
         assert ep["rakes"] >= 1 and "budget" in ep["cycle_reasons"], ep
+    elif scene is _wall_band_scene:
+        assert ep["cycle_reasons"] == ["placed", "placed"] and ep["rakes"] == 0, ep
+    else:
+        assert "placed" in ep["cycle_reasons"] and first["perception"]["lifts_classified"] > 0

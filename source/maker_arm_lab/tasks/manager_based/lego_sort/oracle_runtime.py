@@ -116,6 +116,48 @@ from maker_arm_lab.robots.frames import (
 # `scripts/scripted_grasp_check.py` states its own; both cite core.global_ik, which carries
 # the measurement.
 LEAN_AZIMUTH = 0.0
+# MS7e design section 4.5 (rung B2): under the rig's ``release_lean`` switch, EXTEND alone leans
+# toward the box it releases over, at ``atan2(box_y, box_x)`` from the arm base. EXTEND sweeps
+# the lean from +x to that azimuth along its leg and RETREAT sweeps it back, so every other leg
+# keeps the pinned lean above. With +x pinned, a box behind the side band has no EXTEND plan
+# (the probe of 2026-09-29: 0 of 40 at x -0.07 to 0.00).
+
+# MS7e ledger R12, teacher lever T1 (the rig's ``carry_via`` switch, B2 only). A straight EXTEND
+# from the tray's far side to a box at the band's back passes close to the arm base axis, and
+# the part drops on the way: the D10 census of 2026-09-29 read closest approach under 0.08 m
+# failed 20 of 20 carries, 0.08 to 0.09 m 5 of 12, 0.09 m and over 11 of 483. Such a leg walks
+# an arc about the base axis instead (`carry_arc_point`), so it keeps at least the smaller of
+# its two end radii, and the base turns at an even pace.
+CARRY_MIN_RADIUS_M = 0.10  # INITIAL: R12's floor, the census's clean band plus 1 cm
+
+
+def base_clearance(start, end) -> float:
+    """The least horizontal distance from the arm base axis (the env origin's z axis) to the
+    straight segment ``start`` -> ``end``."""
+    ax, ay, bx, by = float(start[0]), float(start[1]), float(end[0]), float(end[1])
+    dx, dy = bx - ax, by - ay
+    span = dx * dx + dy * dy
+    t = 0.0 if span == 0.0 else min(1.0, max(0.0, -(ax * dx + ay * dy) / span))
+    return math.hypot(ax + t * dx, ay + t * dy)
+
+
+def carry_arc(start, end) -> tuple[float, float, float, float, float]:
+    """The arc from ``start`` to ``end`` about the base axis: start radius, radius change,
+    start azimuth, turn (the short way round), and its length."""
+    r0, r1 = math.hypot(float(start[0]), float(start[1])), math.hypot(float(end[0]), float(end[1]))
+    a0 = math.atan2(float(start[1]), float(start[0]))
+    turn = math.remainder(math.atan2(float(end[1]), float(end[0])) - a0, math.tau)
+    length = math.hypot(r1 - r0, 0.5 * (r0 + r1) * turn, float(end[2]) - float(start[2]))
+    return r0, r1 - r0, a0, turn, length
+
+
+def carry_arc_point(start, end, t: float) -> torch.Tensor:
+    """The point at ``t`` in [0, 1] of `carry_arc`: radius, azimuth and height linear in t."""
+    r0, dr, a0, turn, _ = carry_arc(start, end)
+    r, a = r0 + dr * t, a0 + turn * t
+    z = float(start[2]) + (float(end[2]) - float(start[2])) * t
+    return torch.tensor([r * math.cos(a), r * math.sin(a), z], dtype=torch.float64)
+
 
 BRICK_HALF_HEIGHT = layout.BRICK_SIZE[2] / 2
 # Ruling D3-10 / D3-11 candidate 2: the descend is near level, and rather than one fixed
@@ -243,6 +285,15 @@ ROT_CONVERGED = 0.02
 # loop reads the same rise gate (phase B design 5.5).
 LIFT_MAX_XY_ERROR = 0.03  # m
 
+# MS7e teacher lever T2 (ledger R12, ``passenger_check``): at the LIFT gate a part other than
+# the carried one that stands this much over where it lay when the attempt's HOVER started,
+# within PASSENGER_XY_M of the pick point, rode up with the jaws. The D10 census of 2026-09-29
+# traced 21 of 22 wrong-box parts on count-8 heaps to such passengers, landing in the carried
+# part's box. LIFT raises 0.10 m, so a rider stands near that; a neighbour a finger nudges
+# rises a few mm.
+PASSENGER_MIN_RISE = 0.02  # INITIAL: m, the T2 heap reads on the D10 seeds
+PASSENGER_XY_M = 0.06  # INITIAL: m, a 1x8 across the jaws or a part on a long target
+
 # `resume` calls a brick pinched at core.checker.HELD_MIN_FORCE (imported above), the
 # attribution threshold the eval loop and the privileged channel read it at. It is under
 # PINCH_MIN_FORCE on purpose: a takeover on a weak pinch still enters LIFT, whose gate then
@@ -353,7 +404,9 @@ WATCHDOG_TRIP_STRIKES = 30
 WATCHDOG_TRACKING_TOL_RAD = 0.02
 
 
-def grasp_center_for(pick, tilt: float, heading: float, offset_z: float) -> tuple:
+def grasp_center_for(
+    pick, tilt: float, heading: float, offset_z: float, lean: float = LEAN_AZIMUTH
+) -> tuple:
     """The `grasp_center` position that puts the pick point at ``pick``.
 
     ``pick = grasp_center + R @ (ox, 0, oz)``, so
@@ -371,7 +424,7 @@ def grasp_center_for(pick, tilt: float, heading: float, offset_z: float) -> tupl
     brick in a way only a GPU run could see. Same derivation as
     ``scripted_grasp_check.GraspRig.grasp_center_for``, which is where it was measured.
     """
-    axis = tool_axis_world(tilt, LEAN_AZIMUTH)
+    axis = tool_axis_world(tilt, lean)
     face = torch.tensor([math.sin(heading), -math.cos(heading), 0.0], dtype=torch.float64)
     point = torch.as_tensor(pick, dtype=torch.float64).reshape(3)
     return tuple(float(v) for v in point + offset_z * axis - PICK_OFFSET_MEASURED[0] * face)
@@ -385,6 +438,7 @@ def leg_resolution(
     heading_change: float = 0.0,
     joint_change: float = 0.0,
     speed_scale: float = 1.0,
+    lean_change: float = 0.0,
 ) -> tuple[int, int]:
     """How many waypoints a leg gets, and how many control steps its walk takes.
 
@@ -403,6 +457,7 @@ def leg_resolution(
         math.ceil(distance / (WAYPOINT_STEP_M * gain_scale)),
         math.ceil(tilt_change / (WAYPOINT_TILT_STEP_RAD * gain_scale)),
         math.ceil(heading_change / (WAYPOINT_TILT_STEP_RAD * gain_scale)),
+        math.ceil(lean_change / (WAYPOINT_TILT_STEP_RAD * gain_scale)),
         math.ceil(joint_change / (WAYPOINT_JOINT_STEP_RAD * gain_scale)),
     )
     budget = max(2, int(WALK_BUDGET_FRACTION * max_steps))
@@ -413,6 +468,7 @@ def leg_resolution(
             (distance, LINEAR_PACE_M_PER_S),
             (tilt_change, TILT_PACE_RAD_PER_S),
             (heading_change, TILT_PACE_RAD_PER_S),
+            (lean_change, TILT_PACE_RAD_PER_S),
             (joint_change, JOINT_PACE_RAD_PER_S),
         )
     )
@@ -444,8 +500,21 @@ class OracleRig:
         transport_speed: float = trajectory.TRANSPORT_SPEED,
         oracle_factory=None,
         perceivers=None,
+        release_lean: bool = False,
+        carry_via: bool = False,
+        passenger_check: bool = False,
     ):
         self.env = env
+        # MS7e rung B2: EXTEND leans toward its box (LEAN_AZIMUTH's note, `_leg_lean`).
+        self.release_lean = release_lean
+        # MS7e R12 T1: an EXTEND that would pass the base axis walks an arc (CARRY_MIN_RADIUS_M).
+        self.carry_via = carry_via
+        # MS7e teacher lever T2: a LIFT with a passenger is a miss (`_lift_result`). The log
+        # holds each rejected LIFT's passengers per env for the run; rearm and resume keep it.
+        self.passenger_check = passenger_check
+        self.passenger_log: list[list[list[int]]] = [[] for _ in range(env.num_envs)]
+        # Every part's position when the attempt's HOVER started, under the switch only.
+        self.parts_start: list[torch.Tensor | None] = [None] * env.num_envs
         self.gripper_mode = getattr(env, "gripper_mode", "binary")
         # Multiplier on the pace of the transport legs (TRANSPORT_PHASES); see leg_resolution.
         self.transport_speed = transport_speed
@@ -513,6 +582,9 @@ class OracleRig:
         # left the desk. `commanded_tilt` is the same for the tool-axis tilt.
         self.commanded_yaw = [0.0] * self.num_envs
         self.commanded_tilt = [GRASP_TILT_RAD] * self.num_envs
+        # The lean azimuth the last planned leg ends at: LEAN_AZIMUTH except after an EXTEND
+        # under `release_lean`, so the next carry leg sweeps it back from there.
+        self.commanded_lean = [LEAN_AZIMUTH] * self.num_envs
         # Brick pose at the HOVER this pick attempt started from (env-origin subtracted), for
         # the LIFT rise/xy gate -- mirrors grasp_one's `brick_start` in
         # scripts/scripted_grasp_check.py.
@@ -927,6 +999,7 @@ class OracleRig:
                 oracle.PICK_TILT_RAD,
                 [p.closing_axes for p in seen_parts],
                 orc.walls,
+                orc.hold_band,
             )
             if ranked:
                 chosen = grasp.select_grasp(ranked) or ranked[0]
@@ -1043,6 +1116,13 @@ class OracleRig:
                 # The cycle follows the part actually held; REOPEN would drop it.
                 orc.adopt_held_part(held)
                 brick, lifted = held, True
+        if lifted and self.passenger_check and self.parts_start[i] is not None:
+            riders = self._passengers(i, brick)
+            if riders:
+                # REOPEN drops the carried part and its riders back into the tray, and the
+                # retry ladder (core.oracle's LIFT branch) picks the part again.
+                self.passenger_log[i].append(riders)
+                lifted = False
         # MS6 design 7.4: the stall floor follows the width the jaws close across, and so
         # does the force floor (the jaw drive's force is its stall times its stiffness). The
         # floors stay the ones the CHOSEN grasp set -- `pinch_ok` is telemetry here, not the
@@ -1076,6 +1156,18 @@ class OracleRig:
             if error < best_error:
                 best, best_error = b, error
         return best
+
+    def _passengers(self, i: int, carried: int) -> list[int]:
+        """The parts other than ``carried`` that rose with the jaws (``PASSENGER_MIN_RISE``)."""
+        pick = self.pick_point(i)
+        riders = []
+        for b in range(self.num_bricks):
+            pos = self._brick_pos(i, b)
+            rise = (pos[2] - self.parts_start[i][b, 2]).item()
+            near = (pos[:2] - pick[:2]).norm().item() < PASSENGER_XY_M
+            if b != carried and rise > PASSENGER_MIN_RISE and near:
+                riders.append(b)
+        return riders
 
     def _enter_phase(
         self, i: int, scene: oracle.SceneSnapshot, ending_phase: oracle.Phase | None = None
@@ -1121,6 +1213,10 @@ class OracleRig:
             # than read off `scene` (CPU -- see snapshot()) so it stays on self.device,
             # matching brick_end/pick_point in _lift_result.
             self.brick_start[i] = self._brick_pos(i, orc.target_brick)
+            if self.passenger_check:
+                self.parts_start[i] = torch.stack(
+                    [self._brick_pos(i, b) for b in range(self.num_bricks)]
+                )
         if goal.phase == oracle.Phase.DESCEND:
             # core.oracle deliberately leaves this to the runtime (it owns the
             # maker_arm_lab.robots import) -- the core target is the brick's resting z. It is
@@ -1176,6 +1272,7 @@ class OracleRig:
         pick_from, tilt_from = self._commanded_pick_pose(i, start)
         pick_to = goal.target_pos.double().cpu()
         heading = self.commanded_yaw[i]
+        lean = LEAN_AZIMUTH
         if goal.phase == oracle.Phase.DESCEND or goal.phase in (
             oracle.PUSH_PHASES | oracle.TIP_PHASES
         ) - {oracle.Phase.PUSH_HOVER, oracle.Phase.TIP_HOVER}:
@@ -1198,8 +1295,18 @@ class OracleRig:
             # everywhere: at the grasp tilt the jaw plates foul the desk at every pick offset
             # (ruling D3-10), so the descend runs the near-level ladder instead.
             tilt_to = max(goal.tilt_rad, GRASP_TILT_RAD)
+            lean = self._leg_lean(goal, pick_to)
             plan, heading, direct = self._plan_carry(
-                i, goal, start, pick_from, tilt_from, pick_to, tilt_to, heading
+                i,
+                goal,
+                start,
+                pick_from,
+                tilt_from,
+                pick_to,
+                tilt_to,
+                heading,
+                self.commanded_lean[i],
+                lean,
             )
             if (
                 plan is not None
@@ -1251,6 +1358,7 @@ class OracleRig:
             self.stats[i]["unplanned_legs"] += 1
             self.unplanned[i] = True
             return
+        self.commanded_lean[i] = lean
         if goal.phase == oracle.Phase.EXTEND and getattr(
             self.oracles[i], "matched_jaw_opening", False
         ):
@@ -1365,7 +1473,17 @@ class OracleRig:
         return out
 
     def _plan_carry(
-        self, i, goal, start, pick_from, tilt_from, pick_to, tilt_to, heading
+        self,
+        i,
+        goal,
+        start,
+        pick_from,
+        tilt_from,
+        pick_to,
+        tilt_to,
+        heading,
+        lean_from=LEAN_AZIMUTH,
+        lean_to=LEAN_AZIMUTH,
     ) -> tuple[list[torch.Tensor] | None, float, bool]:
         """A leg with the brick in the jaws (LIFT/RAISE/EXTEND/RETREAT), and the one place
         the jaw heading is allowed to move.
@@ -1415,12 +1533,22 @@ class OracleRig:
             offsets += tuple(half + o for half in (-math.pi, math.pi) for o in offsets)
         for offset in offsets:
             plan = self._plan_cartesian(
-                i, goal, start, pick_from, tilt_from, pick_to, tilt_to, heading, heading + offset
+                i,
+                goal,
+                start,
+                pick_from,
+                tilt_from,
+                pick_to,
+                tilt_to,
+                heading,
+                heading + offset,
+                lean_from=lean_from,
+                lean_to=lean_to,
             )
             if plan is not None:
                 return plan, heading + offset, False
         # Last resort: solve the endpoint and interpolate in joint space, at the held heading.
-        plan = self._plan_direct(i, goal, start, pick_to, tilt_to, heading)
+        plan = self._plan_direct(i, goal, start, pick_to, tilt_to, heading, lean_to)
         return plan, heading, plan is not None
 
     def _extend_plannable_from(self, i: int, q: torch.Tensor, heading: float) -> bool:
@@ -1435,6 +1563,7 @@ class OracleRig:
         """
         goal = self.oracles[i].extend_goal()
         pick_from, tilt_from = self._commanded_pick_pose(i, q)
+        pick_to = goal.target_pos.double().cpu()
         walk_steps = self.walk_steps[i]
         plan, _, _ = self._plan_carry(
             i,
@@ -1442,9 +1571,10 @@ class OracleRig:
             q,
             pick_from,
             tilt_from,
-            goal.target_pos.double().cpu(),
+            pick_to,
             max(goal.tilt_rad, GRASP_TILT_RAD),
             heading,
+            lean_to=self._leg_lean(goal, pick_to),
         )
         self.walk_steps[i] = walk_steps
         return plan is not None
@@ -1551,31 +1681,47 @@ class OracleRig:
         heading_from,
         heading_to=None,
         offset_z=None,
+        lean_from=LEAN_AZIMUTH,
+        lean_to=LEAN_AZIMUTH,
     ) -> list[torch.Tensor] | None:
         """A straight Cartesian leg for the pick point, with the tilt (and, on a carry leg,
-        the jaw heading) swept along it.
+        the jaw heading and the lean azimuth) swept along it.
 
         ``GlobalIK.solve_path``'s continuity constraint is what makes this safe to walk with
         a brick in the jaws: a solver jumping to another IK branch mid-leg fails the path
         outright instead of commanding a lurch through the scene.
+
+        Under ``carry_via`` an EXTEND whose straight line passes within CARRY_MIN_RADIUS_M of
+        the base axis walks `carry_arc` instead; the tilt, heading and lean sweep as before.
         """
         if heading_to is None:
             heading_to = heading_from
         if offset_z is None:
             offset_z = float(self.pick_offset[i, 2].item())
+        arc = (
+            self.carry_via
+            and goal.phase == oracle.Phase.EXTEND
+            and base_clearance(pick_from, pick_to) < CARRY_MIN_RADIUS_M
+        )
         count, steps = self._leg_resolution(
             i,
             goal,
-            distance=float((pick_to - pick_from).norm()),
+            distance=carry_arc(pick_from, pick_to)[4]
+            if arc
+            else float((pick_to - pick_from).norm()),
             tilt_change=abs(tilt_to - tilt_from),
             heading_change=abs(heading_to - heading_from),
+            lean_change=abs(lean_to - lean_from),
         )
         targets = [
             self._target_for(
-                pick_from + (pick_to - pick_from) * t,
+                carry_arc_point(pick_from, pick_to, float(t))
+                if arc
+                else pick_from + (pick_to - pick_from) * t,
                 float(tilt_from + (tilt_to - tilt_from) * float(t)),
                 float(heading_from + (heading_to - heading_from) * float(t)),
                 offset_z,
+                float(lean_from + (lean_to - lean_from) * float(t)),
             )
             for t in torch.linspace(0.0, 1.0, count, dtype=torch.float64)
         ]
@@ -1585,7 +1731,9 @@ class OracleRig:
         self.walk_steps[i] = steps
         return [step.q for step in chain]
 
-    def _plan_direct(self, i, goal, start, pick_to, tilt_to, heading) -> list[torch.Tensor] | None:
+    def _plan_direct(
+        self, i, goal, start, pick_to, tilt_to, heading, lean=LEAN_AZIMUTH
+    ) -> list[torch.Tensor] | None:
         """Fallback for a leg with no continuous Cartesian solution: solve the endpoint.
 
         Seeded from the current pose and rejected outright if it lands further than
@@ -1593,7 +1741,9 @@ class OracleRig:
         The path is then joint-space, which gives up the straight-line guarantee on the tool
         -- acceptable in a fallback, where the alternative is not moving at all.
         """
-        target = self._target_for(pick_to, tilt_to, heading, float(self.pick_offset[i, 2].item()))
+        target = self._target_for(
+            pick_to, tilt_to, heading, float(self.pick_offset[i, 2].item()), lean
+        )
         solution = self.ik.solve(
             target, seed=start, restarts=0, q_prev=start, max_step=MAX_LEG_JOINT_JUMP
         )
@@ -1616,14 +1766,23 @@ class OracleRig:
             goal.max_steps, self.oracles[i].draw.gain_scale, speed_scale=speed_scale, **geometry
         )
 
-    def _target_for(self, pick, tilt: float, heading: float, offset_z: float) -> GraspTarget:
+    def _target_for(
+        self, pick, tilt: float, heading: float, offset_z: float, lean: float = LEAN_AZIMUTH
+    ) -> GraspTarget:
         """The six-scalar grasp task that puts the PICK point at ``pick``."""
         return GraspTarget(
-            position=grasp_center_for(pick, tilt, heading, offset_z),
+            position=grasp_center_for(pick, tilt, heading, offset_z, lean),
             tilt=tilt,
             jaw_heading=heading,
-            lean_azimuth=LEAN_AZIMUTH,
+            lean_azimuth=lean,
         )
+
+    def _leg_lean(self, goal: oracle.Goal, pick_to: torch.Tensor) -> float:
+        """The lean azimuth a carry leg ends at: toward its box for EXTEND under
+        ``release_lean`` (the release target is the box centre), LEAN_AZIMUTH otherwise."""
+        if self.release_lean and goal.phase == oracle.Phase.EXTEND:
+            return math.atan2(float(pick_to[1]), float(pick_to[0]))
+        return LEAN_AZIMUTH
 
     def _commanded_pick_pose(self, i: int, q: torch.Tensor) -> tuple[torch.Tensor, float]:
         """The pick point and tool tilt that the joint target ``q`` asks for.
@@ -1662,6 +1821,7 @@ class OracleRig:
                 self.oracles[i] = self.oracle_factory(i, bl, draw)
             self.commanded_yaw[i] = self.jaw_yaw(i)
             self.commanded_tilt[i] = self.tool_tilt(i)
+            self.commanded_lean[i] = LEAN_AZIMUTH
             self.pick_offset[i] = torch.tensor(PICK_OFFSET_MEASURED, device=self.device)
             # The reset pose is the first thing commanded, so SETTLE holds the arm where the
             # reset left it (start-pose randomisation included) instead of driving it
@@ -1735,6 +1895,7 @@ class OracleRig:
         self.oracles[i] = orc
         self.commanded_yaw[i] = self.jaw_yaw(i)
         self.commanded_tilt[i] = self.tool_tilt(i)
+        self.commanded_lean[i] = LEAN_AZIMUTH
         self.pick_offset[i] = torch.tensor(PICK_OFFSET_MEASURED, device=self.device)
         self.q_cmd[i] = self.q_arm(i)
         self.trims[i].reset()
@@ -1796,6 +1957,7 @@ class OracleRig:
             self._go_idle(i, None)
             return False
         self.brick_start[i] = self._brick_pos(i, held) if held >= 0 else None
+        self.parts_start[i] = None  # a resumed LIFT has no HOVER to measure riders from
         if lifted_from is not None:
             self.brick_start[i][2] = lifted_from
         self.idle[i] = False
@@ -1934,10 +2096,7 @@ class OracleRig:
             if dones[i] or self.goals[i] is None:
                 continue
             if nan_env[i]:
-                self.abandoned[i] = True
-                self.goals[i] = None
-                if self.stats[i]["abandon"] is None:
-                    self.stats[i]["abandon"] = "nan_state"
+                self._abandon(i, "nan_state")
 
     def _run_watchdog(self, dones: torch.Tensor) -> None:
         """Joint-space watchdog: 30 consecutive flagged steps abandons the env."""
@@ -1966,10 +2125,20 @@ class OracleRig:
                     if not self._push_takeover_over(i):
                         self._enter_phase(i, self.snapshot(i) if fixed is None else fixed)
                     continue
-                self.abandoned[i] = True
-                self.goals[i] = None
-                if self.stats[i]["abandon"] is None:
-                    self.stats[i]["abandon"] = "watchdog"
+                self._abandon(i, "watchdog")
+
+    def _abandon(self, i: int, reason: str) -> None:
+        """Give env ``i`` up. A takeover (``resume``) also hands the env back as failed: its
+        loop waits for ``takeover_result``, and without it the cycle ran on to the episode's
+        time-out. Measured on the MS7e B2 teacher smoke (2026-09-29, run seed 20288900): a
+        HOVER jammed near link_005_joint's stop 36 steps in, and the heap lost 63221 steps and
+        34 of its 50 parts."""
+        self.abandoned[i] = True
+        self.goals[i] = None
+        if self.stats[i]["abandon"] is None:
+            self.stats[i]["abandon"] = reason
+        if self.single_cycle[i]:
+            self._go_idle(i, False)
 
     # -- frames --------------------------------------------------------------
     #

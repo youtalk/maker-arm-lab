@@ -115,6 +115,19 @@ DESK_SOLMIX = 1.0e6
 # what re-tunes these if it fails.
 BRICK_FRICTION = (1.0, 0.005, 0.0001)
 BRICK_CONDIM = 4
+# MS7e design section 6.4: under the round family, a round part's studs collide and its
+# contacts take condim 6, which adds rolling friction to the torsional term of BRICK_CONDIM.
+# Studs cannot stop a cylinder on its side from rolling about its own axis, since they lie on
+# that axis; the rolling term is what can. The rolling probe of 2026-09-29 dropped each round
+# part 48 times into the leaned tray and kicked it 48 times at rest, at 0.1 m/s (the jaw
+# speed) across its axis. At 1e-3 a part on its side rolled 1.3 to 8.5 mm (p90 per part) and
+# every part came to rest within 0.45 s. At 3e-4 a round 4x4 rolled 22 mm and 37 of 48
+# round 1x1 drops rocked in place for the whole 6 s. At 2e-3 a round 2x2 balanced on its rim
+# edge in 17 of 48 rests. With condim 4, collision studs or not, the rolls reached 83 to
+# 134 mm (p90), and 8 to 27 of 48 kicked parts still rolled after 6 s.
+ROUND_CONDIM = 6
+ROUND_ROLLING_FRICTION = 0.001  # INITIAL: the lone-part table (MS7e design section 6.2)
+ROUND_FRICTION = (*BRICK_FRICTION[:2], ROUND_ROLLING_FRICTION)
 NOSLIP_ITERATIONS = 3
 IMPRATIO = 10.0
 FLOOR_Z = -0.75  # the Isaac GroundPlaneCfg's height
@@ -219,20 +232,42 @@ def _add_position_actuator(spec, joint: str, kp: float, kd: float, force_limit: 
     act.ctrlrange = list(spec.joint(joint).range)
 
 
-def _add_part_geoms(spec, body, index: int, part: _parts.Part, rgba) -> mujoco.MjsGeom:
-    """One collider (box, cylinder or slope hull) plus visual-only studs (design H3).
+def _add_part_geoms(
+    spec, body, index: int, part: _parts.Part, rgba, round_physics: bool = False
+) -> list[mujoco.MjsGeom]:
+    """The colliders (a box, a cylinder, a slope hull or an LDraw part's hulls) plus visual-only
+    studs (design H3).
 
-    Returns the collider.
+    Under ``round_physics`` a round part's studs collide too, and the part's geoms carry
+    ``ROUND_CONDIM`` and ``ROUND_FRICTION`` (MS7e design section 6.4). Returns the colliders,
+    ``brick_<index>_geom`` first. Each LDraw hull is its own mesh geom and carries its share of
+    the part's mass.
     """
     name = f"brick_{index}_geom"
+    rolls = round_physics and part.family == "round"
+    colliders = []
     if part.family == "round":
         geom = body.add_geom(
             name=name,
             type=mujoco.mjtGeom.mjGEOM_CYLINDER,
             size=[part.size[0] / 2, part.size[2] / 2, 0.0],
             rgba=list(rgba),
-            friction=list(BRICK_FRICTION),
+            friction=list(ROUND_FRICTION if rolls else BRICK_FRICTION),
         )
+    elif part.hulls:
+        for k, (share, verts) in enumerate(part.hulls):
+            mesh = f"brick_{index}_hull_{k}"
+            spec.add_mesh(name=mesh, uservert=[c for v in verts for c in v])
+            hull = body.add_geom(
+                name=name if k == 0 else f"{name}_{k}",
+                type=mujoco.mjtGeom.mjGEOM_MESH,
+                meshname=mesh,
+                rgba=list(rgba),
+                friction=list(BRICK_FRICTION),
+            )
+            hull.mass = part.mass * share
+            colliders.append(hull)
+        geom = colliders[0]
     elif part.hull is None:
         geom = body.add_geom(
             name=name,
@@ -250,7 +285,11 @@ def _add_part_geoms(spec, body, index: int, part: _parts.Part, rgba) -> mujoco.M
             rgba=list(rgba),
             friction=list(BRICK_FRICTION),
         )
-    geom.mass = part.mass
+    if not colliders:
+        geom.mass = part.mass
+        colliders.append(geom)
+    for geom in colliders:
+        geom.condim = ROUND_CONDIM if rolls else BRICK_CONDIM
     for k, (x, y) in enumerate(_parts.stud_positions(part)):
         stud = body.add_geom(
             name=f"brick_{index}_stud_{k}",
@@ -259,9 +298,25 @@ def _add_part_geoms(spec, body, index: int, part: _parts.Part, rgba) -> mujoco.M
             pos=[x, y, part.size[2] / 2 + _parts.STUD_HEIGHT / 2],
             rgba=list(rgba),
         )
+        if rolls:
+            stud.contype, stud.conaffinity = 3, 3  # build_spec's scene pair
+            stud.condim = ROUND_CONDIM
+            stud.friction = list(ROUND_FRICTION)
+            stud.solref = list(CONTACT_SOLREF)
+        else:
+            stud.contype, stud.conaffinity = 0, 0
+        stud.mass = 0.0
+    for k, (base, axis) in enumerate(part.stud_frames):  # LDraw studs, on any face
+        stud = body.add_geom(
+            name=f"brick_{index}_stud_{k}",
+            type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+            size=[_parts.STUD_RADIUS, 0.0, 0.0],
+            fromto=[*base, *(b + _parts.STUD_HEIGHT * a for b, a in zip(base, axis))],
+            rgba=list(rgba),
+        )
         stud.contype, stud.conaffinity = 0, 0
         stud.mass = 0.0
-    return geom
+    return colliders
 
 
 def build_spec(
@@ -272,18 +327,28 @@ def build_spec(
     num_desk_boxes: int = 0,
     tray: bool = False,
     tray_lean_deg: float = 0.0,
+    deep_box_floor: bool = False,
+    camera_back: float = 0.0,
+    round_physics: bool = False,
 ) -> mujoco.MjSpec:
     """The MjSpec for one run draw; ``compile_model`` turns it into a model and handles.
 
     ``parts`` (MS6) replaces the ``num_bricks`` identical box bricks with one body per part.
     A heap lies on the bare desk: there is no dish (owner decision 2026-09-18). ``tray``
     (MS7a design, the tray) adds the four walls of ``layout.tray_static_boxes``, or with
-    ``tray_lean_deg`` > 0 the leaning walls of ``layout.tray_lean_boxes``.
+    ``tray_lean_deg`` > 0 the leaning walls of ``layout.tray_lean_boxes``. ``deep_box_floor``
+    (MS7e flat track) extends each desk box floor's collider under the desk top by
+    ``desk_boxes.DESK_BOX_FLOOR_DEPTH``, so a thin part cannot drop through it.
 
     ``num_desk_boxes`` (MS7a design, desk boxes) removes the shelf and its bins and adds that
     many open boxes on the desk, each a mocap body (``desk_box_<j>``) the env moves per
     episode. A static world geom cannot move: its collision bounds are compiled once, and a
     part dropped on a world geom moved by ``geom_pos`` fell through it (measured 2026-09-23).
+
+    ``camera_back`` moves the overhead camera's nominal x back (``overhead_camera_pose``).
+
+    ``round_physics`` (MS7e design section 6.4) gives round parts collision studs and
+    ``ROUND_CONDIM``; every other part is built as without it.
     """
     if parts is not None:
         num_bricks = len(parts)
@@ -364,7 +429,8 @@ def build_spec(
     for j in range(num_desk_boxes):
         # Parked off the desk until the first reset draws the episode's poses.
         body = spec.worldbody.add_body(name=f"desk_box_{j}", mocap=True, pos=[-1.0, 0.2 * j, 0])
-        for name, center, size in desk_boxes.box_geoms(num_desk_boxes):
+        depth = desk_boxes.DESK_BOX_FLOOR_DEPTH if deep_box_floor else 0.0
+        for name, center, size in desk_boxes.box_geoms(desk_boxes.interior(num_desk_boxes), depth):
             scene_geoms.append(
                 body.add_geom(
                     name=f"desk_box_{j}_{name}",
@@ -425,18 +491,21 @@ def build_spec(
                 friction=list(BRICK_FRICTION),
             )
             geom.mass = layout.BRICK_MASS
+            geom.condim = BRICK_CONDIM
+            colliders = [geom]
         else:
-            geom = _add_part_geoms(spec, body, index, parts[index], layout.BRICK_RGBA[color])
-        geom.condim = BRICK_CONDIM
-        geom.solref = list(CONTACT_SOLREF)
-        scene_geoms.append(geom)
+            colliders = _add_part_geoms(
+                spec, body, index, parts[index], layout.BRICK_RGBA[color], round_physics
+            )
+        for geom in colliders:
+            geom.solref = list(CONTACT_SOLREF)
+            scene_geoms.append(geom)
     for geom in scene_geoms:
         geom.contype, geom.conaffinity = 3, 3  # collides with the robot AND with itself
 
     # Cameras (Isaac offsets are ROS-convention; see core.cameras).
     if cameras_on:
-        over_pos = [p + d for p, d in zip(cameras.OVERHEAD_CAM_POS, draw["overhead_cam_dpos"])]
-        over_rot = compose_offset_rot(cameras.OVERHEAD_CAM_ROT, draw["overhead_cam_drot_deg"])
+        over_pos, over_rot = overhead_camera_pose(draw, camera_back)
         spec.worldbody.add_camera(
             name="overhead",
             pos=over_pos,
@@ -545,20 +614,39 @@ def build_model(
     num_desk_boxes: int = 0,
     tray: bool = False,
     tray_lean_deg: float = 0.0,
+    deep_box_floor: bool = False,
+    camera_back: float = 0.0,
+    round_physics: bool = False,
 ) -> tuple[mujoco.MjModel, SceneHandles]:
     """One call for callers that do not need to edit the spec."""
     if parts is not None:
         num_bricks = len(parts)
-    spec = build_spec(draw, num_bricks, cameras_on, parts, num_desk_boxes, tray, tray_lean_deg)
+    spec = build_spec(
+        draw,
+        num_bricks,
+        cameras_on,
+        parts,
+        num_desk_boxes,
+        tray,
+        tray_lean_deg,
+        deep_box_floor=deep_box_floor,
+        camera_back=camera_back,
+        round_physics=round_physics,
+    )
     return compile_model(spec, num_bricks)
 
 
 # -- per-episode draws: the same numbers as build_spec, written into a compiled model ----------
 
 
-def overhead_camera_pose(draw: dict) -> tuple[list[float], tuple[float, float, float, float]]:
-    """The overhead camera's world position and ROS-convention quaternion for ``draw``."""
+def overhead_camera_pose(
+    draw: dict, back: float = 0.0
+) -> tuple[list[float], tuple[float, float, float, float]]:
+    """The overhead camera's world position and ROS-convention quaternion for ``draw``, with
+    its nominal x ``back`` m further back (``cameras.OVERHEAD_B2_BACK_M`` under MS7e B2)."""
     pos = [p + d for p, d in zip(cameras.OVERHEAD_CAM_POS, draw["overhead_cam_dpos"])]
+    if back:
+        pos[0] -= back
     rot = compose_offset_rot(cameras.OVERHEAD_CAM_ROT, draw["overhead_cam_drot_deg"])
     return pos, rot
 
@@ -568,6 +656,41 @@ def apply_bins(model: mujoco.MjModel, bl: layout.BinLayout, heap: bool = False) 
     boxes = layout.heap_bin_static_boxes(bl) if heap else layout.bin_static_boxes(bl)
     for name, center, _size in boxes:
         model.geom_pos[model.geom(name).id] = center
+
+
+def apply_desk_box_size(model: mujoco.MjModel, j: int, size, floor_depth: float = 0.0) -> None:
+    """Resize desk box ``j`` to interior ``size`` (the MS7e box draw, design section 4.2), its
+    floor reaching ``floor_depth`` under the desk top as the scene built it (``deep_box_floor``).
+
+    Writes each geom's centre and size from ``desk_boxes.box_geoms``, then every bound the
+    collision pipeline caches from them, which ``mj_setConst`` does not refresh (read off
+    MuJoCo 3.13.0, 2026-09-29): the geom's bounding sphere (``geom_rbound``), its local box
+    (``geom_aabb``) and the body's bounding volume tree (``bvh_aabb``), which lives in the
+    body's inertial frame. The tree keeps the compiled partition: a leaf is its geom's box and
+    a node the union of its two children, and a child always follows its parent."""
+    body = model.body(f"desk_box_{j}").id
+    for name, center, full in desk_boxes.box_geoms(size, floor_depth):
+        g = model.geom(f"desk_box_{j}_{name}").id
+        half = np.asarray(full, dtype=float) / 2.0
+        model.geom_pos[g] = center
+        model.geom_size[g] = half
+        model.geom_rbound[g] = np.linalg.norm(half)
+        model.geom_aabb[g] = (0.0, 0.0, 0.0, *half)
+    rot = np.zeros(9)
+    mujoco.mju_quat2Mat(rot, model.body_iquat[body])
+    rot = rot.reshape(3, 3)  # inertial axes in the body frame, as columns
+    start, count = model.body_bvhadr[body], model.body_bvhnum[body]
+    for node in reversed(range(start, start + count)):
+        a, b = model.bvh_child[node]
+        if a < 0:
+            g = model.bvh_nodeid[node]
+            centre = rot.T @ (model.geom_pos[g] - model.body_ipos[body])
+            model.bvh_aabb[node] = (*centre, *(np.abs(rot.T) @ model.geom_size[g]))
+            continue
+        kids = [model.bvh_aabb[start + c] for c in (a, b)]
+        lo = np.minimum(*(k[:3] - k[3:] for k in kids))
+        hi = np.maximum(*(k[:3] + k[3:] for k in kids))
+        model.bvh_aabb[node] = (*(lo + hi) / 2.0, *(hi - lo) / 2.0)
 
 
 def apply_lighting(model: mujoco.MjModel, draw: dict) -> None:
@@ -584,11 +707,11 @@ def apply_lighting(model: mujoco.MjModel, draw: dict) -> None:
     model.geom_rgba[model.geom("floor").id, :3] = draw["floor_color"]
 
 
-def apply_cameras(model: mujoco.MjModel, draw: dict) -> None:
+def apply_cameras(model: mujoco.MjModel, draw: dict, camera_back: float = 0.0) -> None:
     """Move both cameras to ``draw``'s jitter. A model built without cameras is left alone."""
     if model.ncam == 0:
         return
-    pos, rot = overhead_camera_pose(draw)
+    pos, rot = overhead_camera_pose(draw, camera_back)
     c = model.camera("overhead").id
     model.cam_pos[c] = pos
     model.cam_quat[c] = quat_mul(rot, cameras.ROS_TO_MUJOCO_CAM)

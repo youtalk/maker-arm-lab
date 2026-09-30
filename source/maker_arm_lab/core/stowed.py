@@ -107,12 +107,17 @@ def _brick_states(env) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def env_desk_boxes(env, device: str) -> tuple[torch.Tensor, torch.Tensor]:
-    """(N,M,4) grader boxes (x, y, centre z, yaw) and their (3,) half extents, from
-    ``env.desk_box_poses`` (N,M,3) and ``desk_boxes.stow_region``."""
+    """(N,M,4) grader boxes (x, y, centre z, yaw) and their (N,M,3) half extents, from
+    ``env.desk_box_poses`` (N,M,3), each box's interior ``env.desk_box_sizes`` (N,M,3), the MS7a
+    box of ``desk_boxes.interior`` without it, and ``desk_boxes.stow_region``."""
     poses = torch.as_tensor(env.desk_box_poses, dtype=torch.float32)
-    z, half = desk_boxes.stow_region(poses.shape[1])
-    boxes = torch.cat((poses[..., :2], torch.full_like(poses[..., :1], z), poses[..., 2:]), -1)
-    return boxes.to(device), torch.tensor(half).to(device)
+    n, m = poses.shape[:2]
+    sizes = getattr(env, "desk_box_sizes", [desk_boxes.interiors(m)] * n)
+    regions = [[desk_boxes.stow_region(size) for size in row] for row in sizes]
+    z = torch.tensor([[r[0] for r in row] for row in regions], dtype=torch.float32)
+    half = torch.tensor([[r[1] for r in row] for row in regions], dtype=torch.float32)
+    boxes = torch.cat((poses[..., :2], z.reshape(poses[..., :1].shape), poses[..., 2:]), -1)
+    return boxes.to(device), half.reshape(poses.shape).to(device)
 
 
 def parts_in_desk_boxes(env) -> torch.Tensor:

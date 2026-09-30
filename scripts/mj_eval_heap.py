@@ -27,7 +27,14 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lerobot_stack"))
 import policy_client
 from maker_arm_lab.core import oracle, perception
-from maker_arm_lab.core.batch_loop import PARTS_SPLITS, heap_parts
+from maker_arm_lab.core.batch_loop import (
+    PARTS_SPLITS,
+    add_ms7e_arguments,
+    check_ms7e,
+    heap_classes,
+    heap_parts,
+    ms7e_switches,
+)
 from maker_arm_lab.core.eval_loop import EvalFailure
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
@@ -100,6 +107,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=0,
         help="N desk boxes beside the arm replace the shelf and its heap bin (MS7a: 1 for "
         "rung 1, 4 for rung 2); 0 is the MS6 scene",
+    )
+    add_ms7e_arguments(parser)
+    parser.add_argument(
+        "--deep_box_floor",
+        action="store_true",
+        help="MS7e flat track: each desk box floor's collider reaches under the desk top",
     )
     parser.add_argument("--server", type=str, default="tcp://127.0.0.1:5555")
     parser.add_argument("--out", type=str, default="", help="write the EVAL_OK payload here too")
@@ -308,6 +321,7 @@ def parse_args(argv=None) -> argparse.Namespace:
             parser.error(f"--{name} is outside numpy's seed range (0 <= seed < 2**32)")
     if args.heap_k <= 0:
         parser.error("--heap_k must be positive: this client evaluates heap episodes only")
+    check_ms7e(parser, args)
     if args.desk_boxes < 0:
         parser.error("--desk_boxes must be 0 or more")
     if args.perceived:
@@ -378,6 +392,12 @@ def main(argv=None) -> int:
             desk_boxes=args.desk_boxes,
             tray=args.tray,
             tray_lean_deg=args.tray_lean,
+            class_names=heap_classes(args),
+            box_draw=args.box_draw,
+            box_unseen=args.box_unseen,
+            deep_box_floor=args.deep_box_floor,
+            release_lean=args.release_lean,
+            round_physics="round" in args.families,  # MS7e design section 6.4
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
@@ -391,12 +411,21 @@ def main(argv=None) -> int:
                 rng=rig_rng,
                 cycle_budget=args.cycle_budget,
                 boxes=env.desk_box_poses[i],
+                box_sizes=env.desk_box_sizes[i],
                 tray=env.tray,
                 tray_lean_deg=env.tray_lean_deg,
+                wall_band_cont=args.wall_band_cont,
             )
 
         rig = OracleRig(
-            env, env.cfg.bin_layout, oracle.OracleNoise(), rig_rng, oracle_factory=factory
+            env,
+            env.cfg.bin_layout,
+            oracle.OracleNoise(),
+            rig_rng,
+            oracle_factory=factory,
+            release_lean=args.release_lean,
+            carry_via=args.carry_via,
+            passenger_check=args.passenger_check,
         )
         policy = None if args.oracle_driver else policy_client.ServerPolicy(args.server)
         trace = [] if args.hold_trace else None
@@ -439,12 +468,18 @@ def main(argv=None) -> int:
             class_views=args.class_views,
             hold_force=args.hold_force,
             force_cap=args.force_cap,
+            thin_snap=args.thin_snap,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
         payload["desk_boxes"] = args.desk_boxes
         payload["tray"] = args.tray
         payload["tray_lean"] = args.tray_lean
+        payload["ms7e"] = ms7e_switches(args)
+        payload["deep_box_floor"] = args.deep_box_floor
+        if args.passenger_check:
+            # Each rejected LIFT's passengers, as indices into payload["parts"].
+            payload["passenger_rejects"] = [r for log in rig.passenger_log for r in log]
     except EvalFailure as err:
         print("EVAL_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True)
         return 1

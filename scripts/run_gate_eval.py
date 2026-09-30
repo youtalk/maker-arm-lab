@@ -90,9 +90,75 @@ class GateCfg:
     desk_boxes: int = 0  # MuJoCo heap only: MS7a desk boxes; 0 is the MS6 shelf bin
     tray: bool = False  # MuJoCo heap only: the heap drops into the tray (MS7a)
     tray_lean: float = 0.0  # MuJoCo heap only: the tray walls lean outward, degrees
+    deep_box_floor: bool = False  # MuJoCo heap only: MS7e flat lever 1, deeper box floors
     # MuJoCo only: extra flags handed to the eval client verbatim, e.g. the heap loop's
     # protocol switches. A cached payload must have run with the same switches.
     client_flags: tuple = ()
+    # MuJoCo heap only: the MS7e switches (MS7e design section 10.1), forwarded to the heap
+    # client and recorded in its payload's "ms7e" block; every one off is MS7d.
+    families: tuple = ()
+    box_draw: int = 0
+    release_lean: bool = False
+    carry_via: bool = False
+    box_unseen: str | None = None
+    heap_family: str | None = None
+    passenger_check: bool = False
+    wall_band_cont: bool = False
+    thin_snap: bool = False
+    # MS7e unseen-box ladder, the seen row (design section 8.3): (RUN0, LAYOUT0), draw i reads a
+    # recorded run's own seeds RUN0 + i and LAYOUT0 + i (make_eval_draws); None is the formula.
+    seen_seeds: tuple | None = None
+
+
+FAMILY_KEYS = ("round", "ldraw", "flat")
+"""``core.parts.FAMILY_KEYS``'s keys, in order, copied because the supervisor imports no
+maker_arm_lab; the test pins it."""
+READY_FAMILIES: frozenset[str] = frozenset({"round", "ldraw", "flat"})
+"""``core.parts.READY_FAMILIES``, copied and pinned the same way: ``--families`` with another
+key is refused before a server starts (MS7e design section 10.2)."""
+UNBUILT_SWITCHES: tuple[str, ...] = ()
+"""``core.batch_loop.UNBUILT_SWITCHES``, copied and pinned the same way."""
+
+
+def families_key(text: str) -> tuple:
+    """``--families``: the canonical tuple the heap client records, the keys of ``FAMILY_KEYS``
+    in its order, once each (``core.batch_loop.families_arg``). Raises ValueError on an
+    unknown key."""
+    keys = [k.strip() for k in text.split(",") if k.strip()]
+    unknown = [k for k in keys if k not in FAMILY_KEYS]
+    if unknown:
+        raise ValueError(f"--families: unknown family keys {unknown}; keys: {FAMILY_KEYS}")
+    return tuple(k for k in FAMILY_KEYS if k in keys)
+
+
+MS7E_OFF = {
+    "families": [],
+    "box_draw": 0,
+    "release_lean": False,
+    "carry_via": False,
+    "box_unseen": None,
+    "heap_family": None,
+    "passenger_check": False,
+    "wall_band_cont": False,
+    "thin_snap": False,
+}
+"""The "ms7e" block of a read with every MS7e switch off, what an MS7d payload ran with."""
+
+
+def ms7e_block(cfg: "GateCfg") -> dict:
+    """The payload's "ms7e" block a read with ``cfg`` records (``core.batch_loop.ms7e_switches``);
+    the cache matches on it."""
+    return {
+        "families": list(cfg.families),
+        "box_draw": cfg.box_draw,
+        "release_lean": cfg.release_lean,
+        "carry_via": cfg.carry_via,
+        "box_unseen": cfg.box_unseen,
+        "heap_family": cfg.heap_family,
+        "passenger_check": cfg.passenger_check,
+        "wall_band_cont": cfg.wall_band_cont,
+        "thin_snap": cfg.thin_snap,
+    }
 
 
 MS7D_LEVERS = {
@@ -191,17 +257,35 @@ def loop_switches(client_flags) -> dict:
     return found
 
 
-def make_eval_draws(processes: int, seed: int) -> list[EvalDraw]:
+def make_eval_draws(processes: int, seed: int, seen: tuple | None = None) -> list[EvalDraw]:
+    """The draws of ``seed``, or with ``seen`` = (RUN0, LAYOUT0) draw i on the seeds RUN0 + i
+    and LAYOUT0 + i of a recorded corpus run, with the recorder's default permutation."""
     rng = random.Random(f"gate:{seed}")
+    run0, layout0 = seen or (seed * 1000, seed * 1000 + 500)
     return [
         EvalDraw(
             process_index=i,
-            permutation=tuple(rng.choice(ALL_PERMUTATIONS)),
-            run_seed=(seed * 1000 + i) % _SEED_BOUND,
-            layout_seed=(seed * 1000 + 500 + i) % _SEED_BOUND,
+            permutation=(0, 1, 2, 3) if seen else tuple(rng.choice(ALL_PERMUTATIONS)),
+            run_seed=(run0 + i) % _SEED_BOUND,
+            layout_seed=(layout0 + i) % _SEED_BOUND,
         )
         for i in range(processes)
     ]
+
+
+def gate_draws(cfg: "GateCfg") -> list[EvalDraw]:
+    """Every draw of the read, checked against the campaign ledger: a fresh read shares no seed
+    with a recorded run, and a seen read (``cfg.seen_seeds``) reads only recorded runs' pairs."""
+    runs = json.loads(cfg.ledger.read_text()).get("runs", [])
+    draws = make_eval_draws(cfg.processes, cfg.seed, cfg.seen_seeds)
+    if cfg.seen_seeds is None:
+        assert_seeds_disjoint(draws, runs)
+        return draws
+    recorded = {(int(r["seeds"]["run_seed"]), int(r["seeds"]["layout_seed"])) for r in runs}
+    for d in draws:
+        if (d.run_seed, d.layout_seed) not in recorded:
+            raise ValueError(f"--seen_seeds: draw {d.process_index} is no recorded run: {d}")
+    return draws
 
 
 def select_draws(draws: list[EvalDraw], only_processes: tuple | None) -> list[EvalDraw]:
@@ -300,9 +384,23 @@ def aggregate_gate(
     lo, hi = wilson_interval(bricks_stowed, bricks_total)
     # MS7a desk boxes: bricks_stowed counts parts at rest in their own box only (the grader),
     # and these rows say where the rest went. Absent on every payload without desk boxes.
+    # MS7e design section 8.1 adds the rows per family and per box count; an MS7d payload
+    # has no family rows and four boxes in every episode.
     boxed = [ep for ep in episodes if "stowed_by_class" in ep]
     box_rows = {}
     if boxed:
+        by_family: dict[str, dict] = {}
+        by_count: dict[str, dict] = {}
+        for ep in boxed:
+            count = {"stowed": ep["bricks_stowed"], "total": ep["num_bricks"]}
+            for table, rows in (
+                (by_family, ep.get("stowed_by_family", {})),
+                (by_count, {str(ep.get("box_count", len(ep["stowed_by_box"]))): count}),
+            ):
+                for name, row in rows.items():
+                    total = table.setdefault(name, {"stowed": 0, "total": 0})
+                    for k in ("stowed", "total"):
+                        total[k] += row[k]
         box_rows = {
             "stowed_by_class": {
                 c: {
@@ -310,9 +408,17 @@ def aggregate_gate(
                 }
                 for c in boxed[0]["stowed_by_class"]
             },
+            "stowed_by_family": by_family,
+            "stowed_by_box_count": dict(sorted(by_count.items(), key=lambda kv: int(kv[0]))),
+            # Under the box draw an episode lists only its own boxes, so the lists differ in length.
             "stowed_by_box": [
-                {k: sum(ep["stowed_by_box"][m][k] for ep in boxed) for k in ("stowed", "total")}
-                for m in range(len(boxed[0]["stowed_by_box"]))
+                {
+                    k: sum(
+                        ep["stowed_by_box"][m][k] for ep in boxed if m < len(ep["stowed_by_box"])
+                    )
+                    for k in ("stowed", "total")
+                }
+                for m in range(max(len(ep["stowed_by_box"]) for ep in boxed))
             ],
             "wrong_box_parts": sum(ep["wrong_box_parts"] for ep in boxed),
             "wrong_box_cycles": sum(ep["cycle_classes"].count("wrong_box") for ep in boxed),
@@ -479,6 +585,26 @@ def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
                 prefix += ["--tray_lean", str(cfg.tray_lean)]
             if cfg.tray:
                 prefix.append("--tray")
+            if cfg.deep_box_floor:
+                prefix.append("--deep_box_floor")
+            if cfg.families:
+                prefix += ["--families", ",".join(cfg.families)]
+            if cfg.box_draw:
+                prefix += ["--box_draw", str(cfg.box_draw)]
+            if cfg.release_lean:
+                prefix.append("--release_lean")
+            if cfg.carry_via:
+                prefix.append("--carry_via")
+            if cfg.box_unseen:
+                prefix += ["--box_unseen", cfg.box_unseen]
+            if cfg.heap_family:
+                prefix += ["--heap_family", cfg.heap_family]
+            if cfg.passenger_check:
+                prefix.append("--passenger_check")
+            if cfg.wall_band_cont:
+                prefix.append("--wall_band_cont")
+            if cfg.thin_snap:
+                prefix.append("--thin_snap")
         prefix += list(cfg.client_flags)
     else:
         prefix = [
@@ -559,6 +685,10 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
             and payload.get("desk_boxes", 0) == cfg.desk_boxes
             and payload.get("tray", False) == cfg.tray
             and float(payload.get("tray_lean", 0.0)) == cfg.tray_lean
+            # A payload that predates the deep floor ran without it.
+            and payload.get("deep_box_floor", False) == cfg.deep_box_floor
+            # A payload that predates the MS7e switches, or a later one, ran with them off.
+            and MS7E_OFF | payload.get("ms7e", {}) == ms7e_block(cfg)
         )
     # The served inference configuration is part of what a draw measured. An open-loop read
     # (the checkpoint's own n_action_steps) must never stand in for a temporal-ensemble read.
@@ -584,10 +714,7 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
     injected so the orchestration has CPU tests. Finished draws are reused from
     eval_NNN.json; the server is started only if at least one draw still has to run."""
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
-    ledger_runs = json.loads(cfg.ledger.read_text()).get("runs", [])
-    draws = make_eval_draws(cfg.processes, cfg.seed)
-    assert_seeds_disjoint(draws, ledger_runs)
-    selected = select_draws(draws, cfg.only_processes)
+    selected = select_draws(gate_draws(cfg), cfg.only_processes)
     payloads: dict[int, dict] = {}
     todo = []
     for draw in selected:
@@ -645,6 +772,7 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
         (p["inference"] for p in ordered if p.get("inference")), server_ready.get("inference", {})
     )
     results["policy_id"] = next((p.get("policy_id") for p in ordered), None)
+    results["ms7e"] = ms7e_block(cfg)
     results["draws"] = [
         {
             "process_index": d.process_index,
@@ -673,6 +801,14 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
         flush=True,
     )
     return results
+
+
+def _seed_pair(raw: str) -> tuple:
+    try:
+        run0, layout0 = (int(part) for part in raw.split(","))
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(f"not RUN0,LAYOUT0: {raw!r}") from err
+    return run0, layout0
 
 
 def _process_list(raw: str) -> tuple:
@@ -867,6 +1003,73 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             help=f"MuJoCo heap only: forwarded to the heap client as --{name}, MS7d {lever}",
         )
     parser.add_argument(
+        "--families",
+        type=str,
+        default="",
+        help="MuJoCo heap only, MS7e: forwarded to the heap client as --families, the part "
+        f"families the catalog adds (a comma list of {', '.join(FAMILY_KEYS)})",
+    )
+    parser.add_argument(
+        "--box_draw",
+        type=int,
+        default=0,
+        help="MuJoCo heap only, MS7e: forwarded as --box_draw N, the per-episode box count "
+        "uniform from 4 to N; 0 is off",
+    )
+    parser.add_argument(
+        "--release_lean",
+        action="store_true",
+        help="MuJoCo heap only, MS7e B2: forwarded as --release_lean",
+    )
+    parser.add_argument(
+        "--carry_via",
+        action="store_true",
+        help="MuJoCo heap only, MS7e R12 T1 with --release_lean: forwarded as --carry_via",
+    )
+    parser.add_argument(
+        "--box_unseen",
+        choices=("size", "rim"),
+        default=None,
+        help="MuJoCo heap only, MS7e: forwarded as --box_unseen, an unseen-box ladder row",
+    )
+    parser.add_argument(
+        "--heap_family",
+        choices=FAMILY_KEYS,
+        default=None,
+        help="MuJoCo heap only, MS7e: forwarded as --heap_family, a family heap read; the key "
+        "must be in --families",
+    )
+    parser.add_argument(
+        "--passenger_check",
+        action="store_true",
+        help="MuJoCo heap only, MS7e teacher lever T2: forwarded as --passenger_check",
+    )
+    parser.add_argument(
+        "--wall_band_cont",
+        action="store_true",
+        help="MuJoCo heap only, MS7e serving lever S3 with --gripper continuous: forwarded as "
+        "--wall_band_cont",
+    )
+    parser.add_argument(
+        "--thin_snap",
+        action="store_true",
+        help="MuJoCo heap only, MS7e serving lever S2 with --pick_snap: forwarded as --thin_snap",
+    )
+    parser.add_argument(
+        "--deep_box_floor",
+        action="store_true",
+        help="MuJoCo heap only, MS7e flat lever 1: forwarded as --deep_box_floor, the desk box "
+        "floors' colliders reach under the desk top",
+    )
+    parser.add_argument(
+        "--seen_seeds",
+        type=_seed_pair,
+        default=None,
+        help="MS7e unseen-box ladder, the seen row: RUN0,LAYOUT0, draw i reads the seeds RUN0 + i "
+        "and LAYOUT0 + i of a recorded run of the ledger (refused otherwise) instead of --seed's. "
+        "With held-out parts only env 0 draws the recorded boxes, so it needs --num_envs 1",
+    )
+    parser.add_argument(
         "--client_flags",
         type=str,
         default="",
@@ -917,6 +1120,38 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError("--tray_lean leans the tray's walls: it needs --tray")
     if args.tray and args.heap_k <= 0:
         raise ValueError("--tray needs --heap_k > 0: the tray holds a heap")
+    if args.deep_box_floor and args.desk_boxes <= 0:
+        raise ValueError("--deep_box_floor deepens the desk box floors: it needs --desk_boxes")
+    if args.passenger_check and args.desk_boxes <= 0:
+        raise ValueError(
+            "--passenger_check keeps passengers out of other boxes: it needs --desk_boxes"
+        )
+    if args.wall_band_cont and args.gripper != "continuous":
+        raise ValueError(
+            "--wall_band_cont is the continuous jaws' band: it needs --gripper continuous"
+        )
+    if args.thin_snap and not args.pick_snap:
+        raise ValueError("--thin_snap moves pick_snap's floor: it needs --pick_snap")
+    families = families_key(args.families)
+    if any(getattr(args, name) for name in MS7E_OFF) and (
+        args.heap_k <= 0 or args.backend != "mujoco"
+    ):
+        raise ValueError("the MS7e switches need --heap_k > 0 and --backend mujoco")
+    unbuilt = [k for k in families if k not in READY_FAMILIES]
+    if unbuilt:
+        # The client's own usage error (MS7e design section 10.2), before a server starts.
+        raise ValueError(f"--families {','.join(unbuilt)} is not built on this commit")
+    for name in UNBUILT_SWITCHES:
+        if getattr(args, name):
+            raise ValueError(f"--{name} is not built on this commit")
+    if args.heap_family and args.heap_family not in families:
+        raise ValueError("--heap_family must name one of --families")
+    if args.carry_via and not args.release_lean:
+        raise ValueError("--carry_via bends the B2 carry: it needs --release_lean")
+    if args.seen_seeds and args.num_envs != 1:
+        # The env's one generator draws env 0's boxes before any heap; each later env's boxes
+        # follow the heap before it, which held-out parts change.
+        raise ValueError("--seen_seeds reproduces a recorded run's env 0: it needs --num_envs 1")
     if args.heap_k > 0:
         if args.backend != "mujoco":
             raise ValueError("--heap_k needs --backend mujoco: the Isaac env has no heap")
@@ -956,6 +1191,17 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         desk_boxes=args.desk_boxes,
         tray=args.tray,
         tray_lean=args.tray_lean,
+        deep_box_floor=args.deep_box_floor,
+        families=families,
+        box_draw=args.box_draw,
+        release_lean=args.release_lean,
+        carry_via=args.carry_via,
+        box_unseen=args.box_unseen,
+        heap_family=args.heap_family,
+        passenger_check=args.passenger_check,
+        wall_band_cont=args.wall_band_cont,
+        thin_snap=args.thin_snap,
+        seen_seeds=args.seen_seeds,
         client_flags=tuple(shlex.split(args.client_flags))
         + (("--scripted_place",) if args.scripted_place else ())
         + (("--scripted_rake",) if args.scripted_rake else ())

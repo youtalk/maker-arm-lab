@@ -6,6 +6,7 @@ import math
 import random
 
 import h5py
+import mujoco
 import numpy as np
 import pytest
 import torch
@@ -13,9 +14,9 @@ import torch
 from maker_arm_lab.core import desk_boxes, layout, loop, oracle, parts
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
-from maker_arm_lab.core.parts import PART_CLASSES
+from maker_arm_lab.core.parts import BASE_CLASSES
 from maker_arm_lab.core.stowed import per_brick_stowed
-from maker_arm_lab.mj.env import MjLegoSortEnv
+from maker_arm_lab.mj.env import HEAP_PARK_X, MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 from test_heap_loop import SPREAD
 from test_mj_heap_oracle import PARTS, _place
@@ -54,7 +55,7 @@ def test_desk_boxes_replace_the_shelf_and_stand_at_the_drawn_poses(n):
         assert sorted(env.class_to_box[i]) == ([0, 1, 2, 3] if n == 4 else [0, 0, 0, 0])
     assert env.desk_box_poses.shape == (2, n, 3)
     for i in range(2):
-        assert desk_boxes.clear(env.desk_box_poses[i], n)
+        assert desk_boxes.clear(env.desk_box_poses[i], [desk_boxes.interior(n)] * n)
         for j in range(n):
             assert desk_boxes.in_band(env.desk_box_poses[i, j], n)
             assert np.allclose(_box_floor_xy(env, i, j), env.desk_box_poses[i, j, :2])
@@ -162,8 +163,38 @@ def test_the_recorded_initial_state_carries_the_boxes_and_each_parts_destination
         assert np.allclose(init["desk_box_poses"][0], poses, atol=1e-6)
         assert init["destination_bin"][()].tolist() == destination
         assert init["class_to_box"][()].tolist() == class_map
-        assert json.loads(init["class_to_box"].attrs["names"]) == list(PART_CLASSES)
+        assert json.loads(init["class_to_box"].attrs["names"]) == list(BASE_CLASSES)
         assert f["data/demo_0/obs/context_box"].shape[1] == 3
+
+
+def test_the_eight_classes_size_the_class_map_and_the_recorded_names(tmp_path):
+    """MS7e design section 5: under an MS7e switch the env folds the eight classes onto its
+    boxes and the shard names them; a round part goes to its own class's box."""
+    heap = [*PARTS, parts.make_part("round", 2, 2)]
+    draw = sample_run_draw(random.Random(5))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    env = MjLegoSortEnv(
+        1,
+        draw,
+        parts=heap,
+        cameras=False,
+        desk_boxes=4,
+        class_names=parts.PART_CLASSES,
+        export_dir=tmp_path,
+        export_all=True,
+        episode_length_s=0.2,
+    )
+    env.reset(seed=3)
+    class_map = env.class_to_box[0].tolist()
+    assert len(class_map) == 8 and sorted(class_map) == [0, 0, 1, 1, 2, 2, 3, 3]
+    assert env.destination_bins[0].tolist()[-1] == class_map[4]  # round, the fifth class
+    for _ in range(8):
+        env.step(_hold(env))
+    env.close()
+    with h5py.File(tmp_path / "shard.hdf5") as f:
+        init = f["data/demo_0/initial_state"]
+        assert json.loads(init["class_to_box"].attrs["names"]) == list(parts.PART_CLASSES)
+        assert init["class_to_box"][()].tolist() == class_map
 
 
 def _teacher_env_and_rig(n, poses, **env_kwargs):
@@ -327,6 +358,11 @@ def test_box_census_names_the_wrong_box_cycle_and_counts_per_class_and_box():
         {"stowed": 1, "total": 2},
         {"stowed": 0, "total": 0},
     ]
+    assert rows["stowed_by_family"] == {
+        "brick": {"stowed": 1, "total": 3},
+        "slope": {"stowed": 0, "total": 1},
+    }
+    assert rows["box_count"] == 4
 
 
 def test_a_part_carried_into_another_box_is_a_wrong_box_cycle_and_never_stowed():
@@ -360,6 +396,11 @@ def test_a_part_carried_into_another_box_is_a_wrong_box_cycle_and_never_stowed()
     assert ep["stowed_by_box"][1] == {"stowed": 0, "total": 3}
     assert ep["stowed_by_class"]["wide"] == {"stowed": 0, "total": 2}
     assert payload["wrong_box_parts"] == 3 and payload["wrong_box_cycles"] == 3
+    # MS7e design section 8.1: the rows per family and per box count.
+    families = {p.family for p in env.parts}
+    assert set(payload["stowed_by_family"]) == families and ep["box_count"] == 4
+    assert sum(r["total"] for r in payload["stowed_by_family"].values()) == 3
+    assert payload["stowed_by_box_count"] == {"4": {"stowed": 0, "total": 3}}
 
 
 def _lift_until(rig, env, part, rise):
@@ -437,3 +478,60 @@ def test_the_scripted_place_hands_a_lifted_part_to_the_teacher(scripted):
     # One part in reach, two out of it: one cycle, and the teacher's carry stows it.
     assert ep["cycle_targets"] == [0] and ep["cycle_reasons"] == ["stowed"], ep
     assert ep["bricks_stowed"] == 1
+
+
+def _drops(deep: bool, part_index: int, n: int = 8) -> np.ndarray:
+    """Part ``part_index`` of (plate_2x4, brick_2x4) released still over box 0 from 0.10 m at
+    the carry's 19.5 degree lean, ``n`` headings; the other part parked. Final (7,) poses."""
+    plate, brick = parts.by_name(["plate_2x4", "brick_2x4"])
+    draw = sample_run_draw(random.Random(5))
+    env = MjLegoSortEnv(
+        1,
+        draw,
+        parts=[plate, brick],
+        cameras=False,
+        desk_boxes=4,
+        deep_box_floor=deep,
+        class_names=parts.PART_CLASSES,
+    )
+    env.reset(seed=3)
+    env.place_desk_boxes(0, FIXED)
+    m, d, h = env.models[0], env.datas[0], env.handles
+    lean = math.radians(19.5)
+    out = []
+    for k in range(n):
+        axis, yaw = 1.3 * k, 0.7 * k
+        tilt = np.array([math.cos(lean / 2), math.cos(axis) * math.sin(lean / 2), 0.0, 0.0])
+        tilt[2] = math.sin(axis) * math.sin(lean / 2)
+        quat = np.zeros(4)
+        mujoco.mju_mulQuat(quat, tilt, np.array([math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]))
+        for b in range(2):
+            adr = h.brick_qpos[b]
+            here = b == part_index
+            d.qpos[adr : adr + 3] = (*FIXED[0][:2], 0.10) if here else (HEAP_PARK_X, 0.1 * b, 0.0)
+            d.qpos[adr + 3 : adr + 7] = quat if here else (1.0, 0.0, 0.0, 0.0)
+            d.qvel[h.brick_dof[b] : h.brick_dof[b] + 6] = 0.0
+        mujoco.mj_forward(m, d)
+        mujoco.mj_step(m, d, nstep=360)
+        adr = h.brick_qpos[part_index]
+        out.append(d.qpos[adr : adr + 7].copy())
+    env.close()
+    return np.array(out)
+
+
+def test_a_plate_released_over_a_box_stays_on_the_deep_floor_and_a_brick_is_unchanged():
+    """MS7e flat track, lever 1 (``desk_boxes.DESK_BOX_FLOOR_DEPTH``): the plate dropped
+    through the 5 mm floor and was pinned under it on the desk; the deep floor holds it on
+    top, and a brick lands where it always did."""
+    on_floor = desk_boxes.DESK_BOX_WALL + parts.PLATE_HEIGHT / 2
+    shallow = _drops(False, 0)[:, 2]
+    assert (shallow < desk_boxes.DESK_BOX_WALL).any(), shallow
+    assert _drops(True, 0)[:, 2] == pytest.approx(on_floor, abs=0.001)
+    assert np.abs(_drops(False, 1) - _drops(True, 1)).max() < 1e-6
+
+
+def test_deep_box_floor_needs_desk_boxes():
+    with pytest.raises(ValueError, match="deep_box_floor"):
+        MjLegoSortEnv(
+            1, sample_run_draw(random.Random(5)), parts=PARTS, cameras=False, deep_box_floor=True
+        )
