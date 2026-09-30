@@ -489,6 +489,7 @@ def main(argv=None) -> int:
             thin_snap=args.thin_snap,
             snap_closed=args.snap_closed,
             heldout=heldout_names(args),
+            box_empty=args.box_empty,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

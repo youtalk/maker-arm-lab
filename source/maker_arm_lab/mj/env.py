@@ -92,7 +92,7 @@ from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
 from maker_arm_lab.core.heap_oracle import STOW_HALF_EXTENTS
 from maker_arm_lab.core.parts import BASE_CLASSES, Part, part_category, part_class
 from maker_arm_lab.core.quat import compose_offset_rot, quat_apply, quat_mul, rpy_from_quat
-from maker_arm_lab.core.stowed import per_brick_stowed
+from maker_arm_lab.core.stowed import parts_resting_box, per_brick_stowed
 from maker_arm_lab.core.target import target_brick
 from maker_arm_lab.mj import overlay, scene
 from maker_arm_lab.mj.context_names import (
@@ -1076,6 +1076,30 @@ class MjLegoSortEnv:
         self._settle(i, stacked=True)
         self._refresh([i], images=True)
         return n
+
+    def empty_full_boxes(self, i: int) -> list[tuple[int, list[int], list[bool]]]:
+        """MS7f H2, a person's event between cycles (MS7f design 5.4): every desk box of env
+        ``i`` whose parts at rest in it (``parts_resting_box``) sum a bounding volume of at
+        least its interior volume over ``desk_boxes.BOX_VOLUME_PER_PART_VOLUME`` is emptied.
+        The grader reads each of its parts at that moment (``per_brick_stowed``, at rest in a
+        box of its own), then they are parked. The person looks at the boxes, so this reads
+        the simulator. Returns (box, parts, graded correct) per emptied box, in box order."""
+        if not self.desk_boxes:
+            return []
+        resting = parts_resting_box(self)[i].tolist()
+        own = per_brick_stowed(self)[i].tolist()
+        out = []
+        for j in range(int(self.box_count[i])):
+            inside = [b for b, box in enumerate(resting) if box == j]
+            load = sum(math.prod(self.parts[b].size) for b in inside)
+            capacity = math.prod(self.desk_box_sizes[i, j]) / _boxes.BOX_VOLUME_PER_PART_VOLUME
+            if inside and load >= capacity:
+                out.append((j, inside, [bool(own[b]) for b in inside]))
+                self._park(i, inside)
+        if out:
+            mujoco.mj_forward(self.models[i], self.datas[i])
+            self._refresh([i], images=True)
+        return out
 
     def _initial_state(self, i: int) -> dict[str, np.ndarray]:
         d, h, bl = self.datas[i], self.handles, self.bin_layouts[i]

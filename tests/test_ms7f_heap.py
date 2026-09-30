@@ -4,12 +4,14 @@ and the box emptying (H2), on the MuJoCo heap env, cameras off."""
 import dataclasses
 import math
 import random
+from collections import Counter
 
 import mujoco
 import pytest
 import torch
 
-from maker_arm_lab.core import layout, loop, parts, perception
+from maker_arm_lab.core import desk_boxes, layout, loop, parts, perception
+from maker_arm_lab.core.stowed import parts_resting_box
 from maker_arm_lab.mj.env import MjLegoSortEnv
 
 FAMILIES = ("round", "ldraw", "flat")
@@ -157,4 +159,55 @@ def test_a_parked_part_never_enters_the_perceived_state_or_the_tray_count():
     ids = {det.sim_index for det in seen.detections}
     assert not ids & set(parked)
     assert [det for det in free.detections if det.sim_index not in parked] == seen.detections
+    env.close()
+
+
+def _fill_box(env, j: int, members: list[int]) -> None:
+    """Stack ``members`` at rest in box ``j``'s interior."""
+    m, d, h = env.models[0], env.datas[0], env.handles
+    x, y, _ = env.desk_box_poses[0, j]
+    for n, b in enumerate(members):
+        adr = h.brick_qpos[b]
+        dx = 0.02 * (n % 3 - 1)
+        d.qpos[adr : adr + 7] = (x + dx, y, 0.02 + 0.02 * (n // 3), 1, 0, 0, 0)
+        d.qvel[h.brick_dof[b] : h.brick_dof[b] + 6] = 0.0
+    mujoco.mj_forward(m, d)
+    mujoco.mj_step(m, d, nstep=480)
+    env._refresh([0], images=False)
+
+
+def test_an_emptied_boxs_parts_are_graded_once_at_the_emptying(monkeypatch):
+    """H2: a box whose parts at rest fill its capacity is emptied between cycles. Each part is
+    graded then, its own box or not, and parked; the next call finds the box empty and grades
+    nothing again. A box under its capacity stays. The capacity ratio is raised after the
+    reset so three parts fill a box."""
+    env = _env(20)
+    env.reset(seed=2)
+    dest = env.destination_bins[0].tolist()
+    j = max(set(dest), key=dest.count)
+    own = [b for b in range(20) if dest[b] == j][:2]
+    other = [b for b in range(20) if dest[b] != j][:2]
+    members, spare = own + other[:1], other[1]
+    k = next(n for n in range(int(env.box_count[0])) if n != j)
+    _fill_box(env, j, members)
+    _fill_box(env, k, [spare])
+    resting = [int(v) for v in parts_resting_box(env)[0]]
+    assert [resting[b] for b in members] == [j] * 3 and resting[spare] == k
+    load = sum(math.prod(env.parts[b].size) for b in members)
+    ratio = math.prod(env.desk_box_sizes[0, j]) / load
+    assert math.prod(env.parts[spare].size) < math.prod(env.desk_box_sizes[0, k]) / ratio
+    monkeypatch.setattr(desk_boxes, "BOX_VOLUME_PER_PART_VOLUME", ratio)
+    counts = Counter(tray_refill=0, box_empty=0)
+    ok = torch.zeros(1, 20, dtype=torch.bool)
+    box = torch.full((1, 20), -1, dtype=torch.long)
+    assert loop.between_cycles(env, 0, counts, ok, box, True, False)
+    assert counts == {"tray_refill": 0, "box_empty": 1}
+    assert [b for b in range(20) if int(box[0, b]) >= 0] == sorted(members)
+    assert all(int(box[0, b]) == j for b in members)
+    assert [bool(ok[0, b]) for b in members] == [True, True, False]
+    assert env.parked[0].nonzero().flatten().tolist() == sorted(members)
+    assert [int(v) for v in parts_resting_box(env)[0]].count(k) == 1
+    graded = ok.clone()
+    assert not loop.between_cycles(env, 0, counts, ok, box, True, False)
+    assert counts["box_empty"] == 1 and torch.equal(ok, graded)
     env.close()

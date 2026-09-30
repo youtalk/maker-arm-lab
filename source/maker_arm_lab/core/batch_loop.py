@@ -316,6 +316,8 @@ def check_ms7f(parser, args, ready: frozenset[str] = MS7F_READY) -> None:
     for name in ("deep_tray", "tray_refill"):  # MS7f track H: the tray's two arms
         if getattr(args, name, False) and not getattr(args, "tray", False):
             parser.error(f"--{name} changes the tray: it needs --tray")
+    if getattr(args, "box_empty", False) and getattr(args, "desk_boxes", 0) <= 0:
+        parser.error("--box_empty empties the desk boxes: it needs --desk_boxes")
 
 
 def ms7f_switches(args) -> dict:

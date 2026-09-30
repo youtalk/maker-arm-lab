@@ -1696,6 +1696,7 @@ def rollout(
     force_cap: bool = False,
     thin_snap: bool = False,
     snap_closed: bool = False,
+    box_empty: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1726,8 +1727,9 @@ def rollout(
     counts its parts of those kinds and the ones stowed (MS7f design section 4.4, the held-out
     row), read on the grader's final mask. The payload also carries ``steps_total``,
     ``stows_per_hour`` (``stows_per_hour``) and the ``events`` of ``EVENT_NAMES``.
-    An env built with ``tray_refill`` (MS7f H1') runs a person's refill between an env's
-    cycles, before its next selection (``between_cycles``).
+    ``box_empty`` (MS7f H2, design 5.4) and an env built with ``tray_refill`` (MS7f
+    H1') run a person's events between an env's cycles, before its next selection
+    (``between_cycles``); ``box_empty`` needs desk boxes.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1814,6 +1816,8 @@ def rollout(
         raise EvalFailure("snap_closed", "ends pick_snap's landing hold: it needs pick_snap")
     if contact_hold and not perceived:
         raise EvalFailure("contact_hold", "the stop flag's contact fallback needs perceived")
+    if box_empty and not per_part:
+        raise EvalFailure("box_empty", "empties the desk boxes: it needs desk boxes")
     refill = bool(getattr(env, "tray_refill", False))  # MS7f H1': the env parks the waiting parts
     if perceived:
         if policy is None:
@@ -1949,6 +1953,9 @@ def rollout(
     detectors = [HoldDetector() for _ in range(num_envs)]  # the MS7c hold census
     # m, the gap each env's last command asked for; before the first, the jaws' own gap.
     gap_cmd = robot.data.joint_pos[:, jaw_ids].sum(dim=-1).tolist()
+    # MS7f H2: per part the grade and the box of an emptying.
+    emptied_ok = torch.zeros(num_envs, k, dtype=torch.bool)
+    emptied_box = torch.full((num_envs, k), -1, dtype=torch.long)
 
     started = time.monotonic()
     max_steps = int(env.max_episode_length)
@@ -1965,11 +1972,12 @@ def rollout(
             truth.held,
             truth.boxed,
         )
-        tracker.latch_pre_step(per_brick)
+        # A part an emptying graded correct stays stowed (MS7f H2): it is parked, not boxed.
+        tracker.latch_pre_step(per_brick | emptied_ok)
         if per_part:
             # Latched like the tracker's mask: the step that ends an episode also resets it.
             live = ~tracker.done
-            final_box[live] = truth.resting_box[live]
+            final_box[live] = torch.where(emptied_box >= 0, emptied_box, truth.resting_box)[live]
         openings = policy_state(robot.data.joint_pos)[:, 6].to("cpu")
         gaps = robot.data.joint_pos[:, jaw_ids].sum(dim=-1).to("cpu")  # m, measured jaw gap
         # The hold detector reads this step's proprioception first: the jaw gap measured now,
@@ -2058,7 +2066,9 @@ def rollout(
                 if not ready:
                     st.select_wait_steps += 1
                     continue
-            if refill and between_cycles(env, i, st.events):
+            if (box_empty or refill) and between_cycles(
+                env, i, st.events, emptied_ok, emptied_box, box_empty, refill
+            ):
                 # The event moved parts: the truth of this step is stale for env i.
                 truth = truth_reads(env, per_part)
                 per_brick, in_bin, pos, speed, held, boxed = (
@@ -2684,15 +2694,25 @@ def interval_sums(episodes: list[dict]) -> dict:
     return {"names": list(INTERVAL_NAMES), "by_outcome": dict(sorted(by.items()))}
 
 
-def between_cycles(env, i: int, counts) -> bool:
+def between_cycles(env, i: int, counts, emptied_ok, emptied_box, box_empty, refill) -> bool:
     """MS7f: a person's events between env ``i``'s cycles, before its next selection, at zero
-    simulated time (MS7f design 4.1 and 5.3): the refill (``env.refill_tray``), booked in
-    ``counts``. The person reads the simulator; no loop decision reads what they read. Returns
+    simulated time (MS7f design 4.1, 5.3 and 5.4). ``box_empty`` empties every full box
+    (``env.empty_full_boxes``): each of its parts is graded at that moment, once, into
+    ``emptied_ok`` and ``emptied_box`` (row ``i``), then parked, and the perceived state never
+    sees it again. ``refill`` refills the tray (``env.refill_tray``). ``counts`` books each
+    event. The person reads the simulator; no loop decision reads what they read. Returns
     whether an event moved a part."""
-    if env.refill_tray(i):
+    fired = False
+    if box_empty:
+        for box, parts, ok in env.empty_full_boxes(i):
+            counts["box_empty"] += 1
+            emptied_box[i, parts] = box
+            emptied_ok[i, parts] = torch.tensor(ok)
+            fired = True
+    if refill and env.refill_tray(i):
         counts["tray_refill"] += 1
-        return True
-    return False
+        fired = True
+    return fired
 
 
 def _sum_box_rows(episodes: list[dict]) -> dict:
