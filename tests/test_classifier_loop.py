@@ -53,7 +53,7 @@ class _Stub(torch.nn.Module):
         self.passenger_threshold = 0.0
         self.bright, self.dark, self.rider = bright, dark, rider
 
-    def forward(self, frames: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:  # noqa: UP006
+    def forward(self, frames: torch.Tensor, wrist: bool) -> Tuple[torch.Tensor, torch.Tensor]:  # noqa: UP006
         n = frames.shape[0]
         lit = frames.float().mean() > 127.0
         logits = torch.zeros(n, len(self.categories))

@@ -4,8 +4,9 @@ A torchvision ResNet18 with ImageNet weights (ACT's backbone) and two heads, tra
 files (``scripts/mj_render_set.py``'s ``render_<seed>.npz``): the category, over ``CATEGORIES``
 (``core.parts.PART_CATEGORIES``, pinned as text by ``tests/test_lerobot_schema_pin.py``), on every
 frame of a part, and the passenger (another part rose with the jaws) on the wrist frames. The
-export is a TorchScript file: (N, 224, 224, 3) uint8 frames in, (category logits (N, 6),
-passenger logit (N,)) out, the ImageNet normalisation inside, the names in ``categories`` and the
+export is a TorchScript file: (N, 224, 224, 3) uint8 frames and whether they are wrist frames
+in, (category logits (N, 6), passenger logit (N,)) out, the ImageNet normalisation and the wrist
+frame's crop around the jaws (``WRIST_ROI``) inside, the names in ``categories`` and the
 passenger operating point in ``passenger_threshold``. The heap loop loads it with
 ``torch.jit.load`` on the CPU of the uv venv (``core.perception.PartClassifier``), so this venv's
 torchvision never reaches the loop.
@@ -15,7 +16,10 @@ torchvision never reaches the loop.
         --read ~/data/maker-arm-ms7/f/tables/cls/c1/render_*.npz --out ~/data/.../cls/model_v1
 
 Training drops wrist frames with nothing between the jaws and overhead frames whose camera sees
-less than ``MIN_SEEN`` of the part (the arm stands in front of it). A tenth of the files
+less than ``MIN_SEEN`` of the part (the arm stands in front of it), and reads the render set's
+extra ``wrist`` frames (``--wrist_every``) as wrist frames. Each batch draws a brightness, a
+contrast, a shift, a flip and a colour-channel order per frame: the scene paints every part from
+the same four colours whatever its category. A tenth of the files
 (``--val_fraction``) is kept out for the passenger operating point: the lowest logit threshold
 whose false-alarm rate on those wrist frames is at most ``PASSENGER_FALSE_ALARMS``.
 
@@ -45,7 +49,12 @@ import torchvision
 from torch import nn
 
 CATEGORIES = ("brick", "special", "flat", "round", "joint", "minifig")
-VIEWS = ("overhead", "lift", "carry")
+VIEWS = ("overhead", "lift", "carry", "wrist")
+WRIST_ROI = (76, 188, 58, 170)  # INITIAL: the C1 training ladder, 2026-09-30
+"""Rows and columns of the wrist frame the category and passenger heads read, scaled back up to
+224 px: 112 px around the pick point, which projects to (114, 144) at 8.9 cm; the heap under the
+jaws fills the rest of the frame. On the preliminary set (36 train heaps read on 4 others, 134
+lifts) the lift view read 0.69 on the whole frame, 0.82 on a 144 px crop and 0.85 on this one."""
 MIN_SEEN = 0.5  # INITIAL: the share of a part's sample points the overhead camera sees
 PASSENGER_FALSE_ALARMS = 0.01  # the operating point's cap, half the C1 bar's 0.02
 BARS = {"lift_accuracy": 0.97, "category_accuracy": 0.90, "recall": 0.8, "false_alarms": 0.02}
@@ -59,6 +68,7 @@ class PartClassifier(nn.Module):
 
     categories: List[str]  # noqa: UP006
     passenger_threshold: float
+    wrist_roi: List[int]  # noqa: UP006
 
     def __init__(self, weights=None):
         super().__init__()
@@ -71,9 +81,15 @@ class PartClassifier(nn.Module):
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
         self.categories = list(CATEGORIES)
         self.passenger_threshold = 0.0
+        self.wrist_roi = list(WRIST_ROI)
 
-    def forward(self, frames: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:  # noqa: UP006
+    def forward(self, frames: torch.Tensor, wrist: bool) -> Tuple[torch.Tensor, torch.Tensor]:  # noqa: UP006
         x = frames.permute(0, 3, 1, 2).float() / 255.0
+        if wrist:
+            y0, y1, x0, x1 = self.wrist_roi
+            x = nn.functional.interpolate(
+                x[:, :, y0:y1, x0:x1], size=(224, 224), mode="bilinear", align_corners=False
+            )
         features = self.backbone((x - self.mean) / self.std)
         return self.category(features), self.passenger(features).squeeze(-1)
 
@@ -94,8 +110,8 @@ def usable(data: dict) -> np.ndarray:
 
 
 def augment(frames: torch.Tensor, gen: torch.Generator) -> torch.Tensor:
-    """Per frame on the device: a brightness and contrast draw, a shift of up to 12 px and a
-    left-right flip, back to uint8. The part's colour and the desk's are drawn by the scene."""
+    """Per frame on the device: a brightness and contrast draw, a shift of up to 12 px, a
+    left-right flip and an order of the colour channels, back to uint8."""
     n = frames.shape[0]
     x = frames.float()
     dev = frames.device
@@ -107,6 +123,9 @@ def augment(frames: torch.Tensor, gen: torch.Generator) -> torch.Tensor:
     x = torch.roll(x, shifts=(dy, dx), dims=(1, 2))
     flip = torch.rand(n, generator=gen, device=dev) < 0.5
     x[flip] = x[flip].flip(2)
+    orders = torch.tensor([[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]])
+    order = orders.to(dev)[torch.randint(0, 6, (n,), generator=gen, device=dev)]
+    x = torch.gather(x, 3, order[:, None, None, :].expand(-1, x.shape[1], x.shape[2], -1))
     return x.clamp(0, 255).round().to(torch.uint8)
 
 
@@ -133,12 +152,18 @@ def train(model, data, idx, args, device) -> None:
         for start in range(0, len(order), args.batch):
             b = order[start : start + args.batch]
             x = augment(frames[b].to(device, non_blocking=True), gen)
-            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
-                logits, rider = model(x)
-            loss = ce(logits.float(), cat[b].to(device))
-            w = wrist[b].to(device)
-            if bool(w.any()):
-                loss = loss + bce(rider.float()[w], riders[b].to(device)[w])
+            loss = torch.zeros((), device=device)
+            for view, is_wrist in ((~wrist[b], False), (wrist[b], True)):
+                if not bool(view.any()):
+                    continue
+                on = view.to(device)
+                amp = device.type == "cuda"
+                with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
+                    logits, rider = model(x[on], is_wrist)
+                share = float(view.sum()) / len(b)
+                loss = loss + share * ce(logits.float(), cat[b][view].to(device))
+                if is_wrist:
+                    loss = loss + bce(rider.float(), riders[b][view].to(device))
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -149,16 +174,19 @@ def train(model, data, idx, args, device) -> None:
 
 
 @torch.no_grad()
-def infer(model, frames: np.ndarray, device, batch: int = 64) -> tuple[np.ndarray, np.ndarray]:
-    """Category logits (N, 6) and passenger logits (N,) of ``frames``."""
+def infer(model, frames: np.ndarray, wrist: np.ndarray, device, batch: int = 64):
+    """Category logits (N, 6) and passenger logits (N,) of ``frames``, ``wrist`` (N,) saying
+    which are wrist frames."""
     model.eval()
-    logits, riders = [], []
-    for start in range(0, len(frames), batch):
-        x = torch.from_numpy(frames[start : start + batch]).to(device)
-        a, b = model(x)
-        logits.append(a.float().cpu())
-        riders.append(b.float().cpu())
-    return torch.cat(logits).numpy(), torch.cat(riders).numpy()
+    logits = np.zeros((len(frames), len(CATEGORIES)), dtype=np.float32)
+    riders = np.zeros(len(frames), dtype=np.float32)
+    for is_wrist in (False, True):
+        rows = np.flatnonzero(wrist == is_wrist)
+        for start in range(0, len(rows), batch):
+            at = rows[start : start + batch]
+            a, b = model(torch.from_numpy(frames[at]).to(device), is_wrist)
+            logits[at], riders[at] = a.float().cpu().numpy(), b.float().cpu().numpy()
+    return logits, riders
 
 
 def operating_point(riders: np.ndarray, truth: np.ndarray) -> float:
@@ -177,7 +205,7 @@ def _rate(hit: int, total: int) -> float | None:
 
 def read(model, data: dict, device) -> dict:
     """C1 (design section 6.7): the rows, the bars and the confusion matrices."""
-    logits, riders = infer(model, data["frames"], device)
+    logits, riders = infer(model, data["frames"], data["view"] != "overhead", device)
     labels = data["category"]
     active = [c for c in CATEGORIES if c in set(labels.tolist())]
     cols = [CATEGORIES.index(c) for c in active]
@@ -309,7 +337,7 @@ def run(args) -> dict:
         summary["train_seconds"] = round(time.time() - started, 1)
         wrist = keep & (data["view"] != "overhead")
         check = wrist & val if val.any() else wrist
-        _, riders = infer(model, data["frames"][check], device)
+        _, riders = infer(model, data["frames"][check], np.ones(check.sum(), bool), device)
         model.passenger_threshold = operating_point(riders, data["passengers"][check] > 0)
         summary |= {
             "train_frames": len(idx),

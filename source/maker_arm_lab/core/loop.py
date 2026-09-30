@@ -2520,7 +2520,7 @@ def rollout(
                         # The stand-in above drew what it draws without the switch; the wrist
                         # frame decides (MS7f view 2), or ends the cycle on a passenger.
                         frame = env.obs_buf["images"]["wrist_rgb"][i].numpy()
-                        read, rider = classifier.read(frame, class_names)
+                        read, rider = classifier.read(frame, class_names, wrist=True)
                         st.counts["passenger_reads"] += rider
                         if passenger_drop and rider and tray and over_tray(pick, lean, wall_height):
                             st.counts["passenger_drops"] += 1
@@ -2565,7 +2565,7 @@ def rollout(
                         lighter,
                         c.box,
                         seen=c.read_class,
-                        third=lambda _, f=frame: classifier.read(f, class_names)[0],
+                        third=lambda _, f=frame: classifier.read(f, class_names, True)[0],
                     )
                     st.counts["third_views"] += 1
                     st.counts["votes_changed"] += taken != read
