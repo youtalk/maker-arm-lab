@@ -275,6 +275,22 @@ def cycles(data: dict) -> np.ndarray:
     return np.array(rows, dtype=int).reshape(-1, 3)
 
 
+def targets(data: dict) -> np.ndarray:
+    """Each row's selection target, the part index (``held``) of the first overhead row at its
+    env's latest selection step up to the row's own (-1 before any): the target when the camera
+    saw it, which the render set views first."""
+    view, held, step = data["view"], data["held"], data["step"]
+    env = data["file"] * 1_000_000 + data["env"]
+    out = np.full(len(view), -1)
+    latest: dict[int, tuple[int, int]] = {}  # env -> (selection step, its first row's part)
+    for n in range(len(view)):
+        e = int(env[n])
+        if view[n] == "overhead" and latest.get(e, (None,))[0] != int(step[n]):
+            latest[e] = (int(step[n]), int(held[n]))
+        out[n] = latest.get(e, (None, -1))[1]
+    return out
+
+
 def loop_vote(over: np.ndarray, lift: np.ndarray, carry: np.ndarray) -> np.ndarray:
     """The heap loop's ``class_views`` rule (``core.loop.lift_class_box``): the lift read when it
     equals the overhead read, else the overhead read if the carry read sides with it, else the
@@ -296,9 +312,12 @@ def _rate(hit: int, total: int) -> float | None:
     return hit / total if total else None
 
 
-def read(model, data: dict, device) -> dict:
-    """C1 (design section 6.7): the rows, the bars and the confusion matrices."""
+def read(model, data: dict, device, keep=None) -> dict:
+    """C1 (design section 6.7): the rows, the bars and the confusion matrices. ``keep`` (a
+    path) also saves every frame's category and passenger logits there."""
     logits, riders = infer(model, data["frames"], data["view"] != "overhead", data["size"], device)
+    if keep is not None:
+        np.savez(keep, logits=logits, riders=riders)
     labels = data["category"]
     active = [c for c in CATEGORIES if c in set(labels.tolist())]
     cols = [CATEGORIES.index(c) for c in active]
@@ -325,6 +344,9 @@ def read(model, data: dict, device) -> dict:
 
     lift = views["lift"]
     wrist = views["lift"] | views["carry"]
+    target = targets(data)
+    on_target = target == data["held"]
+    neighbour = (target >= 0) & ~on_target
     flagged = riders >= float(model.passenger_threshold)
     kinds = sorted(set(data["part"][part].tolist()))
     tilt = data["tilt"]
@@ -397,6 +419,11 @@ def read(model, data: dict, device) -> dict:
         "lift_by_category": {c: row(lift & (labels == c)) for c in active},
         "lift_heldout": row(lift & held),
         "lift_train_kinds": row(lift & ~held),
+        # The wrist frames' labels are the part in the jaws; the loop's target may be another.
+        "lift_on_target": row(lift & on_target),
+        "lift_on_target_heldout": row(lift & on_target & held),
+        "lift_on_neighbour": row(lift & neighbour),
+        "lift_on_neighbour_heldout": row(lift & neighbour & held),
         "carry": row(views["carry"]),
         "carry_heldout": row(views["carry"] & held),
         "overhead": row(views["overhead"]),
@@ -523,7 +550,8 @@ def run(args) -> dict:
     summary["model"] = str(path)
     if args.read:
         served = torch.jit.load(str(path), map_location=args.read_device)
-        result = read(served, load(sorted(args.read)), torch.device(args.read_device))
+        keep = out / "logits.npz"
+        result = read(served, load(sorted(args.read)), torch.device(args.read_device), keep)
         (out / "c1.json").write_text(json.dumps(result, indent=2))
         summary |= {"c1": str(out / "c1.json"), "pass": result["pass"], "bars": result["bars"]}
         summary["lift"] = result["lift"]

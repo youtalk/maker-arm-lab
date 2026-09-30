@@ -125,6 +125,7 @@ def test_cycles_pair_each_lift_with_its_selection_and_carry():
         "file": np.zeros(8, dtype=int),
     }
     assert tpc.cycles(data).tolist() == [[2, 0, 3], [5, -1, -1], [7, 6, -1]]
+    assert tpc.targets(data).tolist() == [3, 3, 3, 3, 4, 4, 3, 3]
 
 
 def test_the_loop_vote_takes_the_third_view_only_on_a_split():
