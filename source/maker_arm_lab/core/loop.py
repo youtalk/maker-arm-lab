@@ -136,7 +136,8 @@ Two MS7f switches (MS7f design section 6), off by default. ``classifier`` (a
 MS7d vote with the render-trained model on a rendered frame: the narrow overhead view of the
 target's detection at selection (``env.narrow_overhead``) sets the box, the wrist frame at the
 detector's lift can move it (``lift_class_box``), and with ``class_views`` a disagreement waits
-for the wrist frame ``CARRY_VIEW_STEPS`` later as the third vote. The stand-in still draws every
+for the wrist frame ``CARRY_VIEW_STEPS`` later, and the category with the largest summed log
+probability over the three views takes the box (``summed_class``). The stand-in still draws every
 value it draws without the switch, so knob rows stay paired. ``passenger_drop`` (with it) opens
 the jaws and ends the cycle ``passenger`` when the lift's wrist frame reads a second part over the
 tray interior (``over_tray``); the failure memory books the cycle, and anywhere else the reading
@@ -991,8 +992,10 @@ class Cycle:
     box: int = -1  # the box served now: the overhead class's, then the class drawn at a lift
     volume: float = 0.0  # m^3, the bounding volume the loop books into ``box`` at a release end
     read_class: str | None = None  # ``classifier``: the class its narrow overhead view read
+    read_logp: list | None = None  # and each run class's log probability there
     # ``classifier`` with ``class_views``: a lift that read another class than ``read_class``
-    # waits for the carry view, (the lift's class, the true class at the lift, the view's step).
+    # waits for the carry view, (the lift's class, the true class at the lift, the view's step,
+    # the lift's log probabilities).
     vote: tuple | None = None
     # ``perceived_release``: a lifted hold ended over a box (True) or off one (False), and the
     # jaws have not yet opened to ``SELECT_OPEN_FRACTION``; None with no release under way.
@@ -1203,6 +1206,16 @@ def voted_class(views) -> str:
     the third view: it sides with one of the two or splits three ways."""
     first, second, third = views
     return first if first in (second, third) else third
+
+
+def summed_class(names, *views) -> str:
+    """``classifier`` with ``class_views``: the name in ``names`` whose log probability, summed
+    over ``views`` (each a list in the order of ``names``), is largest. Pure. On the MS7f C1 read
+    (model_v2, 72 heaps, the 2771 lifts with all three views, 2026-09-30) it read 0.888 where
+    ``voted_class`` read 0.875: right on 60 lifts the vote got wrong and wrong on 24 it got
+    right."""
+    sums = [sum(v[k] for v in views) for k in range(len(names))]
+    return names[max(range(len(names)), key=sums.__getitem__)]
 
 
 def lift_class_box(wrist_cls, classify, class_to_box: dict, served: int, seen=None, third=None):
@@ -2271,7 +2284,9 @@ def rollout(
                 if classifier is not None:
                     # MS7f view 1: the narrow overhead view of the detection.
                     frame = env.narrow_overhead(i, seen.centre)
-                    st.cycle.read_class = cls = classifier.read(frame, class_names)[0]
+                    logp, _ = classifier.log_probs(frame, class_names)
+                    st.cycle.read_logp = logp
+                    st.cycle.read_class = cls = summed_class(class_names, logp)
                     st.opening = False
                 st.cycle.seen_yaw = float(scene.brick_yaw[target])
                 st.cycle.box = desk_boxes.lighter_box(class_boxes[i][cls], st.box_load)
@@ -2520,7 +2535,8 @@ def rollout(
                         # The stand-in above drew what it draws without the switch; the wrist
                         # frame decides (MS7f view 2), or ends the cycle on a passenger.
                         frame = env.obs_buf["images"]["wrist_rgb"][i].numpy()
-                        read, rider = classifier.read(frame, class_names, wrist=True)
+                        logp, rider = classifier.log_probs(frame, class_names, wrist=True)
+                        read = summed_class(class_names, logp)
                         st.counts["passenger_reads"] += rider
                         if passenger_drop and rider and tray and over_tray(pick, lean, wall_height):
                             st.counts["passenger_drops"] += 1
@@ -2530,7 +2546,7 @@ def rollout(
                             continue
                         drawn = None if true_cls is None else read
                         if class_views and read != c.read_class:
-                            c.vote = (read, true_cls, step + CARRY_VIEW_STEPS)
+                            c.vote = (read, true_cls, step + CARRY_VIEW_STEPS, logp)
                             taken = box = None
                         else:
                             _, taken, box = lift_class_box(read, lambda x: x, lighter, c.box)
@@ -2549,7 +2565,7 @@ def rollout(
                         replan[i] = True
                 if c.vote is not None and step >= c.vote[2]:
                     # MS7f view 3: the carry frame is the third vote, if the part is still up.
-                    read, true_cls, _ = c.vote
+                    read, true_cls, _, lift_logp = c.vote
                     c.vote = None
                     if not detectors[i].lifted:
                         st.counts["votes_lost"] += 1
@@ -2559,14 +2575,10 @@ def rollout(
                         cls: desk_boxes.lighter_box(own, st.box_load)
                         for cls, own in class_boxes[i].items()
                     }
-                    _, taken, box = lift_class_box(
-                        read,
-                        lambda x: x,
-                        lighter,
-                        c.box,
-                        seen=c.read_class,
-                        third=lambda _, f=frame: classifier.read(f, class_names, True)[0],
-                    )
+                    carry_logp, _ = classifier.log_probs(frame, class_names, wrist=True)
+                    views_logp = [v for v in (c.read_logp, lift_logp, carry_logp) if v]
+                    summed = summed_class(class_names, *views_logp)  # no overhead read: two
+                    _, taken, box = lift_class_box(summed, lambda x: x, lighter, c.box)
                     st.counts["third_views"] += 1
                     st.counts["votes_changed"] += taken != read
                     st.counts["wrong_voted_class"] += true_cls is not None and taken != true_cls

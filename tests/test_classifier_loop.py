@@ -125,6 +125,15 @@ def test_a_stub_that_reads_one_class_serves_that_class_s_box(tmp_path):
     assert "placed" in payload["episodes"][0]["cycle_reasons"]
 
 
+def test_the_summed_class_takes_the_largest_summed_log_probability():
+    names = ("a", "b", "c")
+    assert loop.summed_class(names, [-0.1, -2.0, -3.0]) == "a"
+    # Two views lean to b, one is sure of a: the vote of three would take b.
+    sure, lean = [-0.05, -3.0, -4.0], [-0.9, -0.6, -3.0]
+    assert loop.summed_class(names, sure, lean, lean) == "a"
+    assert loop.summed_class(names, [-0.7, -0.7, -3.0], [-1.0, -0.5, -3.0]) == "b"
+
+
 def test_the_carry_view_is_the_third_vote(tmp_path):
     """Overhead reads slope, the lift and the carry read wide: the vote takes wide at the carry
     view, so the box row moves from the slope box to the wide box once a cycle."""

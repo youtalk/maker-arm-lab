@@ -526,13 +526,19 @@ class PartClassifier:
         self.threshold = float(self.model.passenger_threshold)
 
     @torch.no_grad()
-    def read(self, frame, active: Sequence[str], wrist: bool = False) -> tuple[str, bool]:
-        """One (224, 224, 3) uint8 frame, a wrist frame or the narrow overhead view: the category
-        it reads among the run's ``active`` ones, and whether the passenger head reads a second
-        part in the jaws."""
+    def log_probs(self, frame, active: Sequence[str], wrist: bool = False) -> tuple[list, bool]:
+        """One (224, 224, 3) uint8 frame, a wrist frame or the narrow overhead view: the log
+        probability of each of the run's ``active`` categories, in their order, and whether the
+        passenger head reads a second part in the jaws."""
         logits, rider = self.model(torch.as_tensor(frame)[None], wrist)
         cols = [self.categories.index(c) for c in active]
-        return active[int(logits[0, cols].argmax())], float(rider[0]) >= self.threshold
+        logp = torch.log_softmax(logits[0, cols].float(), dim=0).tolist()
+        return logp, float(rider[0]) >= self.threshold
+
+    def read(self, frame, active: Sequence[str], wrist: bool = False) -> tuple[str, bool]:
+        """``log_probs``' most likely category and its passenger read."""
+        logp, rider = self.log_probs(frame, active, wrist)
+        return active[max(range(len(active)), key=logp.__getitem__)], rider
 
 
 class PositionMemory:
