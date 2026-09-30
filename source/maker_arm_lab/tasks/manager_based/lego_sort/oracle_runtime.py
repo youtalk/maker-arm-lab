@@ -285,15 +285,6 @@ ROT_CONVERGED = 0.02
 # loop reads the same rise gate (phase B design 5.5).
 LIFT_MAX_XY_ERROR = 0.03  # m
 
-# MS7e teacher lever T2 (ledger R12, ``passenger_check``): at the LIFT gate a part other than
-# the carried one that stands this much over where it lay when the attempt's HOVER started,
-# within PASSENGER_XY_M of the pick point, rode up with the jaws. The D10 census of 2026-09-29
-# traced 21 of 22 wrong-box parts on count-8 heaps to such passengers, landing in the carried
-# part's box. LIFT raises 0.10 m, so a rider stands near that; a neighbour a finger nudges
-# rises a few mm.
-PASSENGER_MIN_RISE = 0.02  # INITIAL: m, the T2 heap reads on the D10 seeds
-PASSENGER_XY_M = 0.06  # INITIAL: m, a 1x8 across the jaws or a part on a long target
-
 # `resume` calls a brick pinched at core.checker.HELD_MIN_FORCE (imported above), the
 # attribution threshold the eval loop and the privileged channel read it at. It is under
 # PINCH_MIN_FORCE on purpose: a takeover on a weak pinch still enters LIFT, whose gate then
@@ -1232,16 +1223,9 @@ class OracleRig:
         return best
 
     def _passengers(self, i: int, carried: int) -> list[int]:
-        """The parts other than ``carried`` that rose with the jaws (``PASSENGER_MIN_RISE``)."""
-        pick = self.pick_point(i)
-        riders = []
-        for b in range(self.num_bricks):
-            pos = self._brick_pos(i, b)
-            rise = (pos[2] - self.parts_start[i][b, 2]).item()
-            near = (pos[:2] - pick[:2]).norm().item() < PASSENGER_XY_M
-            if b != carried and rise > PASSENGER_MIN_RISE and near:
-                riders.append(b)
-        return riders
+        """The parts other than ``carried`` that rose with the jaws (``oracle.passengers``)."""
+        pos = torch.stack([self._brick_pos(i, b) for b in range(self.num_bricks)])
+        return oracle.passengers(pos, self.parts_start[i][:, 2], self.pick_point(i), carried)
 
     def _enter_phase(
         self, i: int, scene: oracle.SceneSnapshot, ending_phase: oracle.Phase | None = None

@@ -116,6 +116,25 @@ DESCEND_STALL_STEPS = 12
 LIFT_HEIGHT = 0.10
 LIFT_MIN_RISE = 0.05  # m: the rise LIFT must see to call a part lifted (oracle_runtime)
 
+# MS7e teacher lever T2 (ledger R12, ``passenger_check``): at the LIFT gate a part other than
+# the carried one that stands this much over where it lay when the attempt's HOVER started,
+# within PASSENGER_XY_M of the pick point, rode up with the jaws. The D10 census of 2026-09-29
+# traced 21 of 22 wrong-box parts on count-8 heaps to such passengers, landing in the carried
+# part's box. LIFT raises 0.10 m, so a rider stands near that; a neighbour a finger nudges
+# rises a few mm.
+PASSENGER_MIN_RISE = 0.02  # INITIAL: m, the T2 heap reads on the D10 seeds
+PASSENGER_XY_M = 0.06  # INITIAL: m, a 1x8 across the jaws or a part on a long target
+
+
+def passengers(pos: torch.Tensor, start_z: torch.Tensor, pick_xy, carried: int) -> list[int]:
+    """The parts other than ``carried`` that rose with the jaws: ``pos`` (K, 3) now, ``start_z``
+    (K,) their heights at the start, ``pick_xy`` the pick point. Pure. T2 reads it at the LIFT
+    gate (``OracleRig._passengers``); MS7f reads it only to label and count, never to decide."""
+    near = (pos[:, :2] - torch.as_tensor(pick_xy, dtype=pos.dtype)[:2]).norm(dim=-1)
+    rose = (pos[:, 2] - start_z) > PASSENGER_MIN_RISE
+    return [b for b in range(pos.shape[0]) if b != carried and rose[b] and near[b] < PASSENGER_XY_M]
+
+
 # RAISE's own target height and budget -- OpenYAM MEASURED this (Task 8), not
 # the RELEASE_Z a first reading of "raise" suggests.
 #
