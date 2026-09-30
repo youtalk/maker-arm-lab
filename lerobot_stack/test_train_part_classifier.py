@@ -38,6 +38,7 @@ def _render_file(path: Path, seed: int, n: int = 12) -> Path:
         heldout=np.array([k % 5 == 0 for k in range(n)]),
         passengers=np.array(riders),
         riders=np.array(riders),
+        rider_seen=np.array([0.5 if r > 0 else -1.0 for r in riders]),
         held=np.arange(n),
         part_seen=np.array([1.0 if v == "overhead" else -1.0 for v in views]),
         env=np.zeros(n, dtype=int),
@@ -101,7 +102,7 @@ def test_a_tiny_run_trains_exports_and_reads_as_the_loop_loads_it(tmp_path):
 def test_a_file_without_the_rider_label_reads_unknown(tmp_path):
     new = _render_file(tmp_path / "render_1.npz", 1)
     old = dict(np.load(new))
-    del old["riders"]
+    del old["riders"], old["rider_seen"]
     np.savez_compressed(tmp_path / "render_2.npz", **old)
     data = tpc.load([new, tmp_path / "render_2.npz"])
     assert (data["riders"][12:] == -1).all() and (data["riders"][:12] >= -1).all()

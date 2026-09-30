@@ -96,13 +96,13 @@ class PartClassifier(nn.Module):
 
 def load(paths) -> dict[str, np.ndarray]:
     """The render set files as one set of arrays, plus ``file``, each frame's file index. A file
-    from before the ``riders`` label reads -1 (unknown) there."""
+    from before a label (``riders``, ``rider_seen``) reads -1 (unknown) there."""
     parts = [np.load(p) for p in paths]
 
     def column(z, k):
         return z[k] if k in z.files else np.full(len(z["view"]), -1)
 
-    keys = [k for k in parts[0].files if k not in ("args", "riders", "frames")] + ["riders"]
+    keys = sorted({k for z in parts for k in z.files} - {"args", "frames"})
     out = {k: np.concatenate([column(z, k) for z in parts]) for k in keys}
     # The frames go straight into one array: a concatenation would hold every frame twice.
     out["frames"] = np.empty((len(out["view"]), 224, 224, 3), dtype=np.uint8)
@@ -282,6 +282,11 @@ def read(model, data: dict, device) -> dict:
         "passenger_lift": passenger(lift),
         "passenger_wrist": passenger(wrist),
         "passenger_lift_t2_rule": passenger(lift, "passengers"),
+        "riders_in_frame": {
+            "lift_frames_with_riders_labelled": int((lift & (data["rider_seen"] >= 0)).sum()),
+            "rider_seen_at_all": int((lift & (data["rider_seen"] > 0)).sum()),
+            "rider_half_seen": int((lift & (data["rider_seen"] >= 0.5)).sum()),
+        },
         "passenger_threshold": float(model.passenger_threshold),
         "confusion_lift": confusion(lift),
         "confusion_overhead_visible": confusion(views["overhead"] & visible),
