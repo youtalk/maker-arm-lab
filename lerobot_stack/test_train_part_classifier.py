@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 import train_part_classifier as tpc
@@ -14,7 +15,7 @@ import train_part_classifier as tpc
 SCRIPT = Path(__file__).resolve().parent / "train_part_classifier.py"
 
 
-def _render_file(path: Path, seed: int, n: int = 12) -> Path:
+def _render_file(path: Path, seed: int, n: int = 12, **extra) -> Path:
     """A render set file as ``scripts/mj_render_set.py`` writes it: the category shows as the
     frame's colour, and a passenger as a bright band."""
     rng = np.random.default_rng(seed)
@@ -44,6 +45,7 @@ def _render_file(path: Path, seed: int, n: int = 12) -> Path:
         env=np.zeros(n, dtype=int),
         step=np.arange(n),
         args=np.array("{}"),
+        **extra,
     )
     return path
 
@@ -141,3 +143,15 @@ def test_load_reads_the_size_beside_each_file(tmp_path):
     np.save(tmp_path / "render_1.size.npy", np.full((4, 3), 0.01, np.float32))
     size = tpc.load([a, b])["size"]
     assert size.shape == (7, 3) and (size[:4] == 0.01).all() and (size[4:] == -1.0).all()
+
+
+def test_native_wrist_crops_make_a_crop_model_and_do_not_mix(tmp_path):
+    crop = np.array([448, 152, 376, 116, 340])
+    a = _render_file(tmp_path / "render_1.npz", 1, n=4, wrist_crop=crop)
+    b = _render_file(tmp_path / "render_2.npz", 2, n=3)
+    assert tpc.load([a])["wrist_crop"] == tuple(crop.tolist())
+    assert tpc.load([b])["wrist_crop"] is None
+    with pytest.raises(ValueError, match="different wrist frames"):
+        tpc.load([a, b])
+    model = tpc.PartClassifier(None, wrist_crop=True)
+    assert model.wrist_input == "crop" and model.wrist_roi == [0, 224, 0, 224]

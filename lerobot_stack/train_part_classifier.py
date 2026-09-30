@@ -93,8 +93,9 @@ class PartClassifier(nn.Module):
     wrist_roi: List[int]  # noqa: UP006
     overhead_roi: List[int]  # noqa: UP006
     size_input: bool
+    wrist_input: str
 
-    def __init__(self, weights=None):
+    def __init__(self, weights=None, wrist_crop: bool = False):
         super().__init__()
         net = torchvision.models.resnet18(weights=weights)
         net.fc = nn.Identity()
@@ -106,7 +107,9 @@ class PartClassifier(nn.Module):
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
         self.categories = list(CATEGORIES)
         self.passenger_threshold = 0.0
-        self.wrist_roi = list(WRIST_ROI)
+        # A render set with ``wrist_crop`` holds the fingertip crop at native pixels already.
+        self.wrist_roi = [0, 224, 0, 224] if wrist_crop else list(WRIST_ROI)
+        self.wrist_input = "crop" if wrist_crop else "frame"
         self.overhead_roi = list(OVERHEAD_ROI)
         self.size_input = True
 
@@ -120,6 +123,9 @@ class PartClassifier(nn.Module):
         )
         features = self.backbone((x - self.mean) / self.std)
         # The perceived size (N, 3) in metres, sorted, and the view: an unknown size (-1) reads 0.
+        # A wrist view reads none: the size is the target's, and one lift in ten holds another.
+        if wrist:
+            size = torch.full_like(size, -1.0)
         extra = torch.cat(
             [size.float().clamp(min=0.0) * 100.0, torch.full_like(size[:, :1], float(wrist))], 1
         )
@@ -135,7 +141,11 @@ def load(paths) -> dict[str, np.ndarray]:
     def column(z, k):
         return z[k] if k in z.files else np.full(len(z["view"]), -1)
 
-    keys = sorted({k for z in parts for k in z.files} - {"args", "frames"} | LATER_LABELS)
+    crops = {tuple(z["wrist_crop"].tolist()) if "wrist_crop" in z.files else None for z in parts}
+    if len(crops) > 1:
+        raise ValueError(f"render files with different wrist frames: {sorted(map(str, crops))}")
+    keys = sorted({k for z in parts for k in z.files} - {"args", "frames", "wrist_crop"})
+    keys = sorted(set(keys) | LATER_LABELS)
     out = {k: np.concatenate([column(z, k) for z in parts]) for k in keys}
     # The frames go straight into one array: a concatenation would hold every frame twice.
     out["frames"] = np.empty((len(out["view"]), 224, 224, 3), dtype=np.uint8)
@@ -145,6 +155,7 @@ def load(paths) -> dict[str, np.ndarray]:
         out["frames"][at : at + n] = z["frames"]
         at += n
     out["file"] = np.concatenate([np.full(len(z["view"]), n) for n, z in enumerate(parts)])
+    out["wrist_crop"] = crops.pop()
     sizes = [Path(p).with_name(Path(p).name.removesuffix(".npz") + ".size.npy") for p in paths]
     out["size"] = np.concatenate(
         [
@@ -529,7 +540,7 @@ def run(args) -> dict:
             if args.weights == "imagenet"
             else None
         )
-        model = PartClassifier(weights).to(device)
+        model = PartClassifier(weights, data["wrist_crop"] is not None).to(device)
         started = time.time()
         train(model, data, idx, args, device)
         summary["train_seconds"] = round(time.time() - started, 1)
@@ -551,7 +562,11 @@ def run(args) -> dict:
     if args.read:
         served = torch.jit.load(str(path), map_location=args.read_device)
         keep = out / "logits.npz"
-        result = read(served, load(sorted(args.read)), torch.device(args.read_device), keep)
+        data = load(sorted(args.read))
+        crop = getattr(served, "wrist_input", "frame") == "crop"
+        if crop != (data["wrist_crop"] is not None):
+            raise ValueError("the model and the read files take different wrist frames")
+        result = read(served, data, torch.device(args.read_device), keep)
         (out / "c1.json").write_text(json.dumps(result, indent=2))
         summary |= {"c1": str(out / "c1.json"), "pass": result["pass"], "bars": result["bars"]}
         summary["lift"] = result["lift"]
