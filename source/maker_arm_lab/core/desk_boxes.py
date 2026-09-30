@@ -554,7 +554,14 @@ BOX_VOLUME_PER_PART_VOLUME = 2.0  # INITIAL: MS7e ledger R11 measures it
 """The box draw's capacity floor: a box's interior volume over the summed bounding volume of
 the parts it receives. The teacher smoke of 2026-09-29 (six train heaps of 50, base families,
 ``--box_draw 6``) spilled parts from the three boxes under 1.4 (1.14: 16 of 23 stowed, 1.21:
-13 of 20, 1.35: 15 of 21), and the boxes at 1.76 and over held all but at most three."""
+13 of 20, 1.35: 15 of 21), and the boxes at 1.76 and over held all but at most three.
+
+Read on the wave configuration (MS7e ledger R11: six train heaps of 50, run 20289700 + i,
+layout 20289800 + i, all eight families, B2 with ``--box_draw 8``, the deep floor, x86,
+2026-09-29): without the floor 264 of 300 in the correct box at 1.042 cycles per stow, with
+it 275 of 300 at 1.044. The floor redrew the fold in the two heaps whose least ratio was under
+it (1.91 and 1.55, now 2.79 and 2.91): 39 to 48 and 43 to 45 stowed. The other four heaps ran
+step for step the same."""
 FOLD_TRIES = 200
 
 
