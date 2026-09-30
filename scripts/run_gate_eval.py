@@ -105,6 +105,7 @@ class GateCfg:
     passenger_check: bool = False
     wall_band_cont: bool = False
     thin_snap: bool = False
+    snap_closed: bool = False
     # MS7e unseen-box ladder, the seen row (design section 8.3): (RUN0, LAYOUT0), draw i reads a
     # recorded run's own seeds RUN0 + i and LAYOUT0 + i (make_eval_draws); None is the formula.
     seen_seeds: tuple | None = None
@@ -141,6 +142,7 @@ MS7E_OFF = {
     "passenger_check": False,
     "wall_band_cont": False,
     "thin_snap": False,
+    "snap_closed": False,
 }
 """The "ms7e" block of a read with every MS7e switch off, what an MS7d payload ran with."""
 
@@ -158,6 +160,7 @@ def ms7e_block(cfg: "GateCfg") -> dict:
         "passenger_check": cfg.passenger_check,
         "wall_band_cont": cfg.wall_band_cont,
         "thin_snap": cfg.thin_snap,
+        "snap_closed": cfg.snap_closed,
     }
 
 
@@ -605,6 +608,8 @@ def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
                 prefix.append("--wall_band_cont")
             if cfg.thin_snap:
                 prefix.append("--thin_snap")
+            if cfg.snap_closed:
+                prefix.append("--snap_closed")
         prefix += list(cfg.client_flags)
     else:
         prefix = [
@@ -1056,6 +1061,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="MuJoCo heap only, MS7e serving lever S2 with --pick_snap: forwarded as --thin_snap",
     )
     parser.add_argument(
+        "--snap_closed",
+        action="store_true",
+        help="MuJoCo heap only, the MS7e flat study's rule with --pick_snap: forwarded as "
+        "--snap_closed",
+    )
+    parser.add_argument(
         "--deep_box_floor",
         action="store_true",
         help="MuJoCo heap only, MS7e flat lever 1: forwarded as --deep_box_floor, the desk box "
@@ -1132,6 +1143,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         )
     if args.thin_snap and not args.pick_snap:
         raise ValueError("--thin_snap moves pick_snap's floor: it needs --pick_snap")
+    if args.snap_closed and not args.pick_snap:
+        raise ValueError("--snap_closed ends pick_snap's landing hold: it needs --pick_snap")
     families = families_key(args.families)
     if any(getattr(args, name) for name in MS7E_OFF) and (
         args.heap_k <= 0 or args.backend != "mujoco"
@@ -1201,6 +1214,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         passenger_check=args.passenger_check,
         wall_band_cont=args.wall_band_cont,
         thin_snap=args.thin_snap,
+        snap_closed=args.snap_closed,
         seen_seeds=args.seen_seeds,
         client_flags=tuple(shlex.split(args.client_flags))
         + (("--scripted_place",) if args.scripted_place else ())

@@ -3,12 +3,14 @@ once the measured jaw gap is under the served row's width plus ``loop.SNAP_CLOSE
 pinch the hold detector misses is not forced open when the policy lifts. Off, ``snap_hold`` gets
 no gap and holds as before."""
 
+import argparse
 import itertools
 import json
+import pathlib
 
 import pytest
 
-from maker_arm_lab.core import grasp, loop
+from maker_arm_lab.core import batch_loop, grasp, loop
 from test_perceived_loop import _rollout, _served, _snap_closed_scene, _thin_snap_scene
 from test_thin_snap import BRICK_ROW, PLATE_ROW, _same
 
@@ -118,6 +120,26 @@ def test_a_pinch_the_detector_misses_is_forced_open_only_with_the_switch_off(mon
     assert gaps and all(0.0 <= g <= 2.0 * grasp.OPEN_HALF_GAP + 1e-3 for g in gaps)
     assert any(g >= w + loop.SNAP_CLOSED_MARGIN for g, w in calls)  # landing open
     assert any(g < w + loop.SNAP_CLOSED_MARGIN for g, w in calls)  # closed on the part
+
+
+def _checked(argv):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--desk_boxes", type=int, default=0)
+    parser.add_argument("--pick_snap", action="store_true")
+    batch_loop.add_ms7e_arguments(parser)
+    args = parser.parse_args(argv)
+    batch_loop.check_ms7e(parser, args)
+    return args
+
+
+def test_the_flag_needs_pick_snap_and_the_read_client_passes_it():
+    with pytest.raises(SystemExit):
+        _checked(["--snap_closed"])
+    args = _checked(["--pick_snap", "--snap_closed"])
+    assert batch_loop.ms7e_switches(args)["snap_closed"] is True
+    assert batch_loop.ms7e_switches(argparse.Namespace())["snap_closed"] is False
+    root = pathlib.Path(__file__).resolve().parents[1] / "scripts"
+    assert (root / "mj_eval_heap.py").read_text().count("snap_closed=args.snap_closed") == 1
 
 
 def test_the_rollout_refuses_the_switch_without_pick_snap(monkeypatch):

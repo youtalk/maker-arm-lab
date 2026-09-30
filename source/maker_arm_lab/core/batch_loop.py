@@ -149,6 +149,12 @@ def add_ms7e_arguments(parser) -> None:
         help="MS7e serving lever S2 (ledger R13), with --pick_snap: a served row whose half "
         "height is at most loop.THIN_SNAP_MAX_HALF_HEIGHT snaps to desk contact, not row z + 3 mm",
     )
+    parser.add_argument(
+        "--snap_closed",
+        action="store_true",
+        help="MS7e flat study (2026-09-30), with --pick_snap: pick_snap's landing hold ends once "
+        "the measured jaw gap is under the served width plus loop.SNAP_CLOSED_MARGIN",
+    )
 
 
 def check_ms7e(parser, args) -> None:
@@ -181,6 +187,8 @@ def check_ms7e(parser, args) -> None:
         parser.error("--wall_band_cont is the continuous jaws' band: it needs --gripper continuous")
     if getattr(args, "thin_snap", False) and not getattr(args, "pick_snap", False):
         parser.error("--thin_snap moves pick_snap's floor: it needs --pick_snap")
+    if getattr(args, "snap_closed", False) and not getattr(args, "pick_snap", False):
+        parser.error("--snap_closed ends pick_snap's landing hold: it needs --pick_snap")
 
 
 def ms7e_switches(args) -> dict:
@@ -196,6 +204,7 @@ def ms7e_switches(args) -> dict:
         "passenger_check": bool(getattr(args, "passenger_check", False)),
         "wall_band_cont": bool(getattr(args, "wall_band_cont", False)),
         "thin_snap": bool(getattr(args, "thin_snap", False)),
+        "snap_closed": bool(getattr(args, "snap_closed", False)),
     }
 
 
