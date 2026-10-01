@@ -58,9 +58,11 @@ from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 
 class _TokenEmittingParser(argparse.ArgumentParser):
     """A parser whose usage errors still honour the EVAL_OK / EVAL_FAIL contract (``token``: a
-    script that runs this client's ``main``, ``scripts/mj_stretch_run.py``, sets its own)."""
+    script that runs this client's ``main``, ``scripts/mj_stretch_run.py``, sets its own, and its
+    own ``max_heap_k``: a stretch pool is served through the tray refill, not dropped at once)."""
 
     token = "EVAL"
+    max_heap_k = MAX_HEAP_K
 
     def error(self, message: str):
         self.print_usage(sys.stderr)
@@ -345,8 +347,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
             parser.error(f"--{name} is outside numpy's seed range (0 <= seed < 2**32)")
     if args.heap_k <= 0:
         parser.error("--heap_k must be positive: this client evaluates heap episodes only")
-    if args.heap_k > MAX_HEAP_K:
-        parser.error(f"--heap_k {args.heap_k} exceeds {MAX_HEAP_K}, the MS7f heap (MAX_HEAP_K)")
+    if args.heap_k > parser.max_heap_k:
+        parser.error(f"--heap_k {args.heap_k} exceeds {parser.max_heap_k}, this client's heap cap")
     if not args.transport_speed > 0.0:
         parser.error("--transport_speed must be positive")
     if args.lift_budget < 0:

@@ -153,3 +153,14 @@ def test_every_exit_path_prints_one_stretch_token():
     assert [t.split()[0] for t in _run("--no_such_flag")] == ["STRETCH_FAIL"]
     tokens = _run("--oracle_driver", "--num_envs", "1", "--heap_k", "3", "--tray")
     assert len(tokens) == 1 and tokens[0].startswith("STRETCH_FAIL") and "stretch" in tokens[0]
+
+
+def test_the_stretch_pool_may_hold_1000_parts_and_no_more():
+    import mj_eval_heap
+
+    args = mj_eval_heap.parse_args(["--heap_k", "1000"], mj_stretch_run._Parser)
+    assert args.heap_k == 1000
+    with pytest.raises(SystemExit):
+        mj_eval_heap.parse_args(["--heap_k", "1001"], mj_stretch_run._Parser)
+    with pytest.raises(SystemExit):  # the heap client keeps the MS7f heap's cap
+        mj_eval_heap.parse_args(["--heap_k", "151"])

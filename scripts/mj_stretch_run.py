@@ -52,6 +52,7 @@ INTERVENTIONS = ("tray_left", "strays", "miss_streak")
 
 class _Parser(mj_eval_heap._TokenEmittingParser):
     token = "STRETCH"
+    max_heap_k = 1000  # the design's 1000-part run (MS7f design 10.4), served through the refill
 
 
 def after_episode(env, ep: dict, counts: Counter) -> None:
