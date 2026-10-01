@@ -161,3 +161,22 @@ def test_native_wrist_crops_make_a_crop_model_and_do_not_mix(tmp_path):
         tpc.load([a, c])
     model = tpc.PartClassifier(None, wrist_crop=True)
     assert model.wrist_input == "crop" and model.wrist_roi == [0, 224, 0, 224]
+
+
+def test_pick_keeps_every_lift_and_carry_and_caps_the_rest():
+    view = np.array(["overhead"] * 10 + ["lift", "carry"] * 3 + ["wrist"] * 7)
+    rows = tpc.pick(view, 2, "render_1.npz")
+    kept = view[rows].tolist()
+    assert kept.count("lift") == kept.count("carry") == 3
+    assert kept.count("overhead") == kept.count("wrist") == 2
+    assert rows.tolist() == tpc.pick(view, 2, "render_1.npz").tolist()
+    assert tpc.pick(view, 0, "render_1.npz").tolist() == list(range(len(view)))
+
+
+def test_erasing_paints_one_flat_rectangle():
+    frames = torch.zeros(4, 224, 224, 3, dtype=torch.uint8) + 128
+    gen = torch.Generator().manual_seed(0)
+    out = tpc.augment(frames, gen, erase=1.0)
+    assert out.shape == frames.shape and out.dtype == torch.uint8
+    for x in out:  # a uniform grey frame keeps its own value outside the rectangle
+        assert len(torch.unique(x.reshape(-1, 3), dim=0)) >= 2

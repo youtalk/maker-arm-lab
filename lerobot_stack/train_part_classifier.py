@@ -23,9 +23,13 @@ Training drops wrist frames with nothing between the jaws and overhead frames wh
 less than ``MIN_SEEN`` of the part (the arm stands in front of it), and reads the render set's
 extra ``wrist`` frames (``--wrist_every``) as wrist frames. Each batch draws a brightness, a
 contrast, a shift, a flip and a colour-channel order per frame: the scene paints every part from
-the same four colours whatever its category. A tenth of the files
-(``--val_fraction``) is kept out for the passenger operating point: the lowest logit threshold
-whose false-alarm rate on those wrist frames is at most ``PASSENGER_FALSE_ALARMS``.
+the same four colours whatever its category. Against overfitting to the lifts it has seen (v2
+read 0.977 on its training heaps and 0.894 on its validation heaps, 2026-09-30) it also erases a
+random rectangle (``--erase``), smooths the labels (``--label_smoothing``) and keeps the epoch
+with the best validation lift accuracy (``--patience``). ``--cap`` thins each file's overhead and
+burst frames so a large render set fits in memory. A tenth of the files (``--val_fraction``) is
+kept out for that and for the passenger operating point: the lowest logit threshold whose
+false-alarm rate on those wrist frames is at most ``PASSENGER_FALSE_ALARMS``.
 
 ``--read`` reads files the training never sees (C1, design section 6.7) with the exported file on
 ``--read_device`` (the CPU, as served): every frame, argmax over the categories the read's labels
@@ -47,6 +51,7 @@ import random
 import sys
 import time
 import traceback
+import zlib
 from pathlib import Path
 from typing import List, Tuple  # noqa: UP035 -- TorchScript reads the typing names
 
@@ -133,38 +138,54 @@ class PartClassifier(nn.Module):
         return self.category(both), self.passenger(features).squeeze(-1)
 
 
-def load(paths) -> dict[str, np.ndarray]:
-    """The render set files as one set of arrays, plus ``file``, each frame's file index. A file
-    from before a label (``riders``, ``rider_seen``, ``tilt``) reads -1 (unknown) there."""
-    parts = [np.load(p) for p in paths]
+def pick(view: np.ndarray, cap: int, name: str) -> np.ndarray:
+    """The rows of one render file that ``load`` keeps: all with ``cap`` 0, else every lift and
+    carry frame and at most ``cap`` frames of each other view, drawn from the file's name."""
+    if not cap:
+        return np.arange(len(view))
+    rng = np.random.default_rng(zlib.crc32(name.encode()))
+    keep = [np.flatnonzero((view == "lift") | (view == "carry"))]
+    for v in sorted(set(view.tolist()) - {"lift", "carry"}):
+        rows = np.flatnonzero(view == v)
+        keep.append(rng.choice(rows, min(cap, len(rows)), replace=False))
+    return np.sort(np.concatenate(keep))
 
-    def column(z, k):
-        return z[k] if k in z.files else np.full(len(z["view"]), -1)
+
+def load(paths, cap: int = 0) -> dict[str, np.ndarray]:
+    """The render set files as one set of arrays, plus ``file``, each frame's file index. A file
+    from before a label (``riders``, ``rider_seen``, ``tilt``) reads -1 (unknown) there. ``cap``
+    thins each file's views (``pick``) so a large render set fits in memory."""
+    parts = [np.load(p) for p in paths]
+    picks = [pick(z["view"], cap, Path(p).name) for p, z in zip(paths, parts)]
+
+    def column(z, k, rows):
+        return z[k][rows] if k in z.files else np.full(len(rows), -1)
 
     crops = {tuple(z["wrist_crop"].tolist()) if "wrist_crop" in z.files else None for z in parts}
     if len(crops - {None}) > 1:
         raise ValueError(f"render files with different wrist crops: {sorted(map(str, crops))}")
     keys = sorted({k for z in parts for k in z.files} - {"args", "frames", "wrist_crop"})
     keys = sorted(set(keys) | LATER_LABELS)
-    out = {k: np.concatenate([column(z, k) for z in parts]) for k in keys}
+    out = {k: np.concatenate([column(z, k, r) for z, r in zip(parts, picks)]) for k in keys}
     # The frames go straight into one array: a concatenation would hold every frame twice.
     out["frames"] = np.empty((len(out["view"]), 224, 224, 3), dtype=np.uint8)
     at = 0
-    for z in parts:
-        n = len(z["view"])
-        out["frames"][at : at + n] = z["frames"]
-        at += n
-    out["file"] = np.concatenate([np.full(len(z["view"]), n) for n, z in enumerate(parts)])
+    for z, rows in zip(parts, picks):
+        out["frames"][at : at + len(rows)] = z["frames"][rows] if cap else z["frames"]
+        at += len(rows)
+    out["file"] = np.concatenate([np.full(len(r), n) for n, r in enumerate(picks)])
     out["wrist_crop"] = next((c for c in crops if c is not None), None)
     out["wrist_mixed"] = len(crops) > 1
     if out["wrist_mixed"]:  # a file from before the native crop gives its overhead frames only
-        old = np.concatenate([np.full(len(z["view"]), "wrist_crop" not in z.files) for z in parts])
+        old = np.concatenate(
+            [np.full(len(r), "wrist_crop" not in z.files) for z, r in zip(parts, picks)]
+        )
         out["category"] = np.where(old & (out["view"] != "overhead"), "", out["category"])
     sizes = [Path(p).with_name(Path(p).name.removesuffix(".npz") + ".size.npy") for p in paths]
     out["size"] = np.concatenate(
         [
-            np.load(f) if f.exists() else np.full((len(z["view"]), 3), -1.0, np.float32)
-            for f, z in zip(sizes, parts)
+            np.load(f)[r] if f.exists() else np.full((len(r), 3), -1.0, np.float32)
+            for f, r in zip(sizes, picks)
         ]
     )
     return out
@@ -176,9 +197,11 @@ def usable(data: dict) -> np.ndarray:
     return (data["category"] != "") & (~over | (data["part_seen"] >= MIN_SEEN))
 
 
-def augment(frames: torch.Tensor, gen: torch.Generator) -> torch.Tensor:
+def augment(frames: torch.Tensor, gen: torch.Generator, erase: float = 0.0) -> torch.Tensor:
     """Per frame on the device: a brightness and contrast draw, a shift of up to 12 px, a
-    left-right flip and an order of the colour channels, back to uint8."""
+    left-right flip, an order of the colour channels and, at the chance ``erase``, a random
+    rectangle of 2 to 20 % of the frame painted one random colour (random erasing), back to
+    uint8."""
     n = frames.shape[0]
     x = frames.float()
     dev = frames.device
@@ -193,10 +216,40 @@ def augment(frames: torch.Tensor, gen: torch.Generator) -> torch.Tensor:
     orders = torch.tensor([[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]])
     order = orders.to(dev)[torch.randint(0, 6, (n,), generator=gen, device=dev)]
     x = torch.gather(x, 3, order[:, None, None, :].expand(-1, x.shape[1], x.shape[2], -1))
+    if erase:
+        h, w = x.shape[1], x.shape[2]
+        on = torch.rand(n, generator=gen, device=dev) < erase
+        area = (0.02 + 0.18 * torch.rand(n, generator=gen, device=dev)) * h * w
+        aspect = torch.exp((torch.rand(n, generator=gen, device=dev) - 0.5) * 2.4)
+        bh, bw = (area * aspect).sqrt().clamp(1, h), (area / aspect).sqrt().clamp(1, w)
+        y0 = torch.rand(n, generator=gen, device=dev) * (h - bh)
+        x0 = torch.rand(n, generator=gen, device=dev) * (w - bw)
+        ys = torch.arange(h, device=dev)[None, :, None]
+        xs = torch.arange(w, device=dev)[None, None, :]
+        box = (ys >= y0[:, None, None]) & (ys < (y0 + bh)[:, None, None])
+        box = box & (xs >= x0[:, None, None]) & (xs < (x0 + bw)[:, None, None]) & on[:, None, None]
+        paint = 255.0 * torch.rand(n, 1, 1, 3, generator=gen, device=dev)
+        x = torch.where(box[..., None], paint, x)
     return x.clamp(0, 255).round().to(torch.uint8)
 
 
-def train(model, data, idx, args, device) -> None:
+def val_lift_accuracy(model, data, rows, device) -> float:
+    """The share of the lift frames among ``rows`` whose category the model reads right."""
+    rows = rows[data["view"][rows] == "lift"]
+    if not len(rows):
+        return float("nan")
+    logits, _ = infer(
+        model, data["frames"][rows], np.ones(len(rows), bool), data["size"][rows], device
+    )
+    model.train()
+    names = np.array(CATEGORIES)
+    return float((names[logits.argmax(1)] == data["category"][rows]).mean())
+
+
+def train(model, data, idx, args, device, val_rows=None) -> None:
+    """``args.epochs`` epochs at most; with ``val_rows`` (the by-heap validation frames) and
+    ``args.patience`` it keeps the epoch whose validation lift accuracy is best and stops after
+    ``args.patience`` epochs without a better one."""
     frames = torch.from_numpy(data["frames"])
     size = torch.from_numpy(data["size"])
     cat = torch.tensor([CATEGORIES.index(c) if c else -1 for c in data["category"].tolist()])
@@ -213,7 +266,8 @@ def train(model, data, idx, args, device) -> None:
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, args.lr, total_steps=steps, pct_start=0.1)
     gen = torch.Generator(device=device).manual_seed(args.seed)
     order_gen = torch.Generator().manual_seed(args.seed)
-    ce = nn.CrossEntropyLoss(weight=weight.to(device))
+    ce = nn.CrossEntropyLoss(weight=weight.to(device), label_smoothing=args.label_smoothing)
+    best, best_state, stale = -1.0, None, 0
     bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
     model.train()
     for epoch in range(args.epochs):
@@ -221,7 +275,7 @@ def train(model, data, idx, args, device) -> None:
         total, seen = 0.0, 0
         for start in range(0, len(order), args.batch):
             b = order[start : start + args.batch]
-            x = augment(frames[b].to(device, non_blocking=True), gen)
+            x = augment(frames[b].to(device, non_blocking=True), gen, args.erase)
             loss = torch.zeros((), device=device)
             for view, is_wrist in ((~wrist[b], False), (wrist[b], True)):
                 if not bool(view.any()):
@@ -242,7 +296,21 @@ def train(model, data, idx, args, device) -> None:
             sched.step()
             total += float(loss.detach()) * len(b)
             seen += len(b)
-        print(f"epoch {epoch} loss {total / seen:.4f}", flush=True)
+        line = f"epoch {epoch} loss {total / seen:.4f}"
+        if val_rows is not None and len(val_rows) and args.patience:
+            acc = val_lift_accuracy(model, data, val_rows, device)
+            line += f" val_lift {acc:.4f}"
+            if acc > best:
+                best, stale = acc, 0
+                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            else:
+                stale += 1
+        print(line, flush=True)
+        if args.patience and stale >= args.patience:
+            break
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        print(f"kept the epoch with val_lift {best:.4f}", flush=True)
 
 
 @torch.no_grad()
@@ -508,6 +576,21 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--model", default="", help="read this export instead of training")
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--batch", type=int, default=128)
+    parser.add_argument(
+        "--cap",
+        type=int,
+        default=0,
+        help="per file, at most this many frames of each view but lift and carry (0: all)",
+    )
+    parser.add_argument("--label_smoothing", type=float, default=0.1)
+    parser.add_argument("--erase", type=float, default=0.5, help="random erasing's chance")
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=3,
+        help="early stopping on the "
+        "validation heaps' lift accuracy after this many epochs (0: off)",
+    )
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--val_fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=0)
@@ -530,7 +613,7 @@ def run(args) -> dict:
     if args.train:
         torch.manual_seed(args.seed)
         device = torch.device(args.device)
-        data = load(sorted(args.train))
+        data = load(sorted(args.train), args.cap)
         files = sorted(set(data["file"].tolist()))
         random.Random(args.seed).shuffle(files)
         val_files = set(
@@ -546,7 +629,8 @@ def run(args) -> dict:
         )
         model = PartClassifier(weights, data["wrist_crop"] is not None).to(device)
         started = time.time()
-        train(model, data, idx, args, device)
+        val_rows = np.flatnonzero(keep & val)
+        train(model, data, idx, args, device, val_rows)
         summary["train_seconds"] = round(time.time() - started, 1)
         wrist = keep & (data["view"] != "overhead")
         wrist &= data["riders"] >= 0
