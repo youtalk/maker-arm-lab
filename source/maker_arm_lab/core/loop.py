@@ -141,7 +141,11 @@ probability over the three views takes the box (``summed_class``). The stand-in 
 value it draws without the switch, so knob rows stay paired. ``passenger_drop`` (with it) opens
 the jaws and ends the cycle ``passenger`` when the lift's wrist frame reads a second part over the
 tray interior (``over_tray``); the failure memory books the cycle, and anywhere else the reading
-is ignored. The ``perception`` block then carries ``CLASSIFIER_COUNTS``.
+is ignored. The ``perception`` block then carries ``CLASSIFIER_COUNTS``. ``lift_view_steps`` N
+(with ``classifier``; 0 is off) reads view 2 N steps after the detector's lift, if the detector
+still reads a lift then, and keeps view 3 at ``CARRY_VIEW_STEPS`` after the lift, so a vote
+decides on the same step as without the switch. A part that left the jaws before view 2 keeps
+the selection's box (``lift_views_lost``). The stand-in still draws at the lift.
 
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
@@ -304,6 +308,19 @@ CARRY_VIEW_STEPS = 15  # INITIAL: the MS7f C1 read measures the carry view at th
 """Control steps (0.5 s) from the detector's lift to the wrist frame of MS7f view 3, the third
 vote during the carry (MS7f design section 6.3). ``scripts/mj_render_set.py`` records its
 carry frames at the same offset."""
+LIFT_VIEW_COUNTS = ("lift_views_lost",)
+"""``lift_view_steps``'s ``perception`` count, in the payload only with the switch on: the lifts
+whose part left the jaws before view 2's step, so no wrist frame was read.
+
+Why the switch (one instrumented episode, track cls-loop, 2026-10-01: F1 100k at
+``--action_warp 1.5``, model_v6a, a 50-part deep-tray heap of seed 20302900 draw 0, 23 lifts):
+the policy is still rising fast at the detector's lift, the tool 36 mm higher 3 steps later
+and settled by 6. The wrist frame alone reads 20 of 23 at the lift and 22 of 23 at 3, 6 and 9
+steps after it; the served rule with view 2 at 6 steps reads 22 of 23 against 21 of 23. On the
+150-part screens and the checked read (2586 cycles) the lift read is right on 1297 of 1584
+target lifts (0.819; 0.771 over each heap's first 40 cycles, while the deep tray's pile is
+high), against C1's 0.903 on teacher lifts over 50-part heaps, and its errors are mostly brick
+and special read as each other or as flat."""
 SELECT_WAIT_FRACTION = 0.375
 """The share of ``CYCLE_STEP_BUDGET`` the loop waits for the retreat at most before it selects
 anyway: 300 steps at the 800-step budget, and the teacher's RETREAT converges in 91 to 147 of
@@ -1002,6 +1019,8 @@ class Cycle:
     # waits for the carry view, (the lift's class, the true class at the lift, the view's step,
     # the lift's log probabilities).
     vote: tuple | None = None
+    # ``classifier``: view 2 is due, (its step, the lift's step, the true class at the lift).
+    lift_view: tuple | None = None
     # ``perceived_release``: a lifted hold ended over a box (True) or off one (False), and the
     # jaws have not yet opened to ``SELECT_OPEN_FRACTION``; None with no release under way.
     release_over: bool | None = None
@@ -1787,6 +1806,7 @@ def rollout(
     lift_budget: int = 0,
     classifier=None,
     passenger_drop: bool = False,
+    lift_view_steps: int = 0,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1827,8 +1847,9 @@ def rollout(
     ``miss_streak`` (rule 3, ``miss_streak``). The person watches the grader.
     ``book_miss`` (MS7f H) books a failure against the target of a cycle that stowed only other
     parts (``books_failure``), on the truth-graded path; a ``--perceived`` cycle is unchanged.
-    ``classifier`` (a ``perception.PartClassifier`` or None) and ``passenger_drop`` are the
-    MS7f switches of the module docstring; both need ``perceived``, and the second the first.
+    ``classifier`` (a ``perception.PartClassifier`` or None), ``passenger_drop`` and
+    ``lift_view_steps`` are the MS7f switches of the module docstring; all need ``perceived``,
+    and the last two ``classifier``; ``lift_view_steps`` is under ``CARRY_VIEW_STEPS``.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1956,6 +1977,10 @@ def rollout(
         raise EvalFailure("classifier", "reads the perceived views: it needs perceived")
     if passenger_drop and classifier is None:
         raise EvalFailure("passenger_drop", "reads the classifier's passenger head")
+    if lift_view_steps and classifier is None:
+        raise EvalFailure("lift_view_steps", "delays the classifier's wrist read")
+    if not 0 <= lift_view_steps < CARRY_VIEW_STEPS:
+        raise EvalFailure("lift_view_steps", f"must lie in [0, {CARRY_VIEW_STEPS})")
     if classifier is not None and not set(class_names) <= set(classifier.categories):
         raise EvalFailure(
             "classifier", f"reads {classifier.categories}; the run sorts by {class_names}"
@@ -2057,6 +2082,8 @@ def rollout(
     }
     if classifier is not None:
         switches |= {"classifier": classifier.path, "passenger_drop": bool(passenger_drop)}
+    if lift_view_steps:
+        switches["lift_view_steps"] = int(lift_view_steps)
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
     pick_z_hist = [deque(maxlen=GATE_WINDOW + 1) for _ in range(num_envs)]
@@ -2544,40 +2571,60 @@ def rollout(
                     )
                     if classifier is not None:
                         # The stand-in above drew what it draws without the switch; the wrist
-                        # frame decides (MS7f view 2), or ends the cycle on a passenger.
-                        frame = classifier.wrist_frame(env, i)
-                        logp, rider = classifier.log_probs(
-                            frame, class_names, wrist=True, size=c.seen_size
-                        )
-                        read = summed_class(class_names, logp)
-                        c.lift_class, c.rider_read, c.taken_class = read, bool(rider), None
-                        st.counts["passenger_reads"] += rider
-                        if passenger_drop and rider and tray and over_tray(pick, lean, wall_height):
-                            st.counts["passenger_drops"] += 1
-                            st.fail_mem.book(c.target_xy)
-                            _close_cycle(st, "passenger", [], step, None)
-                            st.idle_since, st.opening = step, True
-                            continue
-                        drawn = None if true_cls is None else read
-                        if class_views and read != c.read_class:
-                            c.vote = (read, true_cls, step + CARRY_VIEW_STEPS, logp)
-                            taken = box = None
+                        # frame decides (MS7f view 2), now or ``lift_view_steps`` later.
+                        c.lift_view = (step + lift_view_steps, step, true_cls)
+                    else:
+                        if drawn is None:
+                            st.counts["lifts_empty"] += 1
                         else:
-                            _, taken, box = lift_class_box(read, lambda x: x, lighter, c.box)
-                            c.taken_class = taken
-                    if drawn is None:
+                            st.counts["lifts_classified"] += 1
+                            st.counts["wrong_wrist_class"] += drawn != true_cls
+                            if views is not None:
+                                st.counts["third_views"] += drawn != c.seen_class
+                                st.counts["votes_changed"] += taken != drawn
+                                st.counts["wrong_voted_class"] += taken != true_cls
+                        if box is not None:
+                            c.box = box
+                            env.set_context_box(i, box)
+                            replan[i] = True
+                if c.lift_view is not None and step >= c.lift_view[0]:
+                    _, lift_step, true_cls = c.lift_view
+                    c.lift_view = None
+                    if not detectors[i].lifted:
+                        st.counts["lift_views_lost"] += 1  # the selection's box stays
+                        continue
+                    lighter = {
+                        cls: desk_boxes.lighter_box(own, st.box_load)
+                        for cls, own in class_boxes[i].items()
+                    }
+                    # View 2 decides, or ends the cycle on a passenger.
+                    frame = classifier.wrist_frame(env, i)
+                    logp, rider = classifier.log_probs(
+                        frame, class_names, wrist=True, size=c.seen_size
+                    )
+                    read = summed_class(class_names, logp)
+                    c.lift_class, c.rider_read, c.taken_class = read, bool(rider), None
+                    st.counts["passenger_reads"] += rider
+                    if passenger_drop and rider and tray and over_tray(pick, lean, wall_height):
+                        st.counts["passenger_drops"] += 1
+                        st.fail_mem.book(c.target_xy)
+                        _close_cycle(st, "passenger", [], step, None)
+                        st.idle_since, st.opening = step, True
+                        continue
+                    if true_cls is None:
                         st.counts["lifts_empty"] += 1
                     else:
                         st.counts["lifts_classified"] += 1
-                        st.counts["wrong_wrist_class"] += drawn != true_cls
-                        if views is not None and classifier is None:
-                            st.counts["third_views"] += drawn != c.seen_class
-                            st.counts["votes_changed"] += taken != drawn
-                            st.counts["wrong_voted_class"] += taken != true_cls
-                    if box is not None:
-                        c.box = box
-                        env.set_context_box(i, box)
-                        replan[i] = True
+                        st.counts["wrong_wrist_class"] += read != true_cls
+                    if class_views and read != c.read_class:
+                        c.vote = (read, true_cls, lift_step + CARRY_VIEW_STEPS, logp)
+                    else:
+                        _, taken, box = lift_class_box(read, lambda x: x, lighter, c.box)
+                        c.taken_class = taken
+                        if box is not None:
+                            c.box = box
+                            env.set_context_box(i, box)
+                            replan[i] = True
                 if c.vote is not None and step >= c.vote[2]:
                     # MS7f view 3: the carry frame is the third vote, if the part is still up.
                     read, true_cls, _, lift_logp = c.vote
@@ -2875,6 +2922,7 @@ def rollout(
                 + (MARKER_COUNTS if marker_bias else ())
                 + (WRIST_COUNTS if wrist_fix else ())
                 + (CLASSIFIER_COUNTS if classifier is not None else ())
+                + (LIFT_VIEW_COUNTS if lift_view_steps else ())
             },
         },
     }

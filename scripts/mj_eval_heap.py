@@ -45,7 +45,13 @@ from maker_arm_lab.core.batch_loop import (
 from maker_arm_lab.core.eval_loop import EvalFailure
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
-from maker_arm_lab.core.loop import CYCLE_STEP_BUDGET, cycle_budget, episode_length_s, rollout
+from maker_arm_lab.core.loop import (
+    CARRY_VIEW_STEPS,
+    CYCLE_STEP_BUDGET,
+    cycle_budget,
+    episode_length_s,
+    rollout,
+)
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 
@@ -361,6 +367,10 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         parser.error(
             "--passenger_drop reads the classifier's passenger head: it needs --classifier"
         )
+    if args.lift_view_steps and not args.classifier:
+        parser.error("--lift_view_steps delays the classifier's wrist read: it needs --classifier")
+    if not 0 <= args.lift_view_steps < CARRY_VIEW_STEPS:
+        parser.error(f"--lift_view_steps must lie in [0, {CARRY_VIEW_STEPS})")
     if args.desk_boxes < 0:
         parser.error("--desk_boxes must be 0 or more")
     if args.perceived:
@@ -535,6 +545,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             lift_budget=args.lift_budget,
             classifier=perception.PartClassifier(args.classifier) if args.classifier else None,
             passenger_drop=args.passenger_drop,
+            lift_view_steps=args.lift_view_steps,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

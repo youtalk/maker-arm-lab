@@ -126,7 +126,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         parser.error("--lift_budget cuts a served cycle: the recorder serves no policy")
     if args.end_at_done and args.attempts != args.num_envs:
         parser.error("--end_at_done ends one episode an env: it needs --attempts == --num_envs")
-    for name in ("classifier", "passenger_drop"):
+    for name in ("classifier", "passenger_drop", "lift_view_steps"):
         if getattr(args, name):
             # MS7f C serves the policy loop's views; the recorder's teacher acts on the truth.
             parser.error(f"--{name} reads the serving loop's views: the recorder has none")

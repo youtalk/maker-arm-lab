@@ -267,6 +267,7 @@ MS7F_OFF: dict = {
     "near_tracking": False,
     "classifier": None,
     "passenger_drop": False,
+    "lift_view_steps": 0,
     "transport_speed": trajectory.TRANSPORT_SPEED,
     "descend_speed": 1.0,
     "close_steps": oracle.CLOSE_STEPS,
@@ -282,8 +283,8 @@ MS7F_OFF: dict = {
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
 of a run with every one off, what an MS7e run ran with. categories is the base track's;
 deep_tray, tray_refill, box_empty, book_miss, abandon_cycle (the recorder's) and near_tracking
-(the rig's watchdog) track H's (design section 5); classifier and
-passenger_drop track C's (design section 6); transport_speed (the teacher walk's pace),
+(the rig's watchdog) track H's (design section 5); classifier,
+passenger_drop and lift_view_steps track C's (design section 6); transport_speed (the teacher walk's pace),
 descend_speed and the teacher waits (TEACHER_WAITS) track S's (design section 8), and so is
 lift_budget, a serving trim of the heap client, and end_at_done, the recorder's. The gate supervisor keeps a stdlib copy (``scripts/run_gate_eval.py``),
 pinned by a test."""
@@ -298,6 +299,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "near_tracking",
         "classifier",
         "passenger_drop",
+        "lift_view_steps",
         "transport_speed",
         "descend_speed",
         "close_steps",
@@ -362,6 +364,14 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
         action="store_true",
         help="MS7f C: open the jaws at the lift when the wrist view reads a passenger over the "
         "tray interior",
+    )
+    parser.add_argument(
+        "--lift_view_steps",
+        type=int,
+        default=0,
+        help="MS7f C, the heap client with --classifier: read the wrist view this many steps "
+        "after the lift, once the arm has risen clear of the pile (loop.LIFT_VIEW_COUNTS); 0 "
+        "is off",
     )
     if transport_speed:
         parser.add_argument(

@@ -181,6 +181,58 @@ def test_the_carry_view_is_the_third_vote(tmp_path):
     assert np.allclose(rows[0], poses[slope]) and any(np.allclose(r, poses[wide]) for r in rows)
 
 
+def test_lift_view_steps_reads_the_wrist_view_that_many_steps_after_the_lift(tmp_path):
+    """Overhead reads slope and the wrist frame wide: the box row moves to the wide box at the
+    lift without the switch and exactly N steps later with it (the teacher ignores the row, so
+    both runs lift on the same step); the rest of the run is the same."""
+    moved, payloads = [], []
+    for n in (0, 5):
+        env, rig, policy = _scene()
+        served = _served(env)
+        payloads.append(
+            _rollout(
+                env,
+                rig,
+                policy,
+                perceived=True,
+                classifier=_classifier(tmp_path, "slope", "wide"),
+                lift_view_steps=n,
+                **SWITCHES,
+            )
+        )
+        env.close()
+        wide = env.perceived_box_poses[0][
+            int(env.class_to_box[0][parts.BASE_CLASSES.index("wide")])
+        ]
+        moved.append(
+            next(s for s, row in enumerate(served) if np.allclose(row[1], wide, atol=1e-6))
+        )
+    assert moved[1] == moved[0] + 5
+    off, on = payloads
+    assert (
+        "lift_view_steps" not in off["inference"]["loop"]
+        and "lift_views_lost" not in off["perception"]
+    )
+    assert on["inference"]["loop"]["lift_view_steps"] == 5
+    assert on["perception"].pop("lift_views_lost") == 0
+    assert on["perception"] == off["perception"]
+    for key in ("cycle_reasons", "cycle_targets", "cycle_steps"):
+        assert on["episodes"][0][key] == off["episodes"][0][key], key
+
+
+def test_lift_view_steps_needs_the_classifier_and_a_step_before_the_carry_view(tmp_path):
+    env, rig, policy = _scene()
+    with pytest.raises(EvalFailure, match="lift_view_steps"):
+        _rollout(env, rig, policy, perceived=True, lift_view_steps=6, **SWITCHES)
+    stub = _classifier(tmp_path)
+    for n in (-1, loop.CARRY_VIEW_STEPS):
+        with pytest.raises(EvalFailure, match="lift_view_steps"):
+            _rollout(
+                env, rig, policy, perceived=True, classifier=stub, lift_view_steps=n, **SWITCHES
+            )
+    env.close()
+
+
 def test_a_size_reading_model_gets_the_detection_size_in_every_view(tmp_path):
     """Overhead reads slope and both wrist views wide, so every lift waits for the carry view:
     the run ends only if the overhead, lift and carry reads all got a perceived size."""
@@ -325,6 +377,13 @@ def test_the_clients_take_the_switches_only_where_the_loop_serves_them(capsys):
         "mj_eval_heap", heap + ["--perceived", "--categories", "--passenger_drop"], capsys
     )
     assert line.startswith("EVAL_FAIL ") and "it needs --classifier" in line
-    for flag in (["--classifier", "m.pt"], ["--passenger_drop"]):
+    line = _usage(
+        "mj_eval_heap", heap + ["--perceived", "--categories", "--lift_view_steps", "6"], capsys
+    )
+    assert line.startswith("EVAL_FAIL ") and "it needs --classifier" in line
+    flags = heap + ["--perceived", "--categories", "--classifier", "m.pt", "--lift_view_steps"]
+    line = _usage("mj_eval_heap", flags + [str(loop.CARRY_VIEW_STEPS)], capsys)
+    assert line.startswith("EVAL_FAIL ") and "must lie in [0, 15)" in line
+    for flag in (["--classifier", "m.pt"], ["--passenger_drop"], ["--lift_view_steps", "6"]):
         line = _usage("mj_generate_batch", ["--out_dir", "/tmp/x", "--heap_k", "3"] + flag, capsys)
         assert line.startswith("BATCH_FAIL usage: ") and "the recorder has none" in line

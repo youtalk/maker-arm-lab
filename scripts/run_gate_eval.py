@@ -181,6 +181,7 @@ MS7F_OFF = {
     "near_tracking": False,
     "classifier": None,
     "passenger_drop": False,
+    "lift_view_steps": 0,
     "transport_speed": 4.0,
     "descend_speed": 1.0,
     "close_steps": 45,
@@ -208,6 +209,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "near_tracking",
         "classifier",
         "passenger_drop",
+        "lift_view_steps",
         "transport_speed",
         "descend_speed",
         "close_steps",
@@ -1307,6 +1309,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             default=MS7F_OFF[name],
             help=f"MuJoCo heap only, MS7f S1: forwarded as --{name} N, a teacher wait",
         )
+    parser.add_argument(
+        "--lift_view_steps",
+        type=int,
+        default=MS7F_OFF["lift_view_steps"],
+        help="MuJoCo heap only, MS7f C: forwarded as --lift_view_steps N, the classifier's wrist "
+        "read N steps after the lift",
+    )
     parser.add_argument(
         "--lift_budget",
         type=int,

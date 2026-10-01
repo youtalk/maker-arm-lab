@@ -28,6 +28,7 @@ ON = {
     "near_tracking": ["--near_tracking"],
     "classifier": ["--classifier", "/tmp/ms7f_no_such_classifier.pt"],
     "passenger_drop": ["--passenger_drop"],
+    "lift_view_steps": ["--lift_view_steps", "6"],
     "transport_speed": ["--transport_speed", "6.0"],
     "descend_speed": ["--descend_speed", "2.0"],
     "close_steps": ["--close_steps", "15"],
