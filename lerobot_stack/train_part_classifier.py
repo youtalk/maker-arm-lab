@@ -583,6 +583,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="per file, at most this many frames of each view but lift and carry (0: all)",
     )
     parser.add_argument("--label_smoothing", type=float, default=0.1)
+    parser.add_argument(
+        "--val_skip",
+        default="",
+        help="a file of part names the early stop's "
+        "validation leaves out (the render set's extra kinds)",
+    )
     parser.add_argument("--erase", type=float, default=0.5, help="random erasing's chance")
     parser.add_argument(
         "--patience",
@@ -629,7 +635,8 @@ def run(args) -> dict:
         )
         model = PartClassifier(weights, data["wrist_crop"] is not None).to(device)
         started = time.time()
-        val_rows = np.flatnonzero(keep & val)
+        skip = Path(args.val_skip).read_text().split() if args.val_skip else []
+        val_rows = np.flatnonzero(keep & val & ~np.isin(data["part"], skip))
         train(model, data, idx, args, device, val_rows)
         summary["train_seconds"] = round(time.time() - started, 1)
         wrist = keep & (data["view"] != "overhead")
