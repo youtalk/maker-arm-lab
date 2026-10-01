@@ -24,6 +24,7 @@ ON = {
     "tray_refill": ["--tray_refill"],
     "box_empty": ["--box_empty"],
     "book_miss": ["--book_miss"],
+    "abandon_cycle": ["--abandon_cycle"],
     "classifier": ["--classifier", "/tmp/ms7f_no_such_classifier.pt"],
     "passenger_drop": ["--passenger_drop"],
     "transport_speed": ["--transport_speed", "6.0"],
@@ -208,3 +209,12 @@ def test_the_supervisor_refuses_a_heap_over_150(monkeypatch, capsys, tmp_path):
     assert ge.main(argv) == 2 and "exceeds 150" in capsys.readouterr().err
     argv[argv.index("--heap_k") + 1] = "150"
     assert ge._build_cfg(ge._parse_args(argv)).heap_k == 150
+
+
+def test_the_heap_client_refuses_abandon_cycle(capsys):
+    # The recorder's switch: the heap loop already survives a rig abandon (takeover_failed).
+    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    with pytest.raises(SystemExit) as exit_info:
+        module.main(CLIENTS[0][1] + ["--abandon_cycle"])
+    assert exit_info.value.code == 2
+    assert "--abandon_cycle is the recorder's" in capsys.readouterr().out

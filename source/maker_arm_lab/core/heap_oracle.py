@@ -230,6 +230,7 @@ class HeapOracle(oracle.EnvOracle):
         self.forced_picks = 0
         self.held_swaps = 0
         self._give_up = False
+        self.abandon_cycle = False  # MS7f --abandon_cycle (the recorder): see recover_from_jam
         self.pushes_in_a_row = 0
         self.failures: dict = {}
         # "cell": failures count per 5 cm cell (design 7.2), the teacher's rule. "part": per
@@ -829,7 +830,10 @@ class HeapOracle(oracle.EnvOracle):
         spent. On the 600-part tray read of 2026-09-23 two of twelve episodes were abandoned
         with 19 and 7 parts still in the tray: the wrist roll 0.02 rad off its stop while a
         forced pick's descend stalled on a neighbor, and a wedge rake at the near wall.
-        Anything else (a jam in transit) still abandons.
+        Anything else (a jam in transit) still abandons, unless ``abandon_cycle`` (MS7f, the
+        recorder) is on: then a jam in any other phase ends its cycle too, through REOPEN, with
+        the part booked as not stowed unless a RETREAT finds it in its box. MS7f wave 1 lost two
+        whole 150-part heaps to transit jams after 5 and 10 cycles (2026-09-30).
         """
         if not self.walls:
             return False
@@ -845,7 +849,20 @@ class HeapOracle(oracle.EnvOracle):
             self._give_up = True
             self.phase = oracle.Phase.REOPEN
             return True
-        return False
+        if not self.abandon_cycle:
+            return False
+        self.jams += 1
+        brick = self.target_brick
+        if brick is not None:
+            arrived = self.phase == oracle.Phase.RETREAT and brick in self._stowed(scene)
+            if arrived:
+                self._sorted.add(brick)
+            else:
+                self._mark_failure(scene, brick)
+            self.cycle_outcomes.append(arrived)
+        self._give_up = True
+        self.phase = oracle.Phase.REOPEN
+        return True
 
     def _end_push(self) -> None:
         """Count the push or rake that just ended and scan again at HOVER."""

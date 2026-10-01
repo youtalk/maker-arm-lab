@@ -347,6 +347,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         parser.error("--lift_budget must be 0 (off) or more")
     if args.end_at_done:
         parser.error("--end_at_done cuts the recorder's idle tail: the heap client has none")
+    if args.abandon_cycle:
+        parser.error("--abandon_cycle is the recorder's: the heap loop survives a rig abandon")
     check_ms7e(parser, args)
     check_ms7f(parser, args)
     check_teacher_waits(parser, args)

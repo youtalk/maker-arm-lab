@@ -197,6 +197,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
                 box_sets=env.part_box_sets(i),  # MS7f: one teacher, one load record an episode
                 tray_wall_height=env.tray_wall_height,
             )
+            orc.abandon_cycle = args.abandon_cycle
             return teacher_waits(orc, args)
 
     perceivers = None

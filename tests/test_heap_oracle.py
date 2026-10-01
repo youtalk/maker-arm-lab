@@ -853,6 +853,20 @@ def test_a_jammed_tray_pick_gives_up_the_cycle_and_a_bare_desk_one_the_episode()
     assert orc.recover_from_jam(scene) is False
 
 
+def test_abandon_cycle_ends_a_jam_in_transit_with_the_cycle_not_the_episode():
+    # MS7f --abandon_cycle (the recorder): a carry jam drops the part through REOPEN, books it.
+    scene = _snapshot([[layout.TRAY_CENTER[0], 0.0, 0.0048]])
+    orc = _tray_oracle([BRICK])
+    orc.abandon_cycle = True
+    _to_hover(orc, scene)
+    orc.phase = oracle.Phase.EXTEND
+    assert orc.recover_from_jam(scene) is True
+    assert orc.phase is oracle.Phase.REOPEN and orc.cycle_outcomes == [False]
+    assert orc.failures[orc.cell_of(scene.brick_pos[0, :2].tolist())] == 1
+    _step(orc, scene)
+    assert orc.phase is oracle.Phase.HOVER and orc.target_brick is None
+
+
 def test_a_jammed_rake_is_spent(narrow_band):
     orc = _tray_oracle([BRICK])
     scene = _stuck_scene()

@@ -263,6 +263,7 @@ MS7F_OFF: dict = {
     "tray_refill": False,
     "box_empty": False,
     "book_miss": False,
+    "abandon_cycle": False,
     "classifier": None,
     "passenger_drop": False,
     "transport_speed": trajectory.TRANSPORT_SPEED,
@@ -279,7 +280,8 @@ MS7F_OFF: dict = {
 }
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
 of a run with every one off, what an MS7e run ran with. categories is the base track's;
-deep_tray, tray_refill, box_empty and book_miss track H's (design section 5); classifier and
+deep_tray, tray_refill, box_empty, book_miss and abandon_cycle (the recorder's) track H's
+(design section 5); classifier and
 passenger_drop track C's (design section 6); transport_speed (the teacher walk's pace),
 descend_speed and the teacher waits (TEACHER_WAITS) track S's (design section 8), and so is
 lift_budget, a serving trim of the heap client, and end_at_done, the recorder's. The gate supervisor keeps a stdlib copy (``scripts/run_gate_eval.py``),
@@ -291,6 +293,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "tray_refill",
         "box_empty",
         "book_miss",
+        "abandon_cycle",
         "transport_speed",
         "descend_speed",
         "close_steps",
@@ -417,6 +420,12 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
         action="store_true",
         help="MS7f S, the recorder with --attempts equal to --num_envs: end the episodes once "
         "every env's teacher is DONE instead of stepping on to the time-out (run_batch)",
+    )
+    parser.add_argument(
+        "--abandon_cycle",
+        action="store_true",
+        help="MS7f H, the recorder: a watchdog jam in any phase ends its cycle, not the episode "
+        "(HeapOracle.recover_from_jam)",
     )
     parser.add_argument(
         "--lift_budget",
