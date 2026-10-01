@@ -73,6 +73,7 @@ class GateCfg:
     retries: int = 2
     n_action_steps: int | None = None
     temporal_ensemble_coeff: float | None = None
+    action_warp: float = 1.0  # the server plays each chunk this many times faster (MS7f speed)
     only_processes: tuple | None = None
     eval_timeout_s: float = 4 * 3600
     backend: str = "isaac"  # "mujoco" spawns scripts/mj_eval_policy.py under .venv/bin/python
@@ -651,6 +652,8 @@ def _server_command(cfg: GateCfg) -> list[str]:
         cmd += ["--n_action_steps", str(cfg.n_action_steps)]
     if cfg.temporal_ensemble_coeff is not None:
         cmd += ["--temporal_ensemble_coeff", str(cfg.temporal_ensemble_coeff)]
+    if cfg.action_warp != 1.0:
+        cmd += ["--action_warp", str(cfg.action_warp)]
     return cmd
 
 
@@ -850,6 +853,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     same_inference = served.get("temporal_ensemble_coeff") == cfg.temporal_ensemble_coeff and (
         cfg.n_action_steps is None or served.get("n_action_steps") == cfg.n_action_steps
     )
+    # A payload that predates the warp ran unwarped.
+    same_inference = same_inference and served.get("action_warp", 1.0) == cfg.action_warp
     # The loop's protocol switches are part of what a draw measured; a payload that predates
     # them ran with every switch off.
     recorded = served.get("loop") or {}
@@ -928,9 +933,13 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
     # What the server SERVED with, from the handshake each eval process recorded (identical
     # across processes by construction), falling back to the SERVER_READY line. Never the
     # CLI request.
-    results["inference"] = next(
-        (p["inference"] for p in ordered if p.get("inference")), server_ready.get("inference", {})
-    )
+    results["inference"] = {
+        "action_warp": 1.0,  # a server that predates the warp served none
+        **next(
+            (p["inference"] for p in ordered if p.get("inference")),
+            server_ready.get("inference", {}),
+        ),
+    }
     results["policy_id"] = next((p.get("policy_id") for p in ordered), None)
     results["ms7e"] = ms7e_block(cfg)
     results["ms7f"] = ms7f_block(cfg)
@@ -1010,6 +1019,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--n_action_steps", type=int, default=None)
     parser.add_argument("--temporal_ensemble_coeff", type=float, default=None)
+    parser.add_argument(
+        "--action_warp",
+        type=float,
+        default=1.0,
+        help="the server plays each predicted chunk this many times faster, 1.0 (off) to 3.0",
+    )
     parser.add_argument("--only_processes", type=_process_list, default=None)
     parser.add_argument("--eval_timeout_s", type=float, default=4 * 3600)
     parser.add_argument("--backend", choices=("isaac", "mujoco"), default="isaac")
@@ -1318,6 +1333,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def _build_cfg(args: argparse.Namespace) -> GateCfg:
+    if not 1.0 <= args.action_warp <= 3.0:  # the server's ACTION_WARP_MIN and ACTION_WARP_MAX
+        raise ValueError(f"--action_warp must be in [1.0, 3.0], got {args.action_warp}")
     if args.gripper != "binary" and (args.heap_k <= 0 or args.backend != "mujoco"):
         # Only the MuJoCo heap client drives a continuous gripper (phase B design 5.4).
         raise ValueError("--gripper continuous needs --heap_k > 0 and --backend mujoco")
@@ -1428,6 +1445,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         retries=args.retries,
         n_action_steps=args.n_action_steps,
         temporal_ensemble_coeff=args.temporal_ensemble_coeff,
+        action_warp=args.action_warp,
         only_processes=args.only_processes,
         eval_timeout_s=args.eval_timeout_s,
         backend=args.backend,

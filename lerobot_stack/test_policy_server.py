@@ -276,6 +276,10 @@ def test_policy_id_reflects_the_inference_override():
         inference_policy_id("/ckpt", {"temporal_ensemble_coeff": 0.01, "n_action_steps": 1})
         == "act:/ckpt+te0.01"
     )
+    assert inference_policy_id("/ckpt", {}, action_warp=1.0) == "act:/ckpt"
+    assert inference_policy_id("/ckpt", {"n_action_steps": 50}, action_warp=2.0) == (
+        "act:/ckpt+nas50+warp2.0"
+    )
 
 
 def test_blank_streams_without_an_ablation_passes_both_through():
@@ -596,6 +600,28 @@ def test_action_queues_drain_in_lockstep_without_flags_and_replan_per_env():
     queues.reset()
     queues.step(obs(6))
     assert seen[-1] == [60.0, 160.0]
+
+
+def test_action_warp_resamples_each_chunk_and_refuses_a_slowdown():
+    from policy_server import ActionQueues, warp_chunk
+
+    chunk = np.random.default_rng(0).normal(size=(2, 50, 7)).astype(np.float32)
+    assert warp_chunk(chunk, 1.0) is chunk  # byte-equal: every unwarped read stays identical
+    np.testing.assert_array_equal(warp_chunk(chunk, 2.0), chunk[:, ::2])
+    square = np.stack([np.arange(5.0) ** 2] * 7, axis=-1)[None].astype(np.float32)
+    # t = 0, 1.5, 3: 0, halfway between 1 and 4, then 9; t = 4.5 is past n - 1 = 4.
+    np.testing.assert_allclose(warp_chunk(square, 1.5)[0, :, 3], [0.0, 2.5, 9.0])
+    forwards = []
+
+    def predict(obs):
+        forwards.append(len(obs["state"]))
+        return _chunk_of(obs["state"], 4)
+
+    queues = ActionQueues(predict, 4, action_warp=2.0)
+    got = [queues.step({"state": np.zeros((2, 7), np.float32)})[0, 0] for _ in range(4)]
+    assert got == [0.0, 2.0, 0.0, 2.0] and forwards == [2, 2]  # a half-length queue
+    with pytest.raises(ValueError, match="action_warp"):
+        ActionQueues(predict, 4, action_warp=0.5)
 
 
 def test_the_step_hands_the_replan_flag_to_the_policy_only_when_sent():

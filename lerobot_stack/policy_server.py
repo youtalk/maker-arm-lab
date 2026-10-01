@@ -65,9 +65,9 @@ class PolicyServer:
         # SERVER_READY and hello_ack so a client (and core.loop's mismatch check) knows which.
         self._gripper = gripper
         # The inference config the loaded policy actually runs with (n_action_steps,
-        # temporal_ensemble_coeff, chunk_size), read off the policy after the overrides were
-        # applied and echoed in SERVER_READY and hello_ack so an eval payload records what
-        # was served rather than what the supervisor asked for.
+        # temporal_ensemble_coeff, chunk_size, action_warp), read off the policy after the
+        # overrides were applied and echoed in SERVER_READY and hello_ack so an eval payload
+        # records what was served rather than what the supervisor asked for.
         self._inference = dict(inference or {})
         # Width of the optional context array this policy takes (0 = none). Echoed in the
         # handshake so a client knows whether to send one, and a step's context width is
@@ -223,11 +223,19 @@ class ActionQueues:
 
     ``predict_chunk(obs) -> (b, n_action_steps, action_dim)`` takes the observation arrays of
     the sub-batch, keyed like the wire (state, wrist, overhead, optional context).
+
+    ``action_warp`` X plays each chunk X times faster (``warp_chunk``) before it fills the
+    queues; 1.0 queues the chunk unchanged. A shorter queue only means more forwards.
     """
 
-    def __init__(self, predict_chunk, n_action_steps: int):
+    def __init__(self, predict_chunk, n_action_steps: int, action_warp: float = 1.0):
+        if not ACTION_WARP_MIN <= action_warp <= ACTION_WARP_MAX:
+            raise ValueError(
+                f"action_warp must be in [{ACTION_WARP_MIN}, {ACTION_WARP_MAX}], got {action_warp}"
+            )
         self._predict = predict_chunk
         self._n = n_action_steps
+        self._warp = action_warp
         self._queues: list[deque] = []
 
     def reset(self) -> None:
@@ -245,9 +253,30 @@ class ActionQueues:
                 raise ValueError(
                     f"predict_chunk returned {chunk.shape}, want ({len(need)}, {self._n}, ...)"
                 )
+            chunk = warp_chunk(chunk, self._warp)
             for row, i in enumerate(need):
                 self._queues[i] = deque(chunk[row])
         return np.stack([q.popleft() for q in self._queues])
+
+
+# MS7f speed track: the policy copies the teacher corpus's pace (about 15.4 s a cycle, 158
+# correct stows an hour against the 300 bar), and playing its chunks faster needs no retrain.
+ACTION_WARP_MIN = 1.0
+ACTION_WARP_MAX = 3.0
+
+
+def warp_chunk(chunk: np.ndarray, action_warp: float) -> np.ndarray:
+    """Resample a (b, n, action_dim) chunk at times 0, X, 2X, ... while t <= n - 1, every
+    channel linear between chunk[floor(t)] and chunk[floor(t) + 1]. X = 1.0 returns the chunk
+    itself, so an unwarped read is byte-identical to one served before the switch."""
+    if action_warp == 1.0:
+        return chunk
+    n = chunk.shape[1]
+    t = np.arange(0.0, n - 1 + 1e-9, action_warp)
+    lo = np.floor(t).astype(int)
+    hi = np.minimum(lo + 1, n - 1)
+    w = (t - lo)[None, :, None]
+    return (chunk[:, lo] + w * (chunk[:, hi] - chunk[:, lo])).astype(chunk.dtype)
 
 
 def resolve_inference_overrides(
@@ -416,6 +445,7 @@ def inference_policy_id(
     context_dim: int = 0,
     action_space: str = "absolute",
     gripper: str = "binary",
+    action_warp: float = 1.0,
 ) -> str:
     """Suffix the policy id with the active overrides so eval payloads are self-describing."""
     policy_id = f"act:{checkpoint_dir}"
@@ -423,6 +453,8 @@ def inference_policy_id(
         policy_id += f"+te{overrides['temporal_ensemble_coeff']}"
     elif "n_action_steps" in overrides:
         policy_id += f"+nas{overrides['n_action_steps']}"
+    if action_warp != 1.0:
+        policy_id += f"+warp{action_warp}"
     if gripper_squash:
         policy_id += "+gbce"
     if blank_camera is not None:
@@ -442,6 +474,7 @@ def load_act(
     n_action_steps: int | None = None,
     temporal_ensemble_coeff: float | None = None,
     blank_camera: str | None = None,
+    action_warp: float = 1.0,
 ):
     """Build (policy_fn, reset_fn, policy_id, n_action_steps, inference, context_dim, action_space,
     gripper).
@@ -456,8 +489,11 @@ def load_act(
     when the checkpoint has image features. `context_dim` is the checkpoint's
     `env_state_feature.shape[0]`, or 0 for a checkpoint that takes no context.
     Inference-config overrides (n_action_steps, temporal_ensemble_coeff) are applied
-    at checkpoint load and reflected in the returned policy_id suffix.
+    at checkpoint load and reflected in the returned policy_id suffix. ``action_warp`` plays
+    each queued chunk faster (``ActionQueues``); the ensembler queues no chunk to warp.
     """
+    if action_warp != 1.0 and temporal_ensemble_coeff is not None:
+        raise ValueError("action_warp plays the queued chunk: temporal ensembling queues none")
     import dataclasses
 
     import torch
@@ -529,7 +565,7 @@ def load_act(
             chunk = policy.predict_action_chunk(batch)[:, : policy.config.n_action_steps]
         return _finish(chunk)
 
-    queues = ActionQueues(predict_chunk, int(policy.config.n_action_steps))
+    queues = ActionQueues(predict_chunk, int(policy.config.n_action_steps), action_warp)
 
     def policy_fn(
         state: np.ndarray,
@@ -563,9 +599,10 @@ def load_act(
             context_dim=context_dim,
             action_space=action_space,
             gripper=gripper,
+            action_warp=action_warp,
         ),
         policy.config.n_action_steps,
-        served_inference(policy.config),
+        {**served_inference(policy.config), "action_warp": action_warp},
         context_dim,
         action_space,
         gripper,
@@ -613,6 +650,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n_action_steps", type=int, default=None)
     parser.add_argument("--temporal_ensemble_coeff", type=float, default=None)
     parser.add_argument(
+        "--action_warp",
+        type=float,
+        default=1.0,
+        help=f"play each chunk this many times faster, {ACTION_WARP_MIN} (off) to {ACTION_WARP_MAX}",
+    )
+    parser.add_argument(
         "--blank_camera",
         choices=BLANKABLE_STREAMS,
         default=None,
@@ -646,6 +689,7 @@ def main() -> int:
             n_action_steps=args.n_action_steps,
             temporal_ensemble_coeff=args.temporal_ensemble_coeff,
             blank_camera=args.blank_camera,
+            action_warp=args.action_warp,
         )
         server = PolicyServer(
             policy_fn,

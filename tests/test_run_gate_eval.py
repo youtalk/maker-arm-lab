@@ -260,6 +260,7 @@ def test_run_gate_runs_every_draw_once_and_writes_results(tmp_path, capsys):
     assert results["gate"]["per_brick_rate"] == pytest.approx(6 / 36)
     assert results["gate"]["passed"] is True
     assert results["inference"]["temporal_ensemble_coeff"] == 0.01
+    assert results["inference"]["action_warp"] == 1.0  # the fake server predates the warp
     assert results["policy_id"] == "act:ck+te0.01"
     assert len(results["draws"]) == 3
     written = json.loads((cfg.out_dir / "gate_results.json").read_text())
@@ -744,6 +745,46 @@ def test_cached_payload_matches_the_inference_configuration(tmp_path):
     legacy = {k: v for k, v in served_open_loop.items() if k != "inference"}
     open_loop.n_action_steps = None
     assert cached(open_loop, legacy) and not cached(ensemble, legacy)
+
+
+def test_action_warp_reaches_the_server_splits_the_cache_and_refuses_out_of_range(
+    tmp_path, monkeypatch, capsys
+):
+    ledger = _fake_ledger(tmp_path)
+    plain = _cfg(tmp_path, ledger, processes=1, n_action_steps=None, temporal_ensemble_coeff=None)
+    assert "--action_warp" not in ge._server_command(plain)  # the unwarped command is unchanged
+    warped = _cfg(
+        tmp_path,
+        ledger,
+        processes=1,
+        n_action_steps=None,
+        temporal_ensemble_coeff=None,
+        action_warp=2.0,
+    )
+    server = ge._server_command(warped)
+    assert server[server.index("--action_warp") + 1] == "2.0"
+    plain.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None, "chunk_size": 100}
+
+    def cached(cfg, inference):
+        payload = _payload(draw, [_episode(6)], policy_id="act:ck+nas50", inference=inference)
+        (plain.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    # A warp read never reuses an unwarped payload, nor the reverse; one that predates the
+    # warp ran unwarped.
+    assert cached(plain, served) and cached(plain, {**served, "action_warp": 1.0})
+    assert not cached(plain, {**served, "action_warp": 2.0})
+    assert cached(warped, {**served, "action_warp": 2.0}) and not cached(warped, served)
+    assert not cached(warped, {**served, "action_warp": 1.5})
+    args = ge._parse_args(_argv(tmp_path) + ["--action_warp", "1.5"])
+    assert ge._build_cfg(args).action_warp == 1.5
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    for bad in ("0.5", "3.5"):
+        assert ge.main(_argv(tmp_path) + ["--action_warp", bad]) == 2
+        out = capsys.readouterr()
+        assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--action_warp" in out.err
 
 
 def _argv(tmp_path: Path) -> list[str]:
