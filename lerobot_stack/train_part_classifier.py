@@ -1,6 +1,7 @@
 """The MS7f part classifier (design sections 6.5 and 6.7): train it, export it, read it.
 
-A torchvision ResNet18 with ImageNet weights (ACT's backbone) and two heads, trained on render set
+A torchvision ResNet (``--arch``: ResNet18, ACT's backbone, by default) with ImageNet weights and
+two heads, trained on render set
 files (``scripts/mj_render_set.py``'s ``render_<seed>.npz``): the category, over ``CATEGORIES``
 (``core.parts.PART_CATEGORIES``, pinned as text by ``tests/test_lerobot_schema_pin.py``), on every
 frame of a part, and the passenger (a rider, another part that rose with the jaws: the render
@@ -37,7 +38,9 @@ hold, the bars and the confusion matrices, into ``<out>/c1.json``. It also reads
 view by the part's rest pose (``tilt``), the lifts whose part the loop sees in all three views
 (``cycles``) under the lift alone, the loop's vote (``loop_vote``) and the summed log
 probabilities of the three views, and how much of a missed passenger the lift frame shows.
-``--model FILE`` reads an existing export and trains nothing.
+``--model FILE`` reads an existing export and trains nothing. ``--ensemble FILE ...`` exports
+existing exports as one model, the mean of their logits, with ``--flip_average`` also over each
+frame mirrored (the test-time flip), and reads that.
 
 Prints exactly one ``CLS_OK`` or ``CLS_FAIL`` line on every exit path, argparse errors included,
 and exits through ``os._exit``.
@@ -91,7 +94,8 @@ UPRIGHT_DEG = (
 
 
 class PartClassifier(nn.Module):
-    """ResNet18 and two heads on uint8 NHWC frames."""
+    """A ResNet (``arch``, ResNet18 by default) and two heads on uint8 NHWC frames; the crop is
+    resized to ``input_px`` a side before the backbone."""
 
     categories: List[str]  # noqa: UP006
     passenger_threshold: float
@@ -99,15 +103,23 @@ class PartClassifier(nn.Module):
     overhead_roi: List[int]  # noqa: UP006
     size_input: bool
     wrist_input: str
+    input_px: int
 
-    def __init__(self, weights=None, wrist_crop: bool = False):
+    def __init__(
+        self,
+        weights=None,
+        wrist_crop: bool = False,
+        arch: str = "resnet18",
+        input_px: int = 224,
+    ):
         super().__init__()
-        net = torchvision.models.resnet18(weights=weights)
+        net = getattr(torchvision.models, arch)(weights=weights)
+        width = net.fc.in_features
         net.fc = nn.Identity()
         self.backbone = net
         self.size_net = nn.Sequential(nn.Linear(4, 64), nn.ReLU(), nn.Linear(64, 64), nn.ReLU())
-        self.category = nn.Linear(512 + 64, len(CATEGORIES))
-        self.passenger = nn.Linear(512, 1)
+        self.category = nn.Linear(width + 64, len(CATEGORIES))
+        self.passenger = nn.Linear(width, 1)
         self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
         self.categories = list(CATEGORIES)
@@ -117,14 +129,16 @@ class PartClassifier(nn.Module):
         self.wrist_input = "crop" if wrist_crop else "frame"
         self.overhead_roi = list(OVERHEAD_ROI)
         self.size_input = True
+        self.input_px = input_px
 
     def forward(
         self, frames: torch.Tensor, wrist: bool, size: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:  # noqa: UP006
         x = frames.permute(0, 3, 1, 2).float() / 255.0
         y0, y1, x0, x1 = self.wrist_roi if wrist else self.overhead_roi
+        px = self.input_px
         x = nn.functional.interpolate(
-            x[:, :, y0:y1, x0:x1], size=(224, 224), mode="bilinear", align_corners=False
+            x[:, :, y0:y1, x0:x1], size=(px, px), mode="bilinear", align_corners=False
         )
         features = self.backbone((x - self.mean) / self.std)
         # The perceived size (N, 3) in metres, sorted, and the view: an unknown size (-1) reads 0.
@@ -136,6 +150,53 @@ class PartClassifier(nn.Module):
         )
         both = torch.cat([features, self.size_net(extra.to(features.dtype))], 1)
         return self.category(both), self.passenger(features).squeeze(-1)
+
+
+class Ensemble(nn.Module):
+    """``--ensemble``: exported classifiers served as one, the mean of their category and
+    passenger logits, with ``flip_average`` also over each frame mirrored left to right
+    (training's flip; on a crop model's centred crops the same as mirroring the crop). The
+    members must share the categories, the wrist input and the size input."""
+
+    categories: List[str]  # noqa: UP006
+    passenger_threshold: float
+    wrist_roi: List[int]  # noqa: UP006
+    overhead_roi: List[int]  # noqa: UP006
+    size_input: bool
+    wrist_input: str
+    flip_average: bool
+
+    def __init__(self, members, flip_average: bool = False):
+        super().__init__()
+        first = members[0]
+        for m in members:
+            same = (
+                list(m.categories) == list(first.categories) and m.wrist_input == first.wrist_input
+            )
+            if not (same and m.size_input):
+                raise ValueError("ensemble members must share categories, wrist and size input")
+        self.members = nn.ModuleList(members)
+        self.categories = list(first.categories)
+        # ponytail: the members' mean operating point, not one fitted to the mean passenger logit
+        self.passenger_threshold = float(np.mean([m.passenger_threshold for m in members]))
+        self.wrist_roi = list(first.wrist_roi)
+        self.overhead_roi = list(first.overhead_roi)
+        self.size_input = True
+        self.wrist_input = str(first.wrist_input)
+        self.flip_average = flip_average
+
+    def forward(
+        self, frames: torch.Tensor, wrist: bool, size: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:  # noqa: UP006
+        views = [frames, frames.flip(2)] if self.flip_average else [frames]
+        logits: List[torch.Tensor] = []  # noqa: UP006
+        riders: List[torch.Tensor] = []  # noqa: UP006
+        for m in self.members:
+            for x in views:
+                c, r = m(x, wrist, size)
+                logits.append(c)
+                riders.append(r)
+        return torch.stack(logits).mean(0), torch.stack(riders).mean(0)
 
 
 def pick(view: np.ndarray, cap: int, name: str) -> np.ndarray:
@@ -601,11 +662,26 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--val_fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--weights", choices=("imagenet", "none"), default="imagenet")
+    parser.add_argument("--arch", choices=("resnet18", "resnet34", "resnet50"), default="resnet18")
+    parser.add_argument("--input_px", type=int, default=224, help="the backbone's input side")
+    parser.add_argument(
+        "--ensemble",
+        nargs="*",
+        default=[],
+        help="exports to serve as one (the mean of their logits) instead of training",
+    )
+    parser.add_argument(
+        "--flip_average",
+        action="store_true",
+        help="with --ensemble, also read each frame mirrored and average (test-time flip)",
+    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--read_device", default="cpu", help="the served model runs on the CPU")
     args = parser.parse_args(argv)
-    if bool(args.train) == bool(args.model):
-        parser.error("give either --train files or an exported --model to read")
+    if sum(map(bool, (args.train, args.model, args.ensemble))) != 1:
+        parser.error("give either --train files, an exported --model or --ensemble exports")
+    if args.flip_average and not args.ensemble:
+        parser.error("--flip_average applies to an --ensemble export")
     if args.model and not args.read:
         parser.error("--model reads an export: it needs --read files")
     return args
@@ -629,11 +705,12 @@ def run(args) -> dict:
         val = np.isin(data["file"], list(val_files))
         idx = torch.from_numpy(np.flatnonzero(keep & ~val))
         weights = (
-            torchvision.models.ResNet18_Weights.IMAGENET1K_V1
+            torchvision.models.get_model_weights(args.arch).DEFAULT
             if args.weights == "imagenet"
             else None
         )
-        model = PartClassifier(weights, data["wrist_crop"] is not None).to(device)
+        crop = data["wrist_crop"] is not None
+        model = PartClassifier(weights, crop, args.arch, input_px=args.input_px).to(device)
         started = time.time()
         skip = Path(args.val_skip).read_text().split() if args.val_skip else []
         val_rows = np.flatnonzero(keep & val & ~np.isin(data["part"], skip))
@@ -653,6 +730,10 @@ def run(args) -> dict:
         }
         model = model.cpu().eval()
         torch.jit.script(model).save(str(path))
+    if args.ensemble:
+        members = [torch.jit.load(m, map_location="cpu") for m in args.ensemble]
+        torch.jit.script(Ensemble(members, args.flip_average)).save(str(path))
+        summary["members"] = args.ensemble
     summary["model"] = str(path)
     if args.read:
         served = torch.jit.load(str(path), map_location=args.read_device)

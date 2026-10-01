@@ -51,7 +51,13 @@ def _render_file(path: Path, seed: int, n: int = 12, **extra) -> Path:
 
 
 def test_usage_errors_print_the_fail_token(tmp_path):
-    for argv in ((), ("--out", str(tmp_path)), ("--out", str(tmp_path), "--model", "m.pt")):
+    usage = (
+        (),
+        ("--out", str(tmp_path)),
+        ("--out", str(tmp_path), "--model", "m.pt"),
+        ("--out", str(tmp_path), "--model", "m.pt", "--read", "r.npz", "--flip_average"),
+    )
+    for argv in usage:
         out = subprocess.run(
             [sys.executable, str(SCRIPT), *argv], capture_output=True, text=True, check=False
         )
@@ -102,6 +108,12 @@ def test_a_tiny_run_trains_exports_and_reads_as_the_loop_loads_it(tmp_path):
         )
     )
     assert json.loads(Path(again["c1"]).read_text())["lift"] == c1["lift"]
+    one = tpc.run(
+        tpc.parse_args(
+            ["--ensemble", summary["model"], "--read", str(read[0]), "--out", str(tmp_path / "e")]
+        )
+    )
+    assert json.loads(Path(one["c1"]).read_text())["lift"] == c1["lift"]
 
 
 def test_a_file_without_the_rider_label_reads_unknown(tmp_path):
@@ -180,3 +192,25 @@ def test_erasing_paints_one_flat_rectangle():
     assert out.shape == frames.shape and out.dtype == torch.uint8
     for x in out:  # a uniform grey frame keeps its own value outside the rectangle
         assert len(torch.unique(x.reshape(-1, 3), dim=0)) >= 2
+
+
+def test_an_ensemble_serves_the_mean_of_its_members_and_their_mirror(tmp_path):
+    torch.manual_seed(0)
+    members = []
+    for k, arch in enumerate(("resnet18", "resnet34")):
+        m = tpc.PartClassifier(None, wrist_crop=True, arch=arch).eval()
+        m.passenger_threshold = float(k)
+        members.append(torch.jit.script(m))
+    frames = torch.randint(0, 255, (2, 224, 224, 3), dtype=torch.uint8)
+    size = torch.full((2, 3), 0.01)
+    for flip in (False, True):
+        path = tmp_path / f"e{flip}.pt"
+        torch.jit.script(tpc.Ensemble(members, flip)).save(str(path))
+        served = torch.jit.load(str(path))
+        assert served.wrist_input == "crop" and served.passenger_threshold == 0.5
+        views = (frames, frames.flip(2)) if flip else (frames,)
+        for wrist in (False, True):
+            outs = [m(x, wrist, size) for m in members for x in views]
+            logits, rider = served(frames, wrist, size)
+            assert torch.allclose(logits, torch.stack([o[0] for o in outs]).mean(0), atol=1e-5)
+            assert torch.allclose(rider, torch.stack([o[1] for o in outs]).mean(0), atol=1e-5)
