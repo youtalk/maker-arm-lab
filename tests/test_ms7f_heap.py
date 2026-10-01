@@ -372,3 +372,36 @@ def test_a_heap_of_150_compiles_with_the_camera_clip_of_a_heap_of_50():
     assert m150.stat.extent == m50.stat.extent
     assert list(m150.stat.center) == list(m50.stat.center)
     assert m150.vis.map.znear * m150.stat.extent == m50.vis.map.znear * m50.stat.extent
+
+
+def _hold(env) -> torch.Tensor:
+    return torch.cat([env.scene["robot"].data.joint_pos[:, :6], torch.ones(1, 1)], dim=1)
+
+
+def test_pile_pgs_solves_a_large_island_with_pgs_and_a_small_one_with_newton(monkeypatch):
+    # The step picks the solver from the largest island of the step before it.
+    from maker_arm_lab.mj import scene
+
+    env = _env(20, pile_pgs=True)
+    env.reset(seed=2)
+    m = env.models[0]
+    monkeypatch.setattr(scene, "PILE_PGS_MIN_NV", 0)
+    env.step(_hold(env))
+    assert m.opt.solver == mujoco.mjtSolver.mjSOL_PGS
+    assert m.opt.iterations == scene.PILE_PGS_ITERATIONS
+    monkeypatch.setattr(scene, "PILE_PGS_MIN_NV", m.nv)
+    env.step(_hold(env))
+    assert m.opt.solver == mujoco.mjtSolver.mjSOL_NEWTON and m.opt.iterations == 100
+    env.close()
+
+
+def test_without_pile_pgs_the_solver_never_changes(monkeypatch):
+    from maker_arm_lab.mj import scene
+
+    env = _env(20)
+    env.reset(seed=2)
+    monkeypatch.setattr(scene, "PILE_PGS_MIN_NV", 0)
+    env.step(_hold(env))
+    m = env.models[0]
+    assert m.opt.solver == mujoco.mjtSolver.mjSOL_NEWTON and m.opt.iterations == 100
+    env.close()

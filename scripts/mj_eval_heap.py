@@ -477,6 +477,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             categories=args.categories,
             deep_tray=args.deep_tray,
             tray_refill=args.tray_refill,
+            pile_pgs=args.pile_pgs,
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)

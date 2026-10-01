@@ -295,6 +295,7 @@ class MjLegoSortEnv:
         categories: bool = False,
         deep_tray: bool = False,
         tray_refill: bool = False,
+        pile_pgs: bool = False,
     ):
         # MS6 phase B design 5.4: "binary" is the raw >= 0 opens contract every corpus before
         # phase B was recorded with; "continuous" reads action[:, 6] as the jaw gap in meters.
@@ -453,6 +454,10 @@ class MjLegoSortEnv:
         self._geom_part = {g: b for b, geoms in enumerate(self.handles.body_geoms) for g in geoms}
         self.models = [base_model] + [copy.copy(base_model) for _ in range(num_envs - 1)]
         self.datas = [mujoco.MjData(m) for m in self.models]
+        # MS7f --pile_pgs: the step solves a large pile with PGS (_pick_solver) and returns to
+        # the model's own solver after it; the reset's drop and settle keep the model's.
+        self.pile_pgs = pile_pgs
+        self._own_solver = (base_model.opt.solver, base_model.opt.iterations)
         # A parked part's colliders and gravity come back from these (``_unpark``).
         self._contype = base_model.geom_contype.copy()
         self._conaffinity = base_model.geom_conaffinity.copy()
@@ -613,6 +618,8 @@ class MjLegoSortEnv:
             d = self.datas[i]
             d.ctrl[list(h.arm_actuators)] = targets[i, :6]
             d.ctrl[list(h.gripper_actuators)] = self._grip_ctrl[i]
+            if self.pile_pgs:
+                self._pick_solver(i)
             mujoco.mj_step(self.models[i], d, nstep=scene.CONTROL_SUBSTEPS)
         self.episode_length_buf += 1
         self._refresh(range(self.num_envs), images=False)
@@ -635,6 +642,17 @@ class MjLegoSortEnv:
             self._reset_env(i)
         self._refresh(range(self.num_envs), images=True)
         return None, None, terminated, truncated, {}
+
+    def _pick_solver(self, i: int) -> None:
+        """MS7f --pile_pgs: PGS at scene.PILE_PGS_ITERATIONS while the largest constraint island
+        of env i's last step holds more than scene.PILE_PGS_MIN_NV dofs, else the model's own
+        solver. MuJoCo finds the islands under either solver."""
+        m, d = self.models[i], self.datas[i]
+        big = d.nisland > 0 and int(d.island_nv[: d.nisland].max()) > scene.PILE_PGS_MIN_NV
+        if big:
+            m.opt.solver, m.opt.iterations = mujoco.mjtSolver.mjSOL_PGS, scene.PILE_PGS_ITERATIONS
+        else:
+            m.opt.solver, m.opt.iterations = self._own_solver
 
     def jaw_targets(self, raw_gripper: torch.Tensor) -> tuple[np.ndarray, torch.Tensor]:
         """The per-jaw prismatic target (N,) and the clamp's opening fraction (N,) for the

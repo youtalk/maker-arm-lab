@@ -1165,6 +1165,7 @@ def _ms7f_scene(monkeypatch):
     ready |= {"lift_view_steps"}
     ready |= {"missed_lift"}  # the riders track: a carry the hold detector missed
     ready |= {"cell_failure_cap", "carry_votes"}
+    ready |= {"pile_pgs"}  # the env's solver: no loop decision either
     assert batch_loop.MS7F_READY == ready | teacher, "turn it on in this scene"
     # Two of the three bricks start in the tray and one part fills a box, so the refill and
     # an emptying both run between cycles. Set before the build: the box draw reads the ratio.
@@ -1180,6 +1181,7 @@ def _ms7f_scene(monkeypatch):
         tray_lean=30.0,
         deep_tray=True,
         tray_refill=True,
+        pile_pgs=True,
     )
     env.narrow_overhead = lambda i, point: np.full((224, 224, 3), 255, dtype=np.uint8)
     stub = _classifier(Path(tempfile.mkdtemp()), "special", "brick", names=parts.PART_CATEGORIES)

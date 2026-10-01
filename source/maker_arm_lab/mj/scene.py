@@ -132,6 +132,14 @@ ROUND_ROLLING_FRICTION = 0.001  # INITIAL: the lone-part table (MS7e design sect
 ROUND_FRICTION = (*BRICK_FRICTION[:2], ROUND_ROLLING_FRICTION)
 NOSLIP_ITERATIONS = 3
 IMPRATIO = 10.0
+# MS7f --pile_pgs: the solver of a large pile. In the 150-part deep tray one constraint island
+# holds 846 of 908 dofs and Newton spends ~16 iterations a physics step on it, 88 of 90 ms
+# (Machine A, 2026-10-01); a looser tolerance, condim 3 or an iteration cap of 30 change nothing,
+# and a cap of 10 or the CG solver blow the pile up. PGS at 50 iterations steps the full heap 7x
+# faster with the same 1 mm pile drift over 2 s as at 100, but is slower than Newton below
+# about 100 parts (n 100: 17.3 against 16.8 steps/s; n 50: Newton 3x faster), hence the size.
+PILE_PGS_MIN_NV = 600  # INITIAL: ~100 free parts; a paired teacher read measures it
+PILE_PGS_ITERATIONS = 50  # INITIAL: the same paired teacher read measures it
 FLOOR_Z = -0.75  # the Isaac GroundPlaneCfg's height
 
 # Light levels, calibrated 2026-09-11 against MS2 Isaac frames rendered at the same run draws

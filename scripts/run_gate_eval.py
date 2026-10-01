@@ -196,6 +196,7 @@ MS7F_OFF = {
     "missed_lift": False,
     "cell_failure_cap": 3,
     "carry_votes": 0,
+    "pile_pgs": False,
 }
 """``core.batch_loop.MS7F_OFF``, copied because the supervisor imports no maker_arm_lab; the test
 pins it. The "ms7f" block of a read with every MS7f switch off, what an MS7e payload ran with."""
@@ -227,6 +228,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "missed_lift",
         "cell_failure_cap",
         "carry_votes",
+        "pile_pgs",
     }
 )
 """``core.batch_loop.MS7F_READY``, copied and pinned the same way: any other MS7f switch at a
@@ -1284,6 +1286,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ("end_at_done", "S, the recorder's end at DONE (the heap client refuses it)"),
         ("net_stall", "S1, DESCEND's stall test on the net motion"),
         ("missed_lift", "riders, a carry the hold detector missed"),
+        ("pile_pgs", "the PGS solver of a large pile"),
     ):
         parser.add_argument(
             f"--{name}",

@@ -180,6 +180,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         categories=args.categories,
         deep_tray=args.deep_tray,
         tray_refill=args.tray_refill,
+        pile_pgs=args.pile_pgs,
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)
