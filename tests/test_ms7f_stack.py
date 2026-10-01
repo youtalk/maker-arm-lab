@@ -25,6 +25,7 @@ ON = {
     "box_empty": ["--box_empty"],
     "book_miss": ["--book_miss"],
     "abandon_cycle": ["--abandon_cycle"],
+    "near_tracking": ["--near_tracking"],
     "classifier": ["--classifier", "/tmp/ms7f_no_such_classifier.pt"],
     "passenger_drop": ["--passenger_drop"],
     "transport_speed": ["--transport_speed", "6.0"],

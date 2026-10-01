@@ -888,3 +888,20 @@ def test_the_failure_scope_decides_whether_a_cell_neighbour_stays_a_candidate():
             orc._mark_failure(scene, 0)
         assert orc._candidates(scene).tolist() == [first, second], scope
     assert _oracle([BRICK]).failure_scope == "cell"  # the teacher's rule by default
+
+
+def test_near_tracking_reads_only_the_joints_near_a_stop():
+    # Wave 1 proc_26 at step 1825: link_005_joint 0.01 rad off its stop and on its command, the
+    # wrist roll 0.043 rad behind its own while it slews.
+    from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import watchdog_flags
+
+    limits = torch.tensor([[-2.8, 2.8], [-3.14, 0.0], [0.0, 3.14], [-1.6, 1.73], [-1.57, 1.57],
+                           [-2.7, 2.7]])  # fmt: skip
+    q = torch.tensor([-0.7924, -1.4623, 1.906, -1.5901, 0.2454, 1.0523])
+    qd = torch.tensor([-0.06, -0.06, 0.06, -0.02, 0.0, 0.8])
+    cmd = torch.tensor([-0.7957, -1.4627, 1.9066, -1.5911, 0.2466, 1.0953], dtype=torch.float64)
+    assert watchdog_flags(q, qd, cmd, limits) is True  # the rule the wave ran: a strike
+    assert watchdog_flags(q, qd, cmd, limits, near_tracking=True) is False
+    jammed = cmd.clone()
+    jammed[3] = -1.63  # commanded past the stop it sits on: a real jam
+    assert watchdog_flags(q, qd, jammed, limits, near_tracking=True) is True

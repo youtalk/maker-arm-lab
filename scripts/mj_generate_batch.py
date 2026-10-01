@@ -222,6 +222,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         quiet_landing=args.quiet_landing,
         landing_steps=args.landing_steps,
         net_stall=args.net_stall,
+        near_tracking=args.near_tracking,
     )
     install_heap_events(env, rig, args.box_empty)  # MS7f: the refill and the box emptying
     meta = run_meta(

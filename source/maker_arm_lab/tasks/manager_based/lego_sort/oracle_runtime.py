@@ -404,6 +404,23 @@ WATCHDOG_TRIP_STRIKES = 30
 WATCHDOG_TRACKING_TOL_RAD = 0.02
 
 
+def watchdog_flags(joint_pos, joint_vel, q_cmd, limits, near_tracking: bool = False) -> bool:
+    """One step's watchdog strike for one env: a joint past its stop or too fast, or a joint
+    near its stop while the arm is off its command by WATCHDOG_TRACKING_TOL_RAD. The off-command
+    test reads every joint; under ``near_tracking`` (MS7f) only the joints near their stops, the
+    ones a stop can jam. MS7f wave 1 lost two 150-part heaps to HOVERs with link_005_joint 0.01
+    to 0.03 rad from its stop and on its command while the wrist roll slewed 0.03 to 0.04 rad
+    behind its own (2026-09-30)."""
+    if not oracle.watchdog_trips(joint_pos, joint_vel, limits):
+        return False
+    if oracle.watchdog_trips(joint_pos, joint_vel, limits, guard_rad=0.0):
+        return True
+    err = (joint_pos.double().cpu() - q_cmd).abs()
+    if near_tracking:
+        err = err[oracle.near_stops(joint_pos, limits).cpu()]
+    return float(err.max()) >= WATCHDOG_TRACKING_TOL_RAD
+
+
 def grasp_center_for(
     pick, tilt: float, heading: float, offset_z: float, lean: float = LEAN_AZIMUTH
 ) -> tuple:
@@ -507,6 +524,7 @@ class OracleRig:
         quiet_landing: bool = False,
         landing_steps: int = 0,
         net_stall: bool = False,
+        near_tracking: bool = False,
     ):
         self.env = env
         # MS7e rung B2: EXTEND leans toward its box (LEAN_AZIMUTH's note, `_leg_lean`).
@@ -534,6 +552,7 @@ class OracleRig:
         self.landing_steps = landing_steps
         # MS7f: DESCEND's stall test reads the net motion over its window (`_phase_result`).
         self.net_stall = net_stall
+        self.near_tracking = near_tracking  # MS7f: watchdog_flags reads the near joints only
         self.stall_window: list[list[torch.Tensor]] = [[] for _ in range(env.num_envs)]
         self.bl = bl
         self.noise = noise
@@ -2167,13 +2186,9 @@ class OracleRig:
                 continue  # post-auto-reset state this step; joint_pos/vel are the next episode's
             if self.goals[i] is None:
                 continue
-            tripped = oracle.watchdog_trips(joint_pos[i], joint_vel[i], self.limits)
-            if tripped and not oracle.watchdog_trips(
-                joint_pos[i], joint_vel[i], self.limits, guard_rad=0.0
-            ):
-                # Near a stop, not past it, not fast: a jam only if off the commanded target.
-                tracking = (joint_pos[i].double().cpu() - self.q_cmd[i]).abs().max()
-                tripped = float(tracking) >= WATCHDOG_TRACKING_TOL_RAD
+            tripped = watchdog_flags(
+                joint_pos[i], joint_vel[i], self.q_cmd[i], self.limits, self.near_tracking
+            )
             self.watchdog_strikes[i] = self.watchdog_strikes[i] + 1 if tripped else 0
             if self.watchdog_strikes[i] >= WATCHDOG_TRIP_STRIKES:
                 # MS7a tray: an oracle that can give up the jammed leg instead of the episode

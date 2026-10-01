@@ -1119,7 +1119,8 @@ def _ms7f_scene(monkeypatch):
         "net_stall",
     }
     ready = {"categories", "deep_tray", "tray_refill", "box_empty", "book_miss"}
-    ready |= {"lift_budget", "abandon_cycle"}  # abandon_cycle: the recorder's, not the loop's
+    # abandon_cycle is the recorder's and near_tracking the rig's watchdog: no loop decision
+    ready |= {"lift_budget", "abandon_cycle", "near_tracking"}
     assert batch_loop.MS7F_READY == ready | teacher, "turn it on in this scene"
     # Two of the three bricks start in the tray and one part fills a box, so the refill and
     # an emptying both run between cycles. Set before the build: the box draw reads the ratio.

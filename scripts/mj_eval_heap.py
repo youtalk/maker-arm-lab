@@ -475,6 +475,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             quiet_landing=args.quiet_landing,
             landing_steps=args.landing_steps,
             net_stall=args.net_stall,
+            near_tracking=args.near_tracking,
         )
         policy = None if args.oracle_driver else policy_client.ServerPolicy(args.server)
         trace = [] if args.hold_trace else None

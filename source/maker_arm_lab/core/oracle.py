@@ -666,8 +666,15 @@ def watchdog_trips(
         joint_vel: (6,) arm joint velocities.
         limits: (6, 2) lower/upper joint limits.
     """
-    near = (joint_pos - limits[:, 0] < guard_rad) | (limits[:, 1] - joint_pos < guard_rad)
+    near = near_stops(joint_pos, limits, guard_rad)
     return bool(near.any() or (joint_vel.abs() > speed_max).any())
+
+
+def near_stops(
+    joint_pos: torch.Tensor, limits: torch.Tensor, guard_rad: float = _JOINT_LIMIT_GUARD_RAD
+) -> torch.Tensor:
+    """(6,) bool: the joints within ``guard_rad`` of a stop (or past it)."""
+    return (joint_pos - limits[:, 0] < guard_rad) | (limits[:, 1] - joint_pos < guard_rad)
 
 
 class EnvOracle:
