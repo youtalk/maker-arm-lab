@@ -42,6 +42,23 @@ def test_usage_errors_print_the_fail_token():
         assert len(lines) == 1 and lines[0].startswith("RENDER_FAIL "), argv
 
 
+def test_the_ms7f_scene_switches_parse_and_the_serving_ones_refuse():
+    base = ["--out_dir", "/tmp/x", "--heap_k", "150", "--tray", "--desk_boxes", "8"]
+    base += ["--box_draw", "8", "--release_lean"]
+    on = ["--categories", "--deep_tray", "--box_empty", "--abandon_cycle"]
+    args = _load().parse_args(base + on)
+    assert args.categories and args.deep_tray and args.box_empty and args.abandon_cycle
+    for extra in (["--classifier", "m.pt"], ["--passenger_drop"], ["--book_miss"]):
+        out = subprocess.run(
+            [sys.executable, str(SCRIPT), *base, *extra],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert out.returncode == 2, extra
+        assert out.stdout.strip().splitlines()[-1].startswith("RENDER_FAIL "), extra
+
+
 def test_mix_extra_replaces_the_share_it_is_given():
     mix = _load().mix_extra
     parts, extra = list(range(200)), ["x", "y"]

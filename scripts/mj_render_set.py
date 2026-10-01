@@ -77,10 +77,13 @@ from maker_arm_lab.core import parts as _parts
 from maker_arm_lab.core.batch_loop import (
     add_batch_arguments,
     add_ms7e_arguments,
+    add_ms7f_arguments,
     build_run,
     check_ms7e,
+    check_ms7f,
     heap_classes,
     heap_parts,
+    install_heap_events,
     make_induction,
 )
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
@@ -121,6 +124,13 @@ camera sees in its frame (-1 with no rider or on an overhead frame), the env, th
 step and the part's tilt in degrees (``_tilt``, -1 with no part)."""
 
 
+RENDER_READY = frozenset(
+    {"categories", "deep_tray", "tray_refill", "box_empty", "abandon_cycle", "transport_speed"}
+)
+"""The MS7f switches the render set builds (the gate's scene and the recorder's jam rule): the
+classifier's, the heap loop's and the teacher trims refuse, so a render never runs a no-op."""
+
+
 class _TokenEmittingParser(argparse.ArgumentParser):
     def error(self, message: str):
         self.print_usage(sys.stderr)
@@ -132,6 +142,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = _TokenEmittingParser(description=__doc__)
     add_batch_arguments(parser)
     add_ms7e_arguments(parser)
+    add_ms7f_arguments(parser, transport_speed=False)  # the recorder's flags carry the pace
     parser.add_argument(
         "--wrist_every",
         type=int,
@@ -153,6 +164,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     args = parser.parse_args(argv)
     check_ms7e(parser, args)
+    check_ms7f(parser, args, RENDER_READY)
     if not 0.0 <= args.classifier_extra <= 1.0:
         parser.error("--classifier_extra is a share, from 0 to 1")
     if args.classifier_extra and not getattr(_parts, "CLASSIFIER_EXTRA", ()):
@@ -202,6 +214,9 @@ def build(args):
         deep_box_floor=args.deep_box_floor,
         release_lean=args.release_lean,
         round_physics="round" in args.families,
+        categories=args.categories,
+        deep_tray=args.deep_tray,
+        tray_refill=args.tray_refill,
     )
     env.cameras = False  # every view is rendered on demand at its event
     env.reset(seed=args.run_seed)
@@ -209,7 +224,7 @@ def build(args):
     rig_rng = random.Random(args.run_seed)
 
     def factory(i, layout_i, episode_draw):
-        return HeapOracle(
+        orc = HeapOracle(
             layout_i,
             env.parts,
             env.destination_bins[i],
@@ -222,7 +237,11 @@ def build(args):
             tray=env.tray,
             tray_lean_deg=env.tray_lean_deg,
             wall_band_cont=args.wall_band_cont,
+            box_sets=env.part_box_sets(i),
+            tray_wall_height=env.tray_wall_height,
         )
+        orc.abandon_cycle = args.abandon_cycle
+        return orc
 
     rig = OracleRig(
         env,
@@ -236,6 +255,7 @@ def build(args):
         carry_via=args.carry_via,
         passenger_check=args.passenger_check,
     )
+    install_heap_events(env, rig, args.box_empty)
     return env, rig
 
 
