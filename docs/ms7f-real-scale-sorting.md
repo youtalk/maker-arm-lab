@@ -1,7 +1,7 @@
 # MS7f: real-scale sorting in simulation
 
 Date: 2026-10-01. Status: draft. The campaign still runs. This draft uses the ledger up to its entry
-of 05:38 on 2026-10-01. A line that starts with `TBD:` waits for a read or a decision that had no
+of 13:08 on 2026-10-01. A line that starts with `TBD:` waits for a read or a decision that had no
 number at that time. The controller fills those lines.
 
 The design of MS7f is the document that the owner reviewed and approved in chat on 2026-09-30. This
@@ -11,7 +11,7 @@ below went into that ledger before its number. The measurement tables are under
 `~/data/maker-arm-ms7/f/tables/`. Each read has a TAG, its name. The read payloads are under
 `~/data/maker-arm-ms7/reads/<TAG>/`. Every MS7f TAG starts with `f_`.
 
-The ledger names its rules R1 to R15 and its deviations D1 to D10. The design names its decisions F1
+The ledger names its rules R1 to R15 and its deviations D1 to D14. The design names its decisions F1
 to F10. The tracks are H (the heap), C (the classifier), P (the part families) and S (the speed).
 The retrains are F1 and F2, and their checkpoints are written as "F1 100k". This report writes "rule
 R4", "decision F6" and "retrain F1" to keep them apart.
@@ -29,11 +29,21 @@ MS7e met its gate. Its official read stowed 5299 of 6000 held-out parts in their
 0.883, at 1.271 cycles per correct stow. A correct stow took 21.5 simulated seconds, 167 an hour.
 MS7f makes the task real-scale along three axes (MS7f design section 1):
 
-1. Continuous operation and speed. The bar is at least 300 correct stows per simulated hour.
+1. Continuous operation and speed. The design's bar is at least 300 correct stows per simulated
+   hour.
 2. A dense large heap. An episode holds 150 parts, against 50 in MS7e.
 3. A large catalog sorted by category. Two new families, joint and minifig, join the catalog. The
    parts go to six categories, and a classifier trained on rendered images replaces the class
    stand-in.
+
+The gate has two rows since deviation D12 (10:38). The owner decided on staged bars at 10:35, after
+the screens and with 2 of the 20 heaps of candidate 1's checked read visible. The design's bars stay
+as a stretch row in every verdict:
+
+| row | correct in a box of the category | correct stows an hour | held-out row |
+| --- | --- | --- | --- |
+| staged bars, the gate since D12 | at least 0.85 (2550 of 3000, 5100 of 6000) | at least 200 | at least 0.80 |
+| stretch row, the design's bars | at least 0.92 (2760 of 3000, 5520 of 6000) | at least 300 | at least 0.85 |
 
 The results so far:
 
@@ -59,36 +69,47 @@ The results so far:
   5216 of 6000, 0.869. Wave 2 delivered 5155 of 6000, 0.859.
 - Retrain F1 trained 200k steps from train_E2 150k on wave 1. Its four screens read 353 to 425 of
   600 correct stows and 96.2 to 142.5 correct stows an hour. Candidate 1 is F1 100k.
-- Every screen lies far under every bar of the gate: 0.92 in a box of the category, 300 correct
-  stows an hour and 0.85 on the held-out row.
+- The serving warp `--action_warp 1.5` (D7) raises candidate 1's screen to 145.5 correct stows an
+  hour at 428 of 600. X = 1.25 and X = 2.0 are out. `--passenger_drop` (D9) is not adopted. Model
+  v6a reads 420 of 600 in the loop, against v5's 425.
+- Candidate 1's checked read stows 2043 of 3000, 0.681, at 140.9 correct stows an hour, with a
+  held-out row of 0.600. It fails all three staged bars and the stretch row. Rule R11's trigger
+  fires, so candidate 2 gets a checked read.
+- Retrain F2 trained 200k steps from F1 100k on waves 1 and 2. On paired x86 screens, F2 100k reads
+  435 of 600 against F1 100k's 420. The gain is under the 18 stows that D11 asks, so no third wave
+  of the same recipe records.
 - The control read, E2 with no retrain, stows 768 of 1050, 0.731, at 151.3 correct stows an hour.
   That is the level of candidate 1's screen, so retrain F1 bought no visible gain.
+- Two loop levers wait for their screens (D14): `--missed_lift` and `--lift_view_steps 6`.
 
 The decomposition of section 10 finds four facts:
 
-- On one heap of candidate 1, the failed cycles hold 65 % of the steps.
-- On 13 screen heaps, 0.194 of the parts end in a wrong box. The classifier sets 197 of the 208
-  `wrong_box` cycles, and 171 more parts reach a wrong box as passengers.
+- On candidate 1's checked read, `close_miss` cycles hold 0.295 of the steps and stowed cycles
+  0.239. 1203 of 3408 cycles end on the 800-step budget.
+- A stowed cycle under the warp takes 244 steps, 8.2 s, inside the 12 s of the stretch rate. The
+  failed cycles eat the gain.
+- The wrong boxes hold 621 of 3000 parts on the checked read. The classifier sets 291 of the 318
+  `wrong_box` cycles. Most of the other wrong-box parts, the "riders", are the cycle's own part in
+  a cycle that the hold detector never read as lifted.
 - The wave teacher delivers a part every 13.91 to 16.23 s. This report computes that as 222 to 259
-  parts an hour, under the 300 bar.
-- Candidate 1 runs 17.0 s a cycle, so even one cycle per correct stow reads under 300 an hour.
+  parts an hour, under the stretch rate of 300 but over the staged 200.
 
-The gate outcome:
+The gate outcome. A screen and the control read have no bar, so their rows show the bars for
+comparison only:
 
-| read | checkpoint | commit, classifier | correct stows | correct stows an hour | held-out row | outcome |
-| --- | --- | --- | --- | --- | --- | --- |
-| candidate 1, screen | F1 100k | d6f893d, v5 | 425 of 600, 0.708 | 131.4 | 99 of 151, 0.656 | no bar, picked by rule R11 |
-| candidate 1, checked | F1 100k | 03a5cd8, v6a | TBD | TBD | TBD | TBD |
-| candidate 2, checked | TBD | TBD | TBD | TBD | TBD | TBD |
-| official | TBD | TBD | TBD | TBD | TBD | TBD |
-| control | train_E2 150k | d6f893d, v5, aarch64 | 768 of 1050, 0.731 | 151.3 | 180 of 263, 0.684 | no bar, reported |
+| read | checkpoint | commit, classifier, warp | correct stows | correct stows an hour | held-out row | staged bars (0.85, 200, 0.80) | stretch row (0.92, 300, 0.85) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| candidate 1, screen | F1 100k | d6f893d, v5, X = 1.0 | 425 of 600, 0.708 | 131.4 | 99 of 151, 0.656 | no bar, under all three | no bar, under all three |
+| candidate 1, warp screen | F1 100k | 03a5cd8, v5, X = 1.5 | 428 of 600, 0.713 | 145.5 | 91 of 151, 0.603 | no bar, under all three | no bar, under all three |
+| candidate 1, checked | F1 100k | 03a5cd8, v6a, X = 1.5 | 2043 of 3000, 0.681 | 140.9 | 471 of 785, 0.600 | FAIL on all three | FAIL on all three |
+| candidate 2, checked | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| official | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| control | train_E2 150k | d6f893d, v5, X = 1.0, aarch64 | 768 of 1050, 0.731 | 151.3 | 180 of 263, 0.684 | no bar, under all three | no bar, under all three |
 
-TBD: candidate 1's checked read f_F1_chk (correct stows of 3000, an hour, held-out row, outcome).
+TBD: candidate 2's checked read (correct stows of 3000, an hour, held-out row, both verdicts).
 
-TBD: the trigger of retrain F2 (fires or not) and, on a fire, candidate 2's checked read.
-
-TBD: the official read, or the statement that the milestone fails by rule R2 with no passing checked
-read.
+TBD: the official read, or the statement that the milestone fails by rule R2 with no checked read
+that passes the staged bars.
 
 TBD: the one-paragraph outcome of the milestone.
 
@@ -138,20 +159,39 @@ episode steps) / 30), in correct stows per simulated hour. Every step of an epis
 steps after the last stow count too (MS7f design section 4.1). An event, a tray refill or a box
 emptying, takes zero simulated time. The cycles per correct stow stay in the payload with no bar.
 
-Rule R2 sets the gate. A checked read has three bars. It needs at least 2760 of 3000 correct stows,
-at least 300 an hour and a held-out row of at least 0.85. The official read goes to the candidate
-whose checked read passes. With two passing candidates, the higher throughput wins. The official
-read is one shot. It passes with at least 5520 of 6000, at least 300 an hour and a held-out row of
-at least 0.85. If no checked read passes, the milestone fails, and the report gives the
-decomposition.
+Rule R2 set the gate as the design wrote it. A checked read has three bars. It needs at least 2760
+of 3000 correct stows, at least 300 an hour and a held-out row of at least 0.85. The official read
+goes to the candidate whose checked read passes. With two passing candidates, the higher throughput
+wins. The official read is one shot. It passes with at least 5520 of 6000, at least 300 an hour and
+a held-out row of at least 0.85. If no checked read passes, the milestone fails, and the report
+gives the decomposition.
 
-| read | policy | seed and size | pass |
-| --- | --- | --- | --- |
-| screen | each retrain checkpoint | 20307000, draws 0 to 3, 4 heaps of 150, 600 parts | none, picks the candidate (rule R11) |
-| checked | candidate 1, and candidate 2 on the retrain trigger | 20307100, draws 0 to 19, 3000 parts | at least 2760 correct stows, at least 300 an hour, held-out row at least 0.85 |
-| official | the candidate that rule R2 picks | 20307200, 40 heaps, 6000 parts, one shot | at least 5520 correct stows, at least 300 an hour, held-out row at least 0.85 |
-| control | train_E2 150k, no retrain | 20307300, draws 0 to 6, 1050 parts | none, reported |
-| stretch | the official candidate | run 20307400 + r, layout 20307450 + r, r = 0 and 1, 1000 parts each | none, reported against 0.95, 400 an hour, 1000 parts, 5 interventions |
+Deviation D12 (10:38) is an owner decision. The owner asked for it at 10:35, after the screens and
+with 2 of the 20 heaps of candidate 1's checked read visible: 220 of 300, 0.733, at 194.7 an hour.
+The gate becomes the staged bars. They ask for at least 0.85 in a box of the category (checked 2550
+of 3000, official 5100 of 6000). They also ask for at least 200 correct stows an hour and a held-out
+row of at least 0.80. The design's bars stay as a stretch row in every verdict and in this report.
+The MS8 numbers stay report-only. The reason given to the owner: the speed bar is out of reach this
+week. MS7e's 50-part task read 167 an hour, the recording teacher 220 to 260, and only the clean
+teacher with the true class about 340.
+
+D12 also fixes three consequences:
+
+- Candidate 1's checked read keeps its protocol and supervisor, so its token judges the old bars.
+  The controller computes its staged verdict from its `gate_results.json`.
+- Rule R11's retrain trigger becomes a miss of any staged bar by candidate 1's checked read. On that
+  miss, candidate 2 gets a checked read.
+- The official read runs on the first candidate whose checked read passes the staged bars. Its
+  supervisor runs at `--threshold 0.85 --min_stows_per_hour 200 --heldout_threshold 0.80` through
+  `bin/read_f2.sh`, a copy of `read_f.sh` with those bars.
+
+| read | policy | seed and size | staged bars (D12) | stretch row |
+| --- | --- | --- | --- | --- |
+| screen | each retrain checkpoint | 20307000, draws 0 to 3, 4 heaps of 150, 600 parts | none, picks the candidate (rule R11) | none |
+| checked | candidate 1, and candidate 2 on the retrain trigger | 20307100, draws 0 to 19, 3000 parts | at least 2550 correct stows, at least 200 an hour, held-out row at least 0.80 | 2760, 300 an hour, 0.85 |
+| official | the first candidate whose checked read passes the staged bars | 20307200, 40 heaps, 6000 parts, one shot | at least 5100 correct stows, at least 200 an hour, held-out row at least 0.80 | 5520, 300 an hour, 0.85 |
+| control | train_E2 150k, no retrain | 20307300, draws 0 to 6, 1050 parts | none, reported | none |
+| stretch runs | the official candidate | run 20307400 + r, layout 20307450 + r, r = 0 and 1, 1000 parts each | none | reported against 0.95, 400 an hour, 1000 parts, 5 interventions |
 
 The held-out row counts the parts whose kind is in the held-out split. The policy corpus and the
 classifier's render set use only the train split, so neither model saw these kinds (MS7f design
@@ -217,7 +257,7 @@ Rule R15 keeps `scripts/fleet.py` and `~/data/maker-arm-ms7/hosts.json`, with tr
 | host | hardware | MS7f work |
 | --- | --- | --- |
 | Machine A | 24 cores, RTX 5090 | the controller and the ledger, the P tables, the classifier training, both retrains, read lanes, half of wave 1 |
-| Machine B | 24 cores, RTX 5080 | read lanes, half of wave 1, most of wave 2 |
+| Machine B | 24 cores, RTX 5080 | read lanes (half of candidate 1's checked read, the D11, D13 and D14 screens), half of wave 1, most of wave 2 |
 | Machine C | 128 cores, A2000 12 GB | the night render set, the S0 teacher census, 12 processes of wave 2, the wave 2 conversions, the control read, the F2 screens |
 
 Machine C runs at most 40 camera processes in all. The Thor runs MS5 and is not used.
@@ -525,7 +565,8 @@ summed log probabilities 0.891 and `loop_sum` 0.888. The ledger adopted `loop_su
 `--classifier` (0cdc7db).
 
 The C1 counts change from 3122 lifts and 2771 three-view lifts (v2, v3) to 3147 and 2799 (v4 to
-v6a). The ledger does not record why.
+v6a). The ledger note of 05:42 gives the cause: the render set was rendered again at the native
+crop, and the C1 set grew.
 
 What the ladder found:
 
@@ -663,8 +704,8 @@ wrong-box parts are riders or parts knocked into a box.
 
 The passenger head learns the count of parts that rise with the jaws. Its recall was 0.22 for v1,
 0.164 for v2 after a label fix (87d99fe), 0.44 for v5 and 0.50 for v6a. No model reached the 0.8
-bar. `--passenger_drop` is not adopted at C1. Deviation D9 gives it one screen in the loop (section
-9.4).
+bar. `--passenger_drop` is not adopted at C1. Deviation D9 gives it one screen in the loop, and the
+screen does not adopt it either (section 9.4).
 
 ## 6. Track S: the speed
 
@@ -818,11 +859,11 @@ and 3 to 5 on Machine B. This report computes the Wilson interval.
 | per heap | 136, 121, 129, 129, 126 of 150 |
 | outcome | both bars miss (0.95, 10 s) |
 
-TBD: the sixth heap of f_ref and the six-heap totals, or a note that the verdict stays on five
-heaps.
+The verdict stays on five heaps. The sixth heap's payload exists (`reads/f_ref`, eval_005), but the
+ledger never logged it (ledger note, 05:42).
 
-The ledger counts 106 parts left, 70 of them in the tray and never targeted. The R4 H1 arm had 37
-such parts over 6 heaps.
+The 17:45 entry counts 106 parts left. The ledger note of 05:42 corrects that to 750 - 641 = 109. Of
+these, 70 lie in the tray and were never targeted. The R4 H1 arm had 37 such parts over 6 heaps.
 
 The census (`tables/ref/README.txt`) pre-registered its rows at 17:51 on the H diagnostic seeds. Its
 rule: a factor is a cause of the R9 miss on one of two results. Without the factor, the pooled share
@@ -902,10 +943,21 @@ Wave 2 records the wave 1 recipe at 4464b79 (`f/w2/flags.txt`), with run 2030500
 | Machine B | p 12 to 39, 28 | 3581 of 4200, 0.853 | 1.167 | 14.81 | 3610 |
 | wave 2 | 40 | 5155 of 6000, 0.859 | | | 5180 |
 
-Every episode ends on its time-out, as in wave 1. Machine B's disk filled at 01:48 (984 GB, 0 free), and
-its conversion of p 12 to 39 failed on ENOSPC in every lane. Freeing it needs the owner. The 28
-shards (91 GB) moved over the LAN to Machine C in about 13 minutes and converted there
-(CONVERT_OK 3610 cycle episodes, 03:46). Both wave 2 datasets then shipped to Machine A.
+Every episode ends on its time-out, as in wave 1.
+
+Machine B's disk filled at 01:48 (984 GB, 0 free), and its conversion of p 12 to 39 failed on ENOSPC in
+every lane. Freeing MS7f intermediates on Machine B needed the owner. The 28 shards (91 GB) moved over
+the LAN to Machine C in about 13 minutes and converted there (CONVERT_OK 3610 cycle
+episodes, 03:46). Both wave 2 datasets then shipped to Machine A. The owner then approved two
+cleanups:
+
+| time | deleted on Machine B | free after |
+| --- | --- | --- |
+| 05:42 | the failed wave 2 conversion (7.5 GB) and wave 1's conversion lane copies (6.2 GB). Also deleted: the heap track's eight w1fix2 and w1fix3 smoke shards (22 GB). The merged dataset_b and the smokes' logs, meta and read files stay. | 35 GB |
+| 05:55 | on the owner's request, the MS6 raw shards, conversion lanes, a smoke run and the datasets that Machine A also holds (187 GB) | 222 GB |
+
+At 05:42 the read worktree 7f-r2 (03a5cd8) synced to Machine B as `b_fr2`, and model v6a was copied
+there. So Machine B took lanes of candidate 1's checked read again (section 9.6).
 
 The merge for retrain F2 (05:19) joins f/w1/dataset (5204) and both wave 2 halves (5180) into
 f/w12/dataset: MERGE_OK 10,384 cycle episodes and 3,490,315 frames, CHECK_OK 164 videos.
@@ -954,7 +1006,8 @@ interpolation in time. X = 1.0 is byte-equal to the code before it.
 The build (03:20, feat/ms7f-warp 03a5cd8 on d6f893d): the policy server resamples each chunk at t =
 0, X, 2X and so on. `policy_id` gains `+warp<X>` only off 1.0. The supervisor forwards the switch,
 and its cache splits on it. The server refuses it with temporal ensembling and outside [1.0, 3.0].
-129 lerobot_stack tests and 1552 repo tests pass.
+129 lerobot_stack tests and 1552 repo tests pass. The warp served as built (`policy_id` `+warp1.25`,
+07:38).
 
 The pre-registered rule: candidate 1 reads at X = 1.25 and at X = 1.5. Both screens use seed
 20307000, draws 0 to 3, the four heaps of its own screen at X = 1.0. The TAGs are
@@ -963,13 +1016,23 @@ most 0.02 under the X = 1.0 screen's. The qualified X with the most correct stow
 X = 1.0 always qualifies. One binomial standard error on 600 parts is about 0.015. The screens keep
 model v5.
 
-| X | TAG | correct stows | correct stows an hour | held-out row | verdict |
-| --- | --- | --- | --- | --- | --- |
-| 1.0 | f_F1_100000_scr | 425 of 600, 0.708 | 131.4 | 99 of 151 | the base |
-| 1.25 | f_F1_100000_w125_scr | TBD | TBD | TBD | TBD |
-| 1.5 | f_F1_100000_w150_scr | TBD | TBD | TBD | TBD |
+The extension (10:38, before any number) adds X = 2.0 on the same heaps, TAG f_F1_100000_w200_scr. X
+= 2.0 replaces 1.5 for every read that has not started on two conditions. Its correct stows an hour
+beat X = 1.5's 145.5, and its share is at least 0.708 - 0.02 = 0.688.
 
-TBD: the two warp screens' rows, the winning X by the D7 rule, and what the cycle intervals show.
+The screens ran on Machine A (08:49 and 13:08):
+
+| X | TAG | correct stows | Wilson 95 % | cycles | steps | correct stows an hour | held-out row | wrong box |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1.0 | f_F1_100000_scr | 425 of 600, 0.708 | 0.671 to 0.743 | 685 | 349,191 | 131.4 | 99 of 151, 0.656 | 119 |
+| 1.25 | f_F1_100000_w125_scr | 406 of 600, 0.677 | 0.638 to 0.713 | 682 | 321,538 | 136.4 | 97 of 151, 0.642 | 133 |
+| 1.5 | f_F1_100000_w150_scr | 428 of 600, 0.713 | 0.676 to 0.748 | 702 | 317,657 | 145.5 | 91 of 151, 0.603 | 114 |
+| 2.0 | f_F1_100000_w200_scr | 361 of 600, 0.602 | 0.562 to 0.640 | 644 | 326,339 | 119.5 | 78 of 151 | 150 |
+
+D7 verdict (08:49): X = 1.5 wins at 145.5 an hour, 11 % over X = 1.0, with a share of 0.713 within
+0.02 of 0.708. X = 1.25 is out, because its share is 0.031 under. The extension verdict (13:08): X =
+2.0 is rejected, because its rate and its share are both under X = 1.5's. X = 1.5 stays for every
+later read.
 
 ### 9.4 The passenger-drop screen: deviation D9
 
@@ -980,15 +1043,15 @@ own screen. Its correct stows are at least that screen's plus 6. Its correct sto
 least 0.97 of that screen's. A screen that holds both bars is adopted, and the switch then joins
 every later read.
 
-| row | correct stows | correct stows an hour | wrong box | passenger drops | verdict |
-| --- | --- | --- | --- | --- | --- |
-| f_F1_100000_scr, the base | 425 of 600 | 131.4 | 119 | | |
-| f_F1_100000_pd_scr | TBD | TBD | TBD | TBD | TBD |
-| bar | at least 431 | at least 127.5 | | | |
+| row | correct stows | Wilson 95 % | cycles | steps | correct stows an hour | held-out row | wrong box |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| f_F1_100000_scr, the base | 425 of 600, 0.708 | 0.671 to 0.743 | 685 | 349,191 | 131.4 | 99 of 151 | 119 |
+| f_F1_100000_pd_scr | 425 of 600, 0.708 | 0.671 to 0.743 | 741 | 385,971 | 118.9 | 92 of 151, 0.609 | 98 |
+| bar | at least 431 | | | | at least 127.5 | | |
 
-This report computes the bar from the base's 425 and 131.4.
-
-TBD: the passenger-drop screen's row and its verdict by the D9 rule.
+This report computes the bar from the base's 425 and 131.4. D9 verdict (08:49): `--passenger_drop`
+is not adopted. Its 425 correct stows miss 431, and its 118.9 an hour is 0.90 of the base's rate. It
+cuts the wrong-box parts from 119 to 98 and spends the gain on 56 more cycles.
 
 ### 9.5 The v6a diagnostic screen
 
@@ -996,89 +1059,233 @@ The ledger pre-registered a diagnostic screen at 04:37: candidate 1 at X = 1.0 w
 20307000, draws 0 to 3, TAG f_F1_100000_v6_scr. No decision rides on it, because C1 already adopted
 v6a. Paired with f_F1_100000_scr (v5), it measures the classifier lever inside the loop.
 
-| row | model | correct stows | correct stows an hour | wrong box | `wrong_box` cycles set by the classifier |
-| --- | --- | --- | --- | --- | --- |
-| f_F1_100000_scr | v5 | 425 of 600 | 131.4 | 119 | |
-| f_F1_100000_v6_scr | v6a | TBD | TBD | TBD | TBD |
+| row | model | correct stows | Wilson 95 % | cycles | steps | correct stows an hour | held-out row | wrong box |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| f_F1_100000_scr | v5 | 425 of 600, 0.708 | 0.671 to 0.743 | 685 | 349,191 | 131.4 | 99 of 151 | 119 |
+| f_F1_100000_v6_scr | v6a | 420 of 600, 0.700 | 0.662 to 0.735 | 690 | 342,213 | 132.5 | 97 of 151, 0.642 | 115 |
 
-TBD: the v6a diagnostic screen's row and its pairing with the v5 screen.
+v6a reads 420 against v5's 425. Special rises from 100 of 148 to 108 of 148, and minifig falls from
+41 of 53 to 34 of 53. C1's gain does not show inside the loop at this size of 4 heaps (08:49).
 
-### 9.6 Candidate 1's checked read
+### 9.6 The Machine B lanes of the checked read
 
-The ledger pre-registered the checked read at 02:20. Two later entries amended it, and a third set
-its job:
+The checked read changed its lanes twice before it started, each time with the same rules and read:
+
+| time | chain | lanes | why |
+| --- | --- | --- | --- |
+| 05:20 | f_chk_F1 | `a_fr2l:20` | Machine B's disk was full (D8). |
+| 05:42 | f_chk_F1b | `a_fr2l:12` and `b_fr2:8` | The owner approved the Machine B cleanup (section 8.3). f_chk_F1 stopped before it read anything. |
+| 08:17 | f_chk_F1c | `a_fr2l:10` and `b_fr2:10` | Machine B sat idle from 05:45, because its only queued work was the checked read. f_chk_F1b stopped before it read anything. |
+
+### 9.7 Candidate 1's checked read
+
+The ledger pre-registered the checked read at 02:20. Later entries amended it before it started:
 
 - 02:20: candidate 1, seed 20307100, draws 0 to 19, 3000 parts, TAG f_F1_chk. It passes with at
   least 2760 correct stows, at least 300 correct stows an hour and a held-out row of at least 0.85.
-- 03:20, deviation D8: it starts after the warp screens and reads at D7's winning X. Machine A
-  cannot run the 8 warp heaps and the 20 checked heaps together, and Machine B's disk is full. Its lanes
-  are a_fr2l at 03a5cd8, which reads byte-equal to d6f893d at X = 1.0.
+- 03:20, deviation D8: it starts after the warp screens and reads at D7's winning X.
 - 04:11: model v6a serves it.
-- 05:20: job f_chk_F1 waits for the D7 and D9 screens, applies their rules from the
-  `gate_results.json` files and starts f_F1_chk on `a_fr2l:20`, `PORT_BASE` 15000.
+- 05:20 to 08:17: the lanes of section 9.6.
+
+f_F1_chk started at 08:36 with `--action_warp 1.5` and model v6a, without `--passenger_drop`. Machine B
+finished its 10 heaps at 11:06 and Machine A its 10 at 11:54. D12 (10:38) set the staged bars
+while it ran. The read keeps its protocol and its supervisor, whose token judges the stretch row.
 
 | item | value |
 | --- | --- |
 | TAG | f_F1_chk |
 | checkpoint | F1 100k |
-| commit, classifier | 03a5cd8, v6a |
-| added flags | TBD: `--action_warp X` and `--passenger_drop` as the D7 and D9 rules set them |
+| commit, classifier, warp | 03a5cd8, v6a, `--action_warp 1.5` |
+| correct stows of 3000 | 2043, 0.681 |
+| Wilson 95 % | 0.664 to 0.697 |
+| cycles | 3408 |
+| steps | 1,566,223 |
+| correct stows an hour | 140.9 |
+| held-out row | 471 of 785, 0.600, Wilson 0.565 to 0.634 |
+| wrong-box parts | 621, from 318 `wrong_box` cycles, 291 of them the classifier's |
+| cycles per correct stow, no bar | 1.668 |
+| staged bars (D12) | FAIL on all three: 2043 against 2550, 140.9 against 200, 0.600 against 0.80 |
+| stretch row | FAIL on all three: 2043 against 2760, 140.9 against 300, 0.600 against 0.85 |
+
+By category: brick 784 of 1063, special 415 of 645, flat 267 of 419, round 148 of 199, joint 227 of
+378 and minifig 202 of 296.
+
+The read's `gate_results.json` gives the rows by family and by box count. This report computes the
+fractions:
+
+| family | brick | slope | round | LDraw | plate | tile | joint | minifig |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| correct stows | 784/1063 | 175/284 | 148/199 | 240/361 | 167/256 | 100/163 | 227/378 | 202/296 |
+| fraction | 0.738 | 0.616 | 0.744 | 0.665 | 0.652 | 0.613 | 0.601 | 0.682 |
+
+| boxes | 4 | 5 | 6 | 7 | 8 |
+| --- | --- | --- | --- | --- | --- |
+| correct stows | 97/150 | 499/750 | 537/750 | 492/750 | 418/600 |
+| fraction | 0.647 | 0.665 | 0.716 | 0.656 | 0.697 |
+
+The same file counts 13 box emptying events and no tray refill. Its clamp fraction is 0.0034.
+
+The decomposition of the read's steps (11:54), by cycle outcome:
+
+| cycle outcome | cycles | share of the steps |
+| --- | --- | --- |
+| `close_miss` | 624 | 0.295 |
+| stowed | 1532 | 0.239 |
+| `lifted_lost` | 535 | 0.194 |
+| `held_no_lift` | 212 | 0.084 |
+| `wrong_box` | 318 | 0.075 |
+| `carrying` | 95 | 0.063 |
+| `no_open` | 79 | 0.042 |
+
+A stowed cycle takes 244 steps, 8.2 s, under the warp. If every cycle stowed, that pace gives 442 an
+hour. `lifted_lost` ends 15.7 % of the cycles, against 9.9 % at X = 1.0 on the screen, so the faster
+carry drops more parts. 1203 of the 3408 cycles end on the 800-step budget.
+
+The verdict (11:54): f_F1_chk fails the staged bars on all three and the stretch row. Rule R11's
+trigger, as D12 restated it, fires: candidate 2 gets a checked read.
+
+### 9.8 Retrain F2 and its screens: deviations D6, D10, D11 and D13
+
+Rule R11 set a trigger for retrain F2: candidate 1's checked read stows under 2790 of 3000 (0.93),
+or under 320 correct stows an hour. D12 restates it as a miss of any staged bar. On the trigger, F2
+warm starts from candidate 1 on waves 1 and 2. At most two retrains run.
+
+Deviation D6 (02:20, before any screen number): retrain F2 starts at the end of the F1 screens. It
+does not wait for candidate 1's checked read, because the deep-tray reads take hours and the GPU
+sits idle. Its checkpoints count for the gate only on R11's trigger.
+
+Retrain F2 started at 05:04 on Machine A from F1 100k on f/w12/dataset (section 8.3). It ended
+TRAIN_OK at 07:38 (f/train_F2): 200k steps on 10,384 episodes, checkpoints 50k to 200k on
+Machine A. The D10 job copies each checkpoint to Machine C before its screen
+(`bin/screens_F2_aarch64.sh`). The ledger logs no other second copy.
+
+Deviation D10 (05:19, before any F2 number): F2's screens run on Machine C as soon as each
+checkpoint exists. Each reads seed 20307000, draws 0 to 3, through `read_f.sh` at d6f893d with model
+v6a at X = 1.0 on `c_fr1:4`, TAGs f_F2_<step>_scr. They read the aarch64 physics with a CPU
+policy, so they compare only with each other. The 50k screen started at 05:54, 100k at 06:29 and
+150k at 07:05.
+
+Deviation D11 (08:20, before any F2 number): the D10 screens differ from F1's screens in host and
+classifier, so they cannot say whether wave 2 helped. On Machine B's spare cores, F2 100k and F2 200k
+read the screen protocol on x86 with model v6a at X = 1.0, paired with f_F1_100000_v6_scr. D11 is a
+diagnostic. Its rule: more data helps on a gain of at least 18 correct stows, 3 % of 600, by the
+better F2 row over F1's. That rule decides whether a third wave records.
+
+| checkpoint | TAG, host | correct stows | Wilson 95 % | cycles | correct stows an hour | held-out row | wrong box |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| F1 100k | f_F1_100000_v6_scr, Machine A | 420 of 600, 0.700 | 0.662 to 0.735 | 690 | 132.5 | 97 of 151 | 115 |
+| F2 100k | f_F2_100000_x86_scr, Machine B | 435 of 600, 0.725 | 0.688 to 0.759 | 681 | 140.8 | 91 of 151 | 102 |
+| F2 200k | f_F2_200000_x86_scr, Machine B | 407 of 600, 0.678 | 0.640 to 0.714 | 683 | 121.3 | 92 of 151 | 117 |
+
+D11 verdict (11:06): the better F2 row beats F1's by 15 correct stows, under the 18 that the rule
+asks. Doubling the corpus with the same recipe buys at most a few points, so no third wave of the
+same recipe records. As with F1, the 100k checkpoint reads better than the 200k one.
+
+Deviation D13 (11:53, before any F2 50k or 150k number): the aarch64 F2 screens run about four times
+slower than x86, about 6 h a heap. R11's pick of candidate 2 moves to x86 screens with model v6a at
+X = 1.0. F2 50k and 150k read on Machine B (f_F2_<step>_x86_scr, `b_fr2:4` each). Candidate 2 is the
+checkpoint with the most correct stows of the four, a tie to the higher rate. The D10 screens keep
+running as a record.
+
+| checkpoint | TAG | correct stows | correct stows an hour |
+| --- | --- | --- | --- |
+| F2 50k | f_F2_050000_x86_scr | TBD | TBD |
+| F2 100k | f_F2_100000_x86_scr | 435 of 600 | 140.8 |
+| F2 150k | f_F2_150000_x86_scr | TBD | TBD |
+| F2 200k | f_F2_200000_x86_scr | 407 of 600 | 121.3 |
+
+TBD: the D13 pick of candidate 2, with the F2 50k and 150k x86 screens.
+
+TBD: the D10 aarch64 screens, a record with no decision.
+
+### 9.9 Two loop levers: deviation D14
+
+At 11:07 two subagents took one lever each for the share bar of D12. Both branches start from
+feat/ms7f-warp 03a5cd8. Their switches default off, read byte-equal off, and the recorder refuses
+them. They reported at 12:54.
+
+`--missed_lift` (feat/ms7f-riders 5715401, 1562 tests). Most "riders" are the cycle's own part in a
+cycle that the hold detector never read as lifted. Such a cycle gets no wrist read, so the box stays
+at the overhead read. It gets no release detection either, so it runs to the 800-step budget with a
+stale row while its part is already boxed. On f_F1_100000_scr, 116 of 150 uncredited boxed parts
+were another cycle's target or held part. About 36 over the 4 heaps were the part of no cycle, and
+27 of those ended in a wrong box. These cycles are 22 to 25 a heap and 20 to 24 % of the steps. On
+10 heaps of f_F1_chk they hold 198,563 of 828,292 steps. The switch adds three rules:
+
+- A closed gripper command that carries the pick point 5 cm above its lowest closed point and off
+  the tray counts as a lift. The wrist read and the vote then run.
+- The cycle ends at a jaw gap 1 cm wider than the carry's narrowest gap. Over a box the part counts
+  as placed, elsewhere as dropped.
+- The next selection books a failure on a detection that it still sees within 15 mm of the target.
+
+The subagent expects about 12,000 fewer steps a heap, 15 to 20 % more rate, and 2 to 5 fewer
+wrong-box parts.
+
+`--lift_view_steps N` (feat/ms7f-cls-loop 36b069b, 1554 tests). The in-loop wrist read is right on
+1297 of 1584 target lifts, 0.819, against C1's 0.903. Over each heap's first 40 cycles it is right
+on 0.771. At the detector's lift the part still rises, 36 mm in 3 steps. The switch reads the wrist
+view N steps after the lift, and the carry view stays at 15 steps. On one instrumented 50-part
+episode, the served rule reads 21 of 23 at N = 0 and 22 of 23 at N = 6. The subagent expects 3 to 4
+fewer wrong-box parts a heap. Two causes stay open: neighbour grasps (the held part is not the
+target, 8.4 % of lifts, final class right on 0.517) and overhead misreads in the early pile.
+
+feat/ms7f-levers2 496f857 joins both (13:07, 1565 tests). It carries one fix outside the merge
+conflicts: with both on, view 2 also reads on a carry that `--missed_lift` found. The read worktree
+is 7f-r3, with the aliases `a_fr3l` and `b_fr3`.
+
+Deviation D14 (13:07, before any number) screens the levers on candidate 1 at X = 1.5 with model
+v6a. The screens read seed 20307000, draws 0 to 3, in job f_lever_screens. The rules against
+f_L_base_scr:
+
+- `--missed_lift` needs at least 1.05 times the base's correct stows an hour, and at least the
+  base's correct stows minus 6. With both, it is adopted.
+- `--lift_view_steps 6` needs at least the base's correct stows plus 6, and at least 0.97 times the
+  base's rate. With both, it is adopted.
+- If both are adopted, both serve. The exception: f_L_both_scr reads more than 6 correct stows or 3
+  % of rate under the better single. Then the single with the higher correct stows an hour serves.
+
+| screen | TAG, host | switches | correct stows | correct stows an hour | wrong box | verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| base | f_L_base_scr, Machine A | none | TBD | TBD | TBD | the base |
+| missed lift | f_L_ml_scr, Machine A | `--missed_lift` | TBD | TBD | TBD | TBD |
+| lift view | f_L_lv6_scr, Machine B | `--lift_view_steps 6` | TBD | TBD | TBD | TBD |
+| both | f_L_both_scr, Machine B | both | TBD | TBD | TBD | TBD |
+
+TBD: the D14 screens and their verdicts.
+
+### 9.10 Candidate 2's checked read
+
+Candidate 2's checked read waits for the D13 pick and the D14 screens (13:07). It reads with the
+adopted D14 switches, X = 1.5 from D7 and model v6a, through `read_f2.sh` with the staged bars. It
+reads seed 20307100, draws 0 to 19, on Machine A and Machine B. Job f_chk_F2 (`bin/chk_F2.sh`) applies
+the D13 and D14 rules as written at 13:07.
+
+| item | value |
+| --- | --- |
+| TAG | TBD |
+| checkpoint | TBD: candidate 2 by D13 |
+| switches | TBD: X = 1.5 and the D14 switches |
 | correct stows of 3000 | TBD |
 | Wilson 95 % | TBD |
 | correct stows an hour | TBD |
 | held-out row | TBD |
-| cycles per correct stow, no bar | TBD |
-| wrong-box parts | TBD |
-| outcome | TBD |
+| staged bars (D12) | TBD |
+| stretch row | TBD |
 
-TBD: the rows by category, by family and by box count of f_F1_chk, and its events.
+TBD: candidate 2's checked read, its rows and its decomposition.
 
-### 9.7 Retrain F2 and its screens: deviations D6 and D10
+### 9.11 The official read
 
-Rule R11 sets a trigger for retrain F2: candidate 1's checked read stows under 2790 of 3000 (0.93),
-or under 320 correct stows an hour. On the trigger, F2 warm starts from candidate 1 on waves 1 and
-2. At most two retrains run.
+The official read runs on seed 20307200, 40 heaps of 150, 6000 parts, one shot. Since D12, it reads
+the first candidate whose checked read passes the staged bars. It passes with at least 5100 correct
+stows, at least 200 correct stows an hour and a held-out row of at least 0.80. The stretch row is
+5520, 300 an hour and 0.85. If no checked read passes the staged bars, the official read does not
+run, and the milestone fails.
 
-Deviation D6 (02:20, before any screen number): retrain F2 starts at the end of the F1 screens. It
-does not wait for candidate 1's checked read, because the deep-tray reads take hours and the GPU
-sits idle. Its checkpoints count for the gate only on R11's trigger. Without the trigger, they are
-reported and set aside.
+TBD: the official read's pre-registration (candidate, commit, classifier, lanes), its rows and both
+verdicts, or the statement that it did not run.
 
-Retrain F2 started at 05:04 on Machine A. It merged f/w12/dataset (section 8.3) and trains 200k
-steps from F1 100k, a checkpoint every 50k (f/train_F2). At 05:19 it ran at about 25.5 steps/s next
-to the 16 screen lanes.
-
-Deviation D10 (05:19, before any F2 number): retrain F2's screens run as soon as each checkpoint
-exists, on Machine C. They count only on the trigger. Each checkpoint 50k to 200k reads
-seed 20307000, draws 0 to 3, through `read_f.sh` at d6f893d. The reads use model v6a at X = 1.0 on
-`c_fr1:4`, with TAGs f_F2_<step>_scr. Rule R11's rule picks candidate 2 among them. They read
-the aarch64 physics with a CPU policy, so they compare only with each other.
-
-| step | TAG | correct stows | Wilson 95 % | correct stows an hour | held-out row | wrong box |
-| --- | --- | --- | --- | --- | --- | --- |
-| 50k | f_F2_050000_scr | TBD | TBD | TBD | TBD | TBD |
-| 100k | f_F2_100000_scr | TBD | TBD | TBD | TBD | TBD |
-| 150k | f_F2_150000_scr | TBD | TBD | TBD | TBD | TBD |
-| 200k | f_F2_200000_scr | TBD | TBD | TBD | TBD | TBD |
-
-TBD: retrain F2's TRAIN_OK time and the second copies of its checkpoints.
-
-TBD: whether R11's trigger fires on f_F1_chk (under 2790 or under 320 an hour).
-
-TBD: on the trigger, candidate 2 by rule R11 and its checked read with its pre-registration.
-
-### 9.8 The official read
-
-Rule R2: the official read runs on seed 20307200, 40 heaps of 150, 6000 parts, one shot. It reads
-the candidate whose checked read passes. With two passing candidates, it reads the one with the
-higher throughput. It passes with at least 5520 correct stows, at least 300 correct stows an hour
-and a held-out row of at least 0.85. If no checked read passes, the official read does not run, and
-the milestone fails.
-
-TBD: the official read's pre-registration (candidate, commit, classifier, lanes), its rows and its
-outcome, or the statement that it did not run.
-
-### 9.9 The stretch runs
+### 9.12 The stretch runs
 
 Rule R13: after the official read, the official candidate runs two episodes of 1000 parts, one env
 each. The seeds are run 20307400 + r and layout 20307450 + r, r = 0 and 1. The tray refills from the
@@ -1100,7 +1307,7 @@ consecutive parts and 5 interventions per 1000 parts.
 
 TBD: the stretch runs, or the statement that they did not run because no official read ran.
 
-### 9.10 The control read
+### 9.13 The control read
 
 Rule R12 (MS7f design section 10.3): E2, train_E2 150k with no retrain, reads 7 heaps of 150, 1050
 parts, on the gate configuration. It has no bar and shows what the retrains buy. The ledger
@@ -1129,37 +1336,70 @@ them. The ledger reads it at the level of F1's best screen, 0.708 and 131 an hou
 wave 1 bought no visible gain over the MS7e policy. This report computes its pace: 17.0 s a cycle
 and 1.398 cycles per correct stow.
 
+### 9.14 The owner's video
+
+The owner asked for a video of the policy at work, and a subagent rendered it (12:54). The files are
+in `~/data/maker-arm-ms7/f/video/`:
+
+| item | value |
+| --- | --- |
+| video | `ms7f_F1_100k_w150_v6a_d0.mp4`, H.264, 1280 x 720, 60 fps, 5:10 at 8 times real time, 33.6 MB |
+| stills | the first and the last frame, and a 4 x 3 contact sheet |
+| policy | candidate 1, F1 100k, at X = 1.5 with model v6a |
+| heap | seed 20307000, draw 0, the first heap of the screens, with 4 boxes |
+| camera | the owner's third-person camera |
+| cut | at about 100 boxed parts, simulated time 41:16 |
+| state at the cut | 84 parts in their box, 21 in a wrong box, 148 cycles, 122 correct stows an hour, one box emptying |
+
+The frames show the deep tray with the heap, the four boxes labeled with their categories, and the
+arm at work. An overlay prints the simulated time, the running counts and the current target with
+its classifier read and its box. It also prints how the last cycle ended, for example placed,
+dropped or ended on the budget. The video stops at about 100 boxed parts, so it does not show the
+end of the heap.
+
 ## 10. The decomposition
 
-With no passing checked read, rule R2 asks for the decomposition. The screens already place the
-gaps, so this section gives the decomposition that the ledger has.
+With no checked read that passes, rule R2 asks for the decomposition. Candidate 1's checked read
+misses every bar of both rows, so this section gives the decomposition that the ledger has.
 
 ### 10.1 The throughput arithmetic
 
-The bar of 300 correct stows an hour is 12.0 s, or 360 control steps at 30 Hz, per correct stow. The
-throughput is the product of two factors: the seconds a cycle and the cycles per correct stow. This
-report computes the values from the ledger's counts. For the wave rows, the columns count delivered
-parts in place of correct stows:
+The stretch rate of 300 correct stows an hour is 12.0 s, or 360 control steps at 30 Hz, per correct
+stow. The staged rate of 200 is 18.0 s, or 540 steps. The throughput is the product of two factors:
+the seconds a cycle and the cycles per correct stow. This report computes the values from the
+ledger's counts. For the wave rows, the columns count delivered parts in place of correct stows:
 
 | row | s a cycle | cycles per correct stow | s per correct stow | correct stows an hour |
 | --- | --- | --- | --- | --- |
-| the bar | | | 12.0 | 300 |
-| candidate 1, screen (F1 100k) | 17.0 | 1.612 | 27.4 | 131.4 |
+| the stretch rate | | | 12.0 | 300 |
+| the staged rate (D12) | | | 18.0 | 200 |
+| candidate 1, checked read, X = 1.5 | 15.3 | 1.668 | 25.6 | 140.9 |
+| candidate 1, warp screen, X = 1.5 | 15.1 | 1.640 | 24.7 | 145.5 |
+| candidate 1, screen, X = 1.0 | 17.0 | 1.612 | 27.4 | 131.4 |
 | control read, E2 on the gate configuration, aarch64 | 17.0 | 1.398 | 23.8 | 151.3 |
 | E2 on the MS7e configuration, S0 | 16.98 | 1.275 | 21.64 | 166 |
 | wave 1 teacher, Machine A share | 13.85 | 1.172 | 16.23 per delivered part | 222 delivered parts |
 | wave 2 teacher, aarch64 share | | 1.130 | 13.91 per delivered part | 259 delivered parts |
 | wave 2 teacher, Machine B share | | 1.167 | 14.81 per delivered part | 243 delivered parts |
 
-Three facts follow from the table:
+Four facts follow from the table:
 
-- At candidate 1's 17.0 s a cycle, even one cycle per correct stow gives 212 an hour. To reach 300
-  at 17.0 s a cycle, the cycles per correct stow must fall to 0.71, under one.
+- At candidate 1's 17.0 s a cycle without the warp, even one cycle per correct stow gives 212 an
+  hour. The warp shortens the cycle to about 15 s, but the cycles per correct stow rise.
 - E2 ran 16.98 s a cycle on the MS7e configuration, near its corpus's 16.7 s, and 17.0 s on the
-  gate configuration. Candidate 1 also runs 17.0 s a cycle, against 13.85 s for Machine A's share
-  of its wave 1 corpus.
+  gate configuration. Candidate 1 also runs 17.0 s a cycle at X = 1.0, against 13.85 s for
+  Machine A's share of its wave 1 corpus.
 - The wave teacher delivers 222 to 259 parts an hour. A policy that copies its corpus teacher cycle
-  for cycle reads under 300 an hour, even with no failed cycle.
+  for cycle reads under 300 an hour, even with no failed cycle. The staged rate of 200 lies under
+  the teacher's pace.
+- Every policy row needs at least 1.275 cycles per correct stow. At 15.3 s a cycle, 200 an hour
+  needs at most 1.17 cycles per correct stow.
+
+The ledger's arithmetic of the stretch row on 600 parts (05:56): 552 correct stows at 300 an hour is
+198,720 steps, 57 % of what candidate 1's screen spent. At 311 steps a stowed cycle, that leaves
+about 68,000 steps for every failure, against 246,245 now, a 72 % cut. This report computes the
+staged row the same way: 510 correct stows at 200 an hour is 275,400 steps, 79 % of the screen's
+349,191.
 
 The design's target for the teacher was 10 s per correct stow, 360 an hour. With about 1.15 cycles
 per correct stow, a policy at that pace reaches 12 s and 300 an hour (MS7f design section 8.2). The
@@ -1167,24 +1407,36 @@ read teacher came near that target: S1's comb3 reads 10.30 s on 50-part heaps, a
 read 11.27 s on 150-part heaps. The recorder recipe stays slower. M5 reads 11.24 s per delivered
 part on 50-part heaps, and the deep-tray waves 13.91 to 16.23 s.
 
-### 10.2 Where a screen's steps go
+### 10.2 Where the steps go
 
-The 100k screen's draw 3 is one heap of 150 (03:15). It stows 114 of 150 in 172 cycles and 77,390
-steps, 159.1 correct stows an hour. The cycle intervals split its steps by cycle outcome. This
-report computes the shares and the steps a cycle:
+The ledger splits candidate 1's screen, 4 heaps and 349,191 steps, by cycle outcome (05:56). The
+intervals are the steps a cycle in select to close, close to lift, lift to release and release to
+the next selection:
 
-| cycle outcome | cycles | steps | steps a cycle | share of the steps |
-| --- | --- | --- | --- | --- |
-| stowed | 95 | 26,707 | 281 | 0.345 |
-| `close_miss` | 29 | 21,994 | 758 | 0.284 |
-| `lifted_lost` | 17 | 11,446 | 673 | 0.148 |
-| `wrong_box` | 15 | 5,159 | 344 | 0.067 |
-| `held_no_lift` | 8 | 4,857 | 607 | 0.063 |
-| `carrying`, `no_close`, `no_open` and the rest | 3, 3 and 2 | 7,227 | | 0.093 |
+| cycle outcome | cycles | steps | share of the steps | steps a cycle | intervals |
+| --- | --- | --- | --- | --- | --- |
+| stowed | 331 | 102,946 | 0.295 | 311 | 185, 32, 73, 21 |
+| `close_miss` | 119 | 92,070 | 0.264 | 774 | 643, 95, 6, 30 |
+| `lifted_lost` | 68 | 43,233 | 0.124 | 636 | 250, 180, 56, 149 |
+| `held_no_lift` | 49 | 35,763 | 0.102 | 730 | 463, 247, 3, 16 |
+| `wrong_box` | 63 | 25,543 | 0.073 | 405 | 191, 112, 64, 38 |
+| `no_open` | 29 | 23,696 | 0.068 | 817 | 817, 0, 0, 0 |
+| `carrying` | 22 | 22,666 | 0.065 | 1030 | 344, 130, 479, 77 |
+| `no_close` | 4 | 3,274 | 0.009 | 819 | |
 
-Failed cycles hold 65 % of the steps. 52 cycles ended on the 800-step budget. A stowed cycle takes
-281 steps, 9.4 s, under the 12 s of the bar. A failed `close_miss` cycle takes 758 steps, almost
-three stowed cycles. On the MS7e configuration, E2's failed cycles held 45 % of the steps (S0).
+259 of the 685 cycles end on the 800-step budget. A stowed cycle takes 311 steps, 10.4 s. With every
+cycle stowed, that pace gives 347 an hour. A `close_miss` cycle spends 643 steps before its first
+close.
+
+The same table for the control read, E2 on 7 heaps on Machine C: a stowed cycle takes 406
+steps, 13.6 s, 266 an hour at best, and `close_miss` holds 0.160 of the steps against candidate 1's
+0.264. So the faster wave recipe (M5) made the policy's good cycles 23 % faster, and its failures
+ate the gain (05:56).
+
+Candidate 1's checked read at X = 1.5 shows the same picture on 3000 parts (section 9.7).
+`close_miss` holds 0.295 of the steps and the stowed cycles 0.239. A stowed cycle takes 244 steps,
+8.2 s. With every cycle stowed, that pace gives 442 an hour. `lifted_lost` ends 15.7 % of the cycles
+against 9.9 % at X = 1.0. 1203 of 3408 cycles end on the 800-step budget.
 
 The cycle classes of 13 screen heaps, 1950 parts, every F1 screen payload but the 50k draw 3
 (04:07). This report computes the shares:
@@ -1202,11 +1454,15 @@ The cycle classes of 13 screen heaps, 1950 parts, every F1 screen payload but th
 | all | 2223 | |
 
 Fewer than half of the cycles stow their target. The 13 heaps stow 1296 parts with 1022 stowed
-cycles, so passengers also reach their own box.
+cycles, so other parts also reach their own box.
 
 ### 10.3 The wrong-box parts
 
-On the same 13 heaps, 379 of 1950 parts end in a wrong box, 0.194. They split in two groups:
+On candidate 1's screen (05:56), 425 parts stow from 331 stowed cycles, so 94 correct parts ride
+along. 119 parts end in a wrong box: 63 from `wrong_box` cycles, 57 of them the classifier's, and 56
+"riders".
+
+On the 13 screen heaps of 04:07, 379 of 1950 parts end in a wrong box, 0.194:
 
 | source | parts | share of the 1950 parts |
 | --- | --- | --- |
@@ -1215,23 +1471,34 @@ On the same 13 heaps, 379 of 1950 parts end in a wrong box, 0.194. They split in
 | of them, special read as brick | 74 | |
 | of them, brick read as special | 51 | |
 | of them, brick read as flat | 15 | |
-| passengers, parts that reached a wrong box without a cycle of their own | 171 | 0.088 |
+| parts that reached a wrong box without a cycle of their own | 171 | 0.088 |
 | all wrong-box parts | 379 | 0.194 |
 
-The classifier's taken class is right on 1253 of 1505 lifted cycles, 0.833 (model v5). C1's
-`loop_sum` reads 0.928 on teacher rollouts. The 100k heap of section 10.2 shows the same split: 14
-of its 15 `wrong_box` cycles are the classifier's, 12 set by the wrist vote at the lift and 2 by the
-overhead read. 6 are special read as brick and 3 brick read as special. Its other 11 wrong-box parts
-rode along.
+On candidate 1's checked read, 621 of 3000 parts end in a wrong box. 318 come from `wrong_box`
+cycles, 291 of them the classifier's. This report computes the other 303 as parts without a
+`wrong_box` cycle of their own.
+
+The `--missed_lift` study (12:54, section 9.9) changes what these "riders" are. Most of them are the
+cycle's own part in a cycle that the hold detector never read as lifted. Such a cycle gets no wrist
+read, so the overhead read sets the box. It runs to the 800-step budget with its part already boxed.
+On the screen, 116 of 150 uncredited boxed parts were another cycle's target or held part. About 36
+were the part of no cycle, and 27 of those ended in a wrong box. So the same mechanism costs wrong
+boxes and steps: these cycles hold 20 to 24 % of the steps.
+
+The classifier's taken class is right on 1253 of 1505 lifted cycles, 0.833, with model v5. The
+`--lift_view_steps` study puts the in-loop wrist read at 0.819 on target lifts, against C1's 0.903,
+because the part still rises at the detector's lift. C1's `loop_sum` reads 0.928 on teacher
+rollouts. The screen's heap of 03:15 shows the same split: 14 of its 15 `wrong_box` cycles are the
+classifier's, 12 set by the wrist vote at the lift and 2 by the overhead read.
 
 This report computes one bound from candidate 1's screen. Its 425 correct stows plus its 119
-wrong-box parts make 544 of 600, 0.907, still under 0.92. The screen misses 175 parts. Wrong boxes
-hold 119 of them, and the other 56 end outside every box. With the class stand-in on the MS7e
-50-part configuration, E2 reads 0.907 (C2).
+wrong-box parts make 544 of 600, 0.907. That is over the staged 0.85 and under the stretch 0.92. The
+screen misses 175 parts. Wrong boxes hold 119 of them, and the other 56 end outside every box. With
+the class stand-in on the MS7e 50-part configuration, E2 reads 0.907 (C2).
 
 ### 10.4 The teacher's own share and pace
 
-The teacher rows against the gate's two numbers:
+The teacher rows against the two rows of the gate:
 
 | read | correct box or delivered | s per correct stow or delivered part |
 | --- | --- | --- |
@@ -1240,14 +1507,15 @@ The teacher rows against the gate's two numbers:
 | census row B, 3 diagnostic heaps, no `--book_miss` | 422 of 450, 0.938 | about 10.6 |
 | wave 1 recorder | 5216 of 6000, 0.869 | 16.23 (Machine A share) |
 | wave 2 recorder | 5155 of 6000, 0.859 | 13.91 and 14.81 |
-| the gate | 0.92 | 12.0 |
+| the staged bars | 0.85 | 18.0 |
+| the stretch row | 0.92 | 12.0 |
 
-Only census row B meets both numbers, on three diagnostic heaps without `--book_miss` and without
-the recorder's draws. The recorder delivers 0.859 to 0.869 of its parts, under 0.92, at 13.91 to
-16.23 s a part, over 12 s. Every wave episode ends on its time-out.
+Every teacher row but R4 H1 meets the staged bars. R4 H1 misses the staged rate at 18.42 s, because
+of the stray loop of section 3.4. Only census row B meets the stretch row, on three diagnostic heaps
+without `--book_miss` and without the recorder's draws. The recorder delivers 0.859 to 0.869 of its
+parts at 13.91 to 16.23 s a part. Every wave episode ends on its time-out.
 
-TBD: the decomposition of candidate 1's checked read, and of candidate 2's and the official read
-where they ran.
+TBD: the decomposition of candidate 2's checked read, and of the official read where it ran.
 
 ## 11. The code, the deviations and the defects
 
@@ -1268,6 +1536,12 @@ The ledger records these tips:
 | 7 | `feat/ms7f-classifier` | 0322cfc, then d6f893d | the narrow overhead camera, the render set, the trainer and the three-view vote. `--classifier`, `--passenger_drop`, the crops, the size input and the regularisation. |
 | 8 | `feat/ms7f-warp` | 03a5cd8 on d6f893d | `--action_warp` (D7) |
 | 9 | `feat/ms7f-cls6` | ab3008d on d6f893d | the trainer's `--arch`, `--input_px` and `--ensemble` (v6a) |
+| 10 | `feat/ms7f-riders` | 5715401 on 03a5cd8 | `--missed_lift` (D14) |
+| 11 | `feat/ms7f-cls-loop` | 36b069b on 03a5cd8 | `--lift_view_steps N` (D14) |
+| 12 | `feat/ms7f-levers2` | 496f857 = 36b069b + 5715401 | both levers, with one fix: view 2 also reads on a carry that `--missed_lift` found |
+
+On origin, `feat/ms7f-heap` is 9547db2: 3fa9f3f plus the heap-w1 commits. The stack keeps
+`feat/ms7f-heap-w1` 4464b79 as the wave base (ledger note, 05:42).
 
 The CPU test counts in the ledger:
 
@@ -1281,6 +1555,9 @@ The CPU test counts in the ledger:
 | 4464b79, the wave tip | 1528 passed, 56 skipped | |
 | d6f893d, the read tip | 1551 passed, 60 skipped | 128 |
 | 03a5cd8, warp | 1552 | 129 |
+| 36b069b, cls-loop | 1554 | |
+| 5715401, riders | 1562 | |
+| 496f857, levers2 | 1565 | |
 
 The design merges a rung that is not adopted with its switch off. After the reads, the branches
 restack into one stack with `GH_REPO=youtalk/maker-arm-lab gh stack`, with this report on top.
@@ -1315,10 +1592,31 @@ TBD: the final stack, its PR numbers and the branch tip of each PR.
 | 04:07 | D9 | `--passenger_drop` gets one screen. | Passengers cost about 9 % of the parts. |
 | 04:11 | | Model v6a, a ResNet50, replaces v5 from the checked read on. The design names a ResNet18. | v6a passes the pre-registered v6 bar. |
 | 05:19 | D10 | Retrain F2's screens run now, on Machine C. | Machine B's disk is full, and Machine A holds the other screens. |
+| 05:42, 08:17 | D8 | The checked read takes Machine B lanes again: 12 + 8, then 10 + 10. | The owner approved the Machine B cleanup, and Machine B sat idle from 05:45. |
+| 08:20 | D11 | F2 100k and F2 200k read the screen protocol on x86, paired with F1 100k on v6a. A diagnostic for a third wave. | The D10 screens differ from F1's in host and classifier. |
+| 10:38 | D12 | Owner decision: the staged bars 0.85, 200 an hour and a held-out row of 0.80. The design's bars stay as a stretch row. R11's trigger becomes a miss of any staged bar. | The owner decided at 10:35, after the screens and with 2 of the 20 checked heaps visible. The speed bar is out of reach this week. |
+| 10:38 | D7 | The extension adds X = 2.0 to the warp screens, paired with them. | Pre-registered before any number. It is rejected at 13:08. |
+| 11:07 | | Two lever subagents for the share bar: the in-loop class read and the riders. | The share bar of D12. |
+| 11:53 | D13 | The pick of candidate 2 moves to x86 screens with v6a at X = 1.0. F2 50k and 150k read on Machine B. | The aarch64 screens run about four times slower, about 6 h a heap. |
+| 13:07 | D14 | Lever screens on candidate 1 at X = 1.5 with v6a: base, `--missed_lift`, `--lift_view_steps 6` and both. Candidate 2's checked read waits for them. | The lever reports of 12:54. |
 
-The ledger corrects itself once. At 10:54, the stamps of the rules, the ledger and the agents were
+The ledger corrects itself at 10:54. The stamps of the rules, the ledger and the agents were
 estimates. They now carry the file times: rules 10:15, ledger 10:16, agents 10:20. Every later entry
 takes its time from `date`.
+
+The ledger notes of 05:42 record seven more findings from the first draft of this report:
+
+1. The R9 reference read's sixth heap (`reads/f_ref`, eval_005) was never logged. The verdict used
+   five heaps.
+2. The R9 count of 106 parts left is 750 - 641 = 109.
+3. At 03:15, 26,707 steps over 95 cycles gives 384 an hour, not 383. The difference is rounding.
+4. D7's 13.85 s a cycle is wave 1's Machine A half only.
+5. The C1 set grew from 3122 lifts (v2, v3) to 3147 (v4 on). The render set was rendered again at
+   the native crop.
+6. v6a is a ResNet50 where the design names a ResNet18. This is an unnumbered change that the v6 bar
+   adopted.
+7. `origin/feat/ms7f-heap` is 9547db2, 3fa9f3f plus the heap-w1 commits. The stack keeps heap-w1
+   4464b79 as the wave base.
 
 ### 11.3 The defects found and fixed
 
@@ -1343,8 +1641,8 @@ Five process faults also cost time:
 - 23:21: the first screen chain named a worktree that does not exist. A `pkill -f` pattern then
   matched a later argument of the same command line and killed the calling shell.
 - 23:47: a detached job had no ssh agent, so the 50k screen ended READ_FAIL.
-- 01:48: Machine B's disk filled (984 GB), and its wave 2 conversion failed. Freeing MS7f intermediates
-  on Machine B needs the owner.
+- 01:48: Machine B's disk filled (984 GB), and its wave 2 conversion failed. The owner approved two
+  cleanups at 05:42 and 05:55, and Machine B then had 222 GB free (section 8.3).
 
 ## 12. What the simulation does not promise for the real arm
 
@@ -1375,25 +1673,27 @@ MS7f runs in simulation only (MS7f design section 13):
 The ledger names these open items:
 
 1. The policy runs slower than its teacher. The wave recorder delivers at 13.91 to 16.23 s a part.
-   Candidate 1 runs 17.0 s a cycle at 1.612 cycles per correct stow. A faster policy needs a
-   faster corpus or a serving lever, and D7's warp screens test the serving lever.
-2. Retrain F1 on wave 1 bought no visible gain. The control read, E2 with no retrain, reads 0.731
-   at 151.3 an hour, at the level of candidate 1's screen.
-3. The failed cycles hold 65 % of a candidate-1 heap's steps. `close_miss` and `lifted_lost` take
-   the most.
-4. The classifier sets 197 of 208 `wrong_box` cycles on 13 screen heaps, mostly special and brick
-   confused. v6a raises special to 0.883 on C1, and the diagnostic screen measures it in the loop.
-5. Passengers put 171 of 1950 parts in a wrong box. The passenger head finds 0.50 of them at best.
-   D9 tests `--passenger_drop`.
-6. When a cycle stows another part, the loop's failure memory does not mark the target, and the
+   Candidate 1 runs 17.0 s a cycle at X = 1.0 and 15.3 s at X = 1.5. The warp buys 11 % of rate on
+   the screen, and the faster carry drops more parts.
+2. More data of the same recipe buys little. Retrain F1 reads at the level of the control read, and
+   retrain F2 beats F1 by 15 correct stows on paired x86 screens (D11). So no third wave of the same
+   recipe records.
+3. The failed cycles hold most of the steps. On the checked read, `close_miss` holds 0.295 of the
+   steps, and 1203 of 3408 cycles end on the 800-step budget.
+4. Cycles that the hold detector misses run to the budget with their part already boxed. They hold
+   20 to 24 % of the steps and send parts to a wrong box. `--missed_lift` targets them (D14).
+5. The in-loop wrist read is right on 0.819 of target lifts, against C1's 0.903, because the part
+   still rises at the detector's lift. `--lift_view_steps 6` targets it (D14). Neighbour grasps and
+   early overhead misreads stay open.
+6. The classifier sets 291 of 318 `wrong_box` cycles on the checked read, mostly special and brick
+   confused. v6a does not beat v5 inside the loop at 4 heaps.
+7. When a cycle stows another part, the loop's failure memory does not mark the target, and the
    selector takes the same hard target again. `--book_miss` books the whole cell and hides parts.
-   The census pre-registered row E1, the teacher with `--part_failures`, which books the target
-   part and not its 5 cm cell. The policy reads already carry that switch. The ledger records that
-   rows C, D and E did not finish.
-7. The policy's own waits remain: 58 steps after its close and 45 extra on the approach.
-8. Machine B's disk is full and needs the owner.
+   The census pre-registered row E1, the teacher with `--part_failures`, which books the target part
+   and not its 5 cm cell. The policy reads already carry that switch. The ledger records that rows
+   C, D and E did not finish.
+8. The policy's own waits remain: 58 steps after its close and 45 extra on the approach.
 
-TBD: the steps in order, after the checked read, the trigger, the official read and the stretch
-runs.
+TBD: the steps in order, after candidate 2's checked read, the official read and the stretch runs.
 
 TBD: the closing paragraph of the milestone.
