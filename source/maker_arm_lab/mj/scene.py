@@ -125,6 +125,8 @@ BRICK_CONDIM = 4
 # round 1x1 drops rocked in place for the whole 6 s. At 2e-3 a round 2x2 balanced on its rim
 # edge in 17 of 48 rests. With condim 4, collision studs or not, the rolls reached 83 to
 # 134 mm (p90), and 8 to 27 of 48 kicked parts still rolled after 6 s.
+SPAWN_ROW = 50  # parts per spawn row: up to 50 parts the scene compiles as before MS7f
+SPAWN_ROW_DY = 0.1  # m between spawn rows, inside the K 50 bounding box (stat stays put)
 ROUND_CONDIM = 6
 ROUND_ROLLING_FRICTION = 0.001  # INITIAL: the lone-part table (MS7e design section 6.2)
 ROUND_FRICTION = (*BRICK_FRICTION[:2], ROUND_ROLLING_FRICTION)
@@ -478,11 +480,16 @@ def build_spec(
             )
         )
 
-    # Bricks: free bodies; the default pose is overwritten by the first reset's scatter.
+    # Bricks: free bodies; the default pose is overwritten by the first reset's scatter. They
+    # spawn in rows of SPAWN_ROW along x, the next row SPAWN_ROW_DY over in y: the model's
+    # stat.extent and stat.center follow the spawn row, and a row longer than 50 parts pushed
+    # the cameras' near clip (vis.map.znear x stat.extent) past the wrist camera's jaws at K 150.
     for index in range(num_bricks):
         color = layout.BRICK_COLOR_ORDER[index % len(layout.BRICK_COLOR_ORDER)]
+        row, col = divmod(index, SPAWN_ROW)
         body = spec.worldbody.add_body(
-            name=f"brick_{index}", pos=[layout.SCATTER_X[0] + 0.04 * index, 0.0, layout.SPAWN_Z]
+            name=f"brick_{index}",
+            pos=[layout.SCATTER_X[0] + 0.04 * col, SPAWN_ROW_DY * row, layout.SPAWN_Z],
         )
         body.add_freejoint(name=f"brick_{index}_free")
         if parts is None:
