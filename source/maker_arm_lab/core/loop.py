@@ -147,6 +147,21 @@ still reads a lift then, and keeps view 3 at ``CARRY_VIEW_STEPS`` after the lift
 decides on the same step as without the switch. A part that left the jaws before view 2 keeps
 the selection's box (``lift_views_lost``). The stand-in still draws at the lift.
 
+``missed_lift`` (MS7f riders, under ``perceived`` with the tray, off by default) reads a carry the
+hold detector missed from the arm's own motion. On the F1 100k screen (2026-10-01, 4 heaps of
+150) 150 of the 544 boxed parts came from no stowed or wrong_box cycle, and 116 of those were
+the target or held part of another cycle. 88 such cycles read no lift, ran to their 800-step
+budget, and their part ended in a box (24 a wrong one); on one instrumented heap of 50 such
+parts entered the box 100 to 345 steps into the cycle. No wrist read moved the box off the
+overhead read, and no release ended the cycle, which ran on with a stale row. A command
+that closes over the tray and then carries the pick point out of it ``oracle.LIFT_MIN_RISE``
+higher is that lift (``carry_started``): the wrist read runs as at the detector's lift. The jaws
+then opening ``RELEASE_OPEN_M`` wider than they held the carry (``carry_lost``) is the release
+``perceived_release`` reads at the detector's lost hold: ``placed`` over a perceived box,
+``dropped`` anywhere else. If the next selection still sees a part at the target's position
+after such an end, the failure memory books it there.
+The ``perception`` block then carries ``MISSED_LIFT_COUNTS``.
+
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
 """
@@ -1015,6 +1030,13 @@ class Cycle:
     taken_class: str | None = None  # the class that set the box at that lift or its vote
     vote_lost: bool = False  # the part left the jaws before the vote's carry view
     rider_read: bool = False  # the passenger head read a second part at that lift
+    # ``missed_lift``: the lowest FK pick point z of a closed command over the tray, whether
+    # ``carry_started`` read a carry from there, the narrowest measured jaw gap of the carry and
+    # whether ``carry_lost`` started the cycle's release.
+    carry_z: float | None = None
+    carried: bool = False
+    carry_gap: float | None = None
+    carry_released: bool = False
     # ``classifier`` with ``class_views``: a lift that read another class than ``read_class``
     # waits for the carry view, (the lift's class, the true class at the lift, the view's step,
     # the lift's log probabilities).
@@ -1077,6 +1099,9 @@ class EnvState:
     # (``desk_boxes.lighter_box`` picks between a category's two boxes by it), never the truth.
     box_load: list[float] = field(default_factory=list)
     opening: bool = False  # ``passenger_drop``: the jaws are held open until the next selection
+    # ``missed_lift``: the perceived target position of a cycle ``carry_lost`` released, which
+    # the next selection books a failure at if a detection still lies there.
+    recheck: tuple | None = None
 
 
 def _layout_of(rig, i: int):
@@ -1173,6 +1198,42 @@ def perceived_cycle_end(cycle: Cycle, step: int, released: bool, over: bool) -> 
     if step - cycle.start_step >= CYCLE_STEP_BUDGET:
         return "budget"
     return None
+
+
+def carry_started(cycle: Cycle, closed: bool, pick, in_tray: bool) -> bool:
+    """``missed_lift``: does a carry the hold detector missed start on this step? A step whose
+    gripper command reads ``closed`` with the FK ``pick`` point over the tray interior
+    (``in_tray``, ``over_tray``) keeps the lowest such height in ``cycle.carry_z``; the carry
+    starts on a step the command still reads closed with the pick point off the tray and
+    ``oracle.LIFT_MIN_RISE`` above that height. A retry that reopens over the tray never starts
+    one. The loop's own command, the FK point and known geometry only. Pure except for
+    ``carry_z``."""
+    z = float(pick[2])
+    if closed and in_tray:
+        cycle.carry_z = z if cycle.carry_z is None else min(cycle.carry_z, z)
+        return False
+    return (
+        closed
+        and not in_tray
+        and cycle.carry_z is not None
+        and z - cycle.carry_z >= oracle.LIFT_MIN_RISE
+    )
+
+
+def carry_lost(cycle: Cycle, gap: float, lifted: bool) -> bool:
+    """``missed_lift``: do the jaws let go of a carry the hold detector does not hold? Once the
+    cycle carried (``carry_started`` read it, or the detector read a lift and its hold has
+    ended), the measured jaw ``gap`` keeps its narrowest value in ``cycle.carry_gap``, and a gap
+    ``RELEASE_OPEN_M`` wider than that is the jaws opening on what they carried, which the loop
+    hands ``perceived_release`` as the detector's lost hold. While the detector holds a lifted
+    part (``lifted``) its own end decides. Proprioception only. Pure except for
+    ``carry_gap``."""
+    if lifted or not (cycle.carried or cycle.lift_detected):
+        return False
+    if cycle.carry_gap is None or gap < cycle.carry_gap:
+        cycle.carry_gap = gap
+        return False
+    return gap >= cycle.carry_gap + RELEASE_OPEN_M
 
 
 def tool_clear_of_tray(xy, lean_deg: float, height: float = layout.TRAY_WALL_HEIGHT) -> bool:
@@ -1652,6 +1713,10 @@ CLASSIFIER_CENSUS = ("read_class", "lift_class", "taken_class", "vote_lost", "ri
 selection, the last lift's wrist read, the class that set the box at that lift or at its vote
 (None when no lift was read or the vote was lost, so the selection's box stayed), and whether
 the vote was lost or the passenger head fired. Observation only."""
+MISSED_LIFT_COUNTS = ("missed_lifts", "carried_releases", "carried_rechecks")
+"""``missed_lift``'s ``perception`` counts, in the payload only with the switch on: the carries
+``carry_started`` read, the cycles a release ``carry_lost`` started ended, and the selections
+after one that still saw a part at the target's position and booked a failure there."""
 TORQUE_COUNTS = ("force_capped", "hold_blocked", "hold_blocked_cycles")
 """The ``torque`` block's counts under ``hold_force`` or ``force_cap``: the steps L7 held the arm,
 the hold entries L6 refused (one per confirmed run of the jaw-gap rule) and the cycles with one."""
@@ -1807,6 +1872,7 @@ def rollout(
     classifier=None,
     passenger_drop: bool = False,
     lift_view_steps: int = 0,
+    missed_lift: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1850,6 +1916,7 @@ def rollout(
     ``classifier`` (a ``perception.PartClassifier`` or None), ``passenger_drop`` and
     ``lift_view_steps`` are the MS7f switches of the module docstring; all need ``perceived``,
     and the last two ``classifier``; ``lift_view_steps`` is under ``CARRY_VIEW_STEPS``.
+    ``missed_lift`` (MS7f riders) is the module docstring's; it needs ``perceived`` and the tray.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -1986,6 +2053,10 @@ def rollout(
             "classifier", f"reads {classifier.categories}; the run sorts by {class_names}"
         )
     tray = bool(getattr(env, "tray", False))
+    if missed_lift and not (perceived and tray):
+        raise EvalFailure(
+            "missed_lift", "reads a carry off the tray: it needs perceived and a tray"
+        )
     limits = robot.data.joint_pos_limits[:, arm_ids, :].to("cpu")
     tracker = RolloutTracker(num_envs, k)
     recorder = getattr(env, "recorder", None)
@@ -2084,6 +2155,8 @@ def rollout(
         switches |= {"classifier": classifier.path, "passenger_drop": bool(passenger_drop)}
     if lift_view_steps:
         switches["lift_view_steps"] = int(lift_view_steps)
+    if missed_lift:
+        switches["missed_lift"] = True
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
     pick_z_hist = [deque(maxlen=GATE_WINDOW + 1) for _ in range(num_envs)]
@@ -2149,9 +2222,12 @@ def rollout(
             if st.cycle is not None and perceived:
                 c, d = st.cycle, detectors[i]
                 p = st.perceiver
-                over = d.lost and over_box(top_picks[i][:2], p.box_poses, p.box_sizes)
+                lost = d.lost
+                if missed_lift and not lost and c.release_over is None:
+                    lost = c.carry_released = carry_lost(c, float(gaps[i]), d.lifted)
+                over = lost and over_box(top_picks[i][:2], p.box_poses, p.box_sizes)
                 gap = float(gaps[i]) if release_gap else None
-                released = perceived_release(c, d.lost, d.started, over, float(openings[i]), gap)
+                released = perceived_release(c, lost, d.started, over, float(openings[i]), gap)
                 reason = perceived_cycle_end(c, step, released, bool(c.release_over))
                 # The carry grace keeps a cycle open while the detector holds.
                 grace = not budget_ends_cycle(step - c.start_step, d.holding, c.grace_steps)
@@ -2159,12 +2235,16 @@ def rollout(
                     c.grace_steps += 1
                     reason = None
                 if reason is None and lift_budget_ends(
-                    step - c.start_step, c.lift_detected, d.holding, lift_budget
+                    step - c.start_step, c.lift_detected or c.carried, d.holding, lift_budget
                 ):
                     reason = "lift_budget"
                 if reason is not None:
                     if reason != "placed":
                         st.fail_mem.book(c.target_xy)  # never the selector's _mark_failure
+                    if c.carry_released and reason in ("placed", "dropped"):
+                        st.counts["carried_releases"] += 1
+                        if reason == "placed":  # ``missed_lift``: look at the target's place
+                            st.recheck = c.target_xy
                     _close_cycle(st, reason, [], step, None)
                     st.idle_since = step
             elif st.cycle is not None:
@@ -2247,6 +2327,15 @@ def rollout(
                 stowed_now = {b for b in range(k) if bool(in_bin[i, b])}
             if perceived:
                 state, scene = _perceived_scene(st, env, rig, i, k)
+                if st.recheck is not None:
+                    # ``missed_lift``: a part still lies where the carried cycle's target lay,
+                    # so the carry held nothing; book it as the budget end would have.
+                    near = perception.ASSOCIATION_RADIUS_M
+                    if any(math.dist(d.centre[:2], st.recheck) <= near for d in state.detections):
+                        st.fail_mem.book(st.recheck)
+                        st.selector.failures = st.fail_mem.assign(state.detections)
+                        st.counts["carried_rechecks"] += 1
+                    st.recheck = None
             else:
                 scene = rig.snapshot(i)
             target = _select(st, scene)
@@ -2552,7 +2641,16 @@ def rollout(
                 pick_z=float(pick[2]),
             )
             if perceived:
-                if rig.idle[i] and detectors[i].lift_started:
+                lift_now = rig.idle[i] and detectors[i].lift_started and not c.carried
+                if (
+                    missed_lift
+                    and rig.idle[i]
+                    and not (c.carried or c.lift_detected or detectors[i].lifted)
+                ):
+                    in_tray = over_tray(pick, lean, wall_height)
+                    c.carried = lift_now = carry_started(c, not grip_open, pick, in_tray)
+                    st.counts["missed_lifts"] += c.carried
+                if lift_now:
                     # The class at lift: the box follows the class drawn for the part between
                     # the jaws, the target or not; nothing between them keeps the row.
                     true_cls, part = wrist_class(env, i)
@@ -2590,7 +2688,7 @@ def rollout(
                 if c.lift_view is not None and step >= c.lift_view[0]:
                     _, lift_step, true_cls = c.lift_view
                     c.lift_view = None
-                    if not detectors[i].lifted:
+                    if not (detectors[i].lifted or c.carried):
                         st.counts["lift_views_lost"] += 1  # the selection's box stays
                         continue
                     lighter = {
@@ -2629,7 +2727,7 @@ def rollout(
                     # MS7f view 3: the carry frame is the third vote, if the part is still up.
                     read, true_cls, _, lift_logp = c.vote
                     c.vote = None
-                    if not detectors[i].lifted:
+                    if not (detectors[i].lifted or c.carried):
                         st.counts["votes_lost"] += 1
                         c.vote_lost = True
                         continue
@@ -2923,6 +3021,7 @@ def rollout(
                 + (WRIST_COUNTS if wrist_fix else ())
                 + (CLASSIFIER_COUNTS if classifier is not None else ())
                 + (LIFT_VIEW_COUNTS if lift_view_steps else ())
+                + (MISSED_LIFT_COUNTS if missed_lift else ())
             },
         },
     }

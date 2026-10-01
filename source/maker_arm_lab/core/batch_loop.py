@@ -279,6 +279,7 @@ MS7F_OFF: dict = {
     "landing_steps": 0,
     "end_at_done": False,
     "net_stall": False,
+    "missed_lift": False,
 }
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
 of a run with every one off, what an MS7e run ran with. categories is the base track's;
@@ -286,8 +287,9 @@ deep_tray, tray_refill, box_empty, book_miss, abandon_cycle (the recorder's) and
 (the rig's watchdog) track H's (design section 5); classifier,
 passenger_drop and lift_view_steps track C's (design section 6); transport_speed (the teacher walk's pace),
 descend_speed and the teacher waits (TEACHER_WAITS) track S's (design section 8), and so is
-lift_budget, a serving trim of the heap client, and end_at_done, the recorder's. The gate supervisor keeps a stdlib copy (``scripts/run_gate_eval.py``),
-pinned by a test."""
+lift_budget, a serving trim of the heap client, and end_at_done, the recorder's; missed_lift
+(the heap client's perceived loop) is the riders track's. The gate supervisor keeps a stdlib
+copy (``scripts/run_gate_eval.py``), pinned by a test."""
 MS7F_READY: frozenset[str] = frozenset(
     {
         "categories",
@@ -311,6 +313,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "landing_steps",
         "end_at_done",
         "net_stall",
+        "missed_lift",
     }
 )
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
@@ -453,6 +456,14 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
         default=0,
         help="MS7f S2, the heap client with --perceived: end a cycle that has lifted nothing and "
         "holds nothing this many steps after its selection (loop.lift_budget_ends); 0 is off",
+    )
+    parser.add_argument(
+        "--missed_lift",
+        action="store_true",
+        help="MS7f riders, the heap client with --perceived and --tray: a closed command that "
+        "carries the pick point off the tray is a lift the hold detector missed (wrist read), "
+        "and the jaws opening wider then release it (loop.carry_started, "
+        "loop.carry_lost)",
     )
 
 

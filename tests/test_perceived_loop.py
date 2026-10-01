@@ -1130,6 +1130,7 @@ def _ms7f_scene(monkeypatch):
     # abandon_cycle is the recorder's and near_tracking the rig's watchdog: no loop decision
     ready |= {"lift_budget", "abandon_cycle", "near_tracking", "classifier", "passenger_drop"}
     ready |= {"lift_view_steps"}
+    ready |= {"missed_lift"}  # the riders track: a carry the hold detector missed
     assert batch_loop.MS7F_READY == ready | teacher, "turn it on in this scene"
     # Two of the three bricks start in the tray and one part fills a box, so the refill and
     # an emptying both run between cycles. Set before the build: the box draw reads the ratio.
@@ -1151,7 +1152,7 @@ def _ms7f_scene(monkeypatch):
     # A lift budget under the 800-step cycle budget: the tray scene's first three cycles lift
     # nothing and end on it, and the fourth places its part at step 487 (150 cuts it too).
     on = {"box_empty": True, "book_miss": True, "lift_budget": 750}
-    on |= {"classifier": stub, "passenger_drop": True, "lift_view_steps": 6}
+    on |= {"classifier": stub, "passenger_drop": True, "lift_view_steps": 6, "missed_lift": True}
     return env, rig, policy, budget, switches | on
 
 

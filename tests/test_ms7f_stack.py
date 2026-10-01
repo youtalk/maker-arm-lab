@@ -40,6 +40,7 @@ ON = {
     "landing_steps": ["--landing_steps", "15"],
     "end_at_done": ["--end_at_done"],
     "net_stall": ["--net_stall"],
+    "missed_lift": ["--missed_lift"],
 }
 """Each MS7f switch at a value that is not its off value. A track that adds a switch adds it
 here too (the first test holds the table to ``MS7F_OFF``)."""

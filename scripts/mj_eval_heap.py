@@ -371,6 +371,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         parser.error("--lift_view_steps delays the classifier's wrist read: it needs --classifier")
     if not 0 <= args.lift_view_steps < CARRY_VIEW_STEPS:
         parser.error(f"--lift_view_steps must lie in [0, {CARRY_VIEW_STEPS})")
+    if args.missed_lift and not args.tray:
+        parser.error("--missed_lift reads a carry off the tray: it needs --tray")
     if args.desk_boxes < 0:
         parser.error("--desk_boxes must be 0 or more")
     if args.perceived:
@@ -391,6 +393,7 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "wrist_fix",
         "class_views",
         "lift_budget",
+        "missed_lift",
     ):
         if getattr(args, name) not in (None, False) and not args.perceived:
             parser.error(f"--{name} needs --perceived")
@@ -546,6 +549,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             classifier=perception.PartClassifier(args.classifier) if args.classifier else None,
             passenger_drop=args.passenger_drop,
             lift_view_steps=args.lift_view_steps,
+            missed_lift=args.missed_lift,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
