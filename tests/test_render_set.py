@@ -42,7 +42,6 @@ def test_usage_errors_print_the_fail_token():
         assert len(lines) == 1 and lines[0].startswith("RENDER_FAIL "), argv
 
 
-@pytest.mark.skipif(not _can_render(), reason="no MuJoCo GL context on this host")
 def test_mix_extra_replaces_the_share_it_is_given():
     mix = _load().mix_extra
     parts, extra = list(range(200)), ["x", "y"]
@@ -63,6 +62,7 @@ def test_tilt_reads_the_part_axis_from_world_up():
     assert tilt((0.0, 1.0, 0.0, 0.0)) == pytest.approx(180.0)
 
 
+@pytest.mark.skipif(not _can_render(), reason="no MuJoCo GL context on this host")
 def test_the_render_set_labels_equal_the_truth(tmp_path, monkeypatch):
     """Every row names a part of the heap with its own category and split side, each overhead
     view aims at its part, and each wrist view's part is the one up in the jaws."""
