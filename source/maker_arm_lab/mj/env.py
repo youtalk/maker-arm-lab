@@ -997,7 +997,12 @@ class MjLegoSortEnv:
                 zone=zone,
                 tray=self.tray,
             )
-            top = self._pile_top(i) if stacked else 0.0
+            top = 0.0
+            if stacked:
+                # _pile_top reads xpos: bring it to the qpos written since the last step, or the
+                # first batch reads the parts' spawn poses (the model's qpos0) as a pile.
+                mujoco.mj_forward(m, d)
+                top = self._pile_top(i)
             for b, (x, y) in zip(batch, points):
                 if stacked:
                     lo = max(layout.HEAP_DROP_Z_MIN, top + self.parts[b].half_diagonal)
