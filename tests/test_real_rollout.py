@@ -88,6 +88,7 @@ def _real_rollout(monkeypatch, workers, poison=False, detections=None):
             boxes=env.desk_box_poses[i],
             tray=True,
             tray_lean_deg=env.tray_lean_deg,
+            **real_eval_heap.SERVED_ORACLE,
         )
 
     rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)

@@ -1,8 +1,9 @@
 """The heap gate client on the real arm (MS5 design sections 4.2, 7 and 8): one process runs
 one real episode.
 
-The MS7d served configuration on ``RealEnv``: the unchanged heap loop under ``perceived`` with
-every switch of the MS7d official read (``SERVED_SWITCHES``) and the knob scales at ``all=0``,
+The MS7e served configuration on ``RealEnv``: the unchanged heap loop under ``perceived`` with
+every switch of the MS7d official read, MS7e's serving levers S2 and S3 and the flat study's
+``snap_closed`` (``SERVED_SWITCHES`` and ``SERVED_ORACLE``) and the knob scales at ``all=0``,
 because the noise is the rig's own. The policy server (lerobot_stack) and the perception
 worker run on this host; the arm runs ``Tracking`` in the SDK's loop.
 
@@ -61,9 +62,16 @@ SERVED_SWITCHES = {
     "class_views": True,
     "hold_force": True,
     "force_cap": True,
+    "thin_snap": True,
+    "snap_closed": True,
 }
-"""The MS7d official read's switches (docs/ms7d-perception-levers.md, rule R3 and the nine
-levers), served unchanged on the rig."""
+"""The loop's switches, served unchanged on the rig: the MS7d official read's
+(docs/ms7d-perception-levers.md, rule R3 and the nine levers), MS7e's serving lever S2
+(``thin_snap``, docs/ms7e-widened-task.md) and the flat study's ``snap_closed``
+(docs/ms7e-flat-study.md)."""
+SERVED_ORACLE = {"wall_band_cont": True}
+"""The teacher's switches: MS7e's serving lever S3, the continuous jaws' landing band in the
+grasp model's wall test (docs/ms7e-widened-task.md)."""
 
 
 class TokenArgumentParser(argparse.ArgumentParser):
@@ -191,6 +199,7 @@ def build_world(args, world: dict) -> None:
             boxes=env.desk_box_poses[i],
             tray=True,
             tray_lean_deg=env.tray_lean_deg,
+            **SERVED_ORACLE,
         )
 
     world["rig"] = OracleRig(

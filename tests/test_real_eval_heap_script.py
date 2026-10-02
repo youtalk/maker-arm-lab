@@ -93,10 +93,12 @@ def test_the_token_contract_is_in_the_text():
     assert not top & {"maker_arm_lab.real.env", "maker_arm_lab.real.arm", "maker_arm_lab.real.ros"}
 
 
-def test_the_served_switches_are_the_ms7d_reads():
+def test_the_served_switches_are_the_ms7e_reads():
     switches = real_eval_heap.SERVED_SWITCHES
     assert set(MS7D_ON) <= set(switches) and all(switches.values())
     assert {"select_at_release", "replan_on_switch", "scripted_rake", "pick_snap"} <= set(switches)
+    assert switches["thin_snap"] and switches["snap_closed"]
+    assert real_eval_heap.SERVED_ORACLE == {"wall_band_cont": True}
 
 
 @pytest.mark.parametrize("args", [["--heap_k", "10"], [*ARGS[:4], "--dilation", "1.5"]])
