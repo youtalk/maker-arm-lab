@@ -125,10 +125,19 @@ step and the part's tilt in degrees (``_tilt``, -1 with no part)."""
 
 
 RENDER_READY = frozenset(
-    {"categories", "deep_tray", "tray_refill", "box_empty", "abandon_cycle", "transport_speed"}
+    {
+        "categories",
+        "deep_tray",
+        "tray_refill",
+        "box_empty",
+        "abandon_cycle",
+        "transport_speed",
+        "pile_pgs",
+    }
 )
-"""The MS7f switches the render set builds (the gate's scene and the recorder's jam rule): the
-classifier's, the heap loop's and the teacher trims refuse, so a render never runs a no-op."""
+"""The MS7f switches the render set builds (the gate's scene, the recorder's jam rule and the
+env's PGS solver of a full pile, which only renders use: every read stays on Newton, ledger D17):
+the classifier's, the heap loop's and the teacher trims refuse, so a render never runs a no-op."""
 
 
 class _TokenEmittingParser(argparse.ArgumentParser):
@@ -217,6 +226,7 @@ def build(args):
         categories=args.categories,
         deep_tray=args.deep_tray,
         tray_refill=args.tray_refill,
+        pile_pgs=args.pile_pgs,
     )
     env.cameras = False  # every view is rendered on demand at its event
     env.reset(seed=args.run_seed)
