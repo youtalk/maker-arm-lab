@@ -121,7 +121,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     # The recorder's walk pace predates MS7f (the MS3 speed ladder): it is built here.
     # --book_miss is the heap loop's; the rig driving here keeps its own failure memory.
     # --missed_lift reads the serving loop's carries; the teacher here holds its own.
-    check_ms7f(parser, args, (MS7F_READY - {"book_miss", "missed_lift"}) | {"transport_speed"})
+    # --cell_failure_cap is the serving loop's selector; the teacher keeps CELL_FAILURE_CAP.
+    serving = {"book_miss", "missed_lift", "cell_failure_cap"}
+    check_ms7f(parser, args, (MS7F_READY - serving) | {"transport_speed"})
     check_teacher_waits(parser, args)
     if args.lift_budget:
         parser.error("--lift_budget cuts a served cycle: the recorder serves no policy")

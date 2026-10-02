@@ -237,6 +237,9 @@ class HeapOracle(oracle.EnvOracle):
         # part, so a failing policy excludes the part it keeps missing and not its neighbours
         # (the heap loop's --part_failures switch, MS7a).
         self.failure_scope = "cell"
+        # Failures before ``_candidates`` excludes a key; the heap loop's --cell_failure_cap
+        # (MS7f) sets it on its perceived selectors, the teacher keeps CELL_FAILURE_CAP.
+        self.cell_failure_cap = CELL_FAILURE_CAP
         # False under the heap loop's --perceived (MS7c design section 6): the selector reads
         # no part's destination, so ``_candidates`` skips ``_stowed``; its any-box filter on
         # the perceived boxes already drops a stowed part.
@@ -357,7 +360,7 @@ class HeapOracle(oracle.EnvOracle):
             if not layout.in_reach(x, y, self.bl):
                 self.out_of_reach += 1
                 continue
-            if self.failures.get(self._failure_key(b, (x, y)), 0) >= CELL_FAILURE_CAP:
+            if self.failures.get(self._failure_key(b, (x, y)), 0) >= self.cell_failure_cap:
                 continue
             mask[b] = True
         return mask
@@ -900,7 +903,7 @@ class HeapOracle(oracle.EnvOracle):
             "held_swaps": self.held_swaps,
             "cycle_parts": list(self.cycle_parts),
             "cycle_outcomes": list(self.cycle_outcomes),
-            "cells_excluded": sum(1 for v in self.failures.values() if v >= CELL_FAILURE_CAP),
+            "cells_excluded": sum(1 for v in self.failures.values() if v >= self.cell_failure_cap),
             "parts_out_of_reach": self.out_of_reach,
         }
         if self.boxes:

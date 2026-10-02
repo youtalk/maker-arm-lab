@@ -16,6 +16,7 @@ from maker_arm_lab.core import (
     batch_loop,
     desk_boxes,
     grasp,
+    heap_oracle,
     layout,
     loop,
     oracle,
@@ -504,6 +505,38 @@ def test_the_ms7d_switches_need_perceived_before_a_step():
         assert err.value.reason == name
     env.close()
     assert served == []
+
+
+def test_cell_failure_cap_sets_the_failed_cycles_that_exclude_a_position(monkeypatch, capsys):
+    """One brick the still policy never lifts: each cycle ends on its step budget and books a
+    failure at the brick's perceived position, so the episode ends ``no_candidate`` after as
+    many cycles as the cap, the constant's 3 or the switch's 5. The recorder's teacher keeps
+    the constant, so the recorder refuses the switch."""
+    from test_classifier_loop import _usage  # it imports this module
+
+    heap = ["--heap_k", "3", "--desk_boxes", "4", "--gripper", "continuous"]
+    line = _usage("mj_eval_heap", heap + ["--perceived", "--cell_failure_cap", "11"], capsys)
+    assert line.startswith("EVAL_FAIL ") and "must lie in [1, 10]" in line
+    line = _usage("mj_eval_heap", heap + ["--cell_failure_cap", "5"], capsys)
+    assert line.startswith("EVAL_FAIL ") and "it needs --perceived" in line
+    line = _usage("mj_generate_batch", ["--out_dir", "/tmp/x", "--cell_failure_cap", "5"], capsys)
+    assert line.startswith("BATCH_FAIL usage: ") and "--cell_failure_cap is not built" in line
+    env, rig = _env_and_rig()
+    for bad in ({"cell_failure_cap": 5}, {"perceived": True, "cell_failure_cap": 0}):
+        with pytest.raises(loop.EvalFailure, match="cell_failure_cap"):
+            _rollout(env, rig, _Still(), **bad)
+    env.close()
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 60)
+    ends = []
+    for cap in (heap_oracle.CELL_FAILURE_CAP, 5):
+        env, rig = _env_and_rig(part_list=PARTS[:1], budget=8)
+        _place(env, SPREAD[:1])
+        payload = _rollout(env, rig, _Still(), budget=8, perceived=True, cell_failure_cap=cap)
+        env.close()
+        ep = payload["episodes"][0]
+        on = payload["inference"]["loop"].get("cell_failure_cap")
+        ends.append((ep["cycle_reasons"], ep["done_reason"], on))
+    assert ends == [(["budget"] * 3, "no_candidate", None), (["budget"] * 5, "no_candidate", 5)]
 
 
 def test_the_release_gap_selects_at_once_after_a_perceived_release(monkeypatch):
@@ -1131,6 +1164,7 @@ def _ms7f_scene(monkeypatch):
     ready |= {"lift_budget", "abandon_cycle", "near_tracking", "classifier", "passenger_drop"}
     ready |= {"lift_view_steps"}
     ready |= {"missed_lift"}  # the riders track: a carry the hold detector missed
+    ready |= {"cell_failure_cap"}
     assert batch_loop.MS7F_READY == ready | teacher, "turn it on in this scene"
     # Two of the three bricks start in the tray and one part fills a box, so the refill and
     # an emptying both run between cycles. Set before the build: the box draw reads the ratio.
@@ -1153,6 +1187,7 @@ def _ms7f_scene(monkeypatch):
     # nothing and end on it, and the fourth places its part at step 487 (150 cuts it too).
     on = {"box_empty": True, "book_miss": True, "lift_budget": 750}
     on |= {"classifier": stub, "passenger_drop": True, "lift_view_steps": 6, "missed_lift": True}
+    on |= {"cell_failure_cap": 5}
     return env, rig, policy, budget, switches | on
 
 

@@ -43,11 +43,12 @@ from maker_arm_lab.core.batch_loop import (
     teacher_waits,
 )
 from maker_arm_lab.core.eval_loop import EvalFailure
-from maker_arm_lab.core.heap_oracle import HeapOracle
+from maker_arm_lab.core.heap_oracle import CELL_FAILURE_CAP, HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.core.loop import (
     CARRY_VIEW_STEPS,
     CYCLE_STEP_BUDGET,
+    MAX_CELL_FAILURE_CAP,
     cycle_budget,
     episode_length_s,
     rollout,
@@ -375,6 +376,10 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         parser.error(f"--lift_view_steps must lie in [0, {CARRY_VIEW_STEPS})")
     if args.missed_lift and not args.tray:
         parser.error("--missed_lift reads a carry off the tray: it needs --tray")
+    if not 1 <= args.cell_failure_cap <= MAX_CELL_FAILURE_CAP:
+        parser.error(f"--cell_failure_cap must lie in [1, {MAX_CELL_FAILURE_CAP}]")
+    if args.cell_failure_cap != CELL_FAILURE_CAP and not args.perceived:
+        parser.error("--cell_failure_cap sets the perceived selector's cap: it needs --perceived")
     if args.desk_boxes < 0:
         parser.error("--desk_boxes must be 0 or more")
     if args.perceived:
@@ -552,6 +557,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             passenger_drop=args.passenger_drop,
             lift_view_steps=args.lift_view_steps,
             missed_lift=args.missed_lift,
+            cell_failure_cap=args.cell_failure_cap,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

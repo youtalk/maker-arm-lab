@@ -162,6 +162,12 @@ then opening ``RELEASE_OPEN_M`` wider than they held the carry (``carry_lost``) 
 after such an end, the failure memory books it there.
 The ``perception`` block then carries ``MISSED_LIFT_COUNTS``.
 
+``cell_failure_cap`` N (MS7f, under ``perceived``; ``CELL_FAILURE_CAP`` is off) lets the perceived
+selector's failure memory exclude a part's position after N failed cycles instead of
+``CELL_FAILURE_CAP`` (``HeapOracle.cell_failure_cap``). On candidate 2's checked read (F2 150k,
+6 of 20 heaps, 2026-10-01) every episode ended ``no_candidate`` with about 16 parts a heap
+unboxed, their positions excluded after 3 failures. The teacher keeps the constant.
+
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
 """
@@ -185,6 +191,7 @@ from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_st
 from maker_arm_lab.core.global_ik import JAW_TIP_REACH, fold_to_half_turn, wrap_to_pi
 from maker_arm_lab.core.heap_oracle import (
     CANDIDATE_MAX_Z,
+    CELL_FAILURE_CAP,
     MAX_RAKES,
     RAKE_PART_CAP,
     target_context,
@@ -323,6 +330,8 @@ CARRY_VIEW_STEPS = 15  # INITIAL: the MS7f C1 read measures the carry view at th
 """Control steps (0.5 s) from the detector's lift to the wrist frame of MS7f view 3, the third
 vote during the carry (MS7f design section 6.3). ``scripts/mj_render_set.py`` records its
 carry frames at the same offset."""
+MAX_CELL_FAILURE_CAP = 10
+"""``cell_failure_cap``'s largest value (MS7f, 2026-10-01)."""
 LIFT_VIEW_COUNTS = ("lift_views_lost",)
 """``lift_view_steps``'s ``perception`` count, in the payload only with the switch on: the lifts
 whose part left the jaws before view 2's step, so no wrist frame was read.
@@ -1873,6 +1882,7 @@ def rollout(
     passenger_drop: bool = False,
     lift_view_steps: int = 0,
     missed_lift: bool = False,
+    cell_failure_cap: int = CELL_FAILURE_CAP,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1917,6 +1927,8 @@ def rollout(
     ``lift_view_steps`` are the MS7f switches of the module docstring; all need ``perceived``,
     and the last two ``classifier``; ``lift_view_steps`` is under ``CARRY_VIEW_STEPS``.
     ``missed_lift`` (MS7f riders) is the module docstring's; it needs ``perceived`` and the tray.
+    ``cell_failure_cap`` (MS7f) is the module docstring's; it lies in [1,
+    ``MAX_CELL_FAILURE_CAP``] and needs ``perceived`` unless it is ``CELL_FAILURE_CAP``.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -2057,6 +2069,10 @@ def rollout(
         raise EvalFailure(
             "missed_lift", "reads a carry off the tray: it needs perceived and a tray"
         )
+    if not 1 <= cell_failure_cap <= MAX_CELL_FAILURE_CAP:
+        raise EvalFailure("cell_failure_cap", f"must lie in [1, {MAX_CELL_FAILURE_CAP}]")
+    if cell_failure_cap != CELL_FAILURE_CAP and not perceived:
+        raise EvalFailure("cell_failure_cap", "sets the perceived selector's cap: needs perceived")
     limits = robot.data.joint_pos_limits[:, arm_ids, :].to("cpu")
     tracker = RolloutTracker(num_envs, k)
     recorder = getattr(env, "recorder", None)
@@ -2113,6 +2129,7 @@ def rollout(
             st.selector.boxes = st.perceiver.box_poses
             st.selector.box_sizes = st.perceiver.box_sizes
             st.selector.failure_scope = "part"
+            st.selector.cell_failure_cap = cell_failure_cap
             st.selector.knows_destinations = False
             st.selector.box_filter_xy = box_filter_xy
             if box_walls:
@@ -2157,6 +2174,8 @@ def rollout(
         switches["lift_view_steps"] = int(lift_view_steps)
     if missed_lift:
         switches["missed_lift"] = True
+    if cell_failure_cap != CELL_FAILURE_CAP:
+        switches["cell_failure_cap"] = int(cell_failure_cap)
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
     pick_z_hist = [deque(maxlen=GATE_WINDOW + 1) for _ in range(num_envs)]

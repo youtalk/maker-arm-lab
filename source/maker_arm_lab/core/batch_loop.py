@@ -26,7 +26,7 @@ import torch
 from maker_arm_lab.core import desk_boxes, layout, oracle, perception, trajectory
 from maker_arm_lab.core import loop as _loop
 from maker_arm_lab.core import parts as _parts
-from maker_arm_lab.core.heap_oracle import CYCLE_BUDGET
+from maker_arm_lab.core.heap_oracle import CELL_FAILURE_CAP, CYCLE_BUDGET
 from maker_arm_lab.core.layout import sample_run_draw
 
 CAMPAIGN_TARGET_SUCCESSES = 50
@@ -280,6 +280,7 @@ MS7F_OFF: dict = {
     "end_at_done": False,
     "net_stall": False,
     "missed_lift": False,
+    "cell_failure_cap": CELL_FAILURE_CAP,
 }
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
 of a run with every one off, what an MS7e run ran with. categories is the base track's;
@@ -288,7 +289,8 @@ deep_tray, tray_refill, box_empty, book_miss, abandon_cycle (the recorder's) and
 passenger_drop and lift_view_steps track C's (design section 6); transport_speed (the teacher walk's pace),
 descend_speed and the teacher waits (TEACHER_WAITS) track S's (design section 8), and so is
 lift_budget, a serving trim of the heap client, and end_at_done, the recorder's; missed_lift
-(the heap client's perceived loop) is the riders track's. The gate supervisor keeps a stdlib
+(the heap client's perceived loop) is the riders track's, and so is cell_failure_cap (the
+perceived selector's failure cap). The gate supervisor keeps a stdlib
 copy (``scripts/run_gate_eval.py``), pinned by a test."""
 MS7F_READY: frozenset[str] = frozenset(
     {
@@ -314,6 +316,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "end_at_done",
         "net_stall",
         "missed_lift",
+        "cell_failure_cap",
     }
 )
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
@@ -464,6 +467,14 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
         "carries the pick point off the tray is a lift the hold detector missed (wrist read), "
         "and the jaws opening wider then release it (loop.carry_started, "
         "loop.carry_lost)",
+    )
+    parser.add_argument(
+        "--cell_failure_cap",
+        type=int,
+        default=CELL_FAILURE_CAP,
+        help="MS7f, the heap client with --perceived: the selector's failure memory excludes a "
+        "part's position after this many failed cycles (HeapOracle.cell_failure_cap); "
+        f"{CELL_FAILURE_CAP}, the teacher's, is off",
     )
 
 
