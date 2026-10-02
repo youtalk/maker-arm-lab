@@ -461,8 +461,7 @@ def test_perceived_needs_a_policy_desk_boxes_and_a_row_and_refuses_the_truth_swi
         (None, {}, "perceived"),
         (_Still(), {"row_refresh": True}, "perceived"),
         (_Still(), {"scripted_place": True}, "perceived"),
-        (_Still(), {"takeover": loop.TakeoverConfig(random_interval=None)}, "perceived"),
-    ]
+    ]  # ``takeover`` under perceived is the MS7f wave 3 DAgger mode (test_ms7f_dagger.py)
     for policy, extra, reason in cases:
         with pytest.raises(loop.EvalFailure) as err:
             _rollout(env, rig, policy, perceived=True, **extra)
