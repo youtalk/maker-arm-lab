@@ -448,6 +448,7 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "class_views",
         "lift_budget",
         "missed_lift",
+        "stall_end",
     ):
         if getattr(args, name) not in (None, False) and not args.perceived:
             parser.error(f"--{name} needs --perceived")
@@ -631,6 +632,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             missed_lift=args.missed_lift,
             cell_failure_cap=args.cell_failure_cap,
             carry_votes=args.carry_votes,
+            stall_end=args.stall_end,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

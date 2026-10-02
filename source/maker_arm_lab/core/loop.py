@@ -187,6 +187,13 @@ loop the taken class is right on 1253 of 1505 lifted cycles (0.833, the F1 100k 
 2026-10-01) against 0.94 on the C1 teacher lifts. The ``perception`` block then carries
 ``CARRY_VOTE_COUNTS``.
 
+``stall_end`` (MS7f, under ``perceived``, off by default) ends a cycle ``stall_end``, a failure
+booked as a budget end, once its gripper command has read closed for ``CLOSED_NO_PINCH_STEPS``
+steps in a row while the hold detector holds nothing and the cycle has read no lift
+(``closed_empty_count``, ``stall_ends``): the DAgger recorder's ``closed_no_pinch`` trigger on
+the detector's hold. On the latest checked read (2026-10-02) 162 of 3453 cycles closed on nothing
+and sat there to the 800-step budget, 14.6 % of all simulated time.
+
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
 """
@@ -204,7 +211,7 @@ import torch
 
 from maker_arm_lab.core import checker, desk_boxes, grasp, layout, oracle, perception
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
-from maker_arm_lab.core.dagger_loop import DECLINE_COOLDOWN, trigger_reason
+from maker_arm_lab.core.dagger_loop import CLOSED_NO_PINCH_STEPS, DECLINE_COOLDOWN, trigger_reason
 from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _nearest_brick_cm
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
 from maker_arm_lab.core.global_ik import JAW_TIP_REACH, fold_to_half_turn, wrap_to_pi
@@ -440,6 +447,21 @@ def lift_budget_ends(age: int, lifted: bool, holding: bool, budget: int) -> bool
     holds a part keeps its row, as the carry grace does. The MS7e official read spent 43 % of
     its steps in failed cycles, most of them run to the 800-step budget. Pure."""
     return 0 < budget <= age and not lifted and not holding
+
+
+def closed_empty_count(count: int, grip_open: bool, holding: bool) -> int:
+    """``stall_end``: the steps in a row a cycle's gripper command has read closed while the
+    hold detector holds nothing, the DAgger recorder's ``closed_no_pinch`` count on the
+    detector's hold. An open read or a hold starts it again. Pure."""
+    return count + 1 if not grip_open and not holding else 0
+
+
+def stall_ends(closed_empty: int, lifted: bool, holding: bool) -> bool:
+    """``stall_end``: does a ``perceived`` cycle whose jaws closed on nothing end now? Yes once
+    ``closed_empty`` (``closed_empty_count``) reaches ``CLOSED_NO_PINCH_STEPS`` while the
+    detector has read no lift in the cycle (``lifted``) and holds nothing now (``holding``), the
+    two reads of ``lift_budget_ends``. Pure."""
+    return closed_empty >= CLOSED_NO_PINCH_STEPS and not lifted and not holding
 
 
 CARRY_GRACE_STEPS = 400
@@ -1096,6 +1118,7 @@ class Cycle:
     # selection (``TruthReads.boxed``); None without desk boxes. A metric read only.
     target_in_box: bool | None = None
     hold_blocked: int = 0  # MS7d L6: hold entries the force gate refused in the cycle
+    closed_empty: int = 0  # ``stall_end``: closed steps in a row with no hold (closed_empty_count)
 
 
 @dataclass
@@ -1923,6 +1946,7 @@ def rollout(
     missed_lift: bool = False,
     cell_failure_cap: int = CELL_FAILURE_CAP,
     carry_votes: int = 0,
+    stall_end: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1976,6 +2000,7 @@ def rollout(
     ``MAX_CELL_FAILURE_CAP``] and needs ``perceived`` unless it is ``CELL_FAILURE_CAP``.
     ``carry_votes`` (MS7f) is the module docstring's; it needs ``classifier`` and ``class_views``,
     and lies in [0, ``MAX_CARRY_VOTES``] and under ``CARRY_VIEW_STEPS - lift_view_steps``.
+    ``stall_end`` (MS7f) is the module docstring's; it needs ``perceived``.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -2068,6 +2093,8 @@ def rollout(
     ms7f_tray = refill or bool(getattr(env, "deep_tray", False))
     if lift_budget and not perceived:
         raise EvalFailure("lift_budget", "reads the hold detector's lift: it needs perceived")
+    if stall_end and not perceived:
+        raise EvalFailure("stall_end", "reads the hold detector's hold: it needs perceived")
     if perceived:
         if policy is None:
             raise EvalFailure("perceived", "serves a policy; the oracle driver reads the truth")
@@ -2236,6 +2263,8 @@ def rollout(
         switches["cell_failure_cap"] = int(cell_failure_cap)
     if carry_votes:
         switches["carry_votes"] = int(carry_votes)
+    if stall_end:
+        switches["stall_end"] = True
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
     pick_z_hist = [deque(maxlen=GATE_WINDOW + 1) for _ in range(num_envs)]
@@ -2313,10 +2342,13 @@ def rollout(
                 if select_at_release and reason == "budget" and grace:
                     c.grace_steps += 1
                     reason = None
+                lifted = c.lift_detected or c.carried
                 if reason is None and lift_budget_ends(
-                    step - c.start_step, c.lift_detected or c.carried, d.holding, lift_budget
+                    step - c.start_step, lifted, d.holding, lift_budget
                 ):
                     reason = "lift_budget"
+                if reason is None and stall_end and stall_ends(c.closed_empty, lifted, d.holding):
+                    reason = "stall_end"  # booked as a budget end
                 if reason is not None:
                     if reason != "placed":
                         st.fail_mem.book(c.target_xy)  # never the selector's _mark_failure
@@ -2721,6 +2753,8 @@ def rollout(
                 close_cm=close_cm,
                 pick_z=float(pick[2]),
             )
+            if stall_end:
+                c.closed_empty = closed_empty_count(c.closed_empty, grip_open, detectors[i].holding)
             if perceived:
                 lift_now = rig.idle[i] and detectors[i].lift_started and not c.carried
                 if (

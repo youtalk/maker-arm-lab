@@ -44,6 +44,7 @@ ON = {
     "cell_failure_cap": ["--cell_failure_cap", "5"],
     "carry_votes": ["--carry_votes", "2"],
     "pile_pgs": ["--pile_pgs"],
+    "stall_end": ["--stall_end"],
 }
 """Each MS7f switch at a value that is not its off value. A track that adds a switch adds it
 here too (the first test holds the table to ``MS7F_OFF``)."""
