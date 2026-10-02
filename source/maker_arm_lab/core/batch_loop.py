@@ -281,12 +281,13 @@ MS7F_OFF: dict = {
     "net_stall": False,
     "missed_lift": False,
     "cell_failure_cap": CELL_FAILURE_CAP,
+    "carry_votes": 0,
 }
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
 of a run with every one off, what an MS7e run ran with. categories is the base track's;
 deep_tray, tray_refill, box_empty, book_miss, abandon_cycle (the recorder's) and near_tracking
 (the rig's watchdog) track H's (design section 5); classifier,
-passenger_drop and lift_view_steps track C's (design section 6); transport_speed (the teacher walk's pace),
+passenger_drop, lift_view_steps and carry_votes track C's (design section 6); transport_speed (the teacher walk's pace),
 descend_speed and the teacher waits (TEACHER_WAITS) track S's (design section 8), and so is
 lift_budget, a serving trim of the heap client, and end_at_done, the recorder's; missed_lift
 (the heap client's perceived loop) is the riders track's, and so is cell_failure_cap (the
@@ -317,6 +318,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "net_stall",
         "missed_lift",
         "cell_failure_cap",
+        "carry_votes",
     }
 )
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
@@ -475,6 +477,14 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
         help="MS7f, the heap client with --perceived: the selector's failure memory excludes a "
         "part's position after this many failed cycles (HeapOracle.cell_failure_cap); "
         f"{CELL_FAILURE_CAP}, the teacher's, is off",
+    )
+    parser.add_argument(
+        "--carry_votes",
+        type=int,
+        default=0,
+        help="MS7f C, the heap client with --classifier and --class_views: read this many more "
+        "wrist frames during a vote's carry, between view 2 and the carry view, into the vote's "
+        "sum (loop.carry_vote_steps); 0 is off",
     )
 
 

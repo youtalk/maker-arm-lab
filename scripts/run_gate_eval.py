@@ -195,6 +195,7 @@ MS7F_OFF = {
     "net_stall": False,
     "missed_lift": False,
     "cell_failure_cap": 3,
+    "carry_votes": 0,
 }
 """``core.batch_loop.MS7F_OFF``, copied because the supervisor imports no maker_arm_lab; the test
 pins it. The "ms7f" block of a read with every MS7f switch off, what an MS7e payload ran with."""
@@ -225,6 +226,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "net_stall",
         "missed_lift",
         "cell_failure_cap",
+        "carry_votes",
     }
 )
 """``core.batch_loop.MS7F_READY``, copied and pinned the same way: any other MS7f switch at a
@@ -1334,6 +1336,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=MS7F_OFF["cell_failure_cap"],
         help="MuJoCo heap only, MS7f: forwarded as --cell_failure_cap N, the perceived selector's "
         "failures before it excludes a part's position",
+    )
+    parser.add_argument(
+        "--carry_votes",
+        type=int,
+        default=MS7F_OFF["carry_votes"],
+        help="MuJoCo heap only, MS7f C: forwarded as --carry_votes K, the extra wrist reads of a "
+        "vote's carry",
     )
     parser.add_argument(
         "--seen_seeds",

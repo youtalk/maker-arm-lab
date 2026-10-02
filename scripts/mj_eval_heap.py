@@ -48,6 +48,7 @@ from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.core.loop import (
     CARRY_VIEW_STEPS,
     CYCLE_STEP_BUDGET,
+    MAX_CARRY_VOTES,
     MAX_CELL_FAILURE_CAP,
     cycle_budget,
     episode_length_s,
@@ -380,6 +381,18 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         parser.error(f"--cell_failure_cap must lie in [1, {MAX_CELL_FAILURE_CAP}]")
     if args.cell_failure_cap != CELL_FAILURE_CAP and not args.perceived:
         parser.error("--cell_failure_cap sets the perceived selector's cap: it needs --perceived")
+    if args.carry_votes and not (args.classifier and args.class_views):
+        parser.error(
+            "--carry_votes adds reads to the classifier's vote: it needs --classifier and "
+            "--class_views"
+        )
+    if not 0 <= args.carry_votes <= MAX_CARRY_VOTES:
+        parser.error(f"--carry_votes must lie in [0, {MAX_CARRY_VOTES}]")
+    if args.carry_votes >= CARRY_VIEW_STEPS - args.lift_view_steps:
+        parser.error(
+            f"--carry_votes must be under {CARRY_VIEW_STEPS} - --lift_view_steps, a step for "
+            "each read before the carry view"
+        )
     if args.desk_boxes < 0:
         parser.error("--desk_boxes must be 0 or more")
     if args.perceived:
@@ -558,6 +571,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             lift_view_steps=args.lift_view_steps,
             missed_lift=args.missed_lift,
             cell_failure_cap=args.cell_failure_cap,
+            carry_votes=args.carry_votes,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

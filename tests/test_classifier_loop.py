@@ -387,3 +387,60 @@ def test_the_clients_take_the_switches_only_where_the_loop_serves_them(capsys):
     for flag in (["--classifier", "m.pt"], ["--passenger_drop"], ["--lift_view_steps", "6"]):
         line = _usage("mj_generate_batch", ["--out_dir", "/tmp/x", "--heap_k", "3"] + flag, capsys)
         assert line.startswith("BATCH_FAIL usage: ") and "the recorder has none" in line
+
+
+def test_carry_votes_adds_k_wrist_reads_between_the_lift_and_carry_views(tmp_path, capsys):
+    """Overhead reads slope and the black wrist frames wide, so every lift waits for the carry
+    view, and the sum of the three views takes wide. With K = 2 two more wrist reads land between
+    the lift and carry views; served bright here, they read slope, and the sum of five views
+    takes slope (three to two). The carry view stays 15 steps after the lift either way."""
+    assert loop.carry_vote_steps(0, loop.CARRY_VIEW_STEPS, 2) == [5, 10]
+    assert loop.carry_vote_steps(6, loop.CARRY_VIEW_STEPS, 8) == list(range(7, 15))
+    heap = ["--heap_k", "3", "--desk_boxes", "4", "--box_draw", "4", "--gripper", "continuous"]
+    heap += ["--perceived", "--categories", "--classifier", "m.pt"]
+    line = _usage("mj_eval_heap", heap + ["--carry_votes", "2"], capsys)
+    assert line.startswith("EVAL_FAIL ") and "--classifier and --class_views" in line
+    heap += ["--class_views"]
+    line = _usage("mj_eval_heap", heap + ["--carry_votes", "9"], capsys)
+    assert line.startswith("EVAL_FAIL ") and "must lie in [0, 8]" in line
+    line = _usage("mj_eval_heap", heap + ["--carry_votes", "2", "--lift_view_steps", "13"], capsys)
+    assert line.startswith("EVAL_FAIL ") and "a step for each read" in line
+    line = _usage("mj_generate_batch", ["--out_dir", "/tmp/x", "--carry_votes", "2"], capsys)
+    assert line.startswith("BATCH_FAIL usage: ") and "the recorder has none" in line
+    runs = []
+    for k in (0, 2):
+        env, rig, policy = _scene()
+        served = _served(env)
+        stub = _classifier(tmp_path, "slope", "wide")
+        offsets, lift, real = [], [None], stub.wrist_frame
+
+        def frame(env, i, offsets=offsets, lift=lift, served=served, real=real):
+            # Each wrist read's step after its vote's lift read; one between is served bright.
+            s = len(served)
+            if lift[0] is not None and s - lift[0] < loop.CARRY_VIEW_STEPS:
+                offsets.append(s - lift[0])
+                return np.full((224, 224, 3), BRIGHT, dtype=np.uint8)
+            if lift[0] is not None and s - lift[0] == loop.CARRY_VIEW_STEPS:
+                offsets.append(s - lift[0])  # the carry view closes the vote
+                lift[0] = None
+            else:
+                offsets.append(0)  # a lift read
+                lift[0] = s
+            return real(env, i)
+
+        stub.wrist_frame = frame
+        kwargs = {"perceived": True, "classifier": stub, "class_views": True} | SWITCHES
+        runs.append((_rollout(env, rig, policy, carry_votes=k, **kwargs), offsets))
+        env.close()
+    (off, off_reads), (on, on_reads) = runs
+    votes = off["perception"]["third_views"]
+    assert votes > 0 and on["perception"]["third_views"] == votes
+    assert off["perception"]["votes_lost"] == on["perception"]["votes_lost"] == 0
+    assert off_reads == [0, 15] * votes and on_reads == [0, 5, 10, 15] * votes
+    seen = on["perception"]
+    assert seen["carry_votes_read"] == 2 * votes and seen["carry_votes_lost"] == 0
+    assert "carry_votes_read" not in off["perception"]
+    assert "carry_votes" not in off["inference"]["loop"]
+    assert on["inference"]["loop"]["carry_votes"] == 2
+    rows = [p["episodes"][0]["cycle_census"] for p in (off, on)]
+    assert [{r["taken_class"] for r in c if r["lift_class"]} for c in rows] == [{"wide"}, {"slope"}]

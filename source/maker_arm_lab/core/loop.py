@@ -168,6 +168,15 @@ selector's failure memory exclude a part's position after N failed cycles instea
 6 of 20 heaps, 2026-10-01) every episode ended ``no_candidate`` with about 16 parts a heap
 unboxed, their positions excluded after 3 failures. The teacher keeps the constant.
 
+``carry_votes`` K (MS7f, with ``classifier`` and ``class_views``; 0 is off) reads K more wrist
+frames during a vote's carry, on steps spread evenly between view 2 and the carry view
+(``carry_vote_steps``), and adds their log probabilities to the vote's sum (``summed_class``).
+The vote still decides at the carry view, so the box moves on the same step as without the
+switch. A frame due after the part left the jaws is not read (``carry_votes_lost``). Inside the
+loop the taken class is right on 1253 of 1505 lifted cycles (0.833, the F1 100k screens,
+2026-10-01) against 0.94 on the C1 teacher lifts. The ``perception`` block then carries
+``CARRY_VOTE_COUNTS``.
+
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
 """
@@ -332,6 +341,12 @@ vote during the carry (MS7f design section 6.3). ``scripts/mj_render_set.py`` re
 carry frames at the same offset."""
 MAX_CELL_FAILURE_CAP = 10
 """``cell_failure_cap``'s largest value (MS7f, 2026-10-01)."""
+MAX_CARRY_VOTES = 8
+"""``carry_votes``'s largest value (MS7f, 2026-10-01): with view 2 at 6 steps after the lift,
+the most reads that each get a step of their own before the carry view."""
+CARRY_VOTE_COUNTS = ("carry_votes_read", "carry_votes_lost")
+"""``carry_votes``'s ``perception`` counts, in the payload only with the switch on: the extra
+carry frames read into a vote, and those not read because the part had left the jaws."""
 LIFT_VIEW_COUNTS = ("lift_views_lost",)
 """``lift_view_steps``'s ``perception`` count, in the payload only with the switch on: the lifts
 whose part left the jaws before view 2's step, so no wrist frame was read.
@@ -1052,6 +1067,10 @@ class Cycle:
     vote: tuple | None = None
     # ``classifier``: view 2 is due, (its step, the lift's step, the true class at the lift).
     lift_view: tuple | None = None
+    # ``carry_votes``: the steps of the vote's extra carry reads still due, and the log
+    # probabilities of those read.
+    carry_due: list = field(default_factory=list)
+    carry_logp: list = field(default_factory=list)
     # ``perceived_release``: a lifted hold ended over a box (True) or off one (False), and the
     # jaws have not yet opened to ``SELECT_OPEN_FRACTION``; None with no release under way.
     release_over: bool | None = None
@@ -1310,6 +1329,14 @@ def summed_class(names, *views) -> str:
     right."""
     sums = [sum(v[k] for v in views) for k in range(len(names))]
     return names[max(range(len(names)), key=sums.__getitem__)]
+
+
+def carry_vote_steps(lift_view: int, carry_view: int, k: int) -> list[int]:
+    """``carry_votes``: the steps of ``k`` more wrist reads, spread evenly between view 2's step
+    ``lift_view`` and the carry view's ``carry_view``, each strictly between them and on its own
+    step when ``k`` is under ``carry_view - lift_view``. Pure."""
+    span = carry_view - lift_view
+    return [lift_view + span * j // (k + 1) for j in range(1, k + 1)]
 
 
 def lift_class_box(wrist_cls, classify, class_to_box: dict, served: int, seen=None, third=None):
@@ -1883,6 +1910,7 @@ def rollout(
     lift_view_steps: int = 0,
     missed_lift: bool = False,
     cell_failure_cap: int = CELL_FAILURE_CAP,
+    carry_votes: int = 0,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1929,6 +1957,8 @@ def rollout(
     ``missed_lift`` (MS7f riders) is the module docstring's; it needs ``perceived`` and the tray.
     ``cell_failure_cap`` (MS7f) is the module docstring's; it lies in [1,
     ``MAX_CELL_FAILURE_CAP``] and needs ``perceived`` unless it is ``CELL_FAILURE_CAP``.
+    ``carry_votes`` (MS7f) is the module docstring's; it needs ``classifier`` and ``class_views``,
+    and lies in [0, ``MAX_CARRY_VOTES``] and under ``CARRY_VIEW_STEPS - lift_view_steps``.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -2073,6 +2103,13 @@ def rollout(
         raise EvalFailure("cell_failure_cap", f"must lie in [1, {MAX_CELL_FAILURE_CAP}]")
     if cell_failure_cap != CELL_FAILURE_CAP and not perceived:
         raise EvalFailure("cell_failure_cap", "sets the perceived selector's cap: needs perceived")
+    if carry_votes and not (classifier is not None and class_views):
+        raise EvalFailure("carry_votes", "adds reads to the classifier's vote: needs class_views")
+    if not 0 <= carry_votes <= MAX_CARRY_VOTES or carry_votes >= CARRY_VIEW_STEPS - lift_view_steps:
+        raise EvalFailure(
+            "carry_votes",
+            f"must lie in [0, {MAX_CARRY_VOTES}] and under {CARRY_VIEW_STEPS} - lift_view_steps",
+        )
     limits = robot.data.joint_pos_limits[:, arm_ids, :].to("cpu")
     tracker = RolloutTracker(num_envs, k)
     recorder = getattr(env, "recorder", None)
@@ -2176,6 +2213,8 @@ def rollout(
         switches["missed_lift"] = True
     if cell_failure_cap != CELL_FAILURE_CAP:
         switches["cell_failure_cap"] = int(cell_failure_cap)
+    if carry_votes:
+        switches["carry_votes"] = int(carry_votes)
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
     pick_z_hist = [deque(maxlen=GATE_WINDOW + 1) for _ in range(num_envs)]
@@ -2735,6 +2774,8 @@ def rollout(
                         st.counts["wrong_wrist_class"] += read != true_cls
                     if class_views and read != c.read_class:
                         c.vote = (read, true_cls, lift_step + CARRY_VIEW_STEPS, logp)
+                        c.carry_due = carry_vote_steps(step, c.vote[2], carry_votes)
+                        c.carry_logp = []
                     else:
                         _, taken, box = lift_class_box(read, lambda x: x, lighter, c.box)
                         c.taken_class = taken
@@ -2742,6 +2783,16 @@ def rollout(
                             c.box = box
                             env.set_context_box(i, box)
                             replan[i] = True
+                if c.vote is not None and c.carry_due and step >= c.carry_due[0]:
+                    # ``carry_votes``: one more carry frame for the vote, if the part is still up.
+                    c.carry_due.pop(0)
+                    if detectors[i].lifted or c.carried:
+                        frame = classifier.wrist_frame(env, i)
+                        logp, _ = classifier.log_probs(frame, class_names, True, c.seen_size)
+                        c.carry_logp.append(logp)
+                        st.counts["carry_votes_read"] += 1
+                    else:
+                        st.counts["carry_votes_lost"] += 1
                 if c.vote is not None and step >= c.vote[2]:
                     # MS7f view 3: the carry frame is the third vote, if the part is still up.
                     read, true_cls, _, lift_logp = c.vote
@@ -2756,7 +2807,8 @@ def rollout(
                         for cls, own in class_boxes[i].items()
                     }
                     carry_logp, _ = classifier.log_probs(frame, class_names, True, c.seen_size)
-                    views_logp = [v for v in (c.read_logp, lift_logp, carry_logp) if v]
+                    logps = (c.read_logp, lift_logp, *c.carry_logp, carry_logp)
+                    views_logp = [v for v in logps if v]
                     summed = summed_class(class_names, *views_logp)  # no overhead read: two
                     _, taken, box = lift_class_box(summed, lambda x: x, lighter, c.box)
                     c.taken_class = taken
@@ -3041,6 +3093,7 @@ def rollout(
                 + (CLASSIFIER_COUNTS if classifier is not None else ())
                 + (LIFT_VIEW_COUNTS if lift_view_steps else ())
                 + (MISSED_LIFT_COUNTS if missed_lift else ())
+                + (CARRY_VOTE_COUNTS if carry_votes else ())
             },
         },
     }
