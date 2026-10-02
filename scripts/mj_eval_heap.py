@@ -11,6 +11,11 @@ project's own venv:
 
 ``--oracle_driver`` replaces the policy with the oracle rig on every cycle: the preflight's
 driver and the loop's end-to-end check, no server and no cameras needed.
+
+``--dagger_dir`` is MS7f wave 3 (ledger D17): the same served loop, and on a failure trigger
+(``loop.TakeoverConfig`` without the random draw, ``loop.HELD_NO_RISE_STEPS``) the teacher takes
+the cycle over. Only the takeover frames are recorded, to ``<dagger_dir>/<shard_name>.hdf5``, for
+``convert_to_lerobot.py --split_cycles --dagger``; the payload names the shard.
 """
 
 import argparse
@@ -48,8 +53,10 @@ from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.core.loop import (
     CARRY_VIEW_STEPS,
     CYCLE_STEP_BUDGET,
+    HELD_NO_RISE_STEPS,
     MAX_CARRY_VOTES,
     MAX_CELL_FAILURE_CAP,
+    TakeoverConfig,
     cycle_budget,
     episode_length_s,
     rollout,
@@ -147,6 +154,14 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
     parser.add_argument(
         "--oracle_driver", action="store_true", help="the rig drives every cycle; no server"
     )
+    parser.add_argument(
+        "--dagger_dir",
+        type=str,
+        default="",
+        help="MS7f wave 3: the teacher takes a failing cycle over (the failure triggers) and "
+        "only its frames are recorded to <dagger_dir>/<shard_name>.hdf5; needs the server",
+    )
+    parser.add_argument("--shard_name", type=str, default="shard", help="with --dagger_dir")
     parser.add_argument(
         "--max_wall_minutes",
         type=float,
@@ -395,6 +410,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         )
     if args.desk_boxes < 0:
         parser.error("--desk_boxes must be 0 or more")
+    if args.dagger_dir and args.oracle_driver:
+        parser.error("--dagger_dir takes cycles over from a policy: it needs the server")
     if args.perceived:
         if not args.desk_boxes:
             parser.error("--perceived needs --desk_boxes: a perceived box ends each cycle")
@@ -478,6 +495,9 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             deep_tray=args.deep_tray,
             tray_refill=args.tray_refill,
             pile_pgs=args.pile_pgs,
+            export_dir=args.dagger_dir or None,
+            shard_name=args.shard_name,
+            export_all=bool(args.dagger_dir),
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
@@ -504,6 +524,12 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             )
             return teacher_waits(orc, args)
 
+        perceivers = None  # wave 3: the takeover rows are the perceived ones, as the corpora's
+        if args.dagger_dir and args.perceived:
+            perceivers = [
+                perception.Perceiver(args.run_seed, i, args.noise_scales, env.class_names)
+                for i in range(args.num_envs)
+            ]
         rig = OracleRig(
             env,
             env.cfg.bin_layout,
@@ -511,6 +537,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             rig_rng,
             transport_speed=args.transport_speed,
             oracle_factory=factory,
+            perceivers=perceivers,
             release_lean=args.release_lean,
             carry_via=args.carry_via,
             passenger_check=args.passenger_check,
@@ -531,6 +558,11 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             permutation=perm,
             cycle_budget=args.cycle_budget,
             max_wall_minutes=args.max_wall_minutes,
+            takeover=(
+                TakeoverConfig(random_interval=None, held_no_rise_steps=HELD_NO_RISE_STEPS)
+                if args.dagger_dir
+                else None
+            ),
             on_frame=frame_writer(args.frames_dir) if args.frames_dir else None,
             select_at_release=args.select_at_release,
             replan_on_switch=args.replan_on_switch,
@@ -582,6 +614,8 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
         payload["ms7e"] = ms7e_switches(args)
         payload["ms7f"] = ms7f_switches(args)
         payload["deep_box_floor"] = args.deep_box_floor
+        if args.dagger_dir:
+            payload["shard"] = str(Path(args.dagger_dir) / f"{args.shard_name}.hdf5")
         if args.passenger_check:
             # Each rejected LIFT's passengers, as indices into payload["parts"].
             payload["passenger_rejects"] = [r for log in rig.passenger_log for r in log]

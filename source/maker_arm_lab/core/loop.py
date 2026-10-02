@@ -131,6 +131,16 @@ loop's own end-to-end check. A takeover holds the env until the rig hands it bac
 RETREAT, DONE or ABANDON, and the loop grades only while the rig is idle, so one takeover is
 one loop cycle.
 
+``takeover`` under ``perceived`` is the MS7f wave 3 DAgger mode (MS7f ledger D17): the policy
+drives the perceived loop of a read, and on a trigger the teacher takes the cycle over. The
+triggers and the teacher read the truth, as the expert of a DAgger corpus does; no decision of
+the policy's own cycles does. A rig built with ``perceivers`` (the recorder's MS7c rows) is
+handed the loop's perception, so a takeover records the row and marker point the episode's
+perception reports, as the teacher corpora do. A takeover that stows ends its cycle
+``placed``: the rig's release ends the hold while the loop does not grade, so the detector's
+lost hold never reaches the perceived cycle end. Its pre-selection is dropped, and the loop
+selects on the perceived scene.
+
 Two MS7f switches (MS7f design section 6), off by default. ``classifier`` (a
 ``perception.PartClassifier``, under ``perceived``) replaces the class stand-in in each view of the
 MS7d vote with the render-trained model on a rendered frame: the narrow overhead view of the
@@ -988,7 +998,8 @@ class Cycle:
     takeover: int = 0  # the rig's takeover ordinal while the rig holds this cycle, else 0
     # "takeover_failed" or "takeover_declined": the rig's answer ends the cycle as a failure
     # (phase B design 5.5), after the stowed rule had its chance. A decline while the jaws
-    # hold a part is not an answer: the cycle runs on (``_take_over``).
+    # hold a part is not an answer: the cycle runs on (``_take_over``). "placed": a perceived
+    # takeover that stowed (the wave 3 DAgger mode).
     takeover_end: str | None = None
     taken_over: bool = False  # one takeover per loop cycle (phase B design 5.5)
     start_z: torch.Tensor | None = None  # (k,) part heights when the cycle opened, for the lift
@@ -1927,8 +1938,8 @@ def rollout(
     ``perceived`` is the MS7c boundary of the module docstring, with ``noise_scales`` the
     ``perception.parse_scales`` knob scales (None: nominal) and ``contact_hold`` the stop
     flag's contact fallback. It needs a policy, desk boxes, the continuous gripper and a served
-    target row, and refuses the switches that read the truth (``takeover``,
-    ``scripted_place``, ``row_refresh``).
+    target row, and refuses the switches that read the truth (``scripted_place``,
+    ``row_refresh``); ``takeover`` under it is the wave 3 DAgger mode of the module docstring.
     The nine MS7d switches are the module docstring's; all but ``hold_force`` and
     ``force_cap`` need ``perceived``. Those two need the env's ``arm_torques``, and a
     ``hold_trace`` row then carries the force too.
@@ -2059,7 +2070,6 @@ def rollout(
                 "perceived", "needs desk boxes, the continuous gripper and a served target row"
             )
         for name, on in (
-            ("takeover", takeover is not None),
             ("scripted_place", scripted_place),
             ("row_refresh", row_refresh),
         ):
@@ -2140,6 +2150,7 @@ def rollout(
                 f"the selector spends {st.selector.cycle_budget} cycles, the loop {cycle_budget}",
             )
     scales = {**perception.parse_scales(""), **(noise_scales or {})}  # a knob not named is 1
+    wave3 = perceived and takeover is not None  # MS7f wave 3, the module docstring's DAgger mode
     sensors = None  # MS7d L6 and L7: one pick-point force sensor per env
     if hold_force or force_cap:
         if getattr(env, "arm_torques", None) is None:
@@ -2158,6 +2169,8 @@ def rollout(
         for i, st in enumerate(states):
             st.perceiver = perception.Perceiver(run_seed, i, scales, class_names)
             st.perceiver.reset_episode(poses[i], env.desk_box_sizes[i] if drawn else ())
+            if wave3 and getattr(rig, "perceivers", None) is not None:
+                rig.perceivers[i] = st.perceiver  # a takeover records this perception
             if marker_bias:
                 st.marker = perception.MarkerBias(st.perceiver, run_seed, i)
             if class_views:
@@ -2890,7 +2903,7 @@ def rollout(
                 continue
             st = states[i]
             orc = rig.oracles[i]
-            if getattr(orc, "next_brick", None) is not None:
+            if getattr(orc, "next_brick", None) is not None and not wave3:
                 st.preselected = (
                     orc.next_brick,
                     orc.next_brick_start,
@@ -2899,6 +2912,8 @@ def rollout(
                 )
             if result:
                 st.takeovers_stowed += 1
+                if wave3 and st.cycle is not None:
+                    st.cycle.takeover_end = "placed"  # the rig released over its box
             else:
                 st.takeovers_failed += 1
                 if recorder is not None:
