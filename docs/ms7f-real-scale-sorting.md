@@ -1,7 +1,7 @@
 # MS7f: real-scale sorting in simulation
 
 Date: 2026-10-02. Status: draft. The campaign still runs. This draft uses the ledger up to its entry
-of 06:41 on 2026-10-02. A line that starts with `TBD:` waits for a read or a decision that had no
+of 10:00 on 2026-10-02. A line that starts with `TBD:` waits for a read or a decision that had no
 number at that time. The controller fills those lines.
 
 The design of MS7f is the document that the owner reviewed and approved in chat on 2026-09-30. This
@@ -11,15 +11,15 @@ below went into that ledger before its number. The measurement tables are under
 `~/data/maker-arm-ms7/f/tables/`. Each read has a TAG, its name. The read payloads are under
 `~/data/maker-arm-ms7/reads/<TAG>/`. Every MS7f TAG starts with `f_`.
 
-The ledger names its rules R1 to R15 and its deviations D1 to D19. The design names its decisions F1
+The ledger names its rules R1 to R15 and its deviations D1 to D20. The design names its decisions F1
 to F10. The tracks are H (the heap), C (the classifier), P (the part families) and S (the speed).
-The retrains are F1, F2 and F3, and their checkpoints are written as "F1 100k". The ledger calls
-retrain F3 "retrain 3". This report writes "rule R4", "decision F6" and "retrain F1" to keep them
-apart.
+The retrains are F1, F2, F3 and the pre-registered F4, and their checkpoints are written as "F1
+100k". The ledger calls retrain F3 "retrain 3" and retrain F4 "retrain 4". This report writes "rule
+R4", "decision F6" and "retrain F1" to keep them apart.
 
 All times are PDT. Each time is the time of the ledger entry that records the event. Times from
 10:13 to 23:47 are on 2026-09-30. Times after the first midnight, up to the entry of 23:26, are on
-2026-10-01. The entries after the second midnight, from 00:52 to 06:41, are on 2026-10-02.
+2026-10-01. The entries after the second midnight, from 00:52 to 10:00, are on 2026-10-02.
 
 Numbers come from the ledger or from the files that it names. This report also computes some values
 from the ledger's counts: fractions, rates an hour and Wilson intervals that the ledger does not
@@ -111,21 +111,34 @@ The results so far:
 - The stretch run r = 0 (D15), report-only, serves 1000 of 1000 parts with candidate 2's flags and
   the tray refill. It stows 801 correctly at 259.9 an hour, with 85 interventions per 1000 parts.
 - Deviation D19 (06:40), an owner decision, moves the gate scene to the refilled deep tray,
-  `--deep_tray --tray_refill`. The bars stay D12's. Candidate 3's checked read in this scene and the
-  screens of retrain F3 run.
+  `--deep_tray --tray_refill`. The bars stay D12's.
+- Candidate 3's checked read in the refill scene stows 2297 of 3000, 0.766, at 204.7 correct stows
+  an hour, with a held-out row of 0.735. It passes the staged rate bar and fails the share and
+  held-out bars.
+- Classifier v9e, the mean of the logits of v6a and v8 with nothing trained, passes its
+  pre-registered C1 bar at 0.9235 on the deep-tray set. Its paired screen in the refill scene reads
+  474 of 600, at the adoption bar exactly, so v9e serves every later read.
+- Retrain F3 ends at 200k steps. Its four screens in the refill scene read 477 to 498 of 600 against
+  the pair's 468. Candidate 4 is F3 150k, served with v9e.
+- Candidate 4's checked read in the refill scene stows 2467 of 3000, 0.822, at 300.0 correct stows
+  an hour, with a held-out row of 0.786. It passes the staged rate bar and fails the share bar by 83
+  correct stows and the held-out bar by 11 parts. It is the best checked read so far.
+- Wave 4, the DAgger lever in the refill scene with candidate 4 driving, records for retrain F4.
+  Deviation D20 screens three loop switches on candidate 4, because candidate 4 has rate to spare.
+  Neither has a number yet.
 - The code branches are draft PRs #154 to #163, #165 and #166 in GitHub stack #164, 12 PRs, and CI
   passes on all of them.
 
 The decomposition of section 10 answers where the parts and the hours go:
 
-- The parts. On candidate 3's checked read, 2181 of 3000 parts stow correctly. The classifier's
-  `wrong_box` cycles put 256 in a wrong box, and 214 more reach a wrong box without a cycle of their
-  own. 309 end outside every box. The staged bar needs 369 more correct stows.
-- The hours. The stowed cycles hold 0.352 of candidate 3's steps and `close_miss` 0.340, the largest
-  sink. A stowed cycle takes 230 steps, 7.7 s, inside the 12 s of the stretch rate.
-- The pace. Candidate 3 spends 1,242,893 steps, 10 % under the 1,377,000 that 2550 correct stows at
-  200 an hour allow. So on candidate 3 the share bar binds: 2550 correct stows at the same steps
-  read 221.6 an hour.
+- The parts. On candidate 4's checked read, 2467 of 3000 parts stow correctly. 376 end in a wrong
+  box, 194 of them from the classifier's `wrong_box` cycles, and 157 end outside every box. The
+  staged bar needs 83 more correct stows, and the wrong boxes now hold most of the misses.
+- The hours. The stowed cycles hold 0.492 of candidate 4's steps and `close_miss` 0.254, still the
+  largest sink. A stowed cycle takes 196 steps, 6.5 s, inside the 12 s of the stretch rate.
+- The pace. Candidate 4 spends 888,218 steps, 35 % under the 1,377,000 that 2550 correct stows at
+  200 an hour allow. That is also 11 % under the 993,600 of the stretch row. So the share bar binds
+  on both rows: 2550 correct stows at the same steps read 310.1 an hour.
 - The teacher. The wave teacher delivers a part every 13.91 to 16.23 s, 222 to 259 an hour, over the
   staged 200 and under the stretch 300.
 
@@ -139,7 +152,9 @@ comparison only:
 | candidate 1, checked | F1 100k | 03a5cd8, v6a, X = 1.5 | 2043 of 3000, 0.681 | 140.9 | 471 of 785, 0.600 | FAIL on all three | FAIL on all three |
 | candidate 2, checked | F2 150k | 496f857, v6a, X = 1.5, `--missed_lift` | 2065 of 3000, 0.688 | 189.1 | 508 of 785, 0.647 | FAIL on all three | FAIL on all three |
 | candidate 3, checked | F2 150k | bcbbe02, v6a, X = 1.5, `--missed_lift --cell_failure_cap 5` | 2181 of 3000, 0.727 | 189.5 | 523 of 785, 0.666 | FAIL on all three | FAIL on all three |
-| candidate 3, checked, refill scene (D19) | F2 150k | bcbbe02, v6a, X = 1.5, `--missed_lift --cell_failure_cap 5 --tray_refill` | TBD | TBD | TBD | TBD | TBD |
+| candidate 3, checked, refill scene (D19) | F2 150k | bcbbe02, v6a, X = 1.5, `--missed_lift --cell_failure_cap 5 --tray_refill` | 2297 of 3000, 0.766 | 204.7 | 577 of 785, 0.735 | FAIL on the share and the held-out row, PASS on the rate | FAIL on all three |
+| candidate 4, checked, refill scene | F3 150k | bcbbe02, v9e, X = 1.5, `--missed_lift --cell_failure_cap 5 --tray_refill` | 2467 of 3000, 0.822 | 300.0 | 617 of 785, 0.786 | FAIL on the share and the held-out row, PASS on the rate | FAIL on the share and the held-out row. The ledger reads the rate as met, and the payload gives 299.97. |
+| candidate 4' or candidate 5, checked, refill scene | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 | official | | | | | | runs only on the first checked read in the refill scene that passes the staged bars (D12, D19) | |
 | control | train_E2 150k | d6f893d, v5, X = 1.0, aarch64 | 768 of 1050, 0.731 | 151.3 | 180 of 263, 0.684 | no bar, under all three | no bar, under all three |
 
@@ -156,8 +171,14 @@ Since deviation D19 (06:40), the gate scene is the refilled deep tray, and the f
 stay in this report as the harder row. The official read runs on the first checked read in the
 refill scene that passes the staged bars (section 9.18).
 
-TBD: the outcome in the refill scene of D19: f_F3R_chk's verdict and, on a pass of a checked read
-there, the official read's outcome.
+The outcome in the refill scene so far. Candidate 3 stows 2297 of 3000 at 204.7 an hour, and
+candidate 4 2467 at 300.0, against 2550 and 200. Their held-out rows read 0.735 and 0.786 against
+0.80. Both pass the staged rate bar and fail the share and held-out bars, so no official read runs
+yet. Candidate 4 is 83 correct stows and 11 held-out parts short. Two levers are still open: the D20
+switches and retrain F4 on wave 4 (sections 9.19 and 9.20).
+
+TBD: the outcome in the refill scene after D20 and wave 4, and the official read's outcome on a pass
+of a checked read there.
 
 ## 1. The goal, the decisions and the rules
 
@@ -234,7 +255,7 @@ D12 also fixes three consequences:
 | read | policy | seed and size | staged bars (D12) | stretch row |
 | --- | --- | --- | --- | --- |
 | screen | each retrain checkpoint | 20307000, draws 0 to 3, 4 heaps of 150, 600 parts | none, picks the candidate (rule R11) | none |
-| checked | candidate 1, candidate 2 on the retrain trigger, candidate 3 on a D16 adoption | 20307100, draws 0 to 19, 3000 parts | at least 2550 correct stows, at least 200 an hour, held-out row at least 0.80 | 2760, 300 an hour, 0.85 |
+| checked | candidate 1, candidate 2 on the retrain trigger, candidate 3 on a D16 adoption, candidates 3 and 4 in the refill scene (D19) | 20307100, draws 0 to 19, 3000 parts | at least 2550 correct stows, at least 200 an hour, held-out row at least 0.80 | 2760, 300 an hour, 0.85 |
 | official | the first candidate whose checked read passes the staged bars, in the refill scene since D19 | 20307200, 40 heaps, 6000 parts, one shot | at least 5100 correct stows, at least 200 an hour, held-out row at least 0.80 | 5520, 300 an hour, 0.85 |
 | control | train_E2 150k, no retrain | 20307300, draws 0 to 6, 1050 parts | none, reported | none |
 | stretch runs | the official candidate | run 20307400 + r, layout 20307450 + r, r = 0 and 1, 1000 parts each | none | reported against 0.95, 400 an hour, 1000 parts, 5 interventions |
@@ -290,18 +311,20 @@ Rule R1 fixes every seed before its use. No MS7f seed lies in an MS7e range. The
 | wave 1 | run 20304000 + p, layout 20304100 + p |
 | wave 2 | run 20305000 + p, layout 20305100 + p |
 | wave 3, DAgger (D17) | run 20308000 + p, layout 20308100 + p, train split |
+| wave 4, DAgger in the refill scene | run 20308200 + p, layout 20308300 + p, p = 0 to 89, train split |
 | teacher reference read | run 20306000 + i, layout 20306050 + i, i = 0 to 5 |
 | screens, checked, official, control | 20307000, 20307100, 20307200, 20307300 |
 | stretch runs | run 20307400 + r, layout 20307450 + r, r = 0 and 1 |
 
-Rule R1 grew four times, each time before any use. At 17:42 it added a render extension range for
+Rule R1 grew five times, each time before any use. At 17:42 it added a render extension range for
 the classifier: run 20310000 + i, i = 0 to 999. The range covers train kinds and the D4 extra kinds
 only. At 03:21 the range grew to i = 0 to 1999, and i = 1000 to 1999 went to model v6. At 15:41 it
 added the seeds of classifier v7: deep-tray render heaps on run 20311200 + i, i = 0 to 799, train
 kinds and D4 extras only. A deep-tray C1 read set of every kind uses run 20312000 + i, i = 0 to 99.
 At 21:34 deviation D17 added the seeds of classifier v8. Its deep-tray render heaps run 20311200 + i
 for i = 12 to 399 and 424 to 799, train kinds and D4 extras. The deep-tray C1 set grows with run
-20312000 + i, i = 24 to 99.
+20312000 + i, i = 24 to 99. At 08:32 the wave 4 pre-registration gave both ranges of p = 0 to 89 to
+wave 4.
 
 ### 1.6 The rules that carry over and the hosts
 
@@ -315,8 +338,8 @@ Rule R15 keeps `scripts/fleet.py` and `~/data/maker-arm-ms7/hosts.json`, with tr
 
 | host | hardware | MS7f work |
 | --- | --- | --- |
-| Machine A | 24 cores, RTX 5090 | the controller and the ledger, the P tables, the classifier training, the three retrains, read lanes, half of wave 1, half of wave 3 |
-| Machine B | 24 cores, RTX 5080 | read lanes (half of candidate 1's checked read, the D11, D13 and D14 screens), half of wave 1, most of wave 2. Half of wave 3, the D18 PGS screen and v8 renders. |
+| Machine A | 24 cores, RTX 5090 | the controller and the ledger, the P tables, the classifier training, the three retrains, read lanes. Half of wave 1, half of waves 3 and 4. |
+| Machine B | 24 cores, RTX 5080 | read lanes (half of candidate 1's checked read, the D11, D13 and D14 screens), half of wave 1, most of wave 2. Half of waves 3 and 4, the D18 PGS screen, the refill-scene pair screens and v8 renders. |
 | Machine C | 128 cores, A2000 12 GB | the night render set, the S0 teacher census, 12 processes of wave 2, the wave 2 conversions, the control read, the F2 screens |
 
 Machine C runs at most 40 camera processes in all. The Thor runs MS5 and is not used.
@@ -881,6 +904,58 @@ row and the deep-tray rows of held-out, brick, special and joint. The other cell
 Like v7, the deep data moves the line between plain bricks and the brick-like specials instead of
 sharpening it. At the lift on the old set, the bricks read as special grow from 85 to 160. The
 ledger's reading: the classifier's capacity, not its scene, now limits it.
+
+### 5.10 Classifier v9e, an ensemble of v6a and v8
+
+The ledger pre-registered v9e at 07:22, with no v9e number in existence. It came after the interim
+look of 07:22 at the refill-scene reads (section 9.18), which the ledger disclosed first. v9e is the
+trainer's `--ensemble` of model v6a and model v8: the mean of their logits, with no flip. It comes
+from the v8 worktree at 0323927, and nothing is trained. The reason: on the deep-tray C1 set, v8
+lifts special from 0.726 to 0.879, and v6a holds brick at 0.926 against 0.888. So their errors
+differ.
+
+The C1 bar reads `loop_sum` on the CPU as served, on all 62 deep-tray heaps and the old 72:
+
+- On the deep-tray set, the whole row is at least v6a's plus 0.01.
+- On the deep-tray set, no category reads more than 0.03 under v6a's, and the held-out row does not
+  read under v6a's.
+- On the old set, the whole row is at least 0.939 minus 0.01.
+
+On a C1 pass, a paired screen f_M_cap5_v9e_R_scr follows in the refill scene. It uses candidate 3's
+flags, seed 20307000, draws 0 to 3, model v9e and the host of its pair f_M_cap5_R_scr. v9e is
+adopted for every later read on two conditions: at least the pair's correct stows plus 6, and at
+least 0.97 of the pair's correct stows an hour. A miss of C1 or of the screen ends the classifier
+track, and v6a stays. The output is `tables/cls/model_v9e`.
+
+The C1 verdict came at 07:58 (`tables/cls/model_v9e/bar.txt`, read on the CPU):
+
+| row | v6a, deep tray | v9e, deep tray | v6a, old C1 72 heaps | v9e, old C1 72 heaps |
+| --- | --- | --- | --- | --- |
+| `loop_sum`, all | 841 of 928, 0.906 | 857 of 928, 0.9235 | 2629 of 2799, 0.939 | 2628 of 2799, 0.939 |
+| wrist at the lift | 873 of 1036, 0.843 | 882 of 1036, 0.851 | 2838 of 3147, 0.902 | 2869 of 3147, 0.912 |
+| held-out | 173 of 207, 0.836 | 173 of 207, 0.836 | 579 of 664, 0.872 | 584 of 664, 0.880 |
+| brick | 0.926 | 0.921 | 0.931 | 0.906 |
+| special | 114 of 157, 0.726 | 131 of 157, 0.834 | 0.883 | 0.918 |
+| flat, round, joint | 1.000 | 1.000 | | |
+| minifig | 44 of 46 | 46 of 46 | 0.989 | 1.000 |
+
+The deep-tray row gains 0.017 against the bar's 0.01. Brick falls by 0.005 on the deep-tray set,
+inside the 0.03 margin, and the held-out row stays equal. The old set reads 0.939 against a bar of
+0.929. So v9e passes every check of its bar (V9E_BAR PASS). The deep-tray wrist row and the old
+set's flat, round and joint rows come from `bar.txt`.
+
+The paired screen started on `b_fr6:4` at `PORT_BASE` 17000 and ended at 08:31. Both reads serve
+F2 150k with candidate 3's flags in the refill scene:
+
+| screen | classifier | correct stows | Wilson 95 % | cycles | steps | correct stows an hour | held-out row | wrong-box parts, `wrong_box` cycles | brick | special |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| f_M_cap5_R_scr, the pair | v6a | 468 of 600, 0.780 | 0.745 to 0.811 | 768 | 244,178 | 207.0 | 111 of 151 | 75, 45 | 168 of 202 | 109 of 148 |
+| f_M_cap5_v9e_R_scr | v9e | 474 of 600, 0.790 | 0.756 to 0.821 | 767 | 237,919 | 215.2 | 104 of 151 | 69, 39 | 161 of 202 | 116 of 148 |
+
+The rule asks for at least 474 correct stows and at least 200.8 an hour. v9e reads 474 at 215.2, so
+it is adopted at the bar exactly, +6 (08:31). It serves every later read, and candidate 4's checked
+read reads with it. Its held-out row reads 104 of 151 against the pair's 111. The rule does not test
+that row.
 
 ## 6. Track S: the speed
 
@@ -1678,7 +1753,8 @@ stows, at least 200 correct stows an hour and a held-out row of at least 0.80. T
 run, and the milestone fails. Candidates 1, 2 and 3 fail the staged bars on the full pile, so no
 official read runs in that scene. Since D19 (06:40), the official read runs in the refill scene,
 through `read_f2.sh`. It reads the first checked read in that scene that passes the staged bars
-(section 9.18).
+(section 9.18). Candidates 3 and 4 fail the staged share and held-out bars in the refill scene, so
+no official read runs yet.
 
 ### 9.13 The stretch runs: deviation D15
 
@@ -1856,9 +1932,10 @@ checkpoints against candidate 3 on seed 20307000, draws 0 to 3. The best one wit
 conversions on both hosts, the merge, retrain F3 and the screens f_screens_F3 of F3 50k to 200k with
 candidate 3's flags. They pair with f_M_cap5_scr, so candidate 4 needs at least 441 correct stows.
 
-Retrain F3 runs since 06:40 (job f_dag_after_w3_a). Its corpus f/w123/dataset holds 13,665
+Retrain F3 started at 06:40 (job f_dag_after_w3_a). Its corpus f/w123/dataset holds 13,665
 episodes and 5,110,772 frames, with CHECK_OK 235 videos (section 8.4). D19 moved its screens to the
-refill scene before the full-pile chain f_screens_F3 read anything (section 9.18).
+refill scene before the full-pile chain f_screens_F3 read anything (section 9.18). Retrain F3 ended
+at 08:26 with TRAIN_OK, 200,000 steps and the checkpoints 50k to 200k.
 
 ### 9.18 The refill scene: deviation D19
 
@@ -1875,26 +1952,216 @@ pre-registered four reads at 06:40, before any number in the new scene:
 4. The official read runs in this scene on the first checked read there that passes: seed 20307200,
    40 heaps, one shot, `read_f2.sh`.
 
-f_F3R_chk and f_M_cap5_R_scr run since 06:41. Job f_screens_F3R (`bin/screens_F3R.sh`, a user
+f_F3R_chk and f_M_cap5_R_scr started at 06:41. Job f_screens_F3R (`bin/screens_F3R.sh`, a user
 systemd unit) screens each F3 checkpoint, 50k to 200k, in the refill scene on Machine A. Its TAGs
-are f_F3_<step>_R_scr, on `PORT_BASE` 14400 to 14700, against f_M_cap5_R_scr. No read in the new
-scene has a number yet.
+are f_F3_<step>_R_scr, on `PORT_BASE` 14400 to 14700, against f_M_cap5_R_scr. Each screen serves its
+checkpoint with candidate 3's flags and model v6a.
 
-TBD: f_F3R_chk, candidate 3's checked read in the refill scene, against the staged bars and the
-stretch row.
+The interim look (07:22). The ledger disclosed it as not a verdict, before the next rule, the v9e
+pre-registration of section 5.10. Machine B's 8 finished heaps of f_F3R_chk read 987 of 1200, 0.823, at
+253.7 an hour, with 134 wrong-box parts. That is 0.112 of the parts, the largest loss in the refill
+scene. The 3 finished heaps of f_M_cap5_R_scr read 344 of 450.
 
-TBD: f_M_cap5_R_scr, candidate 3's screen in the refill scene, the base of the F3 screens.
+The pair f_M_cap5_R_scr ended at 07:24: 468 of 600 at 207.0 an hour (section 5.10). So D17's bar for
+retrain F3's screens is at least 474 correct stows. The screens of retrain F3 in the refill scene,
+all on `a_fr6l:4`:
 
-TBD: f_screens_F3R, retrain F3's screens in the refill scene, and candidate 4 by D17's rule.
+| screen | checkpoint | correct stows | Wilson 95 % | cycles | steps | correct stows an hour | held-out row |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| f_M_cap5_R_scr, the pair | F2 150k | 468 of 600, 0.780 | 0.745 to 0.811 | 768 | 244,178 | 207.0 | 111 of 151, 0.735 |
+| f_F3_050000_R_scr | F3 50k | 488 of 600, 0.813 | 0.780 to 0.842 | 752 | 224,859 | 234.4 | 108 of 151, 0.715 |
+| f_F3_100000_R_scr | F3 100k | 482 of 600, 0.803 | 0.770 to 0.833 | 722 | 191,598 | 271.7 | 119 of 151, 0.788 |
+| f_F3_150000_R_scr | F3 150k | 498 of 600, 0.830 | 0.798 to 0.858 | 707 | 185,258 | 290.3 | 116 of 151, 0.768 |
+| f_F3_200000_R_scr | F3 200k | 477 of 600, 0.795 | 0.761 to 0.825 | 707 | 192,195 | 268.0 | 116 of 151, 0.768 |
+
+Every F3 checkpoint passes D17's 474. F3 150k reads the most, 30 over the pair, at 1.40 times the
+pair's rate.
+
+Candidate 3's checked read in the refill scene is f_F3R_chk. It ran from 06:41 to 07:52 on Machine A
+draws 0 to 9 and Machine B draws 10 to 19. The ledger recorded it at 07:53:
+
+| item | value |
+| --- | --- |
+| TAG | f_F3R_chk |
+| checkpoint | F2 150k, candidate 3 |
+| commit, classifier, switches | bcbbe02, v6a, `--action_warp 1.5 --missed_lift --cell_failure_cap 5 --tray_refill` |
+| correct stows of 3000 | 2297, 0.766 |
+| Wilson 95 % | 0.750 to 0.780 |
+| cycles | 3729 |
+| steps | 1,211,739 |
+| correct stows an hour | 204.7 |
+| held-out row | 577 of 785, 0.735, Wilson 0.703 to 0.765 |
+| wrong-box parts | 375, from 244 `wrong_box` cycles |
+| unboxed parts | 328 |
+| cycles per correct stow, no bar | 1.623 |
+| events | 57 refills, 15 box emptyings |
+| supervisor token | GATE_FAIL at the staged bars |
+| staged bars (D12) | FAIL on the share, 2297 against 2550, and on the held-out row, 0.735 against 0.80. PASS on the rate, 204.7 against 200. |
+| stretch row | FAIL on all three: 2297 against 2760, 204.7 against 300, 0.735 against 0.85 |
+
+By category: brick 860 of 1063, special 467 of 645, flat 310 of 419, round 169 of 199, joint 252 of
+378 and minifig 239 of 296. This report computes the fractions of the rows by family and by box
+count from `gate_results.json`:
+
+| family | brick | slope | round | LDraw | plate | tile | joint | minifig |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| correct stows | 860/1063 | 205/284 | 169/199 | 262/361 | 192/256 | 118/163 | 252/378 | 239/296 |
+| fraction | 0.809 | 0.722 | 0.849 | 0.726 | 0.750 | 0.724 | 0.667 | 0.807 |
+
+| boxes | 4 | 5 | 6 | 7 | 8 |
+| --- | --- | --- | --- | --- | --- |
+| correct stows | 126/150 | 574/750 | 608/750 | 558/750 | 431/600 |
+| fraction | 0.840 | 0.765 | 0.811 | 0.744 | 0.718 |
+
+The clamp fraction is 0.0059. The ledger names heaps 0, 5 and 19 as ending on the 195-cycle budget,
+at 97, 81 and 86 correct stows. Heaps 5 and 19 take about 94k steps each. The ledger counts 13 of
+the 20 heaps as ending no_candidate. The payloads give a larger count: 8 heaps end on the cycle
+budget (0, 2, 3, 4, 5, 7, 14 and 19), and 12 end no_candidate.
+
+The verdict (07:53): f_F3R_chk fails the staged share bar and the held-out bar, passes the rate bar,
+and fails the stretch row. No official read runs. Against candidate 3 on the full pile (0.727 at
+189.5), the refill scene adds 116 correct stows and 15.2 an hour.
+
+The pick of candidate 4 was pre-registered at 08:00. That was after the F3 50k screen and f_F3R_chk,
+and before any number of the 100k to 200k screens or of the v9e screen. Job f_chk_F4R
+(`bin/chk_F4R.sh`, a user systemd unit) waits for the four F3 refill screens and f_M_cap5_v9e_R_scr:
+
+- The checkpoint: the F3 refill screen with the most correct stows. It needs at least 474 (D17
+  against f_M_cap5_R_scr), or else candidate 3's F2 150k stays.
+- The classifier: model v9e on a screen of at least 474 correct stows and 200.8 an hour. Else model
+  v6a.
+- If neither lever moves, nothing is read, because f_F3R_chk is that read. Otherwise the read is TAG
+  f_F4R_chk: seed 20307100, draws 0 to 19, the refill scene, candidate 3's flags, `read_f2.sh`,
+  7f-r6, `a_fr6l:10` and `b_fr6:10`, `PORT_BASE` 15800.
+- A pass starts item 4 of D19, the official read.
+
+At 09:00 the rule gave candidate 4 = F3 150k, served with v9e. The two levers come from two
+different screens: F3 150k read with v6a, and v9e read on F2 150k. No screen served F3 150k with v9e
+before the checked read.
+
+Candidate 4's checked read f_F4R_chk ran from 09:01 to 09:58 on Machine A draws 0 to 9 and Machine B draws
+10 to 19. The ledger recorded it at 09:59:
+
+| item | value |
+| --- | --- |
+| TAG | f_F4R_chk |
+| checkpoint | F3 150k, candidate 4 |
+| commit, classifier, switches | bcbbe02, v9e, `--action_warp 1.5 --missed_lift --cell_failure_cap 5 --tray_refill` |
+| correct stows of 3000 | 2467, 0.822 |
+| Wilson 95 % | 0.808 to 0.836 |
+| cycles | 3453, 1.400 a correct stow |
+| steps | 888,218 |
+| correct stows an hour | 300.0 |
+| held-out row | 617 of 785, 0.786, Wilson 0.756 to 0.813 |
+| wrong-box parts | 376, from 231 `wrong_box` cycles |
+| unboxed parts | 157 |
+| events | 60 refills, 16 box emptyings |
+| supervisor token | GATE_FAIL at the staged bars |
+| staged bars (D12) | FAIL on the share, 2467 against 2550, 83 short, and on the held-out row, 0.786 against 0.80, 11 parts short. PASS on the rate, 300.0 against 200. |
+| stretch row | FAIL on the share, 2467 against 2760, and on the held-out row, 0.786 against 0.85. The ledger reads the rate as met at 300.0. |
+
+The payload's rate is 299.97 correct stows an hour, 0.03 under 300. The ledger rounds it to 300.0
+and reads it as meeting the stretch rate.
+
+By category: brick 872 of 1063, special 517 of 645, flat 340 of 419, round 176 of 199, joint 299 of
+378 and minifig 263 of 296. This report computes the fractions of the rows by family and by box
+count:
+
+| family | brick | slope | round | LDraw | plate | tile | joint | minifig |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| correct stows | 872/1063 | 227/284 | 176/199 | 290/361 | 210/256 | 130/163 | 299/378 | 263/296 |
+| fraction | 0.820 | 0.799 | 0.884 | 0.803 | 0.820 | 0.798 | 0.791 | 0.889 |
+
+| boxes | 4 | 5 | 6 | 7 | 8 |
+| --- | --- | --- | --- | --- | --- |
+| correct stows | 125/150 | 604/750 | 620/750 | 609/750 | 509/600 |
+| fraction | 0.833 | 0.805 | 0.827 | 0.812 | 0.848 |
+
+The clamp fraction is 0.0031. 19 of the 20 heaps end no_candidate, and heap 3 ends on the 195-cycle
+budget at 125 correct stows.
+
+The verdict (09:59): f_F4R_chk fails the staged share bar (0.85, 83 correct stows short) and the
+held-out bar (0.80, 11 short). It passes the rate bar (200) and meets the stretch rate (300). No
+official read runs. Against candidate 3 in this scene, candidate 4 gains 170 correct stows and 95.3
+an hour. The unboxed parts fall from 328 to 157, and the wrong-box parts stay at 375 and 376. Every
+category gains, and special gains the most, from 467 to 517 of 645.
 
 TBD: the official read in the refill scene, on the first checked read there that passes the staged
 bars.
 
+### 9.19 Wave 4 and retrain F4
+
+The ledger pre-registered wave 4 at 08:32, with no F4 number in existence. It is the D17 DAgger
+lever once more, now in the D19 gate scene:
+
+- The driver is candidate 4 as f_chk_F4R picks it, checkpoint and classifier. On CHK_NONE it is
+  candidate 3 with v6a. The driver is written to `f/w4/driver.txt`.
+- The recorder is wave 3's. `tables/dag/bin/wave4_host.sh` is `wave3_host.sh` plus `--tray_refill`,
+  from `feat/ms7f-dagger` 6abc2c4. It records the train split on 150-part heaps, run 20308200 + p
+  and layout 20308300 + p (rule R1 amended, section 1.5).
+- Machine A records p 0 to 44 on 6 lanes, and Machine B p 45 to 89 on 10 lanes, 5 h each, next to
+  f_F4R_chk.
+- The conversion follows wave 3. Retrain F4 joins f/w123/dataset and both wave 4 halves into
+  f/w1234/dataset and trains 200k steps warm from the driver, OUT f/train_F4.
+- The screens read each F4 checkpoint, 50k to 200k, in the refill scene. They use seed 20307000,
+  draws 0 to 3, and candidate 4's flags and classifier. They pair with candidate 4's own served
+  configuration on the same seed. If no such screen exists, the pair runs with them.
+- Candidate 5 is the best F4 screen with at least the pair's correct stows plus 6. Its checked read
+  (seed 20307100, draws 0 to 19, the refill scene) runs only on a failure of f_F4R_chk.
+- A smoke on Machine B runs first: K = 50, 30 cycles, F2 150k, out `f/w4/smoke`.
+
+The smoke passed at 09:00 on Machine B with F2 150k and v6a: EVAL_OK, 18 takeovers (16 stowed), 20 parts
+stowed, WAVE4_OK. At K = 50 the tray holds every part, so no refill fired.
+
+Wave 4 started at 09:05 with the driver of `f/w4/driver.txt`, candidate 4: F3 150k and model v9e.
+Machine B's first share on 10 lanes failed every heap within 25 s on CUBLAS_STATUS_ALLOC_FAILED. The 10
+policy servers of f_F4R_chk held 9 GB of the RTX 5080's 16 GB, so 10 more did not fit. The share was
+stopped, and its 64 empty files moved to `f/w4/failed_0903`. No heap had recorded anything. It
+relaunched on 5 lanes with the same job name, p 45 to 89, 5 h. Machine A's share runs on 6 lanes, p
+0 to 44. The ledger records this as a deviation from the pre-registered lane counts only, and its
+09:05 entry dates those counts 08:45.
+
+TBD: wave 4's recording on both hosts, its takeovers and its conversion.
+
+TBD: retrain F4 (f/train_F4 on f/w1234/dataset), its refill-scene screens against candidate 4's
+pair, and candidate 5 by the rule of 08:32.
+
+### 9.20 Three loop switches on candidate 4: deviation D20
+
+Deviation D20 (10:00) was pre-registered before any D20 number. Candidate 4 has rate to spare, 300.0
+an hour against the staged 200. D9 and D14 turned down two levers for their rate cost. So those two
+get one more screen in the D19 scene, and D16's carry votes join them. Every screen serves candidate
+4's configuration: F3 150k, model v9e, `--action_warp 1.5 --missed_lift --cell_failure_cap 5
+--tray_refill`. Each reads seed 20307000, draws 0 to 3, through `read_f.sh` in 7f-r6 (bcbbe02), on 4
+lanes:
+
+| screen | host | switches |
+| --- | --- | --- |
+| f_F4c_R_scr, the pair and also the pair of the F4 screens | Machine A | none |
+| f_F4c_pd_R_scr | Machine A | `--passenger_drop` |
+| f_F4c_lv6_R_scr | Machine A | `--lift_view_steps 6` |
+| f_F4c_cv2_R_scr | Machine B | `--carry_votes 2` |
+| f_F4c_pdlv_R_scr | Machine B | `--passenger_drop --lift_view_steps 6` |
+
+The rule: among the four, the screen with the most correct stows is adopted on two conditions. Its
+correct stows are at least the pair's plus 6, and its correct stows an hour are at least 240. Ties
+go to the higher rate. 240 is 1.2 times the staged bar, a margin for the checked read. An adopted
+switch joins candidate 4's flags as candidate 4'. Candidate 4' then gets a checked read f_F4pR_chk
+(seed 20307100, draws 0 to 19, the refill scene, `read_f2.sh`). The switch also joins the F4 screens
+and their pair, and the pair runs again with it. If nothing is adopted, candidate 4's flags stand.
+
+TBD: the D20 screens and their verdict.
+
+TBD: the checked read of candidate 4' (f_F4pR_chk) or of candidate 5, against the staged bars and
+the stretch row.
+
 ## 10. The decomposition
 
 With no checked read that passes, rule R2 asks for the decomposition. The three checked reads on the
-full pile miss every bar of both rows. This section answers where the parts and the hours go across
-the three checked reads.
+full pile miss every bar of both rows. The two checked reads in the refill scene of D19 pass the
+staged rate and miss the share and the held-out row. This section answers where the parts and the
+hours go across the five checked reads. The columns "candidate 3, refill" and "candidate 4, refill"
+are f_F3R_chk and f_F4R_chk.
 
 ### 10.1 Where the parts go
 
@@ -1903,53 +2170,64 @@ without a `wrong_box` cycle of its own is a "rider" in the ledger's sense. Most 
 cycle's own part in a missed lift (section 9.9). An unboxed part ends outside every box: in the
 tray, on the desk or on a rim.
 
-| part | candidate 1 | candidate 2 | candidate 3 |
-| --- | --- | --- | --- |
-| correct box | 2043 | 2065 | 2181 |
-| wrong box, the classifier's `wrong_box` cycles | 291 | 264 | 256 |
-| wrong box, other `wrong_box` cycles | 27 | 43 | 40 |
-| wrong box, riders without a `wrong_box` cycle | 303 | 243 | 214 |
-| unboxed | 336 | 385 | 309 |
-| short of the staged 2550 | 507 | 485 | 369 |
-| short of the stretch 2760 | 717 | 695 | 579 |
-| held-out row, against 0.80 | 0.600 | 0.647 | 0.666 |
+| part | candidate 1 | candidate 2 | candidate 3 | candidate 3, refill | candidate 4, refill |
+| --- | --- | --- | --- | --- | --- |
+| correct box | 2043 | 2065 | 2181 | 2297 | 2467 |
+| wrong box, the classifier's `wrong_box` cycles | 291 | 264 | 256 | 207 | 194 |
+| wrong box, other `wrong_box` cycles | 27 | 43 | 40 | 37 | 37 |
+| wrong box, riders without a `wrong_box` cycle | 303 | 243 | 214 | 131 | 145 |
+| unboxed | 336 | 385 | 309 | 328 | 157 |
+| short of the staged 2550 | 507 | 485 | 369 | 253 | 83 |
+| short of the stretch 2760 | 717 | 695 | 579 | 463 | 293 |
+| held-out row, against 0.80 | 0.600 | 0.647 | 0.666 | 0.735 | 0.786 |
 
-Three facts follow:
+The ledger gives the refill reads' wrong-box parts, `wrong_box` cycles and unboxed parts. This
+report computes the classifier's share of their `wrong_box` cycles from the payloads, the same way
+as for candidates 1 to 3. On candidate 4 that split comes from model v9e.
 
-- The staged bar allows 450 misses of 3000. The classifier's `wrong_box` cycles alone take 256 to
-  291 of them, more than half. v6a reads 0.897 on deep-tray heaps against 0.939 in the normal tray
-  (section 5.8), and v7 and v8 did not close that gap (section 5.9).
+Five facts follow:
+
+- The staged bar allows 450 misses of 3000. On the full pile, the classifier's `wrong_box` cycles
+  alone take 256 to 291 of them, more than half. v6a reads 0.897 on deep-tray heaps against 0.939 in
+  the normal tray (section 5.8), and v7 and v8 did not close that gap (section 5.9). In the refill
+  scene they take 207 with v6a and 194 with v9e (section 5.10).
 - `--missed_lift` cuts the riders from 303 to 243, and candidate 3 reads 214. The riders still cost
   0.07 of the parts.
 - The unboxed parts rise from 336 to 385 on candidate 2. Its episodes end no_candidate with about 16
   parts a heap left in excluded cells. `--cell_failure_cap 5` brings the unboxed parts down to 309
   on candidate 3, and the correct stows gain 116.
+- The refill scene cuts the riders from 214 to 131 for the same policy and flags. Candidate 3 gains
+  116 correct stows there, but its unboxed parts rise from 309 to 328. 8 of its 20 heaps end on the
+  195-cycle budget.
+- Candidate 4 halves the unboxed parts, from 328 to 157, and only one heap ends on the cycle budget.
+  Its wrong-box parts stay at 376, so the wrong boxes now hold 376 of its 533 misses. The staged bar
+  needs 83 more correct stows.
 
 ### 10.2 Where the hours go
 
 The share of each read's steps by cycle outcome (11:54, 18:06 and 00:52). This report computes the
-rest:
+rest, and all of the two refill columns:
 
-| cycle outcome | candidate 1 | candidate 2 | candidate 3 |
-| --- | --- | --- | --- |
-| steps | 1,566,223 | 1,179,094 | 1,242,893 |
-| cycles | 3408 | 3627 | 3739 |
-| stowed | 0.239 | 0.363 | 0.352 |
-| `close_miss` | 0.295 | 0.336 | 0.340 |
-| `lifted_lost` | 0.194 | 0.076 | 0.073 |
-| `held_no_lift` | 0.084 | 0.085 | 0.083 |
-| `wrong_box` | 0.075 | 0.061 | 0.058 |
-| `carrying` | 0.063 | 0.039 | 0.051 |
-| `no_open` and `no_close` | 0.049 | 0.040 | 0.043 |
-| cycles that end on the 800-step budget | 1203 | 498 | 562 |
-| steps a stowed cycle | 244, 8.2 s | 235, 7.9 s | 230, 7.7 s |
-| steps a `close_miss` cycle, of them before the first close | 740, 620 | 447, 392 | 449, 406 |
-| correct stows an hour | 140.9 | 189.1 | 189.5 |
+| cycle outcome | candidate 1 | candidate 2 | candidate 3 | candidate 3, refill | candidate 4, refill |
+| --- | --- | --- | --- | --- | --- |
+| steps | 1,566,223 | 1,179,094 | 1,242,893 | 1,211,739 | 888,218 |
+| cycles | 3408 | 3627 | 3739 | 3729 | 3453 |
+| stowed | 0.239 | 0.363 | 0.352 | 0.380 | 0.492 |
+| `close_miss` | 0.295 | 0.336 | 0.340 | 0.299 | 0.254 |
+| `lifted_lost` | 0.194 | 0.076 | 0.073 | 0.066 | 0.067 |
+| `held_no_lift` | 0.084 | 0.085 | 0.083 | 0.067 | 0.071 |
+| `wrong_box` | 0.075 | 0.061 | 0.058 | 0.050 | 0.055 |
+| `carrying` | 0.063 | 0.039 | 0.051 | 0.078 | 0.031 |
+| `no_open` and `no_close` | 0.049 | 0.040 | 0.043 | 0.060 | 0.031 |
+| cycles that end on the 800-step budget | 1203 | 498 | 562 | 519 | 268 |
+| steps a stowed cycle | 244, 8.2 s | 235, 7.9 s | 230, 7.7 s | 224, 7.5 s | 196, 6.5 s |
+| steps a `close_miss` cycle, of them before the first close | 740, 620 | 447, 392 | 449, 406 | 435, 399 | 373, 327 |
+| correct stows an hour | 140.9 | 189.1 | 189.5 | 204.7 | 300.0 |
 
-The payloads give the steps a cycle and the split before the first close. Four facts follow:
+The payloads give the steps a cycle and the split before the first close. Six facts follow:
 
-- A stowed cycle takes about 8 s on every read. That is inside the 12 s of the stretch rate and the
-  18 s of the staged rate. The policy can run the cycle at the pace that the bars ask.
+- A stowed cycle takes 6.5 to 8.2 s on every read. That is inside the 12 s of the stretch rate and
+  the 18 s of the staged rate. The policy can run the cycle at the pace that the bars ask.
 - `--missed_lift` moves the time from the budget-ended cycles to the stowed ones. The budget ends
   fall from 1203 to 498, and `lifted_lost` falls from 0.194 to 0.076 of the steps.
 - `close_miss` becomes the largest sink on candidate 2, 0.336 of the steps, and stays so on
@@ -1958,16 +2236,22 @@ The payloads give the steps a cycle and the split before the first close. Four f
   in the close.
 - `--cell_failure_cap 5` buys its 116 correct stows with 112 more cycles and 63,799 more steps, so
   the rate stays at 189.5 against 189.1. The budget ends rise from 498 to 562.
+- In the refill scene, candidate 3's `close_miss` share falls from 0.340 to 0.299, and `carrying`
+  and the `no_open` and `no_close` cycles grow. The rate rises to 204.7, over the staged 200.
+- Candidate 4 spends 27 % fewer steps than candidate 3 in the same scene, 888,218 against 1,211,739,
+  for 170 more correct stows. The stowed cycles hold 0.492 of its steps, and a stowed cycle takes
+  6.5 s. `close_miss` stays the largest sink at 0.254, with 327 of its 373 steps a cycle before the
+  first close.
 
 ### 10.3 The pace arithmetic for the staged bars
 
 At 30 Hz, 200 correct stows an hour is 540 steps per correct stow, and 300 an hour is 360 steps.
 This report computes the step budgets of a 3000-part checked read:
 
-| row | correct stows | correct stows an hour | step budget | candidate 1 spent | candidate 2 spent | candidate 3 spent |
-| --- | --- | --- | --- | --- | --- | --- |
-| staged bars | 2550 | 200 | 1,377,000 | 1,566,223, 14 % over | 1,179,094, 14 % under | 1,242,893, 10 % under |
-| stretch row | 2760 | 300 | 993,600 | 58 % over | 19 % over | 25 % over |
+| row | correct stows | correct stows an hour | step budget | candidate 1 spent | candidate 2 spent | candidate 3 spent | candidate 3, refill, spent | candidate 4, refill, spent |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| staged bars | 2550 | 200 | 1,377,000 | 1,566,223, 14 % over | 1,179,094, 14 % under | 1,242,893, 10 % under | 1,211,739, 12 % under | 888,218, 35 % under |
+| stretch row | 2760 | 300 | 993,600 | 58 % over | 19 % over | 25 % over | 22 % over | 11 % under |
 
 Candidate 1 misses both bars: it needs 507 more correct stows and 12 % fewer steps. Candidate 2's
 steps already fit the staged budget. At its own 1,179,094 steps, 2550 correct stows read 233.6 an
@@ -1982,6 +2266,12 @@ The stretch row asks for more than this policy has. It needs 579 more correct st
 and 20 % fewer steps at the same time. On candidate 2 it needs 695 more and 16 % fewer. The wave
 teacher itself delivers 222 to 259 parts an hour (section 10.4).
 
+In the refill scene, candidate 3 spends 12 % under the staged budget, and 2550 correct stows at its
+steps read 227.3 an hour. Candidate 4 spends 35 % under the staged budget and 11 % under the stretch
+budget. At its own 888,218 steps, 2550 correct stows read 310.1 an hour, and 2760 read 335.6. So on
+candidate 4 only the share and the held-out row bind, on both rows. Its 2467 correct stows at 300 an
+hour ask for at most 888,120 steps, 98 fewer than it spent.
+
 ### 10.4 The throughput arithmetic
 
 The stretch rate of 300 correct stows an hour is 12.0 s, or 360 control steps at 30 Hz, per correct
@@ -1993,6 +2283,8 @@ ledger's counts. For the wave rows, the columns count delivered parts in place o
 | --- | --- | --- | --- | --- |
 | the stretch rate | | | 12.0 | 300 |
 | the staged rate (D12) | | | 18.0 | 200 |
+| candidate 4, checked read in the refill scene, F3 150k, v9e | 8.6 | 1.400 | 12.0 | 300.0 |
+| candidate 3, checked read in the refill scene | 10.8 | 1.623 | 17.6 | 204.7 |
 | stretch run r = 0, candidate 2's flags, the refill tray | 9.0 | 1.536 | 13.9 | 259.9 |
 | candidate 3, checked read, X = 1.5, `--missed_lift --cell_failure_cap 5` | 11.1 | 1.714 | 19.0 | 189.5 |
 | candidate 2, checked read, X = 1.5, `--missed_lift` | 10.8 | 1.756 | 19.0 | 189.1 |
@@ -2006,7 +2298,7 @@ ledger's counts. For the wave rows, the columns count delivered parts in place o
 | wave 2 teacher, aarch64 share | | 1.130 | 13.91 per delivered part | 259 delivered parts |
 | wave 2 teacher, Machine B share | | 1.167 | 14.81 per delivered part | 243 delivered parts |
 
-Seven facts follow from the table:
+Eight facts follow from the table:
 
 - At candidate 1's 17.0 s a cycle without the warp, even one cycle per correct stow gives 212 an
   hour. The warp shortens the cycle to about 15 s, but the cycles per correct stow rise.
@@ -2024,6 +2316,9 @@ Seven facts follow from the table:
   1.714. At 11.1 s a cycle, 200 an hour needs at most 1.62 cycles per correct stow.
 - The stretch run serves candidate 2's policy in the refill tray. There it runs 9.0 s a cycle at
   1.536 cycles per correct stow, 259.9 an hour.
+- Candidate 4 moves both factors at once in the refill scene: 8.6 s a cycle and 1.400 cycles per
+  correct stow. That gives 12.0 s per correct stow, the stretch rate. Candidate 3 in the same scene
+  reads 10.8 s and 1.623.
 
 The ledger's arithmetic of the stretch row on 600 parts (05:56): 552 correct stows at 300 an hour is
 198,720 steps, 57 % of what candidate 1's screen spent. At 311 steps a stowed cycle, that leaves
@@ -2103,6 +2398,23 @@ The picture of candidate 2 holds. `close_miss` keeps 0.340 of the steps, 406 of 
 cycle before the first close. `carrying` grows from 0.039 to 0.051 of the steps, and its cycles
 spend 732 steps between the lift and the release. 562 of the 3739 cycles end on the budget.
 
+The two checked reads in the refill scene, computed the same way from their payloads:
+
+| cycle outcome | candidate 3, refill: cycles | share of the steps | steps a cycle | intervals | candidate 4, refill: cycles | share of the steps | steps a cycle | intervals |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| stowed | 2058 | 0.380 | 224 | 136, 20, 55, 13 | 2228 | 0.492 | 196 | 121, 17, 44, 14 |
+| `close_miss` | 831 | 0.299 | 435 | 399, 28, 3, 6 | 604 | 0.254 | 373 | 327, 35, 5, 7 |
+| `held_no_lift` | 170 | 0.067 | 475 | 350, 87, 5, 34 | 129 | 0.071 | 488 | 371, 107, 2, 8 |
+| `lifted_lost` | 248 | 0.066 | 321 | 168, 56, 64, 33 | 199 | 0.067 | 297 | 146, 68, 55, 29 |
+| `wrong_box` | 244 | 0.050 | 247 | 150, 36, 47, 14 | 231 | 0.055 | 210 | 131, 29, 40, 9 |
+| `carrying` | 86 | 0.078 | 1105 | 228, 117, 715, 45 | 26 | 0.031 | 1062 | 244, 115, 702, 0 |
+| `no_open` | 48 | 0.032 | 800 | 783, 0, 0, 17 | 32 | 0.029 | 804 | 757, 22, 0, 25 |
+| `no_close` | 44 | 0.029 | 792 | 756, 30, 0, 6 | 4 | 0.002 | 472 | 459, 5, 6, 2 |
+
+On candidate 4 every outcome but `held_no_lift` and `no_open` takes fewer steps a cycle than on
+candidate 3 in the same scene. The `carrying` cycles fall from 86 to 26, and the `no_close` cycles
+from 44 to 4. 268 of its 3453 cycles end on the 800-step budget, against candidate 3's 519 of 3729.
+
 The cycle classes of 13 screen heaps, 1950 parts, every F1 screen payload but the 50k draw 3
 (04:07). This report computes the shares:
 
@@ -2148,6 +2460,13 @@ computes the other 243. So `--missed_lift` cuts the parts without a cycle of the
 `--cell_failure_cap 5`, 510 parts end in a wrong box. 296 come from `wrong_box` cycles, 256 of them
 the classifier's, and this report computes the other 214.
 
+In the refill scene, candidate 3 puts 375 parts in a wrong box, from 244 `wrong_box` cycles. This
+report computes 207 of the cycles as the classifier's and 131 parts without a cycle of their own.
+Candidate 4, with v9e, puts 376 parts in a wrong box, from 231 cycles. This report computes 194 of
+them as the classifier's and 145 parts without a cycle of their own. So the wrong boxes stay at
+0.125 of the parts in the refill scene, and the classifier's cycles take 0.065 to 0.069 of the
+parts.
+
 The `--missed_lift` study (12:54, section 9.9) changes what these "riders" are. Most of them are the
 cycle's own part in a cycle that the hold detector never read as lifted. Such a cycle gets no wrist
 read, so the overhead read sets the box. It runs to the 800-step budget with its part already boxed.
@@ -2164,9 +2483,11 @@ classifier's, 12 set by the wrist vote at the lift and 2 by the overhead read.
 This report computes one bound from candidate 1's screen. Its 425 correct stows plus its 119
 wrong-box parts make 544 of 600, 0.907. That is over the staged 0.85 and under the stretch 0.92. The
 same bound on candidate 2's checked read is 2065 plus 550, 2615 of 3000, 0.872. On candidate 3's
-checked read it is 2181 plus 510, 2691 of 3000, 0.897. The screen misses 175 parts. Wrong boxes hold
-119 of them, and the other 56 end outside every box. With the class stand-in on the MS7e 50-part
-configuration, E2 reads 0.907 (C2).
+checked read it is 2181 plus 510, 2691 of 3000, 0.897. In the refill scene it is 2672 of 3000,
+0.891, for candidate 3 and 2843, 0.948, for candidate 4. So with every boxed part in its right box,
+candidate 4 reads over the staged 0.85 and over the stretch 0.92. The screen misses 175 parts. Wrong
+boxes hold 119 of them, and the other 56 end outside every box. With the class stand-in on the MS7e
+50-part configuration, E2 reads 0.907 (C2).
 
 ### 10.7 The teacher's own share and pace
 
@@ -2315,6 +2636,17 @@ holds 12 PRs, and CI passes on both new ones.
 | 00:52 | | f_F3_chk fails all three staged bars and the stretch row. No official read runs. | 2181 of 3000, 189.5 an hour, held-out row 0.666 (D12). |
 | 06:17 | | v8 misses 3 of the 4 checks of its bar, and v6a stays. | v8 reads 0.907 on the deep-tray set against a bar of 0.936, and 0.922 on the old set against 0.929. |
 | 06:40 | D19 | Owner decision: the gate scene becomes the refilled deep tray, `--deep_tray --tray_refill`, still 150 parts a heap. The bars stay D12's staged ones, and the full-pile results stay as the harder row. The official read runs on the first checked read in this scene that passes. Retrain F3's screens move to this scene. | Decision F6's own fallback. The owner was asked at 06:35, after the stretch run. |
+| 07:22 | | An interim look at 8 heaps of f_F3R_chk and 3 of f_M_cap5_R_scr, disclosed as not a verdict before the next rule. | The ledger discloses every number seen before a rule. |
+| 07:22 | | Classifier v9e, the ensemble of v6a and v8, is pre-registered with a C1 bar and a paired refill screen. | v8 lifts special and v6a holds brick, so their errors differ. |
+| 07:53 | | f_F3R_chk fails the staged share and held-out bars and passes the rate bar. No official read runs. | 2297 of 3000, 204.7 an hour, held-out row 0.735. |
+| 07:58 | | v9e passes its C1 bar. | 0.9235 on the deep-tray set against a bar of 0.916, and 0.939 on the old set. |
+| 08:00 | | The pick of candidate 4 is pre-registered: the best F3 refill screen with at least 474 correct stows, and v9e on a passing screen. | After the F3 50k screen and f_F3R_chk, before any other F3 refill screen or v9e screen number. |
+| 08:31 | | v9e is adopted for every later read. | 474 of 600 at 215.2 an hour, at the bar of 474 and 200.8 exactly. |
+| 08:32 | R1 | Wave 4 and retrain F4 are pre-registered. Wave 4 takes run 20308200 + p and layout 20308300 + p, p = 0 to 89. | The D17 DAgger lever once more, in the D19 gate scene. |
+| 09:00 | | Candidate 4 = F3 150k with v9e. | F3 150k reads 498 of 600, the most of the four F3 refill screens. |
+| 09:05 | | Wave 4's Machine B share relaunches on 5 lanes, not 10. | Its first 10 lanes failed on CUBLAS_STATUS_ALLOC_FAILED next to f_F4R_chk's 10 policy servers. |
+| 09:59 | | f_F4R_chk fails the staged share and held-out bars, passes the rate bar and meets the stretch rate. No official read runs. | 2467 of 3000, 300.0 an hour, held-out row 0.786. |
+| 10:00 | D20 | `--passenger_drop`, `--lift_view_steps 6`, `--carry_votes 2` and the first two together get one screen each on candidate 4 in the refill scene. The best one is adopted with at least the pair's correct stows plus 6 and at least 240 an hour. | Candidate 4 has rate to spare, 300.0 an hour against the staged 200. |
 
 The `--pile_pgs` switch (14:11) comes from another session at the owner's request, as draft PR #153
 on `feat/ms7f-pile-pgs` from 03a5cd8. While the largest constraint island has over 600 degrees of
@@ -2358,7 +2690,7 @@ The ledger notes of 05:42 record seven more findings from the first draft of thi
 | 19:29 | `--book_miss` books a miss on the target's whole 5 cm cell at every stow of another part. | The selector never reaches the parts in a cell with three bookings. | `--book_miss` leaves every teacher read |
 | 20:57 | The no-truth scene's stub classifier read a passenger. | | it now reads none |
 
-Six process faults also cost time:
+Seven process faults also cost time:
 
 - 16:00: a tracked background call stops after 2 hours, and a deep-tray wave lasts longer.
   Machine A aliases now reach Machine A over ssh to its own address, so fleet.py detaches their
@@ -2372,6 +2704,9 @@ Six process faults also cost time:
   cleanups at 05:42 and 05:55, and Machine B then had 222 GB free (section 8.3).
 - 17:58: Machine A's ssh agent is gone. Git runs over HTTPS through the override in
   `e/git_https_note.txt`, and the D16 screens run as a user systemd unit.
+- 09:05: wave 4's first Machine B share asked for 10 more policy servers on the RTX 5080. f_F4R_chk's 10
+  servers held 9 GB of its 16 GB, so every heap failed within 25 s on CUBLAS_STATUS_ALLOC_FAILED.
+  The share relaunched on 5 lanes (section 9.19).
 
 ## 12. What the simulation does not promise for the real arm
 
@@ -2401,30 +2736,32 @@ MS7f runs in simulation only (MS7f design section 13):
 
 The steps, in order. Each step names the sink of section 10 that it targets:
 
-1. Change the classifier, not only its scene. v6a reads 0.906 on the 62 deep-tray heaps against
-   0.939 in the normal tray, and special 0.726 against 0.883. v7 added about 5,000 deep-tray frames
-   with no weight and missed its bar. v8 added 53,376 deep-tray frames, weighted to about half the
-   training samples, and also missed it. Both moved the line between plain bricks and the brick-like
-   specials instead of sharpening it. The ledger reads this as a limit of the classifier's capacity.
-   The classifier's `wrong_box` cycles take more than half of the misses that the staged bar allows.
-   Neighbour grasps (8.4 % of lifts, final class right on 0.517) and early overhead misreads stay
-   open beside it.
-2. Fix the grasp approach behind `close_miss`, still the largest time sink. On candidate 3 it holds
-   0.340 of the steps, and 406 of a `close_miss` cycle's 449 steps pass before the first close. A
+1. Cut the wrong boxes, now the largest loss. Candidate 4 puts 376 parts in a wrong box, 376 of its
+   533 misses, and the staged bar needs only 83 more correct stows. v7 and v8 each missed their
+   bars. More deep-tray renders moved the line between plain bricks and the brick-like specials
+   instead of sharpening it. The ensemble v9e passed and serves candidate 4, but the wrong-box parts
+   stay at 375 and 376 in the refill scene. The classifier's `wrong_box` cycles take 194 of them,
+   and parts without a cycle of their own take 145. Neighbour grasps (8.4 % of lifts, final class
+   right on 0.517) and early overhead misreads stay open beside it.
+2. Fix the grasp approach behind `close_miss`, still the largest time sink. On candidate 4 it holds
+   0.254 of the steps, and 327 of a `close_miss` cycle's 373 steps pass before the first close. A
    census of these approaches comes before any lever.
-3. Read what the corpus under the loop that serves buys. Wave 3 (D17) is the first such corpus: the
-   policy drives with candidate 3's flags, and the teacher takes over the failed cycles. Retrain F3
-   trains on it, and its screens in the refill scene decide candidate 4 (section 9.18). More data of
-   the wave 1 recipe buys little (D11).
-4. Keep the unboxed parts in reach. `--cell_failure_cap 5` cuts the unboxed parts from 385 on
-   candidate 2 to 309 on candidate 3, about 15 a heap.
-5. Keep `--pile_pgs` (D18) out of the reads. Its paired screen reads outside the parity tolerance,
+3. Read what the corpus under the loop that serves buys. Wave 3 (D17) was the first such corpus, and
+   retrain F3 on it gave candidate 4: +170 correct stows and +95.3 an hour over candidate 3 in the
+   refill scene, with v9e. Wave 4 repeats the lever in the refill scene with candidate 4 driving,
+   and retrain F4 trains on it (section 9.19). More data of the wave 1 recipe buys little (D11).
+4. Read the D20 switches (section 9.20). Candidate 4's rate leaves room for `--passenger_drop`,
+   `--lift_view_steps 6` and `--carry_votes 2`, which the earlier screens turned down for their rate
+   cost or their count.
+5. Keep the unboxed parts in reach. `--cell_failure_cap 5` cuts the unboxed parts from 385 on
+   candidate 2 to 309 on candidate 3. Candidate 4 leaves 157 in the refill scene, about 8 a heap.
+6. Keep `--pile_pgs` (D18) out of the reads. Its paired screen reads outside the parity tolerance,
    so a PGS read is a new baseline. On a policy read it cuts the wall time a heap by about 1.7
    times. It still serves the renders, where the classifier sees only images.
-6. Run R13's two stretch runs on any official candidate. The stretch run r = 0 is the record of
+7. Run R13's two stretch runs on any official candidate. The stretch run r = 0 is the record of
    continuous operation so far: 801 of 1000 at 259.9 an hour, with 85 interventions per 1000 parts
    (section 9.13).
-7. Merge stack #164, 12 PRs with #165 for `feat/ms7f-levers3` and the report PR #166 on top.
+8. Merge stack #164, 12 PRs with #165 for `feat/ms7f-levers3` and the report PR #166 on top.
    `feat/ms7f-pgs`, `feat/ms7f-render-v8` and `feat/ms7f-dagger` have no PR yet.
 
 With a pass of a checked read in the refill scene of D19, the official read and R13's stretch runs
@@ -2433,13 +2770,17 @@ come before step 1.
 The closing paragraph, written for the case where no checked read in the refill scene of D19 passes.
 MS7f built the real-scale task in simulation and ran it in every read: 150-part heaps in a deep
 tray, box emptying, six categories over 66 kinds and a classifier trained on renders. It did not
-meet its gate. The design's bars stay out of reach, and the owner's staged bars of D12 are missed on
-every checked read on the full pile: candidate 1 at 2043 of 3000 and 140.9 an hour, candidate 2 at
-2065 and 189.1, and candidate 3 at 2181 and 189.5. The loop levers bought rate and share.
-`--missed_lift` took the policy from 140.9 to 189.1 an hour, and `--cell_failure_cap 5` added 116
-correct stows at the same rate. On the full pile the share stays between 0.68 and 0.73. The
-classifier on the deep tray, the missed lifts and the parts left outside every box hold it there.
-The next milestone starts from these sinks.
+meet its gate. The owner's staged bars of D12 are missed on every checked read on the full pile:
+candidate 1 at 2043 of 3000 and 140.9 an hour, candidate 2 at 2065 and 189.1, and candidate 3 at
+2181 and 189.5. In the refilled deep tray of D19, candidate 3 reads 2297 at 204.7 and candidate 4
+2467 at 300.0. Both pass the staged rate and miss the share and the held-out row. Candidate 4
+reaches the design's stretch rate of 300 an hour (299.97 in the payload). It stays 83 correct stows
+and 11 held-out parts under the staged bars. The levers bought rate and share. `--missed_lift` took
+the policy from 140.9 to 189.1 an hour, and `--cell_failure_cap 5` added 116 correct stows at the
+same rate. Retrain F3 on wave 3 with classifier v9e added 170 more in the refill scene. The wrong
+boxes hold most of what is left: 376 of candidate 4's 533 misses. The next milestone starts from
+these sinks.
 
-TBD: the closing outcome. It waits for the refill-scene reads of D19 (section 9.18). On a pass of a
-checked read there, the official read's outcome replaces the paragraph.
+TBD: the closing outcome. It waits for D20, wave 4 and retrain F4, and any checked read of candidate
+4' or candidate 5 (sections 9.19 and 9.20). On a pass of a checked read in the refill scene, the
+official read's outcome replaces the paragraph.
