@@ -2194,7 +2194,9 @@ def rollout(
     ordinal = [0] * num_envs  # the recorder's takeover ordinal per env
     loop_done = torch.zeros(num_envs, dtype=torch.bool)
     triggers = (
-        _TriggerState(num_envs, takeover, run_seed, cycle_budget) if takeover is not None else None
+        _TriggerState(num_envs, takeover, run_seed, cycle_budget, wave3)
+        if takeover is not None
+        else None
     )
     switches = {
         "select_at_release": bool(select_at_release),
@@ -3089,6 +3091,11 @@ def rollout(
         "rakes": sum(e["rakes"] for e in episodes),
         "triggers": {} if triggers is None else dict(triggers.counts),
         "takeovers_declined": 0 if triggers is None else triggers.declined,
+        **(
+            {"takeovers_any_part": sum(st.counts["any_part_takeovers"] for st in states)}
+            if wave3
+            else {}
+        ),
         "clamp_fraction": (
             sum(e["clamp_steps"] for e in episodes) / steps_total if steps_total else 0.0
         ),
@@ -3269,6 +3276,7 @@ def _take_over(
     reason: str,
     holding: bool = False,
     start_z=None,
+    any_part: bool = False,
 ) -> bool:
     """Hand env ``i`` to the rig on the loop's target; False when the rig declines.
 
@@ -3279,9 +3287,19 @@ def _take_over(
     ``OracleRig.resume`` declines most of a correct carry (RULING P32: a part above
     ``LIFT_HEIGHT - LIFT_MIN_RISE``), and ending the cycle there would spend it and mark the
     failure memory at a point in the air. ``start_z`` is the scripted place's: the cycle's part
-    heights at its open, from which the rig's LIFT measures the held part's rise."""
+    heights at its open, from which the rig's LIFT measures the held part's rise.
+
+    ``any_part`` is the wave 3 DAgger mode's: when the rig declines the target with nothing held
+    (no grasp ranks on it, or no plan reaches it), the teacher works the part it ranks first
+    instead, from the state the policy left, and the loop books its target failed where it was
+    perceived. The smoke heap of 2026-10-01 (p = 90) declined 8 of its 8 close_miss cycles."""
     lifted = {} if start_z is None else {"start_z": start_z}
-    if rig.resume(i, target=st.cycle.target, **lifted):
+    taken = rig.resume(i, target=st.cycle.target, **lifted)
+    if not taken and any_part and not holding and rig.resume(i):
+        st.fail_mem.book(st.cycle.target_xy)
+        st.counts["any_part_takeovers"] += 1
+        taken = True
+    if taken:
         st.cycle.taken_over = True
         ordinal[i] += 1
         st.takeovers += 1
@@ -3301,8 +3319,16 @@ class _TriggerState:
     actions are composed, on the envs the policy holds. Caps (design 5.5): one takeover per
     loop cycle, ``max_per_episode_factor * cycle_budget`` per episode."""
 
-    def __init__(self, num_envs: int, config: TakeoverConfig, run_seed: int, cycle_budget: int):
+    def __init__(
+        self,
+        num_envs: int,
+        config: TakeoverConfig,
+        run_seed: int,
+        cycle_budget: int,
+        any_part: bool = False,
+    ):
         self.config = config
+        self.any_part = any_part  # ``_take_over``'s, the wave 3 DAgger mode
         self.max_per_episode = math.floor(config.max_per_episode_factor * cycle_budget)
         self.rng = random.Random(run_seed)
         self.random_p = 0.0 if config.random_interval is None else 1.0 / config.random_interval
@@ -3383,7 +3409,10 @@ class _TriggerState:
             self.since_open[i] = 0
             self.closed_no_pinch[i] = 0
             self.held_no_rise[i] = 0
-            if _take_over(rig, env, st, i, ordinal, reason=reason, holding=int(held[i]) >= 0):
+            holding = int(held[i]) >= 0
+            if _take_over(
+                rig, env, st, i, ordinal, reason=reason, holding=holding, any_part=self.any_part
+            ):
                 self.counts[reason] += 1
             else:
                 # The decline cooldown stays (phase B design 5.5). A decline on a held part

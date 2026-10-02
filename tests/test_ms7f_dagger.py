@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from maker_arm_lab.core import dagger_loop, loop, oracle, perception
+from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 from test_heap_loop import SPREAD
 from test_mj_heap_oracle import _place
@@ -59,6 +60,21 @@ def test_a_perceived_heap_hands_a_still_policy_to_the_teacher_and_records_only_i
     assert set(abs(actor).tolist()) <= set(range(1, ep["takeovers"] + 1))
     kept = {tuple(r.tolist()) for r in recorded[actor > 0]}
     assert kept and kept <= rows, (kept - rows, rows)
+
+
+def test_a_declined_target_hands_the_teacher_the_part_it_ranks_first(monkeypatch):
+    """When the teacher ranks no grasp on the loop's target, the wave 3 takeover works the
+    teacher's own first part, and the loop books its target failed."""
+    monkeypatch.setattr(dagger_loop, "NO_CLOSE_STEPS", 60)
+    monkeypatch.setattr(HeapOracle, "aim_hover_at", lambda self, scene, target: False)
+    env, rig = _env_and_rig()
+    _place(env, SPREAD)
+    payload = _rollout(env, rig, _Still(), perceived=True, takeover=FAILURE, select_at_release=True)
+    env.close()
+    ep = payload["episodes"][0]
+    assert payload["takeovers_any_part"] == ep["takeovers"] >= 1, payload["triggers"]
+    assert ep["takeovers_stowed"] >= 1 and "placed" in ep["cycle_reasons"], ep
+    assert "takeover_declined" not in ep["cycle_reasons"], ep
 
 
 def test_takeover_under_perceived_is_no_longer_refused_but_scripted_place_still_is():
