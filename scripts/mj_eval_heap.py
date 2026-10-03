@@ -347,6 +347,13 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         help="MS7d L7: the arm holds still on a step with a large pick-point force",
     )
     parser.add_argument(
+        "--carry_guard",
+        action="store_true",
+        help="MS7g, with --perceived: keep a lifted part in the jaws until the pick point is over "
+        "its served box, and hand a still guard to the rig's perceived carry (loop.guarded_gap); "
+        "refuses --passenger_drop",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -389,6 +396,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
     check_ms7e(parser, args)
     check_ms7f(parser, args)
     check_teacher_waits(parser, args)
+    if args.carry_guard and args.passenger_drop:
+        parser.error("--carry_guard refuses --passenger_drop, which opens over the tray")
     if args.classifier and not (args.perceived and args.categories):
         parser.error(
             "--classifier reads the categories on the perceived views: it needs --perceived and "
@@ -449,6 +458,7 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "lift_budget",
         "missed_lift",
         "stall_end",
+        "carry_guard",
     ):
         if getattr(args, name) not in (None, False) and not args.perceived:
             parser.error(f"--{name} needs --perceived")
@@ -633,6 +643,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             cell_failure_cap=args.cell_failure_cap,
             carry_votes=args.carry_votes,
             stall_end=args.stall_end,
+            carry_guard=args.carry_guard,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

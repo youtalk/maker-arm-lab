@@ -286,9 +286,11 @@ LOOP_SWITCHES = (
     "perceived",
     "contact_hold",
     *MS7D_LEVERS,
+    "carry_guard",
 )
 """The heap loop's protocol switches (core.loop.rollout); the client records them in the
-payload's inference block under "loop", and the cache matches on them."""
+payload's inference block under "loop", and the cache matches on them. ``carry_guard`` (MS7g)
+is recorded only when on, so a payload without it ran with it off."""
 LOOP_SETTINGS = ("rake_cap",)
 """The heap loop's integer settings, recorded and matched like the switches; 0 is off."""
 PERCEPTION_KNOBS = (
@@ -1205,6 +1207,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             help=f"MuJoCo heap only: forwarded to the heap client as --{name}, MS7d {lever}",
         )
     parser.add_argument(
+        "--carry_guard",
+        action="store_true",
+        help="MuJoCo heap only, with --perceived: forwarded as --carry_guard (MS7g), the guard on "
+        "a lifted part's release and the rig's carry of a still one; refuses --passenger_drop",
+    )
+    parser.add_argument(
         "--families",
         type=str,
         default="",
@@ -1393,13 +1401,16 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         "rake_turn",
         "perceived",
         *MS7D_LEVERS,
+        "carry_guard",
     ):
         if getattr(args, name) and (args.heap_k <= 0 or args.backend != "mujoco"):
             raise ValueError(f"--{name} needs --heap_k > 0 and --backend mujoco")
     perceived_only = [n for n in MS7D_LEVERS if n not in ("hold_force", "force_cap")]
-    for name in ("noise_scales", "contact_hold", *perceived_only):
+    for name in ("noise_scales", "contact_hold", *perceived_only, "carry_guard"):
         if getattr(args, name) and not args.perceived:
             raise ValueError(f"--{name} needs --perceived")
+    if args.carry_guard and args.passenger_drop:
+        raise ValueError("--carry_guard refuses --passenger_drop, which opens over the tray")
     if args.perceived and (not args.desk_boxes or args.gripper != "continuous"):
         # The client's own usage error, before a server starts and every draw loses to it.
         raise ValueError("--perceived needs --desk_boxes and --gripper continuous")
@@ -1527,7 +1538,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         + (("--perceived",) if args.perceived else ())
         + (("--noise_scales", scales) if scales else ())
         + (("--contact_hold",) if args.contact_hold else ())
-        + tuple(f"--{name}" for name in MS7D_LEVERS if getattr(args, name)),
+        + tuple(f"--{name}" for name in MS7D_LEVERS if getattr(args, name))
+        + (("--carry_guard",) if args.carry_guard else ()),
     )
 
 
