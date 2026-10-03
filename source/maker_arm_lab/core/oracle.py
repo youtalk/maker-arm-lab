@@ -766,6 +766,11 @@ class EnvOracle:
         ``HeapOracle`` over desk boxes holds the pick tilt instead (MS7a design, desk boxes)."""
         self.retreat_point = RETREAT_POINT
         """Where RETREAT ends, before the episode's via jitter."""
+        self.release_point: torch.Tensor | None = None
+        """A fixed point (m) EXTEND carries to in place of the target's bin or box
+        (``_release_target``), for a carry whose part the oracle cannot name: the heap loop's
+        perceived carry (MS7g ``--carry_guard``, ``OracleRig.resume(carry=...)``). None: the
+        bin's, as always."""
         self.raises = True
         """Does a lifted part climb RAISE's rim clearance before EXTEND? The shelf rim needs
         it; a desk box's rim is under the lift height, so ``HeapOracle`` skips it there."""
@@ -1025,9 +1030,10 @@ class EnvOracle:
         RAISE that would leave the arm where no EXTEND can be planned (see
         ``oracle_runtime.OracleRig._plan_leg``). Both must ask for the same leg.
         """
+        point = self.release_point
         return self._goal(
             Phase.EXTEND,
-            self._release_target(self.target_brick),
+            self._release_target(self.target_brick) if point is None else point.clone(),
             None,
             self.release_tilt,
             -1.0,
