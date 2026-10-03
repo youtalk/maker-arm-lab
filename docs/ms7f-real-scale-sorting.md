@@ -1,8 +1,7 @@
 # MS7f: real-scale sorting in simulation
 
-Date: 2026-10-02. Status: draft. The campaign still runs. This draft uses the ledger up to its entry
-of 23:12 on 2026-10-02. A line that starts with `TBD:` waits for a read or a decision that had no
-number at that time. The controller fills those lines.
+Date: 2026-10-03. Status: final. MS7f is closed as failed by the owner's decision D25 (05:43 on
+2026-10-03). This report uses the ledger up to its last entry, 06:28 on 2026-10-03.
 
 The design of MS7f is the document that the owner reviewed and approved in chat on 2026-09-30. This
 report cites it as "MS7f design section N" and restates every rule that it uses. The campaign ledger
@@ -11,15 +10,16 @@ below went into that ledger before its number. The measurement tables are under
 `~/data/maker-arm-ms7/f/tables/`. Each read has a TAG, its name. The read payloads are under
 `~/data/maker-arm-ms7/reads/<TAG>/`. Every MS7f TAG starts with `f_`.
 
-The ledger names its rules R1 to R15 and its deviations D1 to D24. The design names its decisions F1
+The ledger names its rules R1 to R15 and its deviations D1 to D25. The design names its decisions F1
 to F10. The tracks are H (the heap), C (the classifier), P (the part families) and S (the speed).
-The retrains are F1 to F5 and the pre-registered F6, and their checkpoints are written as "F1 100k".
-The ledger calls retrain F3 "retrain 3", retrain F4 "retrain 4", and so on. This report writes "rule
-R4", "decision F6" and "retrain F1" to keep them apart.
+The retrains are F1 to F6, and their checkpoints are written as "F1 100k". The ledger calls retrain
+F3 "retrain 3", retrain F4 "retrain 4", and so on. This report writes "rule R4", "decision F6" and
+"retrain F1" to keep them apart.
 
 All times are PDT. Each time is the time of the ledger entry that records the event. Times from
 10:13 to 23:47 are on 2026-09-30. Times after the first midnight, up to the entry of 23:26, are on
-2026-10-01. The entries after the second midnight, from 00:52 to 23:12, are on 2026-10-02.
+2026-10-01. The entries after the second midnight, from 00:52 to 23:22, are on 2026-10-02. The
+entries after the third midnight, from 00:05 to 06:28, are on 2026-10-03.
 
 Numbers come from the ledger or from the files that it names. This report also computes some values
 from the ledger's counts: fractions, rates an hour and Wilson intervals that the ledger does not
@@ -38,6 +38,22 @@ MS7f makes the task real-scale along three axes (MS7f design section 1):
    parts go to six categories, and a classifier trained on rendered images replaces the class
    stand-in.
 
+The result. MS7f fails its gate. The owner closed it as failed at 05:43 on 2026-10-03 (deviation
+D25), after every pre-registered lever was spent. The final result is candidate 6's checked read
+f_F6R_chk in the refilled deep tray of D19: F5 200k with classifier v9e and candidate 3's flags. It
+stows 2522 of 3000 parts in a box of their category, 0.841 [0.827, 0.853], at 308.0 correct stows an
+hour. Its held-out row reads 620 of 785, 0.790. It passes the staged rate bar of 200 an hour. It
+fails the staged share bar of 0.85 by 28 correct stows and the held-out bar of 0.80 by 8 parts. The
+official read never ran, and its seed 20307200 stays unburned. The stretch run r = 1 never ran.
+
+What passed. Every read ran the real-scale task in simulation: 150-part heaps in a deep tray, six
+categories over 66 kinds, a classifier trained on rendered images, box emptying and, since D19, the
+tray refill. All three checked reads in the refill scene pass the staged rate bar. Candidate 6 also
+reads over the design's stretch rate of 300 an hour.
+
+What failed. No checked read reaches the staged share bar of 0.85 or the held-out bar of 0.80. On
+candidate 6 the wrong boxes hold 342 of the 478 misses, and 136 parts end outside every box.
+
 The gate has two rows since deviation D12 (10:38). The owner decided on staged bars at 10:35, after
 the screens and with 2 of the 20 heaps of candidate 1's checked read visible. The design's bars stay
 as a stretch row in every verdict:
@@ -47,7 +63,7 @@ as a stretch row in every verdict:
 | staged bars, the gate since D12 | at least 0.85 (2550 of 3000, 5100 of 6000) | at least 200 | at least 0.80 |
 | stretch row, the design's bars | at least 0.92 (2760 of 3000, 5520 of 6000) | at least 300 | at least 0.85 |
 
-The results so far:
+The campaign, in order:
 
 - The base branch adds the six categories, the category map onto the boxes, the throughput, the
   held-out row, the four cycle intervals of S0 and heaps of up to 150 parts.
@@ -134,16 +150,22 @@ The results so far:
   waves 1 to 5, and its screens read 499 to 518. Candidate 6 is F5 200k.
 - Candidate 6's checked read in the refill scene stows 2522 of 3000, 0.841, at 308.0 correct stows
   an hour, with a held-out row of 0.790. It passes the staged rate bar and fails the share bar by 28
-  correct stows and the held-out bar by 8 parts. It is the best checked read so far.
+  correct stows and the held-out bar by 8 parts. It is the best checked read of MS7f and its final
+  result.
 - The classifier gets one capacity lever (D22). v10, a ResNet50 at 320 px, reads the best deep-tray
   C1 row so far, 0.9386, but misses its bar on 2 joint parts of 22. The ensemble v10e3 also misses.
   An owner override (D23) screens v10 in the loop anyway: it reads 480 of 600 with 92 wrong-box
   parts, under the bar of 510. So C1 does not predict the in-loop read at this margin.
-- Deviation D24 records the frames that the served loop gives the classifier, for an on-policy
-  classifier v11. Wave 6 and retrain F6 repeat the lever that moved candidate 6. Neither has a
-  number yet, and only one official read runs.
-- The code branches are draft PRs #154 to #163, #165 and #166 in GitHub stack #164, 12 PRs, and CI
-  passes on all of them.
+- Deviation D24 records 51 files of the frames that the served loop gives the classifier and trains
+  an on-policy classifier v11 on them. v11 reads the old C1 set at 0.915 against v9e's 0.939, and
+  its in-loop screen reads 478 of 600 against a bar of 524. It is not adopted, the classifier track
+  ends, and v9e stays.
+- Wave 6 records 35 more heaps with 1255 takeovers. Retrain F6 on waves 1 to 6 reads 479 to 497 on
+  its screens, under retrain F5's 518. None reaches the bar of 524, so no candidate 7 exists.
+- Deviation D25 (05:43 on 2026-10-03), an owner decision, closes MS7f as failed. The final result is
+  candidate 6's checked read.
+- The code is 16 PRs, #154 to #163, #165 and #167 to #171, with this report as PR #166 on top, in
+  GitHub stack #172. All of them are ready for review.
 
 The decomposition of section 10 answers where the parts and the hours go:
 
@@ -158,6 +180,20 @@ The decomposition of section 10 answers where the parts and the hours go:
 - The teacher. The wave teacher delivers a part every 13.91 to 16.23 s, 222 to 259 an hour, over the
   staged 200 and under the stretch 300.
 
+What the campaign learned:
+
+- DAgger moved the read twice and then flattened. Retrain F3 on wave 3 with v9e gave candidate 4,
+  and retrain F5 on waves 1 to 5 gave candidate 6. Retrain F4 on wave 4 and retrain F6 on wave 6
+  read flat or under them. The ledger reads the DAgger lever as flat at about 0.82 to 0.84 on the
+  screens.
+- The screens are noisy at this margin. A 600-part screen has a Wilson interval about 0.06 wide,
+  against a pre-registered step of 6 correct stows, 0.01. The ledger reads retrain F5's 518 as the
+  top of the screens' noise, and retrain F6's screens read 479 to 497.
+- C1 does not predict the in-loop read. v10 read the best deep-tray C1 row and boxed worse in the
+  loop (D23). v11, trained with on-policy frames, read worse on C1 and in the loop (D24).
+- The refill scene of D19 took the same policy from 0.727 at 189.5 an hour on the full pile to 0.766
+  at 204.7.
+
 The gate outcome. A screen and the control read have no bar, so their rows show the bars for
 comparison only:
 
@@ -171,8 +207,8 @@ comparison only:
 | candidate 3, checked, refill scene (D19) | F2 150k | bcbbe02, v6a, X = 1.5, `--missed_lift --cell_failure_cap 5 --tray_refill` | 2297 of 3000, 0.766 | 204.7 | 577 of 785, 0.735 | FAIL on the share and the held-out row, PASS on the rate | FAIL on all three |
 | candidate 4, checked, refill scene | F3 150k | bcbbe02, v9e, X = 1.5, `--missed_lift --cell_failure_cap 5 --tray_refill` | 2467 of 3000, 0.822 | 300.0 | 617 of 785, 0.786 | FAIL on the share and the held-out row, PASS on the rate | FAIL on all three. The rate is 299.97 (ledger correction of 10:11). |
 | candidate 6, checked, refill scene | F5 200k | bcbbe02, v9e, X = 1.5, `--missed_lift --cell_failure_cap 5 --tray_refill` | 2522 of 3000, 0.841 | 308.0 | 620 of 785, 0.790 | FAIL on the share and the held-out row, PASS on the rate | FAIL on the share and the held-out row, PASS on the rate |
-| candidate 7 or candidate 6 with v11, checked, refill scene | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| official | | | | | | runs only on the first checked read in the refill scene that passes the staged bars (D12, D19) | |
+| candidate 7 or candidate 6 with v11, checked, refill scene | did not run | no candidate 7, and v11 not adopted | | | | | |
+| official | | | | | | did not run: no checked read passed the staged bars (D12, D19, D25). Seed 20307200 stays unburned. | |
 | control | train_E2 150k | d6f893d, v5, X = 1.0, aarch64 | 768 of 1050, 0.731 | 151.3 | 180 of 263, 0.684 | no bar, under all three | no bar, under all three |
 
 The outcome on the full pile. No checked read on the full 150-part deep pile passes the staged bars
@@ -188,15 +224,12 @@ Since deviation D19 (06:40), the gate scene is the refilled deep tray, and the f
 stay in this report as the harder row. The official read runs on the first checked read in the
 refill scene that passes the staged bars (section 9.18).
 
-The outcome in the refill scene so far. Candidate 3 stows 2297 of 3000 at 204.7 an hour, candidate 4
-2467 at 300.0, and candidate 6 2522 at 308.0, against 2550 and 200. Their held-out rows read 0.735,
-0.786 and 0.790 against 0.80. All three pass the staged rate bar and fail the share and held-out
-bars, so no official read runs yet. Candidate 6 is 28 correct stows and 8 held-out parts short. Two
-levers are still open: the on-policy classifier v11 (D24, section 5.12) and retrain F6 on wave 6
-(section 9.23).
-
-TBD: the outcome in the refill scene after v11 and retrain F6, and the official read's outcome on a
-pass of a checked read there.
+The outcome in the refill scene. Candidate 3 stows 2297 of 3000 at 204.7 an hour, candidate 4 2467
+at 300.0, and candidate 6 2522 at 308.0, against 2550 and 200. Their held-out rows read 0.735, 0.786
+and 0.790 against 0.80. All three pass the staged rate bar and fail the share and held-out bars.
+Candidate 6 is 28 correct stows and 8 held-out parts short. The last two levers did not move it: v11
+is not adopted (D24, section 5.12), and retrain F6 gives no candidate 7 (section 9.23). So no
+official read runs, and the owner closed MS7f as failed (D25, section 9.24).
 
 ## 1. The goal, the decisions and the rules
 
@@ -1074,6 +1107,14 @@ which leaves GPU room for a candidate 6 read. Machine C records p 30 to 89 on 20
 GPU policy servers on its A2000. Each has `BUDGET_S` 7200, and the frames go to `f/pf/frames` on
 each host.
 
+Before the recording, at 22:00 to 22:03, `fleet.py sync` to `b_fpf` and `c_fpf` first refused.
+Both hosts held stale RUNNING job records from MS7d and MS7e, and pgrep showed nothing running. The
+sync then ran with `--force` and built both 7f-pf worktrees at 9197b86. It then failed on a ref-lock
+race in the local git fetch. Two retries failed on `~/data/maker-arm-ms7/sync.bundle.lock`, which
+another session's sync held at the time. The worktrees were checked by hand (HEAD 9197b86, venv
+links), and Machine C's `lerobot_stack/.venv` was pointed at `.venv-cuda`. The ledger added
+this at 23:22.
+
 D24 was amended twice before any v11 number:
 
 - At 23:10, v11 is screened on candidate 6, not candidate 4. f_F6c_v11_R_scr serves F5 200k with
@@ -1089,8 +1130,29 @@ D24 was amended twice before any v11 number:
 Unit ms7f-pf-chain (job f_pf_chain, `tables/cls/bin/pf_chain.sh`) pulls the frames, trains v11,
 screens it and reads f_F6wR_chk. The official read follows only on a pass.
 
-TBD: v11's training, its C1 read (reported only) and its screen f_F6c_v11_R_scr against 524 correct
-stows and 359.5 an hour.
+The recording ended on both hosts:
+
+| host | lanes | p | time | result |
+| --- | --- | --- | --- | --- |
+| Machine B | 5 | 0 to 29 | 22:03 to 00:04 | PF_OK, 23 policy files |
+| Machine C | 20, GPU-served | 30 to 89 | 22:03, done by 00:33, a 2 h budget | PF_OK, 28 policy files |
+
+The ledger pulled the 51 policy files into `tables/cls/h/rs9_*` at 00:33. v11 trained from 9197b86
+on 528 old files, 234 deep-tray files and the 51 policy files, with the new-scene groups 3 times. It
+took 1407 s on 168,421 unique frames (01:19). Its old C1 read ran in the training call, reported
+only: `loop_sum` 2560 of 2799, 0.915, against v9e's 0.939 (`tables/cls/model_v11/c1.json`).
+
+The D24 verdict (01:49), both screens of F5 200k in the refill scene on Machine A:
+
+| screen | classifier | correct stows | Wilson 95 % | cycles | steps | correct stows an hour | held-out row | wrong-box parts, `wrong_box` cycles | brick | special |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| f_F5_200000_R_scr, the pair | v9e | 518 of 600, 0.863 | 0.834 to 0.889 | 656 | 150,975 | 370.6 | 126 of 151 | 61, 35 | 169 of 202 | 127 of 148 |
+| f_F6c_v11_R_scr | v11 | 478 of 600, 0.797 | 0.763 to 0.827 | 673 | 161,086 | 320.5 | 110 of 151 | 86, 62 | 163 of 202 | 107 of 148 |
+
+v11 is not adopted: 478 is under 524. One ResNet50 with the policy frames reads worse than the
+ensemble of v6a and v8. So the policy frames alone do not close the in-loop gap. The classifier
+track ends, and v9e stays. f_F6wR_chk did not run. The `wrong_box` cycles of the pair and the brick
+and special cells come from the screens' `gate_results.json`.
 
 ## 6. Track S: the speed
 
@@ -1889,8 +1951,9 @@ run, and the milestone fails. Candidates 1, 2 and 3 fail the staged bars on the 
 official read runs in that scene. Since D19 (06:40), the official read runs in the refill scene,
 through `read_f2.sh`. It reads the first checked read in that scene that passes the staged bars
 (section 9.18). Candidates 3, 4 and 6 fail the staged share and held-out bars in the refill scene,
-so no official read runs yet. Since 23:10, only the first checked read that passes gets the official
-read, and it runs once (section 9.23).
+so no official read runs. Since 23:10, only the first checked read that passes gets the official
+read, and it runs once (section 9.23). No checked read passed, so the official read never ran, and
+seed 20307200 stays unburned (D25).
 
 ### 9.13 The stretch runs: deviation D15
 
@@ -1946,7 +2009,7 @@ read. The run went from 15:46 to 04:49, and the ledger recorded it at 06:19:
 | run | policy | correct box | correct stows an hour | consecutive parts | interventions per 1000 parts |
 | --- | --- | --- | --- | --- | --- |
 | r = 0, D15 | candidate 2, `--action_warp 1.5 --missed_lift`, v6a | 801 of 1000, 0.801 | 259.9 | 1000 | 85 |
-| r = 1, R13 | the official candidate, only after an official read | TBD | TBD | TBD | TBD |
+| r = 1, R13 | the official candidate, only after an official read | did not run | | | |
 
 Against R13's report-only targets: 0.95, 400 an hour, 1000 consecutive parts (met) and 5
 interventions per 1000 parts (85). The same policy reads 0.688 at 189.1 an hour on candidate 2's
@@ -1954,7 +2017,8 @@ checked read on the full 150-part deep pile. With at most 50 parts in the tray, 
 259.9. This report computes 1230 cycles from the six episodes of `stretch_0.json`: 9.0 s a cycle and
 1.536 cycles per correct stow. The owner decided D19 after this run (section 9.18).
 
-TBD: R13's two stretch runs on the official candidate, after an official read.
+R13's two stretch runs on an official candidate did not run, because no official read ran (D25). The
+run r = 0 of D15 is the only record of continuous operation.
 
 ### 9.14 The control read
 
@@ -2298,10 +2362,11 @@ Its screens in the refill scene, on `a_fr6l:4` with candidate 4's flags and v9e:
 | f_F4_200000_R_scr | F4 200k | 495 of 600, 0.825 | 0.793 to 0.853 | 675 | 173,803 | 307.6 | 119 of 151 | 75 |
 
 None reaches 510, so no candidate 5 exists, and f_chk_F5R prints CHK_NONE (17:20). Retrain F4 on 81
-refill-scene wave heaps reads flat to candidate 4. The ledger says that all four screens fall inside
-the Wilson interval of candidate 4's screen, 0.809 to 0.867. F4 150k reads 0.803, just under it, and
-the other three fall inside. The wrong-box parts do not fall, 72 to 88 against 68. Retrain F5
-follows from F3 150k with a bar of 510 (section 9.22).
+refill-scene wave heaps reads flat to candidate 4. The ledger's entry of 17:20 says that all four
+screens fall inside the Wilson interval of candidate 4's screen, 0.809 to 0.867. Its correction of
+23:22 says that F4 150k, 482 of 600 = 0.803, lies just under it. The other three fall inside. The
+wrong-box parts do not fall, 72 to 88 against 68. Retrain F5 follows from F3 150k with a bar of 510
+(section 9.22).
 
 ### 9.20 Three loop switches on candidate 4: deviation D20
 
@@ -2510,16 +2575,56 @@ At 23:12 the ledger chained the units. Unit ms7f-w6-Machine A runs Machine A's s
 ms7f-retrain6 (job f_retrain6, `bin/retrain6_chain.sh`) converts, pulls, trains retrain F6, screens
 it, picks candidate 7 and reads f_F7R_chk. The official read follows only on a pass.
 
-TBD: wave 6's recording on both hosts, its takeovers and its conversion.
+Machine B's share of wave 6 started at 00:04 on 5 lanes, after its D24 recording. Machine A's share ended
+at 02:01 (p 0 to 44, 6 lanes, 23:11 to 02:01). Wave 6 ended at 02:28:
 
-TBD: retrain F6, its screens in the refill scene against f_F5_200000_R_scr, and candidate 7 by the
-rule of 23:10.
+| host | heaps | takeovers | converted |
+| --- | --- | --- | --- |
+| Machine A | 18 | 665 | CONVERT_OK, 955 episodes |
+| Machine B | 17 | 590 | 793 episodes, 389,906 frames. CONVERT_FAIL on the videos meant no ffmpeg again. |
+| wave 6 | 35 | 1255 | |
 
-TBD: any further checked read (f_F6wR_chk or f_F7R_chk), against the staged bars and the stretch
-row.
+Wave 5 recorded 40 heaps and 1493 takeovers. f_retrain6 pulled Machine B's half, decode-checked it,
+merged and trained retrain F6. This report reads the merge target of `f/w123456/dataset.ledger.json`
+as 21,196 episodes: f/w12345/dataset and both wave 6 halves. Retrain F6 ended at 04:14 with
+TRAIN_OK, 200,000 steps warm from F3 150k on f/w123456.
 
-TBD: the official read in the refill scene, on the first checked read there that passes the staged
-bars.
+Its screens in the refill scene (05:03) serve candidate 3's flags and v9e. Each reads seed 20307000,
+draws 0 to 3, on 4 Machine A lanes:
+
+| screen | checkpoint | correct stows | Wilson 95 % | cycles | steps | correct stows an hour | held-out row | wrong-box parts |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| f_F5_200000_R_scr, the pair | F5 200k | 518 of 600, 0.863 | 0.834 to 0.889 | 656 | 150,975 | 370.6 | 126 of 151 | 61 |
+| f_F6_050000_R_scr | F6 50k | 488 of 600, 0.813 | 0.780 to 0.842 | 640 | 151,711 | 347.4 | 116 of 151 | 93 |
+| f_F6_100000_R_scr | F6 100k | 488 of 600, 0.813 | 0.780 to 0.842 | 656 | 176,870 | 298.0 | 115 of 151 | 89 |
+| f_F6_150000_R_scr | F6 150k | 479 of 600, 0.798 | 0.764 to 0.828 | 657 | 166,391 | 310.9 | 115 of 151 | 84 |
+| f_F6_200000_R_scr | F6 200k | 497 of 600, 0.828 | 0.796 to 0.856 | 715 | 189,601 | 283.1 | 121 of 151 | 77 |
+
+None reaches 524, so no candidate 7 exists (CHK_NONE), and f_F7R_chk did not run. Retrain F6 on 35
+more wave heaps reads under retrain F5's 518 at 200k. The ledger's reading: the DAgger lever is flat
+at about 0.82 to 0.84 on the screens. Retrain F5's 518 sat at the top of the screens' noise. Every
+pre-registered lever is spent. The best checked read stays candidate 6, which fails the staged share
+and held-out bars.
+
+So neither further checked read ran: v11 was not adopted, so f_F6wR_chk did not run, and with no
+candidate 7, f_F7R_chk did not run. The official read did not run, because no checked read passed
+the staged bars.
+
+### 9.24 The close: deviation D25
+
+Deviation D25 (05:43 on 2026-10-03) is an owner decision, asked after the retrain F6 screens: MS7f
+closes as failed. The final result is candidate 6's checked read f_F6R_chk: F5 200k with model v9e
+and candidate 3's flags, in the refill scene of D19. It reads 2522 of 3000, 0.841 [0.827, 0.853], at
+308.0 correct stows an hour, with a held-out row of 620 of 785, 0.790. It fails the staged share bar
+(0.85) and the held-out bar (0.80), and it passes the rate bar (200). The official read never ran,
+and seed 20307200 stays unburned. The stretch run r = 1 of R13, which follows an official read,
+never ran. The ledger's next steps are the report (PR #166), the PR stack and the memory.
+
+At 06:04 on the owner's request, the ledger rendered two trays of candidate 6 serving, from a
+third-person camera: `f/video/ms7f_F5_200k_v9e_refill_d14_two_trays.mp4`. It shows checked seed
+20307100 draw 14, the heap of the candidate 4 video, where f_F6R_chk read 127, near the median of
+126.5. It cuts at the second refill. By then 68 of the 80 parts taken from the tray are in their box
+and 10 in a wrong one. That takes 99 cycles, at 297 correct stows an hour.
 
 ## 10. The decomposition
 
@@ -2928,7 +3033,10 @@ Two restacks made the chain linear:
   CI-style suite passes 1543 tests at the classifier tip and 1558 plus 130 at the levers2 tip.
 
 The stack opened at 17:11 as GitHub stack #164, ten draft PRs. The first CI run passes on all ten.
-The ledger and the branches give these tips:
+At 06:28 on 2026-10-03 the final stack replaced it. `feat/ms7f-dagger`, `feat/ms7f-policy-frames`,
+`feat/ms7f-stall-end` and this report were rebased into one line above `feat/ms7f-levers3`, and five
+new PRs joined. Stack #164 was unstacked, and stack #172 links 17 PRs with this report on top. All
+MS7f PRs are ready for review, on the owner's request. The ledger and the branches give these tips:
 
 | order | PR | branch | tips | what it adds |
 | --- | --- | --- | --- | --- |
@@ -2943,16 +3051,16 @@ The ledger and the branches give these tips:
 | 9 | #162 | `feat/ms7f-cls6` | ab3008d, 7baf879, then 8bd326d | the trainer's `--arch`, `--input_px` and `--ensemble` (v6a) |
 | 10 | #163 | `feat/ms7f-levers2` | 496f857, 4cdf4df, fe33c0c, fbaa41f, then 5e92758 | c7bf05d `--lift_view_steps`, 0a1b552 `--missed_lift` (D14), fbaa41f the stretch parser's cap of 1000, 5e92758 the deep-tray renders for v7 |
 | 11 | #165 | `feat/ms7f-levers3` | bcbbe02 on 5e92758 | fbd45e9 `--cell_failure_cap`, bcbbe02 `--carry_votes` (D16) |
-| top | #166 | `docs/ms7f-report` | on bcbbe02 | this report |
-| off the stack | no PR | `feat/ms7f-pgs` | c657f61 on bcbbe02 | #153's 496eb6f, `--pile_pgs` (D18) |
-| off the stack | no PR | `feat/ms7f-render-v8` | 0323927 on c657f61 | `pile_pgs` in RENDER_READY, the trainer's `--repeat N --repeat_match GLOB` (v8) |
-| off the stack | no PR | `feat/ms7f-dagger` | 6abc2c4 on c657f61 | `scripts/mj_eval_heap.py --dagger_dir`, the wave 3 recorder (D17) |
-| off the stack | no PR | `feat/ms7f-stall-end` | 7c9ed67 on bcbbe02 | `--stall_end` (D21, not adopted) |
-| off the stack | no PR | `feat/ms7f-policy-frames` | 9197b86 on 0323927 | `--classifier_frames`, the D24 recorder |
+| 12 | #167 | `feat/ms7f-pgs` | c657f61 on bcbbe02 | #153's 496eb6f as a cherry-pick, `--pile_pgs` (D18). PR #153 stays untouched. |
+| 13 | #168 | `feat/ms7f-render-v8` | 0323927 on c657f61 | 5a0d80c `--pile_pgs` in the render set, 0323927 the trainer's `--repeat N --repeat_match GLOB` (v8) |
+| 14 | #169 | `feat/ms7f-dagger` | 6abc2c4, then d66a80e on 0323927 | `scripts/mj_eval_heap.py --dagger_dir`, the recorder of waves 3 to 6 (D17) |
+| 15 | #170 | `feat/ms7f-policy-frames` | 9197b86, then 424302a on d66a80e | `--classifier_frames`, the D24 recorder |
+| 16 | #171 | `feat/ms7f-stall-end` | 7c9ed67, then 0e85830 on 424302a | `--stall_end` (D21, not adopted) |
+| top | #166 | `docs/ms7f-report` | on 0e85830 | this report |
 
 The lever branches `feat/ms7f-riders` 5715401 and `feat/ms7f-cls-loop` 36b069b stay as the record.
-Their commits sit in levers2 as 0a1b552 and c7bf05d. Another session's draft PR #153 holds
-`--pile_pgs` (section 11.2).
+Their commits sit in levers2 as 0a1b552 and c7bf05d. Another session's PR #153 holds `--pile_pgs`,
+and #167 carries its commit (section 11.2).
 
 The CPU test counts in the ledger:
 
@@ -2977,12 +3085,16 @@ The CPU test counts in the ledger:
 | 0323927, render-v8 | 1566 | |
 | 6abc2c4, dagger | 1572 | |
 | 7c9ed67, stall-end | 1579 passed, 76 skipped | |
+| d66a80e, dagger after the final rebase | 1581 | |
+| 424302a, policy-frames after the final rebase | 1588 | |
+| 0e85830, stall-end after the final rebase | 1599 | |
 
 The design merges a rung that is not adopted with its switch off. After the reads, the branches
 restack into one stack with `GH_REPO=youtalk/maker-arm-lab gh stack`, with this report on top.
 
-At 21:46 PR #165 (`feat/ms7f-levers3`) and PR #166 (`docs/ms7f-report`) joined the stack. Stack #164
-holds 12 PRs, and CI passes on both new ones.
+At 21:46 PR #165 (`feat/ms7f-levers3`) and PR #166 (`docs/ms7f-report`) joined stack #164, and CI
+passed on both. The final stack #172 (06:28 on 2026-10-03) holds #154 to #163, #165, #167 to #171
+and #166, in that order.
 
 ### 11.2 The deviations and the protocol changes
 
@@ -3067,6 +3179,13 @@ holds 12 PRs, and CI passes on both new ones.
 | 23:10 | | f_F6R_chk fails the staged share and held-out bars and passes the rate bar. No official read runs. | 2522 of 3000, 308.0 an hour, held-out row 0.790. |
 | 23:10 | D24, R1 | v11 is screened on candidate 6 with a bar of 524 and 359.5 an hour. Wave 6 and retrain F6 are pre-registered. Only the first passing checked read gets the official read. | Retrain F5 just moved the read by 55 correct stows. |
 | 23:12 | D24 | The policy frames join v8's 3-times group, about 15 % of the training rows. | The trainer weights one file group, and its RAM has to fit beside wave 6. |
+| 23:22 | | Ledger additions and a correction from the report fill: the D24 worktrees came from a forced fleet sync that then failed and were checked by hand. The 17:20 entry is wrong for F4 150k, which reads 0.803, under candidate 4's interval. | Found by the report fill. |
+| 00:33 | D24 | The recording ends with 51 policy files, Machine B 23 and Machine C 28, and v11 trains. | |
+| 01:49 | D24 | v11 is not adopted. The classifier track ends, and v9e stays. | 478 of 600 under 524. v11 reads the old C1 set at 0.915 against v9e's 0.939. |
+| 02:28 | | Wave 6 ends: 35 heaps and 1255 takeovers. | |
+| 05:03 | | No candidate 7: retrain F6's screens read 479 to 497 against 524. Every pre-registered lever is spent. | The DAgger lever is flat at about 0.82 to 0.84 on the screens. |
+| 05:43 | D25 | Owner decision: MS7f closes as failed. The final result is candidate 6's checked read. The official read and the stretch run r = 1 never ran, and seed 20307200 stays unburned. | Asked after the retrain F6 screens. |
+| 06:28 | | The final PR stack #172 replaces stack #164: 17 PRs, all ready for review, with this report on top. | The owner's request. |
 
 The `--pile_pgs` switch (14:11) comes from another session at the owner's request, as draft PR #153
 on `feat/ms7f-pile-pgs` from 03a5cd8. While the largest constraint island has over 600 degrees of
@@ -3110,7 +3229,7 @@ The ledger notes of 05:42 record seven more findings from the first draft of thi
 | 19:29 | `--book_miss` books a miss on the target's whole 5 cm cell at every stow of another part. | The selector never reaches the parts in a cell with three bookings. | `--book_miss` leaves every teacher read |
 | 20:57 | The no-truth scene's stub classifier read a passenger. | | it now reads none |
 
-Ten process faults also cost time:
+Eleven process faults also cost time:
 
 - 16:00: a tracked background call stops after 2 hours, and a deep-tray wave lasts longer.
   Machine A aliases now reach Machine A over ssh to its own address, so fleet.py detaches their
@@ -3133,6 +3252,10 @@ Ten process faults also cost time:
   Machine A, because wave 5 ran on Machine B only. The chain started again as ms7f-retrain5b.
 - 21:33: Machine B and Machine C sat idle from the end of wave 5 at 17:30, a scheduling miss of
   the retrain F5 chain. The owner asked why.
+- 22:00 to 22:03: `fleet.py sync` to the D24 aliases refused on stale RUNNING job records from MS7d
+  and MS7e, with nothing running. A `--force` sync built both worktrees and then failed on a
+  ref-lock race in the local git fetch. Two retries failed on `sync.bundle.lock`, which another
+  session's sync held. The worktrees were checked by hand (section 5.12).
 
 ## 12. What the simulation does not promise for the real arm
 
@@ -3158,57 +3281,48 @@ MS7f runs in simulation only (MS7f design section 13):
 - Every perceived input except the class keeps the MS7d truth-plus-noise stand-ins at nominal
   knobs.
 
-## 13. What is next
+## 13. The state at the close
 
-The steps, in order. Each step names the sink of section 10 that it targets:
+MS7f closed with every pre-registered lever spent (05:03, D25). The ledger names no further lever.
+Its last steps are this report, the PR stack and the memory. This section lists the sinks of section
+10 on the final read, candidate 6, and the state of each lever:
 
-1. Cut the wrong boxes, the largest loss. Candidate 6 puts 342 parts in a wrong box, 342 of its 478
-   misses, and the staged bar needs only 28 more correct stows. The classifier's `wrong_box` cycles
-   take 195 of them, and parts without a cycle of their own take 119. v7 and v8 missed their bars,
-   v9e passed and serves, and v10 and v10e3 missed (D22). v10 read the best C1 row and still boxed
-   worse in the loop (D23), so C1 does not predict the in-loop read at this margin. The on-policy
-   classifier v11 (D24) trains on the frames that the served loop gives the classifier. Its in-loop
-   screen is its only bar (section 5.12). Neighbour grasps (8.4 % of lifts, final class right on
-   0.517) and early overhead misreads stay open beside it.
-2. Fix the grasp approach behind `close_miss`, still the largest time sink. On candidate 6 it holds
-   0.223 of the steps, and 332 of a `close_miss` cycle's 404 steps pass before the first close. A
-   census of these approaches comes before any lever. The serving switch `--stall_end` (D21) cut
-   good cycles with the bad ones and is out.
-3. Read what the corpus under the loop that serves buys. Retrain F3 on wave 3 gave candidate 4, and
-   retrain F4 on wave 4 read flat to it. Retrain F5 started again from F3 150k on waves 1 to 5 and
-   gave candidate 6, +55 over candidate 4. Wave 6 and retrain F6 repeat that recipe (section 9.23).
-   More data of the wave 1 recipe buys little (D11).
-4. Keep the loop switches as they are. D20 and D21 adopt nothing on candidate 4. `--passenger_drop`
+1. The wrong boxes are the largest loss: 342 of candidate 6's 478 misses. The classifier's
+   `wrong_box` cycles take 195 of them, other `wrong_box` cycles 28, and parts without a cycle of
+   their own 119. After v6a, v7 and v8 missed their C1 bars, and v9e passed and serves. v10 and
+   v10e3 missed (D22). In the loop, v10 read 480 against 510 (D23) and v11 478 against 524 (D24).
+   Neighbour grasps (8.4 % of lifts, final class right on 0.517) and early overhead misreads stay
+   open beside it.
+2. `close_miss` is the largest time sink. On candidate 6 it holds 0.223 of the steps, and 332 of a
+   `close_miss` cycle's 404 steps pass before the first close. The serving switch `--stall_end`
+   (D21) cut good cycles with the bad ones and is out.
+3. The corpus under the loop that serves moved the read twice. Retrain F3 on wave 3 gave candidate
+   4, and retrain F5 on waves 1 to 5 gave candidate 6, +55 over candidate 4. Retrain F4 on wave 4
+   and retrain F6 on wave 6 read flat or under. More data of the wave 1 recipe bought little (D11).
+4. The loop switches stay as they are. D20 and D21 adopt nothing on candidate 4. `--passenger_drop`
    costs 24 correct stows there, and on its D9 screen it gained none.
-5. Keep the unboxed parts in reach. `--cell_failure_cap 5` cuts the unboxed parts from 385 on
-   candidate 2 to 309 on candidate 3. Candidate 6 leaves 136 in the refill scene, about 7 a heap.
-6. Keep `--pile_pgs` (D18) out of the reads. Its paired screen reads outside the parity tolerance,
+5. The unboxed parts: `--cell_failure_cap 5` cuts them from candidate 2's 385 to candidate 3's 309.
+   Candidate 6 leaves 136 in the refill scene, about 7 a heap.
+6. `--pile_pgs` (D18) stays out of the reads. Its paired screen reads outside the parity tolerance,
    so a PGS read is a new baseline. On a policy read it cuts the wall time a heap by about 1.7
-   times. It still serves the renders, where the classifier sees only images.
-7. Run R13's two stretch runs on any official candidate. The stretch run r = 0 is the record of
-   continuous operation so far: 801 of 1000 at 259.9 an hour, with 85 interventions per 1000 parts
-   (section 9.13).
-8. Merge stack #164, 12 PRs with #165 for `feat/ms7f-levers3` and the report PR #166 on top.
-   `feat/ms7f-pgs`, `feat/ms7f-render-v8`, `feat/ms7f-dagger`, `feat/ms7f-stall-end` and
-   `feat/ms7f-policy-frames` have no PR yet.
+   times. It serves only the renders, where the classifier sees images.
+7. The stretch runs: only r = 0 of D15 ran, with candidate 2's flags: 801 of 1000 at 259.9 an hour,
+   with 85 interventions per 1000 parts (section 9.13). R13's runs on an official candidate did not
+   run.
+8. The code is GitHub stack #172: #154 to #163, #165 and #167 to #171, with this report as #166 on
+   top. All 17 PRs are ready for review.
 
-With a pass of a checked read in the refill scene of D19, the official read and R13's stretch runs
-come before step 1.
-
-The closing paragraph, written for the case where no checked read in the refill scene of D19 passes.
-MS7f built the real-scale task in simulation and ran it in every read: 150-part heaps in a deep
-tray, box emptying, six categories over 66 kinds and a classifier trained on renders. It did not
-meet its gate. The owner's staged bars of D12 are missed on every checked read on the full pile:
-candidate 1 at 2043 of 3000 and 140.9 an hour, candidate 2 at 2065 and 189.1, and candidate 3 at
-2181 and 189.5. In the refilled deep tray of D19, candidate 3 reads 2297 at 204.7, candidate 4 2467
-at 300.0 and candidate 6 2522 at 308.0. All three pass the staged rate and miss the share and the
-held-out row. Candidate 6 is the first checked read over the design's stretch rate of 300 an hour.
-It stays 28 correct stows and 8 held-out parts under the staged bars. The levers bought rate and
-share. `--missed_lift` took the policy from 140.9 to 189.1 an hour, and `--cell_failure_cap 5` added
-116 correct stows at the same rate. In the refill scene, retrain F3 on wave 3 with classifier v9e
-added 170 more, and retrain F5 on waves 1 to 5 another 55. The wrong boxes hold most of what is
-left: 342 of candidate 6's 478 misses. The next milestone starts from these sinks.
-
-TBD: the closing outcome. It waits for v11 and its screen (section 5.12), and for retrain F6,
-candidate 7 and any further checked read (section 9.23). On a pass of a checked read in the refill
-scene, the official read's outcome replaces the paragraph.
+The closing paragraph. MS7f built the real-scale task in simulation and ran it in every read:
+150-part heaps in a deep tray, box emptying, six categories over 66 kinds and a classifier trained
+on renders. It did not meet its gate, and the owner closed it as failed (D25). The owner's staged
+bars of D12 are missed on every checked read on the full pile: candidate 1 at 2043 of 3000 and 140.9
+an hour, candidate 2 at 2065 and 189.1, and candidate 3 at 2181 and 189.5. In the refilled deep tray
+of D19, candidate 3 reads 2297 at 204.7, candidate 4 2467 at 300.0 and candidate 6 2522 at 308.0.
+All three pass the staged rate and miss the share and the held-out row. The final result, candidate
+6, reads over the design's stretch rate of 300 an hour. It stays 28 correct stows and 8 held-out
+parts under the staged bars. The levers bought rate and share. `--missed_lift` took the policy from
+140.9 to 189.1 an hour, and `--cell_failure_cap 5` added 116 correct stows at the same rate. In the
+refill scene, retrain F3 on wave 3 with classifier v9e added 170 more, and retrain F5 on waves 1 to
+5 another 55. Then the DAgger lever flattened, and no classifier after v9e boxed better in the loop.
+The wrong boxes hold most of what is left: 342 of candidate 6's 478 misses. The official read never
+ran, and its seed 20307200 stays unburned.
