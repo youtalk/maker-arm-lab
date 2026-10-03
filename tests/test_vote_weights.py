@@ -5,8 +5,9 @@ import json
 
 import numpy as np
 import pytest
+import torch
 
-from maker_arm_lab.core import loop, parts
+from maker_arm_lab.core import desk_boxes, loop, parts
 from maker_arm_lab.core.eval_loop import EvalFailure
 from test_classifier_loop import SWITCHES, _classifier, _scene, _usage
 from test_perceived_loop import _rollout, _served
@@ -104,3 +105,44 @@ def test_the_switch_needs_the_vote_s_views_and_values(tmp_path, capsys):
     missing = str(tmp_path / "missing.json")
     line = _usage("mj_eval_heap", flags + ["--class_views", "--vote_weights", missing], capsys)
     assert line.startswith("EVAL_FAIL ") and "--vote_weights" in line, line
+
+
+def test_the_carry_guard_holds_a_part_while_the_fused_vote_is_pending(tmp_path, monkeypatch):
+    """Every view reads wide, the bricks' class, but a slope bias that the overhead and lift views
+    do not outweigh keeps the slope box until the carry view (CARRY_VIEW_STEPS 100 here), and the
+    teacher opens over the slope box before it. No view splits, yet the fused vote is pending
+    from the lift to the carry view. Off, the part falls into the slope box. With ``carry_guard``
+    the guard holds the open while the vote is pending, the carry view moves the box to wide,
+    and the still guard hands the part to the rig, which places it there."""
+    monkeypatch.setattr(loop, "CARRY_VIEW_STEPS", 100)
+    stub = _classifier(tmp_path, "wide", "wide")
+    # The view logits differ by 1: slope leads by 2 at the selection and 1 at the lift, and
+    # trails by 1 once the carry view adds its weight of 2.
+    vote = _vote(carry=2.0, names=parts.BASE_CLASSES, bias={"slope": 3.0})
+    episodes = []
+    for guard in (False, True):
+        env, rig, policy = _scene()
+        slope = int(env.class_to_box[0][parts.BASE_CLASSES.index("slope")])
+        x, y = (float(v) for v in env.desk_box_poses[0, slope, :2])
+        policy.rig.oracles[0].release_point = torch.tensor((x, y, desk_boxes.DESK_BOX_RELEASE_Z))
+        payload = _rollout(
+            env,
+            rig,
+            policy,
+            perceived=True,
+            classifier=stub,
+            class_views=True,
+            vote_weights=vote,
+            carry_guard=guard,
+            **SWITCHES,
+        )
+        env.close()
+        episodes.append(payload["episodes"][0])
+    off, on = episodes
+    assert off["cycle_classes"][0] == "wrong_box"
+    assert off["cycle_census"][0]["release_place"] == "wrong_box"
+    row = on["cycle_census"][0]
+    assert on["cycle_classes"][0] == "stowed" and row["handoff"] == "placed", row
+    assert row["read_class"] == row["lift_class"] == row["taken_class"] == "wide"
+    assert row["guard_vote_steps"] > 0 and row["guard_rim_steps"] == 0
+    assert row["guard_steps"] == row["guard_vote_steps"] + loop.GUARD_STALL_STEPS
