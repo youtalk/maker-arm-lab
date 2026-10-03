@@ -2479,8 +2479,11 @@ def rollout(
         if carry_votes:
             raise EvalFailure("vote_weights", "fuses three views; carry_votes reads more")
         weights, bias = vote_weights.get("weights", {}), vote_weights.get("bias", {})
-        if set(weights) != set(FUSED_VIEWS) or not set(class_names) <= set(bias):
-            raise EvalFailure("vote_weights", f"needs weights of {FUSED_VIEWS} and a bias a class")
+        # The frame bank's richer forms (ledger D7: a weight a view and class, or a matrix a
+        # view) adopted none, so this serves the nine values only.
+        scalar = all(isinstance(w, (int, float)) for w in weights.values())
+        if set(weights) != set(FUSED_VIEWS) or not scalar or not set(class_names) <= set(bias):
+            raise EvalFailure("vote_weights", f"needs a weight of {FUSED_VIEWS} and a bias a class")
     if carry_votes and not (classifier is not None and class_views):
         raise EvalFailure("carry_votes", "adds reads to the classifier's vote: needs class_views")
     if not 0 <= carry_votes <= MAX_CARRY_VOTES or carry_votes >= CARRY_VIEW_STEPS - lift_view_steps:
