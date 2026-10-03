@@ -100,6 +100,10 @@ PARKED_CENTRE = (3.0, 0.0, 1.0)
 over ``heap_oracle.CANDIDATE_MAX_Z``, so the selector never takes it; outside every box and the
 reach band; and so far from the desk that no landing spot or rake start measures against it."""
 _PARKED_PART = Part("undetected", "brick", 0, 0, (0.008, 0.008, 0.008), False, 0.0)
+OWN_AXES = ("special", "joint", "minifig")
+"""The perceived classes whose detections grasp by the part's own closing axes: the MS7e class
+``special`` and, under MS7f's ``--categories``, the joint and minifig categories, whose parts
+each have their own (MS7f design section 7)."""
 
 
 def parse_scales(text: str) -> dict[str, float]:
@@ -148,8 +152,8 @@ class Detection:
     """The simulator's part index: only the metrics and the teacher-side recorder may read it;
     decisions never do."""
     closing_axes: tuple[int, ...] = BOX_AXES
-    """The part's own closing axes, as its shape shows them. Only a ``special`` detection
-    grasps by them: each LDraw part has its own (MS7e design section 6.5)."""
+    """The part's own closing axes, as its shape shows them. Only a detection of an
+    ``OWN_AXES`` class grasps by them: each LDraw part has its own (MS7e design section 6.5)."""
 
 
 @dataclass
@@ -191,7 +195,7 @@ class PerceivedState:
                 False,
                 0.0,
                 closing_axes=(
-                    SLOPE_AXES if slope else d.closing_axes if d.cls == "special" else BOX_AXES
+                    SLOPE_AXES if slope else d.closing_axes if d.cls in OWN_AXES else BOX_AXES
                 ),
             )
         return tuple(out)
@@ -207,6 +211,9 @@ class Truth:
     classes: Sequence[str]  # (K,) PART_CLASSES names
     tool_xy: tuple[float, float]  # the tool point the arm hides parts around
     closing_axes: Sequence[tuple[int, ...]] = ()  # (K,) catalog closing axes; () is BOX_AXES
+    # MS7f: the parts parked off the desk (a refill's waiting parts, an emptied box's parts).
+    # They draw like any part, so the streams stay paired, and are never detected.
+    parked: frozenset[int] = frozenset()
 
 
 def covered(
@@ -352,7 +359,7 @@ class Perceiver:
             dsize = [s["size"] * SIZE_SIGMA_M * self._gauss() for _ in range(3)]
             missed = self.rng.random() < miss
             cls = self.classify(truth.classes[b], b)
-            if missed or b in hidden:
+            if missed or b in hidden or b in truth.parked:
                 continue
             dsize[int(grasp.body_axes_world(quat[b])[:, 2].abs().argmax())] *= 2.0
             turn = (math.cos(dyaw / 2.0), 0.0, 0.0, math.sin(dyaw / 2.0))
@@ -503,6 +510,55 @@ class ClassViews:
         if fixed is not None:
             return _other_class(true_cls, fixed, self.classes)
         return _other_class(true_cls, pick, self.classes) if fires else true_cls
+
+
+class PartClassifier:
+    """``--classifier`` (MS7f design sections 6.3 to 6.6): the render-trained category and
+    passenger model, a TorchScript file from ``lerobot_stack/train_part_classifier.py``, on the
+    CPU. The file carries its category names (``categories``) and its passenger operating point
+    (``passenger_threshold``, a logit); it takes uint8 (N, 224, 224, 3) frames and whether they are
+    wrist frames, which it crops itself, and with ``size_input`` the part's perceived size. A model
+    with ``wrist_input`` "crop" reads the env's native-pixel fingertip crop
+    (``MjLegoSortEnv.wrist_crop``) in place of the policy's 224 px wrist frame."""
+
+    def __init__(self, path):
+        self.path = str(path)
+        self.model = torch.jit.load(self.path, map_location="cpu").eval()
+        self.categories = tuple(self.model.categories)
+        self.threshold = float(self.model.passenger_threshold)
+        self.size_input = bool(getattr(self.model, "size_input", False))
+        self.wrist_crop = getattr(self.model, "wrist_input", "frame") == "crop"
+
+    def wrist_frame(self, env, i: int):
+        """Env ``i``'s wrist frame as this model reads it: the fingertip crop or the policy's."""
+        if self.wrist_crop:
+            return env.wrist_crop(i)
+        return env.obs_buf["images"]["wrist_rgb"][i].numpy()
+
+    @torch.no_grad()
+    def log_probs(
+        self, frame, active: Sequence[str], wrist: bool = False, size=None
+    ) -> tuple[list, bool]:
+        """One (224, 224, 3) uint8 frame, a wrist frame or the narrow overhead view: the log
+        probability of each of the run's ``active`` categories, in their order, and whether the
+        passenger head reads a second part in the jaws. ``size`` is the part's perceived size
+        (a detection's ``size``), which a ``size_input`` model reads sorted; None reads unknown."""
+        x = torch.as_tensor(frame)[None]
+        if self.size_input:
+            known = torch.tensor([sorted(size)]) if size is not None else torch.full((1, 3), -1.0)
+            logits, rider = self.model(x, wrist, known)
+        else:
+            logits, rider = self.model(x, wrist)
+        cols = [self.categories.index(c) for c in active]
+        logp = torch.log_softmax(logits[0, cols].float(), dim=0).tolist()
+        return logp, float(rider[0]) >= self.threshold
+
+    def read(
+        self, frame, active: Sequence[str], wrist: bool = False, size=None
+    ) -> tuple[str, bool]:
+        """``log_probs``' most likely category and its passenger read."""
+        logp, rider = self.log_probs(frame, active, wrist, size)
+        return active[max(range(len(active)), key=logp.__getitem__)], rider
 
 
 class PositionMemory:

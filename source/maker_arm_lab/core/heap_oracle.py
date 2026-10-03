@@ -22,7 +22,10 @@ What changes against the six-brick oracle, and nothing else:
   release is at the pick tilt over that box's centre with no RAISE, and a part inside any box
   is never a target;
 * in the MS7a tray, when no grasp ranks and a candidate lies within ``grasp.RAKE_BAND_M`` of
-  a wall, the closed jaws rake it off the wall through the push phases (``_plan_rake``).
+  a wall, the closed jaws rake it off the wall through the push phases (``_plan_rake``);
+* under the MS7f category map (``box_sets``) a part may go to any box of its category, and the
+  teacher releases it over the one with less volume in its own record of what it released
+  there (``release_box``, ``box_load``).
 
 The phases, the correctives, the induction and the retry ladder are the base class's.
 """
@@ -151,16 +154,25 @@ class HeapOracle(oracle.EnvOracle):
         tray_lean_deg: float = 0.0,
         box_sizes: Sequence[Sequence[float]] | None = None,
         wall_band_cont: bool = False,
+        box_sets: Sequence[Sequence[int]] | None = None,
+        box_load: list[float] | None = None,
+        tray_wall_height: float = layout.TRAY_WALL_HEIGHT,
     ):
         """``destination`` is the MS6 bin index, or with ``boxes`` (one (x, y, yaw) per desk
         box) the box index of every part, (K,), or one index for them all. ``box_sizes`` is
         each box's interior (MS7e box draw), the MS7a box of ``desk_boxes.interior`` by
         default. ``wall_band_cont`` (MS7e ledger R13 S3, continuous gripper only) tests the
-        walls at the continuous jaws' landing gap, ``grasp.CONT_HOLD_BAND``."""
+        walls at the continuous jaws' landing gap, ``grasp.CONT_HOLD_BAND``. ``box_sets`` (MS7f
+        ``--categories``, ``MjLegoSortEnv.part_box_sets``) is every box of each part's category,
+        the first one ``destination``'s; ``box_load`` is the volume released per box, the
+        record ``release_box`` reads and each RELEASE adds to, shared by the oracles of one
+        episode (the heap loop's oracle driver builds one per cycle), a fresh one when None.
+        ``tray_wall_height`` is the tray walls' height, ``layout.DEEP_TRAY_WALL_HEIGHT`` for
+        the MS7f deep tray (MS7f design 5.3)."""
         super().__init__(bl, len(parts), draw, induction=induction, rng=rng)
         # MS7a design, the tray: the heap lies inside four walls that ``core.grasp`` ranks
         # against (``grasp.wall_allows``). Off, the heap lies on the bare desk as in MS6.
-        self.walls = grasp.tray_walls(tray_lean_deg) if tray else ()
+        self.walls = grasp.tray_walls(tray_lean_deg, tray_wall_height) if tray else ()
         self.hold_band = grasp.CONT_HOLD_BAND if wall_band_cont else grasp.JAW_HOLD_BAND
         self.parts = tuple(parts)
         self.boxes = tuple(tuple(float(v) for v in box) for box in boxes)
@@ -182,6 +194,8 @@ class HeapOracle(oracle.EnvOracle):
         else:
             self.part_boxes = None
             self.destination = int(destination)
+        self.box_sets = None if box_sets is None else tuple(tuple(map(int, s)) for s in box_sets)
+        self.box_load = [0.0] * len(self.boxes) if box_load is None else box_load
         self.sizes = torch.tensor([p.size for p in self.parts], dtype=torch.float32)
         self.cycle_budget = cycle_budget
         self.grasp: grasp.Grasp | None = None
@@ -216,12 +230,16 @@ class HeapOracle(oracle.EnvOracle):
         self.forced_picks = 0
         self.held_swaps = 0
         self._give_up = False
+        self.abandon_cycle = False  # MS7f --abandon_cycle (the recorder): see recover_from_jam
         self.pushes_in_a_row = 0
         self.failures: dict = {}
         # "cell": failures count per 5 cm cell (design 7.2), the teacher's rule. "part": per
         # part, so a failing policy excludes the part it keeps missing and not its neighbours
         # (the heap loop's --part_failures switch, MS7a).
         self.failure_scope = "cell"
+        # Failures before ``_candidates`` excludes a key; the heap loop's --cell_failure_cap
+        # (MS7f) sets it on its perceived selectors, the teacher keeps CELL_FAILURE_CAP.
+        self.cell_failure_cap = CELL_FAILURE_CAP
         # False under the heap loop's --perceived (MS7c design section 6): the selector reads
         # no part's destination, so ``_candidates`` skips ``_stowed``; its any-box filter on
         # the perceived boxes already drops a stowed part.
@@ -250,13 +268,15 @@ class HeapOracle(oracle.EnvOracle):
     def _stowed(self, scene: oracle.SceneSnapshot) -> set[int]:
         if self.boxes:
             boxes, half = self._box_tensor()
-            ok = checker.parts_at_rest_in_own_boxes(
-                scene.brick_pos.unsqueeze(0),
-                scene.brick_lin_vel.unsqueeze(0),
-                boxes,
-                half,
-                torch.tensor([self.part_boxes]),
-            )[0]
+            pos, vel = scene.brick_pos.unsqueeze(0), scene.brick_lin_vel.unsqueeze(0)
+            if self.box_sets is None:
+                ids = torch.tensor([self.part_boxes])
+                ok = checker.parts_at_rest_in_own_boxes(pos, vel, boxes, half, ids)[0]
+            else:
+                allowed = torch.tensor(
+                    [[[m in own for m in range(len(self.boxes))] for own in self.box_sets]]
+                )
+                ok = checker.parts_at_rest_in_box_sets(pos, vel, boxes, half, allowed)[0]
             return {i for i in range(self.num_bricks) if bool(ok[i])}
         # The MS6 z-centre fix: heap mode has one physical bin, so grading reads
         # layout.heap_bin_center directly instead of the six-brick per-color array.
@@ -270,10 +290,19 @@ class HeapOracle(oracle.EnvOracle):
         )[0]
         return {i for i in range(self.num_bricks) if bool(ok[i])}
 
+    def release_box(self, brick: int) -> int:
+        """The box part ``brick`` goes to: its own box, or under the MS7f category map the box of
+        its category with less volume in this teacher's record of its releases (``box_load``),
+        a tie to the lower index (MS7f design section 6.2). The record changes only when a
+        RELEASE ends, so every leg of one carry aims at the same box."""
+        if self.box_sets is None:
+            return self.part_boxes[brick]
+        return desk_boxes.lighter_box(self.box_sets[brick], self.box_load)
+
     def _release_target(self, brick: int) -> torch.Tensor:
         if self.boxes:
             # Over the centre of the part's own box: the level jaws drop it straight down.
-            x, y, _ = self.boxes[self.part_boxes[brick]]
+            x, y, _ = self.boxes[self.release_box(brick)]
             return torch.tensor([x, y, desk_boxes.DESK_BOX_RELEASE_Z])
         return torch.tensor(
             [
@@ -331,7 +360,7 @@ class HeapOracle(oracle.EnvOracle):
             if not layout.in_reach(x, y, self.bl):
                 self.out_of_reach += 1
                 continue
-            if self.failures.get(self._failure_key(b, (x, y)), 0) >= CELL_FAILURE_CAP:
+            if self.failures.get(self._failure_key(b, (x, y)), 0) >= self.cell_failure_cap:
                 continue
             mask[b] = True
         return mask
@@ -786,6 +815,9 @@ class HeapOracle(oracle.EnvOracle):
             return
         super().report(result, scene)
         if phase == oracle.Phase.RELEASE:
+            if self.box_sets is not None and brick is not None:
+                # MS7f: the teacher's own record, the part's bounding volume, never the scene.
+                self.box_load[self.release_box(brick)] += math.prod(self.parts[brick].size)
             self._preselect(scene)
         if phase == oracle.Phase.REOPEN:
             self._regrasp(scene)
@@ -801,7 +833,10 @@ class HeapOracle(oracle.EnvOracle):
         spent. On the 600-part tray read of 2026-09-23 two of twelve episodes were abandoned
         with 19 and 7 parts still in the tray: the wrist roll 0.02 rad off its stop while a
         forced pick's descend stalled on a neighbor, and a wedge rake at the near wall.
-        Anything else (a jam in transit) still abandons.
+        Anything else (a jam in transit) still abandons, unless ``abandon_cycle`` (MS7f, the
+        recorder) is on: then a jam in any other phase ends its cycle too, through REOPEN, with
+        the part booked as not stowed unless a RETREAT finds it in its box. MS7f wave 1 lost two
+        whole 150-part heaps to transit jams after 5 and 10 cycles (2026-09-30).
         """
         if not self.walls:
             return False
@@ -817,7 +852,20 @@ class HeapOracle(oracle.EnvOracle):
             self._give_up = True
             self.phase = oracle.Phase.REOPEN
             return True
-        return False
+        if not self.abandon_cycle:
+            return False
+        self.jams += 1
+        brick = self.target_brick
+        if brick is not None:
+            arrived = self.phase == oracle.Phase.RETREAT and brick in self._stowed(scene)
+            if arrived:
+                self._sorted.add(brick)
+            else:
+                self._mark_failure(scene, brick)
+            self.cycle_outcomes.append(arrived)
+        self._give_up = True
+        self.phase = oracle.Phase.REOPEN
+        return True
 
     def _end_push(self) -> None:
         """Count the push or rake that just ended and scan again at HOVER."""
@@ -855,7 +903,7 @@ class HeapOracle(oracle.EnvOracle):
             "held_swaps": self.held_swaps,
             "cycle_parts": list(self.cycle_parts),
             "cycle_outcomes": list(self.cycle_outcomes),
-            "cells_excluded": sum(1 for v in self.failures.values() if v >= CELL_FAILURE_CAP),
+            "cells_excluded": sum(1 for v in self.failures.values() if v >= self.cell_failure_cap),
             "parts_out_of_reach": self.out_of_reach,
         }
         if self.boxes:

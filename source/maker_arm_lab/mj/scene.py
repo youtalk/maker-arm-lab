@@ -125,6 +125,8 @@ BRICK_CONDIM = 4
 # round 1x1 drops rocked in place for the whole 6 s. At 2e-3 a round 2x2 balanced on its rim
 # edge in 17 of 48 rests. With condim 4, collision studs or not, the rolls reached 83 to
 # 134 mm (p90), and 8 to 27 of 48 kicked parts still rolled after 6 s.
+SPAWN_ROW = 50  # parts per spawn row: up to 50 parts the scene compiles as before MS7f
+SPAWN_ROW_DY = 0.1  # m between spawn rows, inside the K 50 bounding box (stat stays put)
 ROUND_CONDIM = 6
 ROUND_ROLLING_FRICTION = 0.001  # INITIAL: the lone-part table (MS7e design section 6.2)
 ROUND_FRICTION = (*BRICK_FRICTION[:2], ROUND_ROLLING_FRICTION)
@@ -330,13 +332,15 @@ def build_spec(
     deep_box_floor: bool = False,
     camera_back: float = 0.0,
     round_physics: bool = False,
+    tray_wall_height: float = layout.TRAY_WALL_HEIGHT,
 ) -> mujoco.MjSpec:
     """The MjSpec for one run draw; ``compile_model`` turns it into a model and handles.
 
     ``parts`` (MS6) replaces the ``num_bricks`` identical box bricks with one body per part.
     A heap lies on the bare desk: there is no dish (owner decision 2026-09-18). ``tray``
     (MS7a design, the tray) adds the four walls of ``layout.tray_static_boxes``, or with
-    ``tray_lean_deg`` > 0 the leaning walls of ``layout.tray_lean_boxes``. ``deep_box_floor``
+    ``tray_lean_deg`` > 0 the leaning walls of ``layout.tray_lean_boxes``, each
+    ``tray_wall_height`` high (the MS7f deep tray's ``layout.DEEP_TRAY_WALL_HEIGHT``). ``deep_box_floor``
     (MS7e flat track) extends each desk box floor's collider under the desk top by
     ``desk_boxes.DESK_BOX_FLOOR_DEPTH``, so a thin part cannot drop through it.
 
@@ -458,10 +462,11 @@ def build_spec(
         )
     walls = []
     if tray:
+        h = tray_wall_height
         walls = (
-            layout.tray_lean_boxes(tray_lean_deg)
+            layout.tray_lean_boxes(tray_lean_deg, h)
             if tray_lean_deg > 0.0
-            else [(*box, (1.0, 0.0, 0.0, 0.0)) for box in layout.tray_static_boxes()]
+            else [(*box, (1.0, 0.0, 0.0, 0.0)) for box in layout.tray_static_boxes(h)]
         )
     for name, center, size, quat in walls:
         scene_geoms.append(
@@ -475,11 +480,16 @@ def build_spec(
             )
         )
 
-    # Bricks: free bodies; the default pose is overwritten by the first reset's scatter.
+    # Bricks: free bodies; the default pose is overwritten by the first reset's scatter. They
+    # spawn in rows of SPAWN_ROW along x, the next row SPAWN_ROW_DY over in y: the model's
+    # stat.extent and stat.center follow the spawn row, and a row longer than 50 parts pushed
+    # the cameras' near clip (vis.map.znear x stat.extent) past the wrist camera's jaws at K 150.
     for index in range(num_bricks):
         color = layout.BRICK_COLOR_ORDER[index % len(layout.BRICK_COLOR_ORDER)]
+        row, col = divmod(index, SPAWN_ROW)
         body = spec.worldbody.add_body(
-            name=f"brick_{index}", pos=[layout.SCATTER_X[0] + 0.04 * index, 0.0, layout.SPAWN_Z]
+            name=f"brick_{index}",
+            pos=[layout.SCATTER_X[0] + 0.04 * col, SPAWN_ROW_DY * row, layout.SPAWN_Z],
         )
         body.add_freejoint(name=f"brick_{index}_free")
         if parts is None:
@@ -617,6 +627,7 @@ def build_model(
     deep_box_floor: bool = False,
     camera_back: float = 0.0,
     round_physics: bool = False,
+    tray_wall_height: float = layout.TRAY_WALL_HEIGHT,
 ) -> tuple[mujoco.MjModel, SceneHandles]:
     """One call for callers that do not need to edit the spec."""
     if parts is not None:
@@ -632,6 +643,7 @@ def build_model(
         deep_box_floor=deep_box_floor,
         camera_back=camera_back,
         round_physics=round_physics,
+        tray_wall_height=tray_wall_height,
     )
     return compile_model(spec, num_bricks)
 

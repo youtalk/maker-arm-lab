@@ -17,6 +17,9 @@ the 31.8 mm grasps slide off one side (section 5). They stay constructible so a 
 with them still replays through ``by_name``. Tall bricks (two, three and five bricks high)
 took their place. Round bricks (cylinders) came and went the same day (``RETIRED_FAMILIES``).
 
+MS7f (MS7f design section 6.1) sorts by six categories (``PART_CATEGORIES``,
+``part_category``) in place of the eight classes when its ``--categories`` switch is on.
+
 MS7e (MS7e design sections 5 and 6) brings three families back one at a time: round, LDraw
 and flat (plates and tiles, no 4-wide part). ``catalog(families)`` adds a family only when a
 ``FAMILY_KEYS`` key names it, so with no key the catalog, the split and the four classes are
@@ -37,6 +40,11 @@ An LDraw part (``ldraw_part``) is read from ``assets/parts/<id>.json``, which
 collider is up to four convex hulls (``Part.hulls``) and its studs are visual
 (``Part.stud_frames``). Its mass keeps the H2 rule, and each hull carries the share of it that
 its volume holds (MS7e design section 6.1).
+
+MS7f (MS7f design section 7) adds two more families the same generator builds: joint
+(``JOINT_IDS``) and minifig (``MINIFIG_IDS``). Their parts are named ``<family>_<id>``, come after tile in ``FAMILIES`` so no
+catalog index moves, split on their own generator and class as ``special`` while the eight
+MS7e classes sort.
 """
 
 from __future__ import annotations
@@ -61,17 +69,60 @@ MASS_FLOOR_KG = 0.0005  # solver health on 1x1 plates (0.12 g solid)
 # 7 mm under the 52.4 mm per-jaw travel; the full gap is 104.8 mm (robots.frames.JAW_FULL_GAP)
 MAX_GRASP_WIDTH = 0.045
 HELDOUT_FRACTION = 0.2
-FAMILIES = ("brick", "slope", "round", "ldraw", "plate", "tile")
+FAMILIES = ("brick", "slope", "round", "ldraw", "plate", "tile", "joint", "minifig")
 """Catalog order. The MS7e families come after brick and slope, so ``split`` draws the base
-split unchanged (MS7e design section 5)."""
-FAMILY_KEYS = {"round": ("round",), "ldraw": ("ldraw",), "flat": ("plate", "tile")}
+split unchanged (MS7e design section 5), and the MS7f families after tile."""
+FAMILY_KEYS = {
+    "round": ("round",),
+    "ldraw": ("ldraw",),
+    "flat": ("plate", "tile"),
+    "joint": ("joint",),
+    "minifig": ("minifig",),
+}
 """The keys ``--families`` accepts, and the families each brings into the catalog."""
-READY_FAMILIES: frozenset[str] = frozenset({"round", "ldraw", "flat"})
+READY_FAMILIES: frozenset[str] = frozenset({"round", "ldraw", "flat", "joint", "minifig"})
 """The ``FAMILY_KEYS`` keys whose behaviour is in this commit. Each family track adds its key
 when it lands; ``--families`` with any other key is a usage error (MS7e design section 10.2)."""
 LDRAW_IDS = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")
 """The pre-registered LDraw parts, in catalog order (MS7e design section 6.5). Part names are
 ``ldraw_<id>``; ``ldraw_part`` loads each from ``assets/parts/<id>.json``."""
+JOINT_IDS = ("2780", "6558", "43093", "3937", "3938", "14417", "14418", "4081b")
+"""MS7f joint family: three Technic pins (friction, long, axle pin), the two halves of a 1x2
+hinge brick, a 1x2 plate with a side ball, one with a socket and a 1x1 plate with a clip."""
+MINIFIG_IDS = ("3626b", "973", "3815c01", "3901", "3624", "3838", "4349")
+"""MS7f minifig family, each part one rigid body: a head, a torso without arms, the hips and
+legs as one assembly, male hair, a police hat, air tanks and a loudhailer. The cowboy hat 3629
+left on 2026-09-30: upright it offers only its brim's edge, which the jaws ride over, and on
+the minifig heap read (run 20303500 + i, layout 20303550 + i) its 21 cycles took 1009 steps
+each against 346 for the parts of the same seeds without the new families."""
+LDRAW_FAMILY_IDS = {"ldraw": LDRAW_IDS, "joint": JOINT_IDS, "minifig": MINIFIG_IDS}
+"""Every family read from ``LDRAW_DIR``, with its part ids in catalog order."""
+CLASSIFIER_EXTRA = (
+    *("brick_1x1x2", "brick_1x1x5", "brick_1x4x3", "brick_2x2x2", "brick_2x4x2"),
+    *("brick_1x10", "brick_2x10"),
+    *("ldraw_3037", "ldraw_3298", "ldraw_3665a", "ldraw_3702", "ldraw_32000", "ldraw_6541"),
+    *("ldraw_4070", "ldraw_30414"),
+    *("plate_1x3", "plate_1x8", "plate_2x3", "plate_2x8"),
+    *("tile_1x3", "tile_1x6", "tile_1x8", "tile_2x3"),
+    *("round_1x1x2", "round_1x1x3", "round_2x2x3", "round_4x4x2"),
+    *("joint_32054", "joint_32002", "joint_6628", "joint_63868", "joint_60470a"),
+    *("joint_4276b", "joint_44301a", "joint_2430", "joint_14419"),
+    *("minifig_6132", "minifig_3625", "minifig_3959", "minifig_973c01", "minifig_30162"),
+    *("minifig_86035", "minifig_30135", "minifig_4530", "minifig_6025"),
+)
+"""Kinds only the category classifier's render set sees (MS7f, the controller's deviation of
+2026-09-30): in no catalog, no split and no ``catalog_index``, so the catalog's held-out kinds
+stay unseen by the policy and the classifier. ``by_name`` builds them (``extra_part``), and
+each family's ``FAMILY_CATEGORY`` gives its category. They add category cues the ~50 train
+kinds lack: other bricks, slopes, Technic bricks, arches and side-stud bricks, other plate and
+tile footprints, taller round bricks, other pins, clip, hinge and ball plates, and other
+helmets, hair and accessories. No primitive extra repeats a catalog kind's family and size,
+and none has a category a shape leaves open (a round plate would be round and flat). The domed
+helmets 3833 and 3844 stayed out: dropped on the desk, they rocked on their domes for 1 s after
+a 3 s settle (up to 21 mm), on 3 and 2 of 5 drops. So did every kind the heap teacher stowed
+under 9 of 12 times alone (``scripts/mj_part_table.py``, 2026-09-30): the arches 3455 (6) and
+3307 (5), which offer no closing axis on their side, the fire helmet 3834 (8), the radio 3962b
+(8) and the pickaxe 3841 (0). The camera 4360 did not build (a degenerate CoACD hull)."""
 LDRAW_DIR = Path(__file__).resolve().parents[3] / "assets" / "parts"
 FLAT_FAMILIES = ("plate", "tile")  # in the catalog only under ``--families flat``
 RETIRED_FAMILIES = ("round",)
@@ -191,15 +242,15 @@ def make_part(family: str, nx: int, ny: int, nz: int = 1) -> Part:
 
 
 @functools.cache
-def ldraw_part(part_id: str) -> Part:
-    """The LDraw part ``part_id`` from its JSON file (module docstring). ``nx`` and ``ny`` are
-    its footprint in studs; its studs are ``stud_frames``, so ``studs`` is False."""
+def ldraw_part(part_id: str, family: str = "ldraw") -> Part:
+    """The ``family`` part ``part_id`` from its JSON file (module docstring). ``nx`` and ``ny``
+    are its footprint in studs; its studs are ``stud_frames``, so ``studs`` is False."""
     rec = json.loads((LDRAW_DIR / f"{part_id}.json").read_text())
     size = tuple(rec["size"])
     total = sum(rec["hull_volumes"])
     return Part(
-        name=f"ldraw_{part_id}",
-        family="ldraw",
+        name=f"{family}_{part_id}",
+        family=family,
         nx=round(size[1] / STUD_PITCH),
         ny=round(size[0] / STUD_PITCH),
         size=size,
@@ -224,18 +275,51 @@ map and the perception's class draws are MS7d's."""
 
 def part_class(part: Part) -> str:
     """The sorting class of ``part``: its family for a round part, a plate and a tile,
-    ``special`` for an LDraw part, ``slope`` for a slope, ``tall`` for a brick taller than one
-    brick height, ``narrow`` for a one-height brick one stud wide and ``wide`` for a one-height
-    brick two or more studs wide. The base catalog holds 6, 5, 8 and 10."""
+    ``special`` for a part from ``LDRAW_DIR``, ``slope`` for a slope, ``tall`` for a brick
+    taller than one brick height, ``narrow`` for a one-height brick one stud wide and ``wide``
+    for a one-height brick two or more studs wide. The base catalog holds 6, 5, 8 and 10.
+
+    The MS7f families join ``special``: a ninth class would reshuffle every MS7e class map."""
     if part.family in ("round", "plate", "tile"):
         return part.family
-    if part.family == "ldraw":
+    if part.family in LDRAW_FAMILY_IDS:
         return "special"
     if part.family == "slope":
         return "slope"
     if part.size[2] > BRICK_HEIGHT + 1e-9:
         return "tall"
     return "narrow" if part.nx == 1 else "wide"
+
+
+PART_CATEGORIES = ("brick", "special", "flat", "round", "joint", "minifig")
+"""The six sort categories of MS7f (MS7f design section 6.1), in the order the category map
+lists them. They replace the eight classes under ``--categories``."""
+FAMILY_CATEGORY = {
+    "brick": "brick",
+    "slope": "special",
+    "ldraw": "special",
+    "plate": "flat",
+    "tile": "flat",
+    "round": "round",
+    "joint": "joint",
+    "minifig": "minifig",
+}
+"""The category of each family: a brick of any height or width is a brick, a slope and an LDraw
+part are special, a plate and a tile are flat. ``joint`` and ``minifig`` are the families of
+MS7f design section 7, which the parts track adds to ``FAMILIES``."""
+
+
+def part_category(part: Part) -> str:
+    """The sort category of ``part`` (``PART_CATEGORIES``), read off its family."""
+    return FAMILY_CATEGORY[part.family]
+
+
+def active_categories(families: Sequence[str] = ()) -> tuple[str, ...]:
+    """The categories of a run whose catalog holds the ``FAMILY_KEYS`` keys ``families``
+    (``catalog``): those of its families, in ``PART_CATEGORIES`` order. Brick and slope are in
+    every catalog, so brick and special always are."""
+    present = {"brick", "slope"} | {f for key in families for f in FAMILY_KEYS[key]}
+    return tuple(c for c in PART_CATEGORIES if c in {FAMILY_CATEGORY[f] for f in present})
 
 
 def stud_positions(part: Part) -> list[tuple[float, float]]:
@@ -264,8 +348,8 @@ def graspable(part: Part) -> bool:
 def _family_parts(family: str) -> list[Part]:
     """Every graspable part of one family, in catalog order."""
     made = (
-        [ldraw_part(i) for i in LDRAW_IDS]
-        if family == "ldraw"
+        [ldraw_part(i, family) for i in LDRAW_FAMILY_IDS[family]]
+        if family in LDRAW_FAMILY_IDS
         else [make_part(family, *spec) for spec in _FAMILY_SPECS[family]]
     )
     return [p for p in made if graspable(p)]
@@ -284,23 +368,36 @@ def catalog(families: Sequence[str] = ()) -> list[Part]:
 
 def catalog_index(name: str) -> int:
     """The part's index in the full MS7e order: the MS7d catalog (0 to 28), then round, LDraw,
-    plate and tile. An LDraw part needs no JSON for it. The lone-part table seeds a part's
-    trials at 20289000 plus this index (MS7e design section 8.4)."""
+    plate and tile, then the MS7f families. A part from ``LDRAW_DIR`` needs no JSON for it. The
+    lone-part table seeds a part's trials at 20289000 plus this index (MS7e design section
+    8.4)."""
     names = []
     for f in FAMILIES:
         names += (
-            [f"ldraw_{i}" for i in LDRAW_IDS]
-            if f == "ldraw"
+            [f"{f}_{i}" for i in LDRAW_FAMILY_IDS[f]]
+            if f in LDRAW_FAMILY_IDS
             else [p.name for p in _family_parts(f)]
         )
     return names.index(name)
 
 
+def extra_part(name: str) -> Part:
+    """A ``CLASSIFIER_EXTRA`` kind from its name: an LDraw-built family's JSON part, or a
+    primitive from its ``<family>_<nx>x<ny>[x<nz>]`` name."""
+    family, spec = name.split("_", 1)
+    if family in LDRAW_FAMILY_IDS:
+        return ldraw_part(spec, family)
+    return make_part(family, *(int(n) for n in spec.split("x")))
+
+
 def _replayable() -> list[Part]:
-    """The catalog plus the flat, retired and LDraw parts other shards were recorded with."""
+    """The catalog plus the flat, retired and LDraw-built parts other shards were recorded
+    with, and the classifier's extras."""
     flat = [make_part(f, nx, ny) for f in FLAT_FAMILIES for nx, ny in _BOX_FOOTPRINTS]
     retired = [make_part(*spec) for spec in _RETIRED]
-    return catalog() + [p for p in flat if graspable(p)] + retired + _family_parts("ldraw")
+    ldraw = [p for f in LDRAW_FAMILY_IDS for p in _family_parts(f)]
+    extra = [extra_part(n) for n in CLASSIFIER_EXTRA]
+    return catalog() + [p for p in flat if graspable(p)] + retired + ldraw + extra
 
 
 def split(parts: Sequence[Part], seed: int) -> tuple[list[Part], list[Part]]:

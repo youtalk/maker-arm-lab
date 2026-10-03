@@ -45,7 +45,7 @@ def test_the_ms7e_part_order_and_its_families():
     table = _load()
     order = table.part_order()
     assert order[:29] == [p.name for p in parts.catalog()]
-    assert len(order) == 51 and len(set(order)) == 51
+    assert len(order) == len(set(order)) == 51 + len(parts.JOINT_IDS) + len(parts.MINIFIG_IDS)
     pins = {
         "round_1x1": 29,
         "round_4x4": 32,
@@ -58,7 +58,9 @@ def test_the_ms7e_part_order_and_its_families():
     }
     for name, index in pins.items():
         assert order.index(name) == index, name
-    assert [parts.catalog_index(n) for n in order] == list(range(51))
+    assert [parts.catalog_index(n) for n in order] == list(range(len(order)))
+    assert table.family_parts("joint") == order[51:59] == [f"joint_{i}" for i in parts.JOINT_IDS]
+    assert table.family_parts("minifig") == order[59:]
     assert table.family_parts("round") == order[29:33]
     assert table.family_parts("flat") == order[41:51]
     assert table.family_parts("tile") == order[47:51]
@@ -73,6 +75,10 @@ def test_the_seed_rule():
     # A shorter table is a prefix: trial t's seed never depends on the trial count.
     assert table.trial_seeds("brick_2x4", 3) == table.trial_seeds("brick_2x4", 12)[:3]
     assert table.trial_seeds("round_1x1", 3) != table.trial_seeds("brick_2x4", 3)
+    # --seed_base moves the base, and the default keeps MS7e's (MS7f ledger R1: 20303000).
+    want = random.Random(20303000 + index)
+    assert table.trial_seeds("brick_2x4", 2, 20303000) == [want.randrange(2**31) for _ in range(2)]
+    assert table.parse_args(["--parts", "brick_2x4"]).seed_base == 20289000
 
 
 def test_one_real_trial_on_brick_2x4_stows(tmp_path):

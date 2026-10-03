@@ -5,12 +5,24 @@ test (MS7c design section 10), on the three-part MuJoCo heap with four desk boxe
 
 import math
 import random
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
 
-from maker_arm_lab.core import desk_boxes, grasp, layout, loop, oracle, parts, perception
+from maker_arm_lab.core import (
+    batch_loop,
+    desk_boxes,
+    grasp,
+    heap_oracle,
+    layout,
+    loop,
+    oracle,
+    parts,
+    perception,
+)
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.hold import HoldDetector
 from maker_arm_lab.core.layout import sample_run_draw
@@ -31,6 +43,8 @@ def _env_and_rig(
     box_draw=0,
     tray_lean=0.0,
     wall_band_cont=False,
+    categories=False,
+    **ms7f,
 ):
     draw = sample_run_draw(random.Random(5))
     draw["slot_colors"] = (0, 1, 2, 3)
@@ -47,11 +61,14 @@ def _env_and_rig(
         episode_length_s=loop.episode_length_s(budget),
         class_names=class_names,
         box_draw=box_draw,
+        categories=categories,
+        **ms7f,
     )
     env.reset(seed=11)
     if not box_draw:
         env.place_desk_boxes(0, FIXED)
     rng = random.Random(1)
+    loads = [[0.0] * env.desk_boxes]  # MS7f --categories: the teacher's release record
 
     def factory(i, bl, episode_draw):
         return HeapOracle(
@@ -66,6 +83,9 @@ def _env_and_rig(
             box_sizes=env.desk_box_sizes[i],
             tray_lean_deg=env.tray_lean_deg,
             wall_band_cont=wall_band_cont,
+            box_sets=env.part_box_sets(i),
+            box_load=loads[i],
+            tray_wall_height=env.tray_wall_height,
         )
 
     rig = OracleRig(env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory)
@@ -487,6 +507,38 @@ def test_the_ms7d_switches_need_perceived_before_a_step():
     assert served == []
 
 
+def test_cell_failure_cap_sets_the_failed_cycles_that_exclude_a_position(monkeypatch, capsys):
+    """One brick the still policy never lifts: each cycle ends on its step budget and books a
+    failure at the brick's perceived position, so the episode ends ``no_candidate`` after as
+    many cycles as the cap, the constant's 3 or the switch's 5. The recorder's teacher keeps
+    the constant, so the recorder refuses the switch."""
+    from test_classifier_loop import _usage  # it imports this module
+
+    heap = ["--heap_k", "3", "--desk_boxes", "4", "--gripper", "continuous"]
+    line = _usage("mj_eval_heap", heap + ["--perceived", "--cell_failure_cap", "11"], capsys)
+    assert line.startswith("EVAL_FAIL ") and "must lie in [1, 10]" in line
+    line = _usage("mj_eval_heap", heap + ["--cell_failure_cap", "5"], capsys)
+    assert line.startswith("EVAL_FAIL ") and "it needs --perceived" in line
+    line = _usage("mj_generate_batch", ["--out_dir", "/tmp/x", "--cell_failure_cap", "5"], capsys)
+    assert line.startswith("BATCH_FAIL usage: ") and "--cell_failure_cap is not built" in line
+    env, rig = _env_and_rig()
+    for bad in ({"cell_failure_cap": 5}, {"perceived": True, "cell_failure_cap": 0}):
+        with pytest.raises(loop.EvalFailure, match="cell_failure_cap"):
+            _rollout(env, rig, _Still(), **bad)
+    env.close()
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 60)
+    ends = []
+    for cap in (heap_oracle.CELL_FAILURE_CAP, 5):
+        env, rig = _env_and_rig(part_list=PARTS[:1], budget=8)
+        _place(env, SPREAD[:1])
+        payload = _rollout(env, rig, _Still(), budget=8, perceived=True, cell_failure_cap=cap)
+        env.close()
+        ep = payload["episodes"][0]
+        on = payload["inference"]["loop"].get("cell_failure_cap")
+        ends.append((ep["cycle_reasons"], ep["done_reason"], on))
+    assert ends == [(["budget"] * 3, "no_candidate", None), (["budget"] * 5, "no_candidate", 5)]
+
+
 def test_the_release_gap_selects_at_once_after_a_perceived_release(monkeypatch):
     """MS7d L2: after a cycle that ended ``placed`` or ``dropped`` the loop selects at once, as
     after a non-release end; with the switch off it waits for the full gap as in MS7c. The
@@ -776,7 +828,7 @@ def test_a_rake_that_hands_back_over_its_part_looks_again_and_finds_it(monkeypat
     for looks in (False, True):
         env, rig = _one_stuck_brick(monkeypatch)
         if not looks:
-            monkeypatch.setattr(loop, "look_again", lambda tool_xy, lean_deg, streak: False)
+            monkeypatch.setattr(loop, "look_again", lambda *args: False)
         payload = _rollout(
             env, rig, _Home(), budget=3, perceived=True, noise_scales=ZERO, scripted_rake=True
         )
@@ -1001,7 +1053,8 @@ class _TruthlessEnv:
         object.__setattr__(self, "_strict", False)
 
     def __getattr__(self, name):
-        if self._strict and name in ("destination_bins", "desk_box_poses", "desk_box_sizes"):
+        strict = ("destination_bins", "desk_box_poses", "desk_box_sizes", "destination_mask")
+        if self._strict and name in strict + ("class_boxes",):
             raise AssertionError(f"the loop read env.{name} after its setup")
         return getattr(self._env, name)
 
@@ -1049,8 +1102,12 @@ TRUTH_DECISION_READS = (
 """The loop's truth reads besides the three accessors: what its decisions read before MS7c."""
 
 
-def _teacher_scene(monkeypatch, class_names=parts.BASE_CLASSES, box_draw=0):
-    env, rig = _env_and_rig(class_names=class_names, box_draw=box_draw)
+def _teacher_scene(
+    monkeypatch, class_names=parts.BASE_CLASSES, box_draw=0, categories=False, **env_kwargs
+):
+    env, rig = _env_and_rig(
+        class_names=class_names, box_draw=box_draw, categories=categories, **env_kwargs
+    )
     _place(env, SPREAD)
     switches = {
         "select_at_release": True,
@@ -1075,6 +1132,64 @@ def _box_draw_scene(monkeypatch):
     """The teacher scene under the MS7e box draw (``--box_draw 6``): the reset draws the count,
     each box's interior and pose, and the loop perceives each box's size (design section 4.3)."""
     return _teacher_scene(monkeypatch, parts.PART_CLASSES, box_draw=6)
+
+
+def _ms7f_scene(monkeypatch):
+    """The teacher scene with every MS7f switch the commit builds (``batch_loop.MS7F_READY``):
+    the six categories over the drawn boxes, a category's second boxes chosen by the loop's
+    own release record (MS7f design section 6.2). A track that readies a loop switch adds it
+    here, so the no-truth test runs with every ready switch on (design section 12.2).
+    ``classifier`` and ``passenger_drop`` (track C) read a stub TorchScript model on a stand-in
+    narrow view (the cameras are off). It reads no passenger: every lift of this tray scene is
+    over the tray interior, where a passenger read ends the cycle, and the scene's one lifting
+    cycle must place. ``test_classifier_loop`` runs the drop on its own tray scene."""
+    from test_classifier_loop import _classifier  # it imports this module
+
+    # Track S's teacher pace and waits drive the rig, which serves no loop decision, and
+    # end_at_done ends the recorder's episodes.
+    teacher = {
+        "transport_speed",
+        "descend_speed",
+        "close_steps",
+        "lift_hold_steps",
+        "release_steps",
+        "close_guard",
+        "quiet_landing",
+        "landing_steps",
+        "end_at_done",
+        "net_stall",
+    }
+    ready = {"categories", "deep_tray", "tray_refill", "box_empty", "book_miss"}
+    # abandon_cycle is the recorder's and near_tracking the rig's watchdog: no loop decision
+    ready |= {"lift_budget", "abandon_cycle", "near_tracking", "classifier", "passenger_drop"}
+    ready |= {"lift_view_steps"}
+    ready |= {"missed_lift"}  # the riders track: a carry the hold detector missed
+    ready |= {"cell_failure_cap", "carry_votes"}
+    assert batch_loop.MS7F_READY == ready | teacher, "turn it on in this scene"
+    # Two of the three bricks start in the tray and one part fills a box, so the refill and
+    # an emptying both run between cycles. Set before the build: the box draw reads the ratio.
+    monkeypatch.setattr(layout, "TRAY_REFILL_START", 2)
+    monkeypatch.setattr(layout, "TRAY_REFILL_AT", 1)
+    monkeypatch.setattr(desk_boxes, "BOX_VOLUME_PER_PART_VOLUME", 1e4)
+    env, rig, policy, budget, switches = _teacher_scene(
+        monkeypatch,
+        parts.active_categories(),
+        box_draw=6,
+        categories=True,
+        tray=True,
+        tray_lean=30.0,
+        deep_tray=True,
+        tray_refill=True,
+    )
+    env.narrow_overhead = lambda i, point: np.full((224, 224, 3), 255, dtype=np.uint8)
+    stub = _classifier(Path(tempfile.mkdtemp()), "special", "brick", names=parts.PART_CATEGORIES)
+    # A lift budget under the 800-step cycle budget: the tray scene's first three cycles lift
+    # nothing and end on it, and the fourth places its part at step 487 (150 cuts it too).
+    on = {"box_empty": True, "book_miss": True, "lift_budget": 750}
+    on |= {"classifier": stub, "passenger_drop": True, "lift_view_steps": 6, "missed_lift": True}
+    # carry_votes adds reads to the class_views vote, so the scene turns the vote on too.
+    on |= {"cell_failure_cap": 5, "carry_votes": 2, "class_views": True}
+    return env, rig, policy, budget, switches | on
 
 
 def _thin_snap_scene(monkeypatch):
@@ -1199,6 +1314,7 @@ def test_every_ms7d_switch_at_once_runs_the_teacher_scene_to_its_end(monkeypatch
         _wall_band_scene,
         _thin_snap_scene,
         _snap_closed_scene,
+        _ms7f_scene,
     ],
 )
 def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):

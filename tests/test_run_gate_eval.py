@@ -260,6 +260,7 @@ def test_run_gate_runs_every_draw_once_and_writes_results(tmp_path, capsys):
     assert results["gate"]["per_brick_rate"] == pytest.approx(6 / 36)
     assert results["gate"]["passed"] is True
     assert results["inference"]["temporal_ensemble_coeff"] == 0.01
+    assert results["inference"]["action_warp"] == 1.0  # the fake server predates the warp
     assert results["policy_id"] == "act:ck+te0.01"
     assert len(results["draws"]) == 3
     written = json.loads((cfg.out_dir / "gate_results.json").read_text())
@@ -744,6 +745,46 @@ def test_cached_payload_matches_the_inference_configuration(tmp_path):
     legacy = {k: v for k, v in served_open_loop.items() if k != "inference"}
     open_loop.n_action_steps = None
     assert cached(open_loop, legacy) and not cached(ensemble, legacy)
+
+
+def test_action_warp_reaches_the_server_splits_the_cache_and_refuses_out_of_range(
+    tmp_path, monkeypatch, capsys
+):
+    ledger = _fake_ledger(tmp_path)
+    plain = _cfg(tmp_path, ledger, processes=1, n_action_steps=None, temporal_ensemble_coeff=None)
+    assert "--action_warp" not in ge._server_command(plain)  # the unwarped command is unchanged
+    warped = _cfg(
+        tmp_path,
+        ledger,
+        processes=1,
+        n_action_steps=None,
+        temporal_ensemble_coeff=None,
+        action_warp=2.0,
+    )
+    server = ge._server_command(warped)
+    assert server[server.index("--action_warp") + 1] == "2.0"
+    plain.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None, "chunk_size": 100}
+
+    def cached(cfg, inference):
+        payload = _payload(draw, [_episode(6)], policy_id="act:ck+nas50", inference=inference)
+        (plain.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    # A warp read never reuses an unwarped payload, nor the reverse; one that predates the
+    # warp ran unwarped.
+    assert cached(plain, served) and cached(plain, {**served, "action_warp": 1.0})
+    assert not cached(plain, {**served, "action_warp": 2.0})
+    assert cached(warped, {**served, "action_warp": 2.0}) and not cached(warped, served)
+    assert not cached(warped, {**served, "action_warp": 1.5})
+    args = ge._parse_args(_argv(tmp_path) + ["--action_warp", "1.5"])
+    assert ge._build_cfg(args).action_warp == 1.5
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    for bad in ("0.5", "3.5"):
+        assert ge.main(_argv(tmp_path) + ["--action_warp", bad]) == 2
+        out = capsys.readouterr()
+        assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--action_warp" in out.err
 
 
 def _argv(tmp_path: Path) -> list[str]:
@@ -1429,3 +1470,116 @@ def test_the_gate_sums_the_family_and_box_count_rows():
     assert list(rows["stowed_by_box_count"]) == ["4", "5"]
     # The box draw gives each episode its own number of boxes (a crash on 2026-09-29).
     assert rows["stowed_by_box"] == [{"stowed": 7, "total": 12}] + [{"stowed": 0, "total": 0}] * 4
+
+
+def test_the_supervisors_ms7f_copies_match_the_core_modules():
+    import argparse
+
+    from maker_arm_lab.core import batch_loop
+
+    assert ge.MS7F_OFF == batch_loop.MS7F_OFF == batch_loop.ms7f_switches(argparse.Namespace())
+    assert ge.MS7F_READY == batch_loop.MS7F_READY
+
+
+def test_the_supervisor_forwards_categories_and_its_cache_matches_it(tmp_path, capsys):
+    draw = ge.make_eval_draws(1, 1)[0]
+    argv = _argv(tmp_path / "gate") + MS7E_HEAP + ["--desk_boxes", "8", "--box_draw", "6"]
+    plain = ge._build_cfg(ge._parse_args(argv))
+    on = ge._build_cfg(ge._parse_args(argv + ["--categories"]))
+    assert "--categories" in ge._eval_command(on, draw)
+    assert "--categories" not in ge._eval_command(plain, draw)
+    assert ge.ms7f_block(plain) == ge.MS7F_OFF and ge.ms7f_block(on)["categories"] is True
+    path = tmp_path / "gate" / "eval_000.json"
+    path.parent.mkdir(parents=True)
+
+    def hit(gate_cfg, **extra):
+        served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+        payload = _heap_payload(draw, inference=served, desk_boxes=8, **extra)
+        payload["ms7e"] = ge.MS7E_OFF | {"box_draw": 6}
+        path.write_text(json.dumps(payload))
+        return ge._cached_payload(gate_cfg, draw) is not None
+
+    # An MS7e payload (no block) ran with every MS7f switch off.
+    assert hit(plain) and hit(plain, ms7f=ge.MS7F_OFF) and not hit(plain, ms7f=ge.ms7f_block(on))
+    assert hit(on, ms7f=ge.ms7f_block(on)) and not hit(on) and not hit(on, ms7f=ge.MS7F_OFF)
+    no_draw = [a for a in argv if a not in ("--box_draw", "6")]
+    with pytest.raises(ValueError, match="needs --box_draw"):
+        ge._build_cfg(ge._parse_args(no_draw + ["--categories"]))
+    with pytest.raises(ValueError, match="need --heap_k > 0|needs --heap_k > 0"):
+        ge._build_cfg(ge._parse_args(_argv(tmp_path) + ["--categories", "--box_draw", "6"]))
+    ledger = _fake_ledger(tmp_path)
+    cfg = _cfg(tmp_path, ledger, processes=1, backend="mujoco", heap_k=50, box_draw=6)
+    cfg.ms7f = {"categories": True}
+    results = ge.run_gate(cfg, lambda d: _heap_payload(d), lambda: _FakeServer([]))
+    assert results["ms7f"] == ge.MS7F_OFF | {"categories": True}
+
+
+def test_the_gate_sums_the_throughput_and_the_heldout_row_and_gates_them_only_when_set():
+    """MS7f design section 4.2: with both bars unset the verdict is MS7e's; each set bar gates."""
+    from maker_arm_lab.core import loop
+
+    assert ge.CONTROL_HZ == loop.CONTROL_HZ and ge.INTERVAL_NAMES == loop.INTERVAL_NAMES
+    eps = [
+        dict(
+            _episode(0),
+            num_bricks=150,
+            bricks_stowed=140,
+            steps=54000,
+            cycles=150,
+            stowed_heldout={"stowed": 17, "total": 20},
+            events={"tray_refill": 2, "box_empty": 1},
+            cycle_classes=["stowed", "held_no_lift"],
+            cycle_intervals=[[1, 2, 3, 4], [5, 6, 0, 0]],
+            stowed_by_category={"brick": {"stowed": 90, "total": 95}},
+        ),
+        dict(
+            _episode(0),
+            num_bricks=150,
+            bricks_stowed=136,
+            steps=54000,
+            cycles=150,
+            stowed_heldout={"stowed": 16, "total": 20},
+            events={"tray_refill": 1, "box_empty": 0},
+            cycle_classes=["stowed"],
+            cycle_intervals=[[10, 20, 30, 40]],
+            stowed_by_category={"brick": {"stowed": 80, "total": 90}},
+        ),
+    ]
+    payload = {"episodes": eps}
+    plain = ge.aggregate_gate([payload], 0.9)
+    gate = plain["gate"]
+    assert gate["passed"] and gate["steps_total"] == 108000
+    assert gate["stows_per_hour"] == pytest.approx(3600 * 276 / (108000 / 30))  # 276 an hour
+    assert gate["heldout"]["stowed"] == 33 and gate["heldout"]["total"] == 40
+    assert gate["heldout"]["rate"] == pytest.approx(0.825) and gate["heldout_passed"]
+    assert gate["stows_per_hour_passed"] and gate["min_stows_per_hour"] is None
+    assert not ge.aggregate_gate([payload], 0.9, min_stows_per_hour=300)["gate"]["passed"]
+    assert ge.aggregate_gate([payload], 0.9, min_stows_per_hour=270)["gate"]["passed"]
+    assert not ge.aggregate_gate([payload], 0.9, heldout_threshold=0.85)["gate"]["passed"]
+    assert ge.aggregate_gate([payload], 0.9, heldout_threshold=0.80)["gate"]["passed"]
+    empty = {"episodes": [dict(e, stowed_heldout={"stowed": 0, "total": 0}) for e in eps]}
+    assert not ge.aggregate_gate([empty], 0.9, heldout_threshold=0.0)["gate"]["heldout_passed"]
+    rows = plain["secondary"]
+    assert rows["events"] == {"box_empty": 1, "tray_refill": 3}
+    assert rows["stowed_by_category"] == {"brick": {"stowed": 170, "total": 185}}
+    assert rows["cycle_intervals"]["by_outcome"] == loop.interval_sums(eps)["by_outcome"]
+    # An MS7e payload has none of the MS7f rows and the same verdict.
+    old = {"episodes": [_episode(3, num_bricks=6)]}
+    assert "events" not in ge.aggregate_gate([old], 0.4)["secondary"]
+    assert ge.aggregate_gate([old], 0.4)["gate"]["passed"]
+
+
+def test_the_bars_reach_the_gate_results_from_the_command_line(tmp_path):
+    argv = _argv(tmp_path) + MS7E_HEAP
+    cfg = ge._build_cfg(ge._parse_args(argv))
+    assert cfg.min_stows_per_hour is None and cfg.heldout_threshold is None
+    more = ["--min_stows_per_hour", "300", "--heldout_threshold", "0.85"]
+    cfg = ge._build_cfg(ge._parse_args(argv + more))
+    assert cfg.min_stows_per_hour == 300.0 and cfg.heldout_threshold == 0.85
+    ledger = _fake_ledger(tmp_path)
+    cfg = _cfg(tmp_path, ledger, processes=1, backend="mujoco", heap_k=50)
+    cfg.min_stows_per_hour, cfg.heldout_threshold = 300.0, 0.85
+    results = ge.run_gate(cfg, lambda d: _heap_payload(d), lambda: _FakeServer([]))
+    gate = results["gate"]
+    assert gate["min_stows_per_hour"] == 300.0 and gate["heldout_threshold"] == 0.85
+    assert not gate["passed"] and not gate["heldout_passed"]  # no held-out part in the read

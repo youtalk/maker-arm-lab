@@ -28,28 +28,50 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lerobot_stack"))
 import policy_client
 from maker_arm_lab.core import oracle, perception
 from maker_arm_lab.core.batch_loop import (
+    MAX_HEAP_K,
     PARTS_SPLITS,
     add_ms7e_arguments,
+    add_ms7f_arguments,
     check_ms7e,
+    check_ms7f,
+    check_teacher_waits,
     heap_classes,
     heap_parts,
+    heldout_names,
     ms7e_switches,
+    ms7f_switches,
+    teacher_waits,
 )
 from maker_arm_lab.core.eval_loop import EvalFailure
-from maker_arm_lab.core.heap_oracle import HeapOracle
+from maker_arm_lab.core.heap_oracle import CELL_FAILURE_CAP, HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
-from maker_arm_lab.core.loop import CYCLE_STEP_BUDGET, cycle_budget, episode_length_s, rollout
+from maker_arm_lab.core.loop import (
+    CARRY_VIEW_STEPS,
+    CYCLE_STEP_BUDGET,
+    MAX_CARRY_VOTES,
+    MAX_CELL_FAILURE_CAP,
+    cycle_budget,
+    episode_length_s,
+    rollout,
+)
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 
 
 class _TokenEmittingParser(argparse.ArgumentParser):
-    """A parser whose usage errors still honour the EVAL_OK / EVAL_FAIL contract."""
+    """A parser whose usage errors still honour the EVAL_OK / EVAL_FAIL contract (``token``: a
+    script that runs this client's ``main``, ``scripts/mj_stretch_run.py``, sets its own, and its
+    own ``max_heap_k``: a stretch pool is served through the tray refill, not dropped at once)."""
+
+    token = "EVAL"
+    max_heap_k = MAX_HEAP_K
 
     def error(self, message: str):
         self.print_usage(sys.stderr)
         print(f"{self.prog}: error: {message}", file=sys.stderr, flush=True)
-        print("EVAL_FAIL " + json.dumps({"reason": "usage", "detail": message}), flush=True)
+        print(
+            f"{self.token}_FAIL " + json.dumps({"reason": "usage", "detail": message}), flush=True
+        )
         raise SystemExit(2)
 
 
@@ -61,8 +83,8 @@ def _scales(text: str) -> dict:
         raise argparse.ArgumentTypeError(str(err)) from None
 
 
-def parse_args(argv=None) -> argparse.Namespace:
-    parser = _TokenEmittingParser(description=__doc__)
+def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace:
+    parser = parser_cls(description=__doc__)
     parser.add_argument("--num_envs", type=int, default=5)
     parser.add_argument("--run_seed", type=int, default=0, help="env.reset seed and the rig rng")
     parser.add_argument("--layout_seed", type=int, default=0, help="seeds sample_run_draw")
@@ -109,10 +131,16 @@ def parse_args(argv=None) -> argparse.Namespace:
         "rung 1, 4 for rung 2); 0 is the MS6 scene",
     )
     add_ms7e_arguments(parser)
+    add_ms7f_arguments(parser)
     parser.add_argument(
         "--deep_box_floor",
         action="store_true",
         help="MS7e flat track: each desk box floor's collider reaches under the desk top",
+    )
+    parser.add_argument(
+        "--render",
+        action="store_true",
+        help="MS7f H0: render the policy cameras under --oracle_driver too, to time a read's scene",
     )
     parser.add_argument("--server", type=str, default="tcp://127.0.0.1:5555")
     parser.add_argument("--out", type=str, default="", help="write the EVAL_OK payload here too")
@@ -321,7 +349,50 @@ def parse_args(argv=None) -> argparse.Namespace:
             parser.error(f"--{name} is outside numpy's seed range (0 <= seed < 2**32)")
     if args.heap_k <= 0:
         parser.error("--heap_k must be positive: this client evaluates heap episodes only")
+    if args.heap_k > parser.max_heap_k:
+        parser.error(f"--heap_k {args.heap_k} exceeds {parser.max_heap_k}, this client's heap cap")
+    if not args.transport_speed > 0.0:
+        parser.error("--transport_speed must be positive")
+    if args.lift_budget < 0:
+        parser.error("--lift_budget must be 0 (off) or more")
+    if args.end_at_done:
+        parser.error("--end_at_done cuts the recorder's idle tail: the heap client has none")
+    if args.abandon_cycle:
+        parser.error("--abandon_cycle is the recorder's: the heap loop survives a rig abandon")
     check_ms7e(parser, args)
+    check_ms7f(parser, args)
+    check_teacher_waits(parser, args)
+    if args.classifier and not (args.perceived and args.categories):
+        parser.error(
+            "--classifier reads the categories on the perceived views: it needs --perceived and "
+            "--categories"
+        )
+    if args.passenger_drop and not args.classifier:
+        parser.error(
+            "--passenger_drop reads the classifier's passenger head: it needs --classifier"
+        )
+    if args.lift_view_steps and not args.classifier:
+        parser.error("--lift_view_steps delays the classifier's wrist read: it needs --classifier")
+    if not 0 <= args.lift_view_steps < CARRY_VIEW_STEPS:
+        parser.error(f"--lift_view_steps must lie in [0, {CARRY_VIEW_STEPS})")
+    if args.missed_lift and not args.tray:
+        parser.error("--missed_lift reads a carry off the tray: it needs --tray")
+    if not 1 <= args.cell_failure_cap <= MAX_CELL_FAILURE_CAP:
+        parser.error(f"--cell_failure_cap must lie in [1, {MAX_CELL_FAILURE_CAP}]")
+    if args.cell_failure_cap != CELL_FAILURE_CAP and not args.perceived:
+        parser.error("--cell_failure_cap sets the perceived selector's cap: it needs --perceived")
+    if args.carry_votes and not (args.classifier and args.class_views):
+        parser.error(
+            "--carry_votes adds reads to the classifier's vote: it needs --classifier and "
+            "--class_views"
+        )
+    if not 0 <= args.carry_votes <= MAX_CARRY_VOTES:
+        parser.error(f"--carry_votes must lie in [0, {MAX_CARRY_VOTES}]")
+    if args.carry_votes >= CARRY_VIEW_STEPS - args.lift_view_steps:
+        parser.error(
+            f"--carry_votes must be under {CARRY_VIEW_STEPS} - --lift_view_steps, a step for "
+            "each read before the carry view"
+        )
     if args.desk_boxes < 0:
         parser.error("--desk_boxes must be 0 or more")
     if args.perceived:
@@ -341,6 +412,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         "marker_bias",
         "wrist_fix",
         "class_views",
+        "lift_budget",
+        "missed_lift",
     ):
         if getattr(args, name) not in (None, False) and not args.perceived:
             parser.error(f"--{name} needs --perceived")
@@ -365,8 +438,11 @@ def frame_writer(frames_dir: str):
     return write
 
 
-def main(argv=None) -> int:
-    args = parse_args(argv)
+def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -> int:
+    """``run`` is the rollout (``loop.rollout``, or the stretch runner's chain of them) and
+    ``episode_s`` overrides the env's episode length; the tokens are ``parser_cls.token``'s."""
+    args = parse_args(argv, parser_cls)
+    token = parser_cls.token
     policy = None
     env = None
     close_error = None
@@ -382,12 +458,12 @@ def main(argv=None) -> int:
             draw,
             num_bricks=len(parts),
             parts=parts,
-            cameras=not args.oracle_driver,
+            cameras=not args.oracle_driver or args.render,
             episode_draws=args.episode_draws,
             frame_jitter=args.frame_jitter,
             spatial_scale=args.spatial_scale,
             context=args.context,
-            episode_length_s=episode_length_s(args.cycle_budget),
+            episode_length_s=episode_s or episode_length_s(args.cycle_budget),
             gripper_mode=args.gripper,
             desk_boxes=args.desk_boxes,
             tray=args.tray,
@@ -398,12 +474,18 @@ def main(argv=None) -> int:
             deep_box_floor=args.deep_box_floor,
             release_lean=args.release_lean,
             round_physics="round" in args.families,  # MS7e design section 6.4
+            categories=args.categories,
+            deep_tray=args.deep_tray,
+            tray_refill=args.tray_refill,
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
+        # MS7f --categories: the teacher's record of what it released per box, one per env and
+        # shared by the oracle of every cycle, since the loop runs one episode per env.
+        loads = [[0.0] * env.desk_boxes for _ in range(env.num_envs)]
 
         def factory(i, bl, episode_draw):
-            return HeapOracle(
+            orc = HeapOracle(
                 bl,
                 env.parts,
                 env.destination_bins[i],
@@ -415,21 +497,31 @@ def main(argv=None) -> int:
                 tray=env.tray,
                 tray_lean_deg=env.tray_lean_deg,
                 wall_band_cont=args.wall_band_cont,
+                box_sets=env.part_box_sets(i),
+                box_load=loads[i],
+                tray_wall_height=env.tray_wall_height,
             )
+            return teacher_waits(orc, args)
 
         rig = OracleRig(
             env,
             env.cfg.bin_layout,
             oracle.OracleNoise(),
             rig_rng,
+            transport_speed=args.transport_speed,
             oracle_factory=factory,
             release_lean=args.release_lean,
             carry_via=args.carry_via,
             passenger_check=args.passenger_check,
+            descend_speed=args.descend_speed,
+            quiet_landing=args.quiet_landing,
+            landing_steps=args.landing_steps,
+            net_stall=args.net_stall,
+            near_tracking=args.near_tracking,
         )
         policy = None if args.oracle_driver else policy_client.ServerPolicy(args.server)
         trace = [] if args.hold_trace else None
-        payload = rollout(
+        payload = (run or rollout)(
             env,
             rig,
             policy,
@@ -470,6 +562,16 @@ def main(argv=None) -> int:
             force_cap=args.force_cap,
             thin_snap=args.thin_snap,
             snap_closed=args.snap_closed,
+            heldout=heldout_names(args),
+            box_empty=args.box_empty,
+            book_miss=args.book_miss,
+            lift_budget=args.lift_budget,
+            classifier=perception.PartClassifier(args.classifier) if args.classifier else None,
+            passenger_drop=args.passenger_drop,
+            lift_view_steps=args.lift_view_steps,
+            missed_lift=args.missed_lift,
+            cell_failure_cap=args.cell_failure_cap,
+            carry_votes=args.carry_votes,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
@@ -477,16 +579,19 @@ def main(argv=None) -> int:
         payload["tray"] = args.tray
         payload["tray_lean"] = args.tray_lean
         payload["ms7e"] = ms7e_switches(args)
+        payload["ms7f"] = ms7f_switches(args)
         payload["deep_box_floor"] = args.deep_box_floor
         if args.passenger_check:
             # Each rejected LIFT's passengers, as indices into payload["parts"].
             payload["passenger_rejects"] = [r for log in rig.passenger_log for r in log]
     except EvalFailure as err:
-        print("EVAL_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True)
+        print(
+            f"{token}_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True
+        )
         return 1
     except Exception as err:  # noqa: BLE001 -- any uncaught error must still print a token
         print(
-            "EVAL_FAIL "
+            f"{token}_FAIL "
             + json.dumps({"reason": "exception", "detail": f"{err}\n{traceback.format_exc()}"}),
             flush=True,
         )
@@ -503,7 +608,7 @@ def main(argv=None) -> int:
             # so exactly one token is printed on either path (mj_dagger_batch.py's rule).
             close_error = f"{err}\n{traceback.format_exc()}"
     if close_error is not None:
-        print("EVAL_FAIL " + json.dumps({"reason": "close", "detail": close_error}), flush=True)
+        print(f"{token}_FAIL " + json.dumps({"reason": "close", "detail": close_error}), flush=True)
         return 1
     try:
         if args.out:
@@ -512,9 +617,11 @@ def main(argv=None) -> int:
             with gzip.open(args.hold_trace, "wt") as f:
                 f.writelines(json.dumps(row) + "\n" for row in trace)
     except Exception as err:  # noqa: BLE001 -- the rollout already ran; still print a token
-        print("EVAL_FAIL " + json.dumps({"reason": "write_out", "detail": str(err)}), flush=True)
+        print(
+            f"{token}_FAIL " + json.dumps({"reason": "write_out", "detail": str(err)}), flush=True
+        )
         return 1
-    print("EVAL_OK " + json.dumps(payload), flush=True)
+    print(f"{token}_OK " + json.dumps(payload), flush=True)
     return 0
 
 

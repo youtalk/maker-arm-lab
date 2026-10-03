@@ -430,3 +430,15 @@ def test_a_special_detection_grasps_by_the_parts_own_closing_axes():
     assert [p.closing_axes for p in got] == [ldraw.closing_axes, parts.SLOPE_AXES, parts.BOX_AXES]
     wrong = Detection(SPREAD[0], IDENTITY, BRICK.size, "wide", 0, ldraw.closing_axes)
     assert perception.PerceivedState([wrong], ()).parts(1)[0].closing_axes == parts.BOX_AXES
+
+
+def test_a_joint_or_minifig_detection_grasps_by_the_parts_own_axes():
+    """Under --categories a joint or a minifig part is perceived as its category, and grasps by
+    its own axes as an MS7e special part does: 14417 never closes across its side ball."""
+    pin = parts.ldraw_part("14417", "joint")
+    assert pin.closing_axes == (0, 2)
+    for cls in ("joint", "minifig", "special"):
+        seen = Detection(SPREAD[0], IDENTITY, pin.size, cls, 0, pin.closing_axes)
+        assert perception.PerceivedState([seen], ()).parts(1)[0].closing_axes == (0, 2)
+    flat = Detection(SPREAD[0], IDENTITY, pin.size, "flat", 0, pin.closing_axes)
+    assert perception.PerceivedState([flat], ()).parts(1)[0].closing_axes == parts.BOX_AXES

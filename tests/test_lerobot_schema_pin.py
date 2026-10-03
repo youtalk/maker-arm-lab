@@ -42,3 +42,11 @@ def test_protocol_state_is_seven_wide():
     if not PROTOCOL.exists():
         pytest.skip("lerobot_stack/policy_protocol.py is ported by Task E2")
     assert '"state": ((7,), "float32")' in PROTOCOL.read_text()
+
+
+def test_the_part_classifier_names_the_ms7f_categories_in_order():
+    from maker_arm_lab.core.parts import PART_CATEGORIES
+
+    text = (CONVERT.parent / "train_part_classifier.py").read_text()
+    pinned = re.search(r"^CATEGORIES = \(([^)]*)\)", text, re.MULTILINE).group(1)
+    assert tuple(v.strip().strip('"') for v in pinned.split(",")) == PART_CATEGORIES

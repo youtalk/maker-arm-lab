@@ -24,18 +24,32 @@ from pathlib import Path
 import torch
 
 from maker_arm_lab.core import desk_boxes, layout, oracle, perception, trajectory
+from maker_arm_lab.core import loop as _loop
 from maker_arm_lab.core import parts as _parts
+from maker_arm_lab.core.heap_oracle import CELL_FAILURE_CAP, CYCLE_BUDGET
 from maker_arm_lab.core.layout import sample_run_draw
 
 CAMPAIGN_TARGET_SUCCESSES = 50
+EVENTS = _loop.EVENT_NAMES  # MS7f: a heap run's events, counted per episode by its track
 
 PARTS_SPLITS = ("train", "heldout", "all")
 LEGACY_EPISODE_LENGTH_S = 180.0
 
 
 def heap_episode_length_s(k: int, cycle_budget: int) -> float:
-    """Design section 9: 30 s of settle and slack plus 20 s per pick the budget allows."""
+    """Design section 9: 30 s of settle and slack plus 20 s per pick the budget allows. With
+    ``heap_cycle_budget`` it scales with the heap: 1030 s at 50 parts, 3030 s (90,900 steps) at
+    the MS7f heap of 150, where the MS7e teacher's 14.3 s a cycle at 1.04 cycles a part needs
+    about 2230 s (MS7f design section 3)."""
     return 30.0 + 20.0 * min(k, cycle_budget)
+
+
+def heap_cycle_budget(k: int) -> int:
+    """The recorder's default cycle budget for a heap of ``k`` parts: ``heap_oracle.CYCLE_BUDGET``
+    (50) up to 50 parts, the budget of every corpus through MS7e, and above that the heap loop's
+    own ceil(1.3 K) (``loop.cycle_budget``): 195 for the MS7f heap of 150 (MS7f design section
+    5), so a recording and a read of one heap get the same cycles."""
+    return CYCLE_BUDGET if k <= CYCLE_BUDGET else _loop.cycle_budget(k)
 
 
 def heap_parts(args) -> list[_parts.Part] | None:
@@ -64,10 +78,21 @@ def heap_parts(args) -> list[_parts.Part] | None:
     return heap
 
 
+def heldout_names(args) -> frozenset[str]:
+    """The part kinds of the held-out split of the run's catalog (``--families``, ``--parts_seed``),
+    the kinds neither the policy nor the classifier saw: the held-out row of MS7f design section
+    4.4, meaningful under ``--parts_split all``."""
+    catalog = _parts.catalog(getattr(args, "families", ()))
+    return frozenset(p.name for p in _parts.split(catalog, args.parts_seed)[1])
+
+
 def heap_classes(args) -> tuple[str, ...]:
     """The active class list: the eight MS7e classes whenever ``--families`` names a family or
     the box draw is on, else the four MS7a classes, so with every MS7e switch off the class
-    map and the perception's class draws are MS7d's (MS7e design section 5)."""
+    map and the perception's class draws are MS7d's (MS7e design section 5). Under MS7f
+    ``--categories`` it is the run's active categories (``parts.active_categories``)."""
+    if getattr(args, "categories", False):
+        return _parts.active_categories(getattr(args, "families", ()))
     on = getattr(args, "families", ()) or getattr(args, "box_draw", 0)
     return _parts.PART_CLASSES if on else _parts.BASE_CLASSES
 
@@ -191,6 +216,30 @@ def check_ms7e(parser, args) -> None:
         parser.error("--snap_closed ends pick_snap's landing hold: it needs --pick_snap")
 
 
+TEACHER_WAITS = ("close_steps", "lift_hold_steps", "release_steps")
+"""The ``EnvOracle`` waits a heap client trims per oracle (``teacher_waits``); with
+``descend_speed`` they are track S's teacher trims (MS7f design section 8.2)."""
+
+
+def check_teacher_waits(parser, args) -> None:
+    """Refuse a wait under one step or a pace at or under zero with ``parser.error``."""
+    if not args.descend_speed > 0.0:
+        parser.error("--descend_speed must be positive")
+    if args.landing_steps < 0:
+        parser.error("--landing_steps must be 0 (off) or more")
+    for name in TEACHER_WAITS:
+        if getattr(args, name) < 1:
+            parser.error(f"--{name} must be at least 1")
+
+
+def teacher_waits(orc, args):
+    """``orc`` (an ``EnvOracle``) with the waits of ``args``; returns it."""
+    for name in TEACHER_WAITS:
+        setattr(orc, name, getattr(args, name))
+    orc.close_guard = args.close_guard
+    return orc
+
+
 def ms7e_switches(args) -> dict:
     """The MS7e switch block a payload and a run's meta record, and the gate supervisor's cache
     matches (``run_gate_eval.ms7e_block``). Every switch off is MS7d."""
@@ -206,6 +255,280 @@ def ms7e_switches(args) -> dict:
         "thin_snap": bool(getattr(args, "thin_snap", False)),
         "snap_closed": bool(getattr(args, "snap_closed", False)),
     }
+
+
+MS7F_OFF: dict = {
+    "categories": False,
+    "deep_tray": False,
+    "tray_refill": False,
+    "box_empty": False,
+    "book_miss": False,
+    "abandon_cycle": False,
+    "near_tracking": False,
+    "classifier": None,
+    "passenger_drop": False,
+    "lift_view_steps": 0,
+    "transport_speed": trajectory.TRANSPORT_SPEED,
+    "descend_speed": 1.0,
+    "close_steps": oracle.CLOSE_STEPS,
+    "lift_hold_steps": oracle.LIFT_HOLD_STEPS,
+    "release_steps": oracle.RELEASE_STEPS,
+    "lift_budget": 0,
+    "close_guard": False,
+    "quiet_landing": False,
+    "landing_steps": 0,
+    "end_at_done": False,
+    "net_stall": False,
+    "missed_lift": False,
+    "cell_failure_cap": CELL_FAILURE_CAP,
+    "carry_votes": 0,
+}
+"""The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
+of a run with every one off, what an MS7e run ran with. categories is the base track's;
+deep_tray, tray_refill, box_empty, book_miss, abandon_cycle (the recorder's) and near_tracking
+(the rig's watchdog) track H's (design section 5); classifier,
+passenger_drop, lift_view_steps and carry_votes track C's (design section 6); transport_speed (the teacher walk's pace),
+descend_speed and the teacher waits (TEACHER_WAITS) track S's (design section 8), and so is
+lift_budget, a serving trim of the heap client, and end_at_done, the recorder's; missed_lift
+(the heap client's perceived loop) is the riders track's, and so is cell_failure_cap (the
+perceived selector's failure cap). The gate supervisor keeps a stdlib
+copy (``scripts/run_gate_eval.py``), pinned by a test."""
+MS7F_READY: frozenset[str] = frozenset(
+    {
+        "categories",
+        "deep_tray",
+        "tray_refill",
+        "box_empty",
+        "book_miss",
+        "abandon_cycle",
+        "near_tracking",
+        "classifier",
+        "passenger_drop",
+        "lift_view_steps",
+        "transport_speed",
+        "descend_speed",
+        "close_steps",
+        "lift_hold_steps",
+        "release_steps",
+        "lift_budget",
+        "close_guard",
+        "quiet_landing",
+        "landing_steps",
+        "end_at_done",
+        "net_stall",
+        "missed_lift",
+        "cell_failure_cap",
+        "carry_votes",
+    }
+)
+"""The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
+a usage error with the script's fail token (MS7f design section 12.2). Each track adds its
+switch in the commit that brings the behaviour; the supervisor's copy is pinned by a test."""
+
+
+def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
+    """The MS7f switches (MS7f design section 12.1, ``MS7F_OFF``), shared by the MuJoCo heap
+    scripts. Each defaults off, and off is MS7e. ``transport_speed`` False leaves out
+    ``--transport_speed``, which the recorder already takes (``add_batch_arguments``)."""
+    parser.add_argument(
+        "--categories",
+        action="store_true",
+        help="MS7f: sort by the six categories (parts.PART_CATEGORIES) over the drawn boxes, a "
+        "category with more boxes than it needs taking a second one (desk_boxes.category_map); "
+        "needs --box_draw",
+    )
+    parser.add_argument(
+        "--deep_tray",
+        action="store_true",
+        help="MS7f H1: the tray's walls rise to the deep tray's height and every part drops in "
+        "at the start",
+    )
+    parser.add_argument(
+        "--tray_refill",
+        action="store_true",
+        help="MS7f H1': the tray holds a share of the heap at the start and is refilled between "
+        "cycles; the waiting parts are parked out of reach",
+    )
+    parser.add_argument(
+        "--box_empty",
+        action="store_true",
+        help="MS7f H2: a full box is emptied between cycles, its parts graded then and parked",
+    )
+    parser.add_argument(
+        "--book_miss",
+        action="store_true",
+        help="MS7f H: the heap loop books a failure against the target of a cycle that stowed only "
+        "other parts (loop.books_failure); the heap client only",
+    )
+    parser.add_argument(
+        "--classifier",
+        type=str,
+        default=None,
+        help="MS7f C: a TorchScript category classifier read on the three views, in place of the "
+        "stand-in",
+    )
+    parser.add_argument(
+        "--passenger_drop",
+        action="store_true",
+        help="MS7f C: open the jaws at the lift when the wrist view reads a passenger over the "
+        "tray interior",
+    )
+    parser.add_argument(
+        "--lift_view_steps",
+        type=int,
+        default=0,
+        help="MS7f C, the heap client with --classifier: read the wrist view this many steps "
+        "after the lift, once the arm has risen clear of the pile (loop.LIFT_VIEW_COUNTS); 0 "
+        "is off",
+    )
+    if transport_speed:
+        parser.add_argument(
+            "--transport_speed",
+            type=float,
+            default=trajectory.TRANSPORT_SPEED,
+            help="MS7f S: the teacher walk's pace, the multiplier on the transport legs "
+            "(trajectory.TRANSPORT_SPEED)",
+        )
+    parser.add_argument(
+        "--descend_speed",
+        type=float,
+        default=1.0,
+        help="MS7f S1: the multiplier on DESCEND's pace (OracleRig.descend_speed)",
+    )
+    parser.add_argument(
+        "--close_steps",
+        type=int,
+        default=oracle.CLOSE_STEPS,
+        help="MS7f S1: control steps the teacher's CLOSE holds",
+    )
+    parser.add_argument(
+        "--close_guard",
+        action="store_true",
+        help="MS7f S1: a retry's CLOSE holds oracle.CLOSE_STEPS whatever --close_steps says",
+    )
+    parser.add_argument(
+        "--quiet_landing",
+        action="store_true",
+        help="MS7f S1: the rig commands no joint noise once DESCEND has walked its leg, so the "
+        "stall test ends a noisy landing (OracleRig.quiet_landing)",
+    )
+    parser.add_argument(
+        "--landing_steps",
+        type=int,
+        default=0,
+        help="MS7f S1: DESCEND also ends this many steps after its walk, the joint noise kept "
+        "(OracleRig.landing_steps); 0 is off",
+    )
+    parser.add_argument(
+        "--net_stall",
+        action="store_true",
+        help="MS7f S1: DESCEND's stall test reads the pick point's net motion over its window, "
+        "so a landing under joint noise ends (OracleRig.net_stall)",
+    )
+    parser.add_argument(
+        "--lift_hold_steps",
+        type=int,
+        default=oracle.LIFT_HOLD_STEPS,
+        help="MS7f S1: control steps LIFT holds after it arrives, before its gate reads the rise",
+    )
+    parser.add_argument(
+        "--release_steps",
+        type=int,
+        default=oracle.RELEASE_STEPS,
+        help="MS7f S1: control steps the teacher's RELEASE holds",
+    )
+    parser.add_argument(
+        "--end_at_done",
+        action="store_true",
+        help="MS7f S, the recorder with --attempts equal to --num_envs: end the episodes once "
+        "every env's teacher is DONE instead of stepping on to the time-out (run_batch)",
+    )
+    parser.add_argument(
+        "--abandon_cycle",
+        action="store_true",
+        help="MS7f H, the recorder: a watchdog jam in any phase ends its cycle, not the episode "
+        "(HeapOracle.recover_from_jam)",
+    )
+    parser.add_argument(
+        "--near_tracking",
+        action="store_true",
+        help="MS7f H: the rig's watchdog reads the off-command error of the joints near a stop "
+        "only (oracle_runtime.watchdog_flags)",
+    )
+    parser.add_argument(
+        "--lift_budget",
+        type=int,
+        default=0,
+        help="MS7f S2, the heap client with --perceived: end a cycle that has lifted nothing and "
+        "holds nothing this many steps after its selection (loop.lift_budget_ends); 0 is off",
+    )
+    parser.add_argument(
+        "--missed_lift",
+        action="store_true",
+        help="MS7f riders, the heap client with --perceived and --tray: a closed command that "
+        "carries the pick point off the tray is a lift the hold detector missed (wrist read), "
+        "and the jaws opening wider then release it (loop.carry_started, "
+        "loop.carry_lost)",
+    )
+    parser.add_argument(
+        "--cell_failure_cap",
+        type=int,
+        default=CELL_FAILURE_CAP,
+        help="MS7f, the heap client with --perceived: the selector's failure memory excludes a "
+        "part's position after this many failed cycles (HeapOracle.cell_failure_cap); "
+        f"{CELL_FAILURE_CAP}, the teacher's, is off",
+    )
+    parser.add_argument(
+        "--carry_votes",
+        type=int,
+        default=0,
+        help="MS7f C, the heap client with --classifier and --class_views: read this many more "
+        "wrist frames during a vote's carry, between view 2 and the carry view, into the vote's "
+        "sum (loop.carry_vote_steps); 0 is off",
+    )
+
+
+def check_ms7f(parser, args, ready: frozenset[str] = MS7F_READY) -> None:
+    """Refuse an MS7f switch whose behaviour is not in this commit (MS7f design section 12.2)
+    with ``parser.error``, so the script prints its fail token instead of a no-op run."""
+    for name, off in MS7F_OFF.items():
+        if getattr(args, name, off) != off and name not in ready:
+            parser.error(f"--{name} is not built on this commit")
+    if getattr(args, "categories", False) and not getattr(args, "box_draw", 0):
+        parser.error("--categories maps the categories onto the drawn boxes: it needs --box_draw")
+    for name in ("deep_tray", "tray_refill"):  # MS7f track H: the tray's two arms
+        if getattr(args, name, False) and not getattr(args, "tray", False):
+            parser.error(f"--{name} changes the tray: it needs --tray")
+    if getattr(args, "box_empty", False) and getattr(args, "desk_boxes", 0) <= 0:
+        parser.error("--box_empty empties the desk boxes: it needs --desk_boxes")
+
+
+def ms7f_switches(args) -> dict:
+    """The MS7f switch block a payload and a run's meta record, and the gate supervisor's cache
+    matches (``run_gate_eval.ms7f_block``). Every switch off is MS7e."""
+    return {name: getattr(args, name, off) for name, off in MS7F_OFF.items()}
+
+
+def install_heap_events(env, rig, box_empty: bool) -> None:
+    """MS7f: the recorder's rig runs a person's events between its own cycles, as the heap
+    loop runs them between its cycles (``loop.between_cycles``): the refill of an env built
+    with ``tray_refill`` and, with ``box_empty``, the emptying of full boxes, after which the
+    teacher's load record of that box starts over. Each episode's stats carry the counts in
+    "events"; a part an emptying graded correct counts as delivered (``env.emptied_ok``)."""
+    refill = bool(getattr(env, "tray_refill", False))
+    if not (box_empty or refill):
+        return
+    ok = torch.zeros(env.num_envs, env.cfg.num_bricks, dtype=torch.bool)
+    box = torch.full((env.num_envs, env.cfg.num_bricks), -1, dtype=torch.long)
+    for i in range(env.num_envs):
+        rig.stats[i]["events"] = dict.fromkeys(EVENTS, 0)
+
+    def between(i: int) -> bool:
+        loads = [getattr(rig.oracles[i], "box_load", None) or []]
+        counts = rig.stats[i]["events"]
+        return _loop.between_cycles(env, i, counts, ok, box, box_empty, refill, loads=loads)
+
+    rig.between_cycles = between
 
 
 def cycle_actor(orc) -> int:
@@ -260,7 +583,12 @@ def build_run(args) -> tuple[dict, layout.BinLayout, oracle.OracleNoise]:
         hover_height=(0.12 - 0.02 * args.noise_scale, 0.12 + 0.02 * args.noise_scale),
         lateral_offset=0.003 * args.noise_scale,
         yaw_offset=0.0873 * args.noise_scale,
-        gain_scale=(1.0 - 0.3 * args.noise_scale, 1.0),
+        gain_scale=(
+            1.0 - 0.3 * args.noise_scale
+            if getattr(args, "gain_min", None) is None
+            else args.gain_min,
+            1.0,
+        ),
         action_noise_std=0.05 * args.noise_scale,
         via_jitter=0.02 * args.noise_scale,
         # Outside --noise_scale on purpose: it removes a SHORTCUT (the fixed R,B,Y,G,R,B
@@ -309,6 +637,7 @@ def run_meta(
         "noise_scale": args.noise_scale,
         "start_pose_offset_rad": args.start_pose_offset_rad,
         "transport_speed": args.transport_speed,
+        "gain_min": getattr(args, "gain_min", None),
         # What was CONFIGURED; each episode's own "pick_order" records what was picked.
         "randomize_pick_order": noise.randomize_pick_order,
         "nearest_first_pick_order": noise.nearest_first_pick_order,
@@ -328,6 +657,7 @@ def run_meta(
         "desk_boxes": int(getattr(args, "desk_boxes", 0)),
         # MS7e design section 10.1: the MS7e switches, every one off on an MS7d run.
         "ms7e": ms7e_switches(args),
+        "ms7f": ms7f_switches(args),  # MS7f design section 12.1, every one off on an MS7e run
         "deep_box_floor": bool(getattr(args, "deep_box_floor", False)),
         # MS7c design section 7.1: the rows, the marker and the box row as recorded from the
         # perceived state at these knob scales; each episode counts its perceived selections
@@ -385,11 +715,18 @@ def run_meta(
     }
 
 
-def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
+def run_batch(
+    env, rig, target_attempts: int, max_wall_minutes: float, end_at_done: bool = False
+) -> dict:
     """Drive ``rig`` until ``target_attempts`` episodes concluded or the deadline passed.
 
     Returns the raw counters ``run_stats`` turns into RUN_STATS. Closes the env on every
     exit path (the recorder's export count is read before that), as generate_batch.py did.
+
+    ``end_at_done`` (MS7f S, a heap run with one episode an env): once every env's teacher is
+    DONE or its episode concluded, the next step is the time-out of every episode still open.
+    DONE frames are not recorded (``cycle_actor``), so the exported episodes are the ones the
+    time-out writes; only the unrecorded idle tail is cut.
     """
     episodes: list[dict] = []
     abandon_reasons: Counter = Counter()
@@ -397,11 +734,13 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
     clamped_steps = 0
     attempts = 0
     cycle_bricks: list[set[int]] = [set() for _ in range(rig.num_envs)]
+    episode_steps = [0] * rig.num_envs  # control steps of each env's episode so far
     motion = trajectory.MotionStats(rig.num_envs)
     start = time.time()
     heap = getattr(env, "parts", None) is not None
     recorder = getattr(env, "recorder", None)
     seen_outcomes = [0] * rig.num_envs
+    concluded = [False] * rig.num_envs
     if heap:
         env.oracle_actor = torch.zeros(rig.num_envs, dtype=torch.int16)
     deadline = start + max_wall_minutes * 60
@@ -426,6 +765,7 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
                     env.oracle_actor[i] = actor
             out = rig.step()
             control_steps += 1
+            episode_steps = [n + 1 for n in episode_steps]
             if heap and recorder is not None:
                 for i in range(rig.num_envs):
                     orc = rig.oracles[i]
@@ -454,9 +794,16 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
                         outcome = "abandoned"
                         abandon_reasons[stats["abandon"] or "unknown"] += 1
                     episodes.append(
-                        {"env": i, "outcome": outcome, "cycles": len(cycle_bricks[i]), **stats}
+                        {
+                            "env": i,
+                            "outcome": outcome,
+                            "cycles": len(cycle_bricks[i]),
+                            "steps": episode_steps[i],
+                            **stats,
+                        }
                     )
                     cycle_bricks[i] = set()
+                    episode_steps[i] = 0
                     seen_outcomes[i] = 0
                 attempts += len(env_ids)
                 abandoned_ids = out["abandoned"].nonzero(as_tuple=False).squeeze(-1).tolist()
@@ -466,7 +813,12 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
                     env.reset(env_ids=torch.tensor(abandoned_ids, device=env.device))
                 for i in env_ids:
                     motion.reset(i)
+                    concluded[i] = True
                 rig.rearm(env_ids)
+            if end_at_done and heap and all_done(rig, concluded):
+                for i in range(rig.num_envs):
+                    if not concluded[i]:
+                        env.episode_length_buf[i] = env.max_episode_length - 1
     finally:
         wall_seconds = time.time() - start
         exported = env.recorder_manager.exported_successful_episode_count
@@ -487,6 +839,14 @@ def run_batch(env, rig, target_attempts: int, max_wall_minutes: float) -> dict:
         "exported_written": exported_written,
         "motion": motion.summary(),
     }
+
+
+def all_done(rig, concluded: list[bool]) -> bool:
+    """Is every env's episode concluded or its teacher DONE (``run_batch``'s end_at_done)?"""
+    return all(
+        concluded[i] or (orc is not None and orc.phase == oracle.Phase.DONE)
+        for i, orc in enumerate(rig.oracles)
+    )
 
 
 def run_stats(
@@ -552,6 +912,11 @@ def run_stats(
         stats["pushes"] = sum(int(e.get("pushes", 0)) for e in episodes)
         stats["rakes"] = sum(int(e.get("rakes", 0)) for e in episodes)
         stats["cycles_per_stowed"] = stats["cycles"] / stowed if stowed else None
+        # MS7f design section 4.1: every step of every episode counts, the events take none.
+        steps = sum(int(e.get("steps", 0)) for e in episodes)
+        stats["steps_total"] = steps
+        stats["stows_per_hour"] = _loop.stows_per_hour(stowed, steps)
+        stats["events"] = {n: sum(e.get("events", {}).get(n, 0) for e in episodes) for n in EVENTS}
     if probe:
         # A heap probe grades on every episode the recorder wrote, not the fully-stowed
         # count: the same "exported_written" gate `exported_count` (mj_generate_batch.py)
@@ -579,22 +944,20 @@ def write_meta(
     return path
 
 
-MAX_HEAP_K = 127
-"""mj/recorder.py writes obs/cycle_brick and oracle_runtime.py's env.oracle_cycle_brick are
-int8; a part index above this wraps negative in both, silently mislabeling the corpus. Bounded
-here rather than widened: widening changes the on-disk schema for six-brick shards too."""
+MAX_HEAP_K = 150
+"""The largest heap a script takes: the MS7f heap of 150 parts (MS7f design section 5). A part
+index above 127 does not fit the int8 of obs/cycle_brick and the rig's stash, so a heap over
+127 parts writes both as int16 (``mj.recorder.MAX_INT8_PART``) and every smaller heap keeps
+the int8 schema of every shard before it. No cycle budget, drop or tray is sized past 150."""
 
 
 def _heap_k_type(parser):
-    """A ``type=`` for ``--heap_k`` that rejects a value the int8 cycle_brick channel cannot hold."""
+    """A ``type=`` for ``--heap_k`` that rejects a heap over ``MAX_HEAP_K``."""
 
     def parse(value: str) -> int:
         k = int(value)
         if k > MAX_HEAP_K:
-            parser.error(
-                f"--heap_k {k} exceeds {MAX_HEAP_K}: mj/recorder.py's obs/cycle_brick channel "
-                "is int8 and wraps negative above that, silently mislabeling the corpus"
-            )
+            parser.error(f"--heap_k {k} exceeds {MAX_HEAP_K}, the MS7f heap (MAX_HEAP_K)")
         return k
 
     return parse
@@ -665,8 +1028,7 @@ def add_batch_arguments(parser) -> None:
         type=_heap_k_type(parser),
         default=0,
         help="MuJoCo only: replace the six bricks with a heap of K mixed parts on the desk (MS6). "
-        f"0 is the six-brick task; K must be <= {MAX_HEAP_K} (mj/recorder.py's obs/cycle_brick "
-        "and obs/target_part are int8).",
+        f"0 is the six-brick task; K must be <= {MAX_HEAP_K}, the MS7f heap.",
     )
     parser.add_argument(
         "--parts_seed", type=int, default=20260915, help="seeds the held-out split of the catalog"
@@ -678,7 +1040,11 @@ def add_batch_arguments(parser) -> None:
         help="which side of the split a heap run draws its parts from",
     )
     parser.add_argument(
-        "--cycle_budget", type=int, default=50, help="pick cycles a heap episode may spend"
+        "--cycle_budget",
+        type=int,
+        default=50,
+        help="pick cycles a heap episode may spend (the MuJoCo recorder's default scales with "
+        "the heap, batch_loop.heap_cycle_budget)",
     )
     parser.add_argument(
         "--tray",
@@ -738,6 +1104,13 @@ def add_batch_arguments(parser) -> None:
         help="Multiplier on the pace of the transport legs (HOVER, LIFT, RAISE, EXTEND, "
         "RETREAT) under the minimum-jerk walk; 1.0 is the old staircase's pace, the default "
         "is the speed-ladder read. DESCEND is never scaled.",
+    )
+    parser.add_argument(
+        "--gain_min",
+        type=float,
+        default=None,
+        help="MS7f S1, the recorder: the lower bound of the per-episode gain_scale draw (the "
+        "walks' pace), in place of 1 - 0.3 * --noise_scale; unset keeps that",
     )
     parser.add_argument(
         "--induce_prob",

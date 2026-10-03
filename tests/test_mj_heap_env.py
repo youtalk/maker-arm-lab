@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 
-from maker_arm_lab.core import layout, parts
+from maker_arm_lab.core import cameras, layout, parts
 from maker_arm_lab.core.heap_oracle import STOW_HALF_EXTENTS
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj import overlay
@@ -417,3 +417,47 @@ def test_a_leaning_tray_builds_tilted_walls_and_keeps_the_heap_inside():
     env.close()
     with pytest.raises(ValueError, match="tray_lean_deg"):
         MjLegoSortEnv(1, draw, num_bricks=2, parts=PARTS[:2], cameras=False, tray_lean_deg=30.0)
+
+
+@pytest.mark.skipif(not _can_render(), reason="no MuJoCo GL context on this host")
+def test_the_narrow_view_looks_at_its_point_and_changes_no_later_frame_or_draw():
+    """MS7f design section 6.3, view 1: the overhead camera turns onto the point at the narrow
+    angle from where it stands, and a twin env that never took the view renders and draws the
+    same afterwards."""
+
+    def make():
+        e = MjLegoSortEnv(
+            1, _draw(), parts=PARTS[:3], cameras=True, frame_jitter=True, episode_length_s=1.0
+        )
+        e.reset(seed=3)
+        return e
+
+    a, b = make(), make()
+    c, r = a._cam_overhead, a.renderers[0]
+    point = a.datas[0].xpos[a.handles.brick_bodies[1]].copy()
+    eye = a.datas[0].cam_xpos[c].copy()
+    seen, real = [], r.update_scene
+
+    def spy(d, camera):
+        seen.append((d.cam_xpos[c].copy(), d.cam_xmat[c].reshape(3, 3).copy()))
+        seen.append(float(a.models[0].cam_fovy[c]))
+        return real(d, camera=camera)
+
+    r.update_scene = spy
+    frame = a.narrow_overhead(0, point)
+    r.update_scene = real
+    (at, rot), fovy = seen
+    want = (point - at) / np.linalg.norm(point - at)
+    assert np.allclose(at, eye) and np.allclose(-rot[:, 2], want, atol=1e-9)
+    assert fovy == cameras.NARROW_FOV_DEG
+    assert frame.shape == (224, 224, 3) and frame.dtype == np.uint8
+    assert (frame != a.obs_buf["images"]["overhead_rgb"][0].numpy()).any()
+    for _ in range(3):
+        a.step(_hold_action(a))
+        b.step(_hold_action(b))
+        for key in ("wrist_rgb", "overhead_rgb", "overhead_depth"):
+            assert torch.equal(a.obs_buf["images"][key], b.obs_buf["images"][key]), key
+    assert a._rng.getstate() == b._rng.getstate()
+    assert a._np_rng.bit_generator.state == b._np_rng.bit_generator.state
+    a.close()
+    b.close()

@@ -30,6 +30,8 @@ For each part the tool:
 * fills the collision mesh: it voxelizes the surface at ``VOXEL_M`` and fills, slice by
   horizontal slice, every region the walls enclose. The underside of a brick fills; an opening
   that reaches the outside sideways (an arch, a pin hole, the space under a slope) stays open.
+  A part after the MS7e ones fills the slices across x and y as well (``HORIZONTAL_FILL``), so
+  the bore of a pin that lies along x fills too.
   The LDraw walls are 1.6 mm thick and a gripped jaw sinks 2 to 4 mm into a part
   (``core.grasp.CLOSE_SQUEEZE_M``), so a hollow part would let the jaw through its wall. The
   solid matches every other part of the catalog, which is a solid box.
@@ -86,8 +88,68 @@ PARTS = {
     "87087": ((0, 2), "y runs through the side stud, which a real jaw meets 1.6 mm early"),
     "11211": ((0, 2), "y runs through the two side studs, which a real jaw meets 1.6 mm early"),
     "3660": ((0, 2), "y puts a jaw on the slope; z closes top on bottom strip, as a slope's z"),
+    # MS7f joint family (MS7f design section 7). LDraw lays a pin along x, its rest on the desk.
+    "2780": ((0, 1, 2), "x on the flat pin ends; y and z across the collar when they lie flat"),
+    "6558": ((0, 1, 2), "as 2780: x on the flat ends, y and z across the collar"),
+    "43093": ((0, 1, 2), "as 2780: x on the flat ends, y and z across the collar"),
+    "3937": ((0, 1, 2), "box-shaped: a 1x2 brick whose top is the two hinge lugs"),
+    "3938": ((0, 2), "a 1x2 plate over the knuckle; y meets only the 1.8 mm rib under it"),
+    "14417": ((0, 2), "a 1x2 plate; y puts one jaw on the side ball, which squeezes it out"),
+    "14418": ((0, 1, 2), "a 1x2 plate; x puts one jaw on the socket's round end"),
+    "4081b": ((1, 2), "a 1x1 plate; x puts one jaw on the side clip's ring, as 14417's y"),
+    # MS7f minifig family: each part as LDraw builds it upright, one rigid body.
+    "3626b": ((0, 1, 2), "a head: x and y across its round side, z from the top to the neck"),
+    "973": ((0, 1, 2), "a torso: y on the flat front and back, x on the tapered sides"),
+    "3815c01": ((0, 1, 2), "the hips and legs as one body, a box to within a millimeter"),
+    "3901": ((0, 1, 2), "hair: x and y across its round side, z from the crown to the rim"),
+    "3624": ((0, 1, 2), "a police hat: z from its flat top to the rim, x and y across it"),
+    "3838": ((0, 1, 2), "air tanks: x across the two tanks, y front to back, z end to end"),
+    "4349": ((0, 1, 2), "a loudhailer: x end to end, y across the cone, z cone to handle"),
+    # MS7f classifier extras (core.parts.CLASSIFIER_EXTRA): in no catalog and no split.
+    "3037": ((0, 2), "4 studs wide on x, the slope runs along y; x on the flat ends, z as 3660's"),
+    "3298": ((1, 2), "the 33 degree slope runs along x; y on the flat sides, z as a slope's"),
+    "3665a": ((1, 2), "the inverted slope runs along x, where a jaw would meet it"),
+    "3702": ((0, 1, 2), "box-shaped like 3700; x (64 mm) is over the grasp limit"),
+    "32000": ((0, 1, 2), "box-shaped like 3700"),
+    "6541": ((0, 1, 2), "box-shaped like 3700"),
+    "4070": ((0, 2), "y runs through the side headlight, as 87087's side stud"),
+    "30414": ((0, 2), "y runs through the four side studs, as 11211's"),
+    "32054": ((0, 1, 2), "a pin as 6558: x on the flat ends, y and z across the stop bush"),
+    "32002": ((0, 1, 2), "a pin as 2780"),
+    "6628": ((1, 2), "a pin with a towball: x would put one jaw on the ball"),
+    "63868": ((1, 2), "a 1x2 plate; x puts one jaw on the end clip, as 4081b's x"),
+    "60470a": ((0, 2), "a 1x2 plate; y puts the jaws on the two side clips, as 14417's y"),
+    "4276b": ((0, 1, 2), "a 1x2 plate; x meets the hinge fingers, as 14418's socket end"),
+    "44301a": ((0, 1, 2), "a 1x2 plate; x meets the single hinge finger, as 14418's socket end"),
+    "2430": ((0, 1, 2), "a plate with the hinge knuckle at one corner"),
+    "14419": ((1, 2), "a 1x2 plate with a socket and a ball on its ends, where x would close"),
+    "6132": ((0, 1, 2), "hair with a beard: x and y across the head ring, z top to beard"),
+    "3625": ((0, 1, 2), "hair with pigtails, as 3901"),
+    "3959": ((0, 1, 2), "a torch: x end to end, y across the head, z head to handle"),
+    "973c01": ((0, 1, 2), "a torso with its arms as one body, as 973"),
+    "30162": ((0, 1, 2), "binoculars: a small box within a millimeter"),
+    "86035": ((0, 1, 2), "a cap as 3624: z top to rim, x and y across the crown and the peak"),
+    "30135": ((0, 1, 2), "a kepi as 3624: z top to rim, x and y across the crown and the peak"),
+    "4530": ((0, 1, 2), "shoulder-length hair, as 3901"),
+    "6025": ((0, 1, 2), "islander hair, as 3901"),
 }
-"""Part id -> (closing axes, reason). The axes are body axes after this tool's orientation."""
+"""Part id -> (closing axes, reason). The axes are body axes after this tool's orientation.
+
+The joint table first offered 14417 its y axis and 4081b its x axis (15.2 mm each, one jaw on
+the ball or on the clip's ring): the part squeezed out at LIFT on 10 of 11 such grasps, with
+no jaw force left at the gate, and the table stowed 4 and 10 of 12 (MS7f lone-part table,
+seeds 20303000 + catalog index, 2026-09-30). The other axes of both parts stowed every lift.
+
+3938's underside opens sideways, so its fill leaves a 1 mm top slab, the two knuckle lugs at
+the ends and a 1.8 mm rib between them: across y the jaws close on the rib alone (0.5 to 0.7 N
+against 1.2 to 1.8 N across x on the table, or nothing). On the joint heap read (run 20303500
++ i, layout 20303550 + i, 2026-09-30) the loop took 3938 as its target in 56 cycles for 18
+parts: 113877 of the joint read's 168738 steps, a median of 10 close edges a cycle."""
+HORIZONTAL_FILL = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")
+HORIZONTAL_FILL += ("3037", "3298", "3665a", "3702", "32000", "6541", "4070", "30414")
+"""The ``ldraw`` family's parts (MS7e and the classifier extras) fill their horizontal slices
+only, so 3700's pin hole stays open. Every joint and minifig part fills its slices across all
+three axes: a pin lies along x, and only its x slices close its bore (MS7f design section 13)."""
 
 
 class _TokenEmittingParser(argparse.ArgumentParser):
@@ -224,9 +286,10 @@ def disk(center, axis, radius, n: int = 16):
     return np.array([[center, ring[i], ring[(i + 1) % n]] for i in range(n)])
 
 
-def fill_voxels(tris, lo, hi):
+def fill_voxels(tris, lo, hi, axes=(2,)):
     """(solid, origin): the voxels of the triangle soup ``tris`` (N, 3, 3), m, with every region
-    its walls enclose in a horizontal slice filled (module docstring).
+    its walls enclose in a slice across one of ``axes`` filled (module docstring). The default
+    slices are the horizontal ones.
 
     The grid starts half a voxel below ``lo``, so a face on the LDU grid lies mid-voxel.
     """
@@ -245,7 +308,10 @@ def fill_voxels(tris, lo, hi):
         pts = tri[0] + a * (tri[1] - tri[0]) + b * (tri[2] - tri[0])
         idx = np.floor((pts - origin) / VOXEL_M).astype(int)
         surface[idx[:, 0], idx[:, 1], idx[:, 2]] = True
-    solid = np.stack([binary_fill_holes(surface[:, :, k]) for k in range(shape[2])], axis=2)
+    solid = np.zeros_like(surface)
+    for axis in axes:
+        slices = [binary_fill_holes(s) for s in np.moveaxis(surface, axis, 0)]
+        solid |= np.moveaxis(np.stack(slices), 0, axis)
     return solid, origin
 
 
@@ -304,7 +370,8 @@ def build_part(lib: Library, part_id: str, max_hulls: int, seed: int) -> dict:
     caps = [disk(s["base"], s["axis"], s["radius"]) for s in studs]
     coll = np.concatenate([coll, *caps]) if caps else coll
 
-    solid, origin = fill_voxels(coll, -0.5 * size, 0.5 * size)
+    axes = (2,) if part_id in HORIZONTAL_FILL else (0, 1, 2)
+    solid, origin = fill_voxels(coll, -0.5 * size, 0.5 * size, axes)
     mesh = trimesh.Trimesh(*voxel_faces(solid, origin), process=True)
     convex = mesh.volume >= CONVEX_FILL * mesh.convex_hull.volume
     pieces = coacd.run_coacd(
@@ -367,8 +434,9 @@ def notice(library: pathlib.Path, records: list[dict]) -> str:
             f"Library: the official complete.zip of {stamp:%Y-%m-%d}, sha256",
             f"{digest}.",
             "Changes: the triangles were expanded, converted to meters and reoriented, the studs",
-            "left out of the collision mesh, the cavities each horizontal slice encloses filled,",
-            "and the result split into convex hulls by CoACD (scripts/ldraw_parts.py).",
+            "left out of the collision mesh, the cavities each horizontal slice encloses filled",
+            "(each slice along any axis for the parts after 3660), and the result split into",
+            "convex hulls by CoACD (scripts/ldraw_parts.py).",
             "LDraw is a trademark of the Estate of James Jessiman.",
             "LEGO is a trademark of the LEGO Group, which does not sponsor or endorse this work.",
             "",

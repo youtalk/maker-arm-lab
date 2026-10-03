@@ -10,9 +10,10 @@ of RETREAT, or the give-up after the grasp retries. This is the loop of
 ``scripts/mj_release_envelope_check.py``, with the part and the boxes drawn instead of fixed.
 
 Seeds (ledger R1): part p's trials take their seeds from
-``random.Random(20289000 + parts.catalog_index(p))``, one ``randrange(2**31)`` per trial. A
-trial's seed resets the env (box poses, class map, physics DR), seeds the rig and, through
-``"pose:<seed>"``, the drop. So a trial reads the same in any worker and any order.
+``random.Random(base + parts.catalog_index(p))``, one ``randrange(2**31)`` per trial, with the
+base 20289000 unless ``--seed_base`` moves it. A trial's seed resets the env (box poses, class
+map, physics DR), seeds the rig and, through ``"pose:<seed>"``, the drop. So a trial reads the
+same in any worker and any order.
 
 The reads, all off the driven arm and the part:
 
@@ -79,43 +80,19 @@ from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import (
 from mj_release_envelope_check import EPISODE_LENGTH_S, MAX_STEPS, SETTLE_STEPS, _arm_box_contact
 
 TABLE_SEED_BASE = 20289000
-"""Ledger R1: part p's trial generator is seeded ``TABLE_SEED_BASE + parts.catalog_index(p)``."""
+"""Ledger R1: part p's trial generator is seeded ``TABLE_SEED_BASE + parts.catalog_index(p)``.
+``--seed_base`` moves the base: the MS7f ledger's R1 seeds its tables at 20303000."""
 DESK_BOXES = 4
 TRAY_LEAN_DEG = 30.0
 """The MS7d scene: ``--tray --desk_boxes 4 --tray_lean 30``."""
 DROP_HEIGHT_M = 0.005
 """The drop's lowest possible corner over the tray floor: the centre starts one half diagonal
 plus this high, so no orientation starts inside the floor."""
-MS7E_PARTS = (
-    "round_1x1",
-    "round_2x2",
-    "round_2x2x2",
-    "round_4x4",
-    "ldraw_3700",
-    "ldraw_3701",
-    "ldraw_3894",
-    "ldraw_4490",
-    "ldraw_3659",
-    "ldraw_87087",
-    "ldraw_11211",
-    "ldraw_3660",
-    "plate_1x2",
-    "plate_1x4",
-    "plate_1x6",
-    "plate_2x2",
-    "plate_2x4",
-    "plate_2x6",
-    "tile_1x2",
-    "tile_1x4",
-    "tile_2x2",
-    "tile_2x4",
-)
-"""The MS7e parts after main's 29-part catalog, in the MS7e catalog order."""
 
 
 def part_order() -> list[str]:
-    """Every part name the table knows, in the MS7e catalog order."""
-    return [p.name for p in _parts.catalog()] + list(MS7E_PARTS)
+    """Every part name the table knows, in the catalog order (``parts.catalog_index``)."""
+    return [p.name for p in _parts.catalog(tuple(_parts.FAMILY_KEYS))]
 
 
 def family(name: str) -> str:
@@ -124,16 +101,16 @@ def family(name: str) -> str:
     return "flat" if prefix in ("plate", "tile") else prefix
 
 
-FAMILIES = ("brick", "slope", "round", "ldraw", "flat", "plate", "tile")
+FAMILIES = ("brick", "slope", "round", "ldraw", "flat", "plate", "tile", "joint", "minifig")
 
 
 def family_parts(fam: str) -> list[str]:
     return [n for n in part_order() if family(n) == fam or n.split("_")[0] == fam]
 
 
-def trial_seeds(name: str, trials: int) -> list[int]:
+def trial_seeds(name: str, trials: int, base: int = TABLE_SEED_BASE) -> list[int]:
     """Ledger R1: the seeds of part ``name``'s trials 0 .. trials-1."""
-    rng = random.Random(TABLE_SEED_BASE + _parts.catalog_index(name))
+    rng = random.Random(base + _parts.catalog_index(name))
     return [rng.randrange(2**31) for _ in range(trials)]
 
 
@@ -154,6 +131,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--trials", type=int, default=12, help="trials per part")
     parser.add_argument("--procs", type=int, default=1, help="local worker processes")
     parser.add_argument("--out", type=str, default="", help="write the table JSON here")
+    parser.add_argument(
+        "--seed_base",
+        type=int,
+        default=TABLE_SEED_BASE,
+        help="part p's trials and scene draw take base + parts.catalog_index(p)",
+    )
     parser.add_argument(
         "--deep_box_floor",
         action="store_true",
@@ -362,14 +345,14 @@ def scene_switches(args) -> dict:
     }
 
 
-def _env(name: str, switches: dict) -> MjLegoSortEnv:
+def _env(name: str, switches: dict, base: int) -> MjLegoSortEnv:
     """One env per part per worker process, built once; every trial resets it."""
-    key = (name, *switches.values())
+    key = (name, base, *switches.values())
     if key not in _ENVS:
         (part,) = _parts.by_name([name])
         _ENVS[key] = MjLegoSortEnv(
             1,
-            layout.sample_run_draw(random.Random(TABLE_SEED_BASE + _parts.catalog_index(name))),
+            layout.sample_run_draw(random.Random(base + _parts.catalog_index(name))),
             parts=[part, part],
             cameras=False,
             episode_length_s=EPISODE_LENGTH_S,
@@ -386,11 +369,11 @@ def _env(name: str, switches: dict) -> MjLegoSortEnv:
     return _ENVS[key]
 
 
-def _task(job: tuple[str, int, int, dict]) -> dict:
-    name, t, seed, switches = job
+def _task(job: tuple[str, int, int, dict, int]) -> dict:
+    name, t, seed, switches, base = job
     torch.set_num_threads(1)  # one core per worker; small tensors never thread anyway
     try:
-        record = run_trial(_env(name, switches), seed)
+        record = run_trial(_env(name, switches, base), seed)
     except Exception as err:  # noqa: BLE001 -- the table records it and fails its token
         record = {
             "error": f"{err}\n{traceback.format_exc()}",
@@ -445,7 +428,9 @@ def _git_sha(path: Path) -> str:
 def run(args) -> dict:
     switches = scene_switches(args)
     jobs = [
-        (n, t, s, switches) for n in args.names for t, s in enumerate(trial_seeds(n, args.trials))
+        (n, t, s, switches, args.seed_base)
+        for n in args.names
+        for t, s in enumerate(trial_seeds(n, args.trials, args.seed_base))
     ]
     if args.procs == 1:
         records = [_task(job) for job in jobs]
@@ -467,6 +452,7 @@ def run(args) -> dict:
             **switches,
         },
         "trials_per_part": args.trials,
+        "seed_base": args.seed_base,
         "total": summarize(records),
         "families": fams,
         "parts": rows,

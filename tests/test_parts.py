@@ -15,7 +15,8 @@ def test_catalog_has_29_parts_in_a_fixed_order_and_no_flat_or_round_part():
     assert names[0] == "brick_1x1" and names[-1] == "slope_2x4"
     assert "brick_1x2x5" in names and "slope_1x2" in names
     assert not [n for n in names if n.startswith(parts.FLAT_FAMILIES + parts.RETIRED_FAMILIES)]
-    assert parts.FAMILIES == ("brick", "slope", "round", "ldraw", "plate", "tile")
+    assert parts.FAMILIES[:7] == ("brick", "slope", "round", "ldraw", "plate", "tile", "joint")
+    assert parts.FAMILIES[7:] == ("minifig",)
     assert [p.name for p in parts.catalog(())] == names
 
 
@@ -152,3 +153,29 @@ def test_every_class_holds_a_held_out_part():
         "narrow": ["brick_1x6"],
         "wide": ["brick_2x3", "brick_2x7"],
     }
+
+
+def test_the_classifier_extras_stay_out_of_every_catalog_split_and_draw():
+    """MS7f (controller deviation, 2026-09-30): the render set's extra kinds build by name, fit
+    the jaws, each has one of the six categories, and none enters a catalog, a split or the
+    catalog index, so the catalog, the held-out kinds and every draw from them stay put."""
+    everything = parts.catalog(tuple(parts.FAMILY_KEYS))
+    names = {p.name for p in everything}
+    extra = parts.by_name(parts.CLASSIFIER_EXTRA)
+    assert len(set(parts.CLASSIFIER_EXTRA)) == len(extra) >= 30
+    assert [p.name for p in extra] == list(parts.CLASSIFIER_EXTRA)
+    seen = {(p.family, p.size) for p in everything}
+    for part in extra:
+        assert part.name not in names and parts.graspable(part), part.name
+        assert parts.part_category(part) in parts.PART_CATEGORIES
+        assert part.hulls or (part.family, part.size) not in seen, part.name  # no kind again
+        with pytest.raises(ValueError):
+            parts.catalog_index(part.name)
+    assert {parts.part_category(p) for p in extra} == set(parts.PART_CATEGORIES)
+    assert len(everything) == 66
+    _, held = parts.split(everything, 20260915)
+    assert [p.name for p in held] == [
+        *("brick_1x6", "brick_2x3", "brick_2x7", "brick_1x2x2", "brick_1x2x5", "slope_1x2"),
+        *("slope_1x3", "round_2x2x2", "ldraw_3894", "ldraw_11211", "plate_1x4", "plate_2x2"),
+        *("tile_1x4", "joint_14418", "joint_4081b", "minifig_3901", "minifig_3624"),
+    ]

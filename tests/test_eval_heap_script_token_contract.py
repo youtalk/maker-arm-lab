@@ -42,7 +42,8 @@ def test_tokens_are_printed_inside_main_and_nothing_risky_runs_at_module_scope()
 
 def test_usage_errors_print_the_fail_token():
     text = SCRIPT.read_text()
-    assert 'print("EVAL_FAIL " + json.dumps({"reason": "usage"' in text
+    assert 'token = "EVAL"' in text  # the parser's token; main prints parser_cls.token's
+    assert 'f"{self.token}_FAIL " + json.dumps({"reason": "usage"' in text
 
 
 def test_the_heap_client_takes_the_gripper_flag():

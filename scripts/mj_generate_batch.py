@@ -33,17 +33,24 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 
 from maker_arm_lab.core import perception
 from maker_arm_lab.core.batch_loop import (
+    MS7F_READY,
     add_batch_arguments,
     add_ms7e_arguments,
+    add_ms7f_arguments,
     build_run,
     check_ms7e,
+    check_ms7f,
+    check_teacher_waits,
     heap_classes,
+    heap_cycle_budget,
     heap_episode_length_s,
     heap_parts,
+    install_heap_events,
     make_induction,
     run_batch,
     run_meta,
     run_stats,
+    teacher_waits,
     write_meta,
 )
 from maker_arm_lab.core.heap_oracle import HeapOracle
@@ -79,7 +86,9 @@ class _TokenEmittingParser(argparse.ArgumentParser):
 def parse_args(argv=None) -> argparse.Namespace:
     parser = _TokenEmittingParser(description=__doc__)
     add_batch_arguments(parser)
+    parser.set_defaults(cycle_budget=None)  # heap_cycle_budget(K) once --heap_k is read
     add_ms7e_arguments(parser)
+    add_ms7f_arguments(parser, transport_speed=False)  # --transport_speed is a batch flag
     parser.add_argument(
         "--perceived",
         action="store_true",
@@ -106,7 +115,24 @@ def parse_args(argv=None) -> argparse.Namespace:
     for name in ("run_seed", "layout_seed"):
         if not (0 <= getattr(args, name) < 2**32):
             parser.error(f"--{name} is outside numpy's seed range (0 <= seed < 2**32)")
+    if args.cycle_budget is None:
+        args.cycle_budget = heap_cycle_budget(args.heap_k)
     check_ms7e(parser, args)
+    # The recorder's walk pace predates MS7f (the MS3 speed ladder): it is built here.
+    # --book_miss is the heap loop's; the rig driving here keeps its own failure memory.
+    # --missed_lift reads the serving loop's carries; the teacher here holds its own.
+    # --cell_failure_cap is the serving loop's selector; the teacher keeps CELL_FAILURE_CAP.
+    serving = {"book_miss", "missed_lift", "cell_failure_cap"}
+    check_ms7f(parser, args, (MS7F_READY - serving) | {"transport_speed"})
+    check_teacher_waits(parser, args)
+    if args.lift_budget:
+        parser.error("--lift_budget cuts a served cycle: the recorder serves no policy")
+    if args.end_at_done and args.attempts != args.num_envs:
+        parser.error("--end_at_done ends one episode an env: it needs --attempts == --num_envs")
+    for name in ("classifier", "passenger_drop", "lift_view_steps", "carry_votes"):
+        if getattr(args, name):
+            # MS7f C serves the policy loop's views; the recorder's teacher acts on the truth.
+            parser.error(f"--{name} reads the serving loop's views: the recorder has none")
     if args.perceived and (args.heap_k <= 0 or args.desk_boxes <= 0):
         parser.error(
             "--perceived records a heap sorted into desk boxes: it needs --heap_k > 0 "
@@ -151,6 +177,9 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         deep_box_floor=args.deep_box_floor,
         release_lean=args.release_lean,
         round_physics="round" in args.families,  # MS7e design section 6.4
+        categories=args.categories,
+        deep_tray=args.deep_tray,
+        tray_refill=args.tray_refill,
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)
@@ -159,7 +188,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
     if parts is not None:
 
         def factory(i, layout_i, episode_draw):
-            return HeapOracle(
+            orc = HeapOracle(
                 layout_i,
                 env.parts,
                 env.destination_bins[i],
@@ -172,7 +201,11 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
                 tray=env.tray,
                 tray_lean_deg=env.tray_lean_deg,
                 wall_band_cont=args.wall_band_cont,
+                box_sets=env.part_box_sets(i),  # MS7f: one teacher, one load record an episode
+                tray_wall_height=env.tray_wall_height,
             )
+            orc.abandon_cycle = args.abandon_cycle
+            return teacher_waits(orc, args)
 
     perceivers = None
     if args.perceived:  # MS7c design section 7.1: the teacher acts on the truth
@@ -192,7 +225,13 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         release_lean=args.release_lean,
         carry_via=args.carry_via,
         passenger_check=args.passenger_check,
+        descend_speed=args.descend_speed,
+        quiet_landing=args.quiet_landing,
+        landing_steps=args.landing_steps,
+        net_stall=args.net_stall,
+        near_tracking=args.near_tracking,
     )
+    install_heap_events(env, rig, args.box_empty)  # MS7f: the refill and the box emptying
     meta = run_meta(
         args,
         draw,
@@ -208,7 +247,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         episode_length_s=episode_length_s,
     )
     print("RUN_META " + json.dumps(meta), flush=True)
-    counters = run_batch(env, rig, args.attempts, args.max_wall_minutes)
+    counters = run_batch(env, rig, args.attempts, args.max_wall_minutes, args.end_at_done)
     stats = run_stats(
         counters,
         target_attempts=args.attempts,

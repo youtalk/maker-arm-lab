@@ -9,7 +9,8 @@ consumers and are unchanged):
     joint_targets (T,8) f32      the post-clamp targets applied (6 arm + 2 jaws)
     obs/joint_pos_abs (T,8) f32  pre-step joint positions, URDF order
     obs/images/wrist_rgb, obs/images/overhead_rgb (T,224,224,3) u8   pre-step frames
-    obs/cycle_phase (T,) i8, obs/cycle_brick (T,) i8                  the rig's stash
+    obs/cycle_phase (T,) i8, obs/cycle_brick (T,) i8                  the rig's stash;
+        cycle_brick is i16 on a heap of more than MAX_INT8_PART parts (MS7f, 150-part heaps)
     obs/clamped (T,) bool        the Rust clamp changed this step's target
     obs/context_camera (T,6) f32, obs/context_privileged (T,66) f32   the two context
         channels (MS4 levers 1 and 3), always recorded; each carries a JSON `names` attr
@@ -32,6 +33,8 @@ consumers and are unchanged):
     initial_state/class_to_box (C,) i64         desk box shards only: the box of each class,
         in the order of its JSON `names` attr (the env's class_names, the four
         core.parts.BASE_CLASSES unless an MS7e switch is on)
+    initial_state/class_box_mask (C,M) bool     MS7f --categories only: every box of each
+        category (the first is class_to_box's), in the same `names` order
     attrs: parts (JSON list of part names, MS6 heap shards only)
     attrs (file level): gripper_mode ("binary" | "continuous", MS6 phase B design 5.4)
 
@@ -60,6 +63,9 @@ from maker_arm_lab.mj.context_names import (
 )
 
 IMAGE_KEYS = ("wrist_rgb", "overhead_rgb")
+MAX_INT8_PART = 127
+"""The largest part index obs/cycle_brick holds as int8, the schema every shard up to MS7e
+used; a larger heap (the MS7f heap size, design section 5) writes it as int16 (``wide_ids``)."""
 DEPTH_KEY = "overhead_depth"
 
 
@@ -75,8 +81,10 @@ class ShardRecorder:
         depth: bool = False,
         gripper_mode: str = "binary",
         class_names: Sequence[str] = BASE_CLASSES,
+        wide_ids: bool = False,
     ) -> None:
         self.path = Path(path)
+        self._brick_dtype = np.int16 if wide_ids else np.int8
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._class_names = tuple(class_names)
         self._file = h5py.File(self.path, "w")
@@ -169,7 +177,7 @@ class ShardRecorder:
         s["joint_pos_abs"].append(np.asarray(joint_pos, dtype=np.float32).copy())
         s["actions"].append(np.asarray(action, dtype=np.float32).copy())
         s["cycle_phase"].append(np.int8(phase))
-        s["cycle_brick"].append(np.int8(brick))
+        s["cycle_brick"].append(self._brick_dtype(brick))
         if context_camera is not None:
             s["context_camera"].append(np.asarray(context_camera, dtype=np.float32).copy())
         if context_privileged is not None:
@@ -219,7 +227,8 @@ class ShardRecorder:
         obs = group.create_group("obs")
         obs.create_dataset("joint_pos_abs", data=np.stack(s["joint_pos_abs"][:steps]))
         obs.create_dataset("cycle_phase", data=np.asarray(s["cycle_phase"][:steps], dtype=np.int8))
-        obs.create_dataset("cycle_brick", data=np.asarray(s["cycle_brick"][:steps], dtype=np.int8))
+        brick = np.asarray(s["cycle_brick"][:steps], dtype=self._brick_dtype)
+        obs.create_dataset("cycle_brick", data=brick)
         obs.create_dataset("clamped", data=np.asarray(s["clamped"][:steps], dtype=bool))
         obs.create_dataset("actor", data=np.asarray(s["actor"][:steps], dtype=np.int16))
         obs.create_dataset("target_part", data=np.asarray(s["target_part"][:steps], dtype=np.int16))
@@ -261,6 +270,9 @@ class ShardRecorder:
                 init.create_dataset(key, data=state[key].astype(np.int64))
         if "class_to_box" in state:
             ds = init.create_dataset("class_to_box", data=state["class_to_box"].astype(np.int64))
+            ds.attrs["names"] = json.dumps(list(self._class_names))
+        if "class_box_mask" in state:
+            ds = init.create_dataset("class_box_mask", data=state["class_box_mask"].astype(bool))
             ds.attrs["names"] = json.dumps(list(self._class_names))
         if self._parts[env_index] is not None:
             group.attrs["parts"] = json.dumps(self._parts[env_index])

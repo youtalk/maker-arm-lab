@@ -31,6 +31,14 @@ IMAGE_HEIGHT = 224
 # column instead of the workspace. At the home pose the frame covers 0.32 m of desk at
 # 0.23 m range, spanning core.layout's scatter band.
 WRIST_FOV_DEG = 70.0
+WRIST_CLASSIFIER_PX = 448
+WRIST_CLASSIFIER_CROP = (152, 376, 116, 340)
+"""The MS7f part classifier's wrist view (``MjLegoSortEnv.wrist_crop``): the wrist camera at the
+same pose and field of view rendered at 448 px, and the rows and columns of the 224 px crop
+around the fingertips at native pixels, the 112 px region of a 224 px frame that the classifier
+read before. The pick point sits about 0.089 m from the camera, so the crop spans 0.062 m at
+0.28 mm a pixel there: the assumption for the real rig is a wrist camera that gives about 0.3 mm
+a pixel at the jaws. The policy's 224 px wrist frames do not change."""
 
 # Overhead camera: straight down over the desk, framing the brick scatter zone AND all four
 # bins. Every number is derived from core.layout so that moving the scatter zone or the bins
@@ -50,6 +58,13 @@ box is a 0.10 m square interior, 0.05 m deep, yawed 45 degrees, at the band's ba
 -0.07. At 0.139 m its corner keeps 4.18 px (the near edge binds; the sides keep 13.82 px and the
 far edge 49.12 px), and the 30 degree leaned tray keeps 67.51 px. With no shift the same corner
 leaves the frame by 36.6 px at x -0.06."""
+
+NARROW_FOV_DEG = 9.1
+"""The narrow overhead view (MS7f design section 6.3, view 1), degrees: 224 px at 0.5 mm a pixel,
+the pixel of a 224 px crop of the real rig's 1920 px frame, at 0.704 m, the B2 camera's
+distance to the tray centre. A fixed angle, as a crop of a fixed frame is: over the tray
+interior, parts 0.005 to 0.03 m high sit 0.684 to 0.722 m away, 0.486 to 0.513 mm a pixel
+(2026-09-30). ``MjLegoSortEnv.narrow_overhead`` turns the overhead camera onto the target."""
 
 # Look straight down with world +x ("away from the arm base", toward the bins) as image-up.
 # In the ROS camera convention (+z = view direction, +x = image-right, +y = image-down) that is

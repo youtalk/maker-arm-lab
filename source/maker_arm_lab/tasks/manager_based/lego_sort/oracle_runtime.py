@@ -285,15 +285,6 @@ ROT_CONVERGED = 0.02
 # loop reads the same rise gate (phase B design 5.5).
 LIFT_MAX_XY_ERROR = 0.03  # m
 
-# MS7e teacher lever T2 (ledger R12, ``passenger_check``): at the LIFT gate a part other than
-# the carried one that stands this much over where it lay when the attempt's HOVER started,
-# within PASSENGER_XY_M of the pick point, rode up with the jaws. The D10 census of 2026-09-29
-# traced 21 of 22 wrong-box parts on count-8 heaps to such passengers, landing in the carried
-# part's box. LIFT raises 0.10 m, so a rider stands near that; a neighbour a finger nudges
-# rises a few mm.
-PASSENGER_MIN_RISE = 0.02  # INITIAL: m, the T2 heap reads on the D10 seeds
-PASSENGER_XY_M = 0.06  # INITIAL: m, a 1x8 across the jaws or a part on a long target
-
 # `resume` calls a brick pinched at core.checker.HELD_MIN_FORCE (imported above), the
 # attribution threshold the eval loop and the privileged channel read it at. It is under
 # PINCH_MIN_FORCE on purpose: a takeover on a weak pinch still enters LIFT, whose gate then
@@ -404,6 +395,23 @@ WATCHDOG_TRIP_STRIKES = 30
 WATCHDOG_TRACKING_TOL_RAD = 0.02
 
 
+def watchdog_flags(joint_pos, joint_vel, q_cmd, limits, near_tracking: bool = False) -> bool:
+    """One step's watchdog strike for one env: a joint past its stop or too fast, or a joint
+    near its stop while the arm is off its command by WATCHDOG_TRACKING_TOL_RAD. The off-command
+    test reads every joint; under ``near_tracking`` (MS7f) only the joints near their stops, the
+    ones a stop can jam. MS7f wave 1 lost two 150-part heaps to HOVERs with link_005_joint 0.01
+    to 0.03 rad from its stop and on its command while the wrist roll slewed 0.03 to 0.04 rad
+    behind its own (2026-09-30)."""
+    if not oracle.watchdog_trips(joint_pos, joint_vel, limits):
+        return False
+    if oracle.watchdog_trips(joint_pos, joint_vel, limits, guard_rad=0.0):
+        return True
+    err = (joint_pos.double().cpu() - q_cmd).abs()
+    if near_tracking:
+        err = err[oracle.near_stops(joint_pos, limits).cpu()]
+    return float(err.max()) >= WATCHDOG_TRACKING_TOL_RAD
+
+
 def grasp_center_for(
     pick, tilt: float, heading: float, offset_z: float, lean: float = LEAN_AZIMUTH
 ) -> tuple:
@@ -503,6 +511,11 @@ class OracleRig:
         release_lean: bool = False,
         carry_via: bool = False,
         passenger_check: bool = False,
+        descend_speed: float = 1.0,
+        quiet_landing: bool = False,
+        landing_steps: int = 0,
+        net_stall: bool = False,
+        near_tracking: bool = False,
     ):
         self.env = env
         # MS7e rung B2: EXTEND leans toward its box (LEAN_AZIMUTH's note, `_leg_lean`).
@@ -513,11 +526,25 @@ class OracleRig:
         # holds each rejected LIFT's passengers per env for the run; rearm and resume keep it.
         self.passenger_check = passenger_check
         self.passenger_log: list[list[list[int]]] = [[] for _ in range(env.num_envs)]
+        # MS7f: a person's events between two of the rig's own cycles (RETREAT ended, the next
+        # HOVER not yet entered), called with the env index, True when they moved parts. The
+        # recorder installs it (``core.batch_loop.install_heap_events``); None runs no events.
+        self.between_cycles = None
         # Every part's position when the attempt's HOVER started, under the switch only.
         self.parts_start: list[torch.Tensor | None] = [None] * env.num_envs
         self.gripper_mode = getattr(env, "gripper_mode", "binary")
         # Multiplier on the pace of the transport legs (TRANSPORT_PHASES); see leg_resolution.
         self.transport_speed = transport_speed
+        # MS7f track S: the multiplier on DESCEND's pace, 1.0 today (LINEAR_PACE_M_PER_S's note).
+        self.descend_speed = descend_speed
+        # MS7f: no command noise once DESCEND has walked its leg (`_command_noise`).
+        self.quiet_landing = quiet_landing
+        # MS7f: DESCEND also ends this many steps after its walk (0: off; `_phase_result`).
+        self.landing_steps = landing_steps
+        # MS7f: DESCEND's stall test reads the net motion over its window (`_phase_result`).
+        self.net_stall = net_stall
+        self.near_tracking = near_tracking  # MS7f: watchdog_flags reads the near joints only
+        self.stall_window: list[list[torch.Tensor]] = [[] for _ in range(env.num_envs)]
         self.bl = bl
         self.noise = noise
         self.rng = rng
@@ -638,7 +665,9 @@ class OracleRig:
         self.perceivers = perceivers
         if perceivers is not None:
             self._part_sizes = torch.tensor([p.size for p in env.parts])
-            self._part_classes = [part_class(p) for p in env.parts]
+            # The env's class of each part: its category under MS7f --categories.
+            keys = getattr(env, "part_classes", None)
+            self._part_classes = list(keys) if keys else [part_class(p) for p in env.parts]
             # Per env: (selection key, row, point) of the selection in force, or None.
             self._frozen: list[tuple | None] = [None] * self.num_envs
             self._swaps_seen = [0] * self.num_envs
@@ -731,6 +760,9 @@ class OracleRig:
         # describes the NEXT episode's scatter. Device-side and never synced here; the one
         # host read is in episode_stats.
         self._stowed_sample = per_brick_stowed(self.env)
+        emptied = getattr(self.env, "emptied_ok", None)  # MS7f H2: graded at an emptying
+        if emptied is not None:
+            self._stowed_sample = self._stowed_sample | emptied.to(self.device)
         return action
 
     def observe(self, dones: torch.Tensor) -> dict:
@@ -856,6 +888,10 @@ class OracleRig:
         factor = orc.noise_factor()
         if goal.target_pos is None and factor <= 1.0:
             return 0.0
+        if self.quiet_landing and goal.phase == oracle.Phase.DESCEND and not self.plans[i]:
+            # The stall test reads the pick point still for DESCEND_STALL_STEPS; the jitter
+            # moves it ~0.1 mm a step, over STALL_EPS, so a noisy landing waited on its budget.
+            return 0.0
         std = orc.draw.action_noise_std * factor * JOINT_NOISE_PER_RAW_UNIT
         if std <= 0.0:
             return 0.0
@@ -899,16 +935,25 @@ class OracleRig:
         until RETREAT ends. ``oracle_marker_part`` and ``oracle_cycle_target`` are what the
         policy sees, and under the 2026-09-22 protocol they switch to the pre-selected next
         part the moment RELEASE ends (``EnvOracle.preselects_next_target``).
+
+        ``oracle_marker_box`` is the box the teacher sends the marker's part to when its oracle
+        chooses among a category's boxes (MS7f ``--categories``, ``HeapOracle.release_box``),
+        else -1 and the env serves the part's own box. A heap of more than 127 parts keeps its
+        part ids in int16 (the MS7f heap size, design section 5).
         """
         if not hasattr(self.env, "oracle_cycle_phase"):
+            ids = torch.int16 if self.num_bricks > 127 else torch.int8
             self.env.oracle_cycle_phase = torch.full(
                 (self.num_envs,), -1, dtype=torch.int8, device=self.device
             )
             self.env.oracle_cycle_brick = torch.full(
-                (self.num_envs,), -1, dtype=torch.int8, device=self.device
+                (self.num_envs,), -1, dtype=ids, device=self.device
             )
             self.env.oracle_marker_part = torch.full(
-                (self.num_envs,), -1, dtype=torch.int8, device=self.device
+                (self.num_envs,), -1, dtype=ids, device=self.device
+            )
+            self.env.oracle_marker_box = torch.full(
+                (self.num_envs,), -1, dtype=torch.int16, device=self.device
             )
             self.env.oracle_cycle_target = torch.zeros(
                 (self.num_envs, 7), dtype=torch.float32, device=self.device
@@ -936,6 +981,8 @@ class OracleRig:
             if ahead:
                 marker_i, start, chosen = orc_i.next_brick, orc_i.next_brick_start, orc_i.next_grasp
             self.env.oracle_marker_part[i] = marker_i if marker_i is not None else -1
+            sets = getattr(orc_i, "box_sets", None) if marker_i is not None else None
+            self.env.oracle_marker_box[i] = -1 if sets is None else orc_i.release_box(marker_i)
             if self.perceivers is None:
                 self.env.oracle_cycle_target[i] = torch.tensor(target_context(start, chosen))
                 continue
@@ -977,6 +1024,7 @@ class OracleRig:
                 sizes=self._part_sizes,
                 classes=self._part_classes,
                 tool_xy=tuple(scene.pick_point[:2].tolist()),
+                parked=frozenset(self.env.parked[i].nonzero().flatten().tolist()),
             )
         )
         stats = self.stats[i]
@@ -1037,6 +1085,9 @@ class OracleRig:
                 continue
             if self._push_takeover_over(i):
                 continue
+            events = goal.phase == oracle.Phase.RETREAT and self.between_cycles is not None
+            if events and self.between_cycles(i):
+                scene = self.snapshot(i)  # the event moved parts
             self._enter_phase(i, scene, ending_phase=goal.phase)
 
     def _phase_result(self, i: int, goal: oracle.Goal) -> oracle.PhaseResult | None:
@@ -1087,6 +1138,20 @@ class OracleRig:
             self.quiet[i] = self.quiet[i] + 1 if moved < STALL_EPS else 0
             self.previous_pick_point[i] = now.clone()
             stalled = self.quiet[i] >= goal.stall_steps
+            if self.net_stall and goal.phase == oracle.Phase.DESCEND:
+                # The recorder's joint noise moves the pick point ~0.1 mm a step, over STALL_EPS,
+                # but jitters around the landing: over the window its net motion stays under
+                # stall_steps * STALL_EPS, which a descent at STALL_EPS a step reaches.
+                window = self.stall_window[i]
+                window.append(now.clone())
+                del window[: -goal.stall_steps - 1]
+                net = (window[-1] - window[0]).norm().item()
+                stalled = len(window) > goal.stall_steps and net < goal.stall_steps * STALL_EPS
+            if self.landing_steps and goal.phase == oracle.Phase.DESCEND and not self.plans[i]:
+                # The recorder's joint noise keeps the pick point moving over STALL_EPS, so the
+                # stall test alone waits a noisy landing out toward the phase budget.
+                landed = self.steps_in_phase[i] - self.walk_steps[i]
+                stalled = stalled or landed >= self.landing_steps
         budget = self.steps_in_phase[i] >= goal.max_steps
         if not (converged or stalled or budget):
             return None
@@ -1158,16 +1223,9 @@ class OracleRig:
         return best
 
     def _passengers(self, i: int, carried: int) -> list[int]:
-        """The parts other than ``carried`` that rose with the jaws (``PASSENGER_MIN_RISE``)."""
-        pick = self.pick_point(i)
-        riders = []
-        for b in range(self.num_bricks):
-            pos = self._brick_pos(i, b)
-            rise = (pos[2] - self.parts_start[i][b, 2]).item()
-            near = (pos[:2] - pick[:2]).norm().item() < PASSENGER_XY_M
-            if b != carried and rise > PASSENGER_MIN_RISE and near:
-                riders.append(b)
-        return riders
+        """The parts other than ``carried`` that rose with the jaws (``oracle.passengers``)."""
+        pos = torch.stack([self._brick_pos(i, b) for b in range(self.num_bricks)])
+        return oracle.passengers(pos, self.parts_start[i][:, 2], self.pick_point(i), carried)
 
     def _enter_phase(
         self, i: int, scene: oracle.SceneSnapshot, ending_phase: oracle.Phase | None = None
@@ -1226,6 +1284,7 @@ class OracleRig:
         self._plan_leg(i, goal)
         if goal.stall_steps:
             self.previous_pick_point[i] = self.pick_point(i).clone()
+            self.stall_window[i] = [self.previous_pick_point[i]]
 
     # -- planning ------------------------------------------------------------
 
@@ -1762,6 +1821,8 @@ class OracleRig:
     def _leg_resolution(self, i: int, goal: oracle.Goal, **geometry: float) -> tuple[int, int]:
         """``leg_resolution`` for this env's episode draw, this phase's budget and pace."""
         speed_scale = self.transport_speed if goal.phase in TRANSPORT_PHASES else 1.0
+        if goal.phase == oracle.Phase.DESCEND:
+            speed_scale = self.descend_speed
         return leg_resolution(
             goal.max_steps, self.oracles[i].draw.gain_scale, speed_scale=speed_scale, **geometry
         )
@@ -1842,6 +1903,8 @@ class OracleRig:
             self.abandoned[i] = False
             self._outcome[i] = None
             self.stats[i] = self._fresh_stats()
+            if self.between_cycles is not None:  # MS7f: the recorder's events, per episode
+                self.stats[i]["events"] = {"tray_refill": 0, "box_empty": 0}  # loop.EVENT_NAMES
             self.single_cycle[i] = False
             self.takeover_result[i] = None
             if not idle:
@@ -2107,13 +2170,9 @@ class OracleRig:
                 continue  # post-auto-reset state this step; joint_pos/vel are the next episode's
             if self.goals[i] is None:
                 continue
-            tripped = oracle.watchdog_trips(joint_pos[i], joint_vel[i], self.limits)
-            if tripped and not oracle.watchdog_trips(
-                joint_pos[i], joint_vel[i], self.limits, guard_rad=0.0
-            ):
-                # Near a stop, not past it, not fast: a jam only if off the commanded target.
-                tracking = (joint_pos[i].double().cpu() - self.q_cmd[i]).abs().max()
-                tripped = float(tracking) >= WATCHDOG_TRACKING_TOL_RAD
+            tripped = watchdog_flags(
+                joint_pos[i], joint_vel[i], self.q_cmd[i], self.limits, self.near_tracking
+            )
             self.watchdog_strikes[i] = self.watchdog_strikes[i] + 1 if tripped else 0
             if self.watchdog_strikes[i] >= WATCHDOG_TRIP_STRIKES:
                 # MS7a tray: an oracle that can give up the jammed leg instead of the episode

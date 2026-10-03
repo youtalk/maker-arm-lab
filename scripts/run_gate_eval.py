@@ -73,6 +73,7 @@ class GateCfg:
     retries: int = 2
     n_action_steps: int | None = None
     temporal_ensemble_coeff: float | None = None
+    action_warp: float = 1.0  # the server plays each chunk this many times faster (MS7f speed)
     only_processes: tuple | None = None
     eval_timeout_s: float = 4 * 3600
     backend: str = "isaac"  # "mujoco" spawns scripts/mj_eval_policy.py under .venv/bin/python
@@ -86,6 +87,9 @@ class GateCfg:
     parts_split: str = "heldout"
     cycle_budget: int | None = None  # None: the client's default, ceil(1.3 * K)
     max_cycles_per_stowed: float | None = None  # the second gate rule, None: not applied
+    # MS7f design section 4.2: the throughput bar and the held-out row's bar, None: not applied.
+    min_stows_per_hour: float | None = None
+    heldout_threshold: float | None = None
     gripper: str = "binary"  # MuJoCo only: the checkpoint's handshake (MS6 phase B design 5.4)
     desk_boxes: int = 0  # MuJoCo heap only: MS7a desk boxes; 0 is the MS6 shelf bin
     tray: bool = False  # MuJoCo heap only: the heap drops into the tray (MS7a)
@@ -109,12 +113,15 @@ class GateCfg:
     # MS7e unseen-box ladder, the seen row (design section 8.3): (RUN0, LAYOUT0), draw i reads a
     # recorded run's own seeds RUN0 + i and LAYOUT0 + i (make_eval_draws); None is the formula.
     seen_seeds: tuple | None = None
+    # MuJoCo heap only: the MS7f switches (MS7f design section 12.1) at their values, forwarded
+    # to the heap client and recorded in its payload's "ms7f" block; MS7F_OFF is MS7e.
+    ms7f: dict = field(default_factory=dict)
 
 
-FAMILY_KEYS = ("round", "ldraw", "flat")
+FAMILY_KEYS = ("round", "ldraw", "flat", "joint", "minifig")
 """``core.parts.FAMILY_KEYS``'s keys, in order, copied because the supervisor imports no
 maker_arm_lab; the test pins it."""
-READY_FAMILIES: frozenset[str] = frozenset({"round", "ldraw", "flat"})
+READY_FAMILIES: frozenset[str] = frozenset({"round", "ldraw", "flat", "joint", "minifig"})
 """``core.parts.READY_FAMILIES``, copied and pinned the same way: ``--families`` with another
 key is refused before a server starts (MS7e design section 10.2)."""
 UNBUILT_SWITCHES: tuple[str, ...] = ()
@@ -162,6 +169,85 @@ def ms7e_block(cfg: "GateCfg") -> dict:
         "thin_snap": cfg.thin_snap,
         "snap_closed": cfg.snap_closed,
     }
+
+
+MS7F_OFF = {
+    "categories": False,
+    "deep_tray": False,
+    "tray_refill": False,
+    "box_empty": False,
+    "book_miss": False,
+    "abandon_cycle": False,
+    "near_tracking": False,
+    "classifier": None,
+    "passenger_drop": False,
+    "lift_view_steps": 0,
+    "transport_speed": 4.0,
+    "descend_speed": 1.0,
+    "close_steps": 45,
+    "lift_hold_steps": 30,
+    "release_steps": 20,
+    "lift_budget": 0,
+    "close_guard": False,
+    "quiet_landing": False,
+    "landing_steps": 0,
+    "end_at_done": False,
+    "net_stall": False,
+    "missed_lift": False,
+    "cell_failure_cap": 3,
+    "carry_votes": 0,
+}
+"""``core.batch_loop.MS7F_OFF``, copied because the supervisor imports no maker_arm_lab; the test
+pins it. The "ms7f" block of a read with every MS7f switch off, what an MS7e payload ran with."""
+MAX_HEAP_K = 150
+"""``core.batch_loop.MAX_HEAP_K``, the MS7f heap, copied and pinned the same way."""
+MS7F_READY: frozenset[str] = frozenset(
+    {
+        "categories",
+        "deep_tray",
+        "tray_refill",
+        "box_empty",
+        "book_miss",
+        "abandon_cycle",
+        "near_tracking",
+        "classifier",
+        "passenger_drop",
+        "lift_view_steps",
+        "transport_speed",
+        "descend_speed",
+        "close_steps",
+        "lift_hold_steps",
+        "release_steps",
+        "lift_budget",
+        "close_guard",
+        "quiet_landing",
+        "landing_steps",
+        "end_at_done",
+        "net_stall",
+        "missed_lift",
+        "cell_failure_cap",
+        "carry_votes",
+    }
+)
+"""``core.batch_loop.MS7F_READY``, copied and pinned the same way: any other MS7f switch at a
+value but its off value is refused before a server starts (MS7f design section 12.2)."""
+
+
+def ms7f_block(cfg: "GateCfg") -> dict:
+    """The payload's "ms7f" block a read with ``cfg`` records (``core.batch_loop.ms7f_switches``);
+    the cache matches on it."""
+    return MS7F_OFF | cfg.ms7f
+
+
+def ms7f_flags(block: dict) -> list[str]:
+    """The heap client's flags for an "ms7f" block: a switch at its off value sends nothing, an
+    on switch its flag, and a valued switch its flag and value."""
+    flags = []
+    for name, value in block.items():
+        if value == MS7F_OFF[name]:
+            continue
+        flags += [f"--{name}"] if value is True else [f"--{name}", str(value)]
+    return flags
 
 
 MS7D_LEVERS = {
@@ -340,8 +426,18 @@ def wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple[float
     return (max(0.0, center - half), min(1.0, center + half))
 
 
+CONTROL_HZ = 30.0
+"""``core.loop.CONTROL_HZ``, copied because the supervisor imports no maker_arm_lab; pinned."""
+INTERVAL_NAMES = ("select_to_close", "close_to_lift", "lift_to_release", "release_to_next")
+"""``core.loop.INTERVAL_NAMES``, the S0 intervals (MS7f design section 8.1); pinned."""
+
+
 def aggregate_gate(
-    process_payloads: list[dict], threshold: float, max_cycles_per_stowed: float | None = None
+    process_payloads: list[dict],
+    threshold: float,
+    max_cycles_per_stowed: float | None = None,
+    min_stows_per_hour: float | None = None,
+    heldout_threshold: float | None = None,
 ) -> dict:
     """Per-brick success rate = bricks delivered to their correct bin / (num_bricks x
     episodes), as RolloutTracker grades it, gated against `threshold`. Everything else is
@@ -350,7 +446,13 @@ def aggregate_gate(
 
     `max_cycles_per_stowed` (MS6 phase B design 5.3) is the heap gate's second rule: pick
     cycles per stowed part at most this. None (the six-brick task) reports cycles but does
-    not gate on them."""
+    not gate on them.
+
+    MS7f design section 4.2 adds two bars, each gated only when set: ``min_stows_per_hour``, the
+    correct stows per simulated hour over every step of every episode (3600 x stowed / (steps /
+    30)), and ``heldout_threshold``, the stowed share of the held-out row (each episode's
+    ``stowed_heldout``: parts of kinds neither the policy nor the classifier saw), which fails
+    when the read holds no held-out part. With both unset the verdict is MS7e's."""
     episodes = [ep for p in process_payloads for ep in p["episodes"]]
     if max_cycles_per_stowed is not None and any("cycles" not in ep for ep in episodes):
         # A six-brick payload has no cycles; counting it as 0 would pass the rule for free.
@@ -364,6 +466,16 @@ def aggregate_gate(
         cycles_per_stowed is not None and cycles_per_stowed <= max_cycles_per_stowed
     )
     steps_total = sum(ep["steps"] for ep in episodes)
+    per_hour = 3600.0 * bricks_stowed * CONTROL_HZ / steps_total if steps_total else 0.0
+    hour_ok = min_stows_per_hour is None or per_hour >= min_stows_per_hour
+    held = {
+        k: sum(ep.get("stowed_heldout", {}).get(k, 0) for ep in episodes)
+        for k in ("stowed", "total")
+    }
+    held_rate = held["stowed"] / held["total"] if held["total"] else None
+    held_ok = heldout_threshold is None or (
+        held_rate is not None and held_rate >= heldout_threshold
+    )
     grasp_attempts = sum(ep.get("grasp_attempts", 0) for ep in episodes)
     grasp_successes = sum(ep.get("grasp_successes", 0) for ep in episodes)
     grasp_successes_strict = sum(ep.get("grasp_successes_strict", 0) for ep in episodes)
@@ -437,7 +549,18 @@ def aggregate_gate(
             "cycles_total": cycles_total,
             "cycles_per_stowed": cycles_per_stowed,
             "max_cycles_per_stowed": max_cycles_per_stowed,
-            "passed": rate >= threshold and cycles_ok,
+            "steps_total": steps_total,
+            "stows_per_hour": per_hour,
+            "min_stows_per_hour": min_stows_per_hour,
+            "stows_per_hour_passed": hour_ok,
+            "heldout": {
+                **held,
+                "rate": held_rate,
+                "wilson95": list(wilson_interval(held["stowed"], held["total"])),
+            },
+            "heldout_threshold": heldout_threshold,
+            "heldout_passed": held_ok,
+            "passed": rate >= threshold and cycles_ok and hour_ok and held_ok,
         },
         "secondary": {
             "all_six_episode_rate": (
@@ -478,8 +601,40 @@ def aggregate_gate(
             ],
             "mean_steps": (steps_total / len(episodes)) if episodes else None,
             **box_rows,
+            **_ms7f_rows(episodes),
         },
     }
+
+
+def _ms7f_rows(episodes: list[dict]) -> dict:
+    """The MS7f rows of a read (interface item 4): the events, the rows per category under
+    --categories and the S0 intervals summed per cycle outcome (``core.loop.interval_sums``, a
+    stdlib copy). Absent on a payload that predates them."""
+    rows: dict = {}
+    events = [ep["events"] for ep in episodes if "events" in ep]
+    if events:
+        rows["events"] = {n: sum(e.get(n, 0) for e in events) for n in sorted(set().union(*events))}
+    by_category: dict[str, dict] = {}
+    for ep in episodes:
+        for name, row in ep.get("stowed_by_category", {}).items():
+            total = by_category.setdefault(name, {"stowed": 0, "total": 0})
+            for k in ("stowed", "total"):
+                total[k] += row[k]
+    if by_category:
+        rows["stowed_by_category"] = by_category
+    timed = [ep for ep in episodes if "cycle_intervals" in ep]
+    if timed:
+        by: dict[str, dict] = {}
+        for ep in timed:
+            for outcome, four in zip(ep["cycle_classes"], ep["cycle_intervals"]):
+                row = by.setdefault(outcome, {"cycles": 0, "steps": [0, 0, 0, 0]})
+                row["cycles"] += 1
+                row["steps"] = [a + b for a, b in zip(row["steps"], four)]
+        rows["cycle_intervals"] = {
+            "names": list(INTERVAL_NAMES),
+            "by_outcome": dict(sorted(by.items())),
+        }
+    return rows
 
 
 def _extract_json_line(text: str, token: str) -> dict:
@@ -505,6 +660,8 @@ def _server_command(cfg: GateCfg) -> list[str]:
         cmd += ["--n_action_steps", str(cfg.n_action_steps)]
     if cfg.temporal_ensemble_coeff is not None:
         cmd += ["--temporal_ensemble_coeff", str(cfg.temporal_ensemble_coeff)]
+    if cfg.action_warp != 1.0:
+        cmd += ["--action_warp", str(cfg.action_warp)]
     return cmd
 
 
@@ -610,6 +767,7 @@ def _eval_command(cfg: GateCfg, draw: EvalDraw) -> list[str]:
                 prefix.append("--thin_snap")
             if cfg.snap_closed:
                 prefix.append("--snap_closed")
+            prefix += ms7f_flags(ms7f_block(cfg))
         prefix += list(cfg.client_flags)
     else:
         prefix = [
@@ -694,6 +852,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
             and payload.get("deep_box_floor", False) == cfg.deep_box_floor
             # A payload that predates the MS7e switches, or a later one, ran with them off.
             and MS7E_OFF | payload.get("ms7e", {}) == ms7e_block(cfg)
+            # The same for the MS7f switches (MS7f design section 12.2).
+            and MS7F_OFF | payload.get("ms7f", {}) == ms7f_block(cfg)
         )
     # The served inference configuration is part of what a draw measured. An open-loop read
     # (the checkpoint's own n_action_steps) must never stand in for a temporal-ensemble read.
@@ -701,6 +861,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     same_inference = served.get("temporal_ensemble_coeff") == cfg.temporal_ensemble_coeff and (
         cfg.n_action_steps is None or served.get("n_action_steps") == cfg.n_action_steps
     )
+    # A payload that predates the warp ran unwarped.
+    same_inference = same_inference and served.get("action_warp", 1.0) == cfg.action_warp
     # The loop's protocol switches are part of what a draw measured; a payload that predates
     # them ran with every switch off.
     recorded = served.get("loop") or {}
@@ -765,7 +927,13 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
         finally:
             server.stop()
     ordered = [payloads[k] for k in sorted(payloads)]
-    results = aggregate_gate(ordered, cfg.threshold, cfg.max_cycles_per_stowed)
+    results = aggregate_gate(
+        ordered,
+        cfg.threshold,
+        cfg.max_cycles_per_stowed,
+        cfg.min_stows_per_hour,
+        cfg.heldout_threshold,
+    )
     results["checkpoint"] = cfg.checkpoint
     results["seed"] = cfg.seed
     results["ledger"] = str(cfg.ledger)
@@ -773,11 +941,16 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
     # What the server SERVED with, from the handshake each eval process recorded (identical
     # across processes by construction), falling back to the SERVER_READY line. Never the
     # CLI request.
-    results["inference"] = next(
-        (p["inference"] for p in ordered if p.get("inference")), server_ready.get("inference", {})
-    )
+    results["inference"] = {
+        "action_warp": 1.0,  # a server that predates the warp served none
+        **next(
+            (p["inference"] for p in ordered if p.get("inference")),
+            server_ready.get("inference", {}),
+        ),
+    }
     results["policy_id"] = next((p.get("policy_id") for p in ordered), None)
     results["ms7e"] = ms7e_block(cfg)
+    results["ms7f"] = ms7f_block(cfg)
     results["draws"] = [
         {
             "process_index": d.process_index,
@@ -854,6 +1027,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--n_action_steps", type=int, default=None)
     parser.add_argument("--temporal_ensemble_coeff", type=float, default=None)
+    parser.add_argument(
+        "--action_warp",
+        type=float,
+        default=1.0,
+        help="the server plays each predicted chunk this many times faster, 1.0 (off) to 3.0",
+    )
     parser.add_argument("--only_processes", type=_process_list, default=None)
     parser.add_argument("--eval_timeout_s", type=float, default=4 * 3600)
     parser.add_argument("--backend", choices=("isaac", "mujoco"), default="isaac")
@@ -894,6 +1073,20 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help="the second gate rule of MS6 phase B: pick cycles per stowed part at most this "
         "(default 1.3 when --heap_k > 0, else not applied)",
+    )
+    parser.add_argument(
+        "--min_stows_per_hour",
+        type=float,
+        default=None,
+        help="MS7f design section 4.2: the throughput bar, correct stows per simulated hour over "
+        "every step of every episode; not applied by default",
+    )
+    parser.add_argument(
+        "--heldout_threshold",
+        type=float,
+        default=None,
+        help="MS7f design section 4.2: the held-out row's bar, the stowed share of parts of "
+        "held-out kinds (meaningful under --parts_split all); not applied by default",
     )
     parser.add_argument(
         "--gripper",
@@ -1073,6 +1266,85 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "floors' colliders reach under the desk top",
     )
     parser.add_argument(
+        "--categories",
+        action="store_true",
+        help="MuJoCo heap only, MS7f: forwarded as --categories, the six categories over the "
+        "drawn boxes; needs --box_draw",
+    )
+    for name, what in (
+        ("deep_tray", "H1, the deep tray"),
+        ("tray_refill", "H1', the tray refill"),
+        ("box_empty", "H2, the box emptying"),
+        ("book_miss", "H, the missed target's failure"),
+        ("abandon_cycle", "H, the recorder's jam ends a cycle (the heap client refuses it)"),
+        ("near_tracking", "H, the watchdog reads the joints near a stop"),
+        ("passenger_drop", "C, the passenger response"),
+        ("close_guard", "S1, a retry's CLOSE at full length"),
+        ("quiet_landing", "S1, no joint noise after DESCEND's walk"),
+        ("end_at_done", "S, the recorder's end at DONE (the heap client refuses it)"),
+        ("net_stall", "S1, DESCEND's stall test on the net motion"),
+        ("missed_lift", "riders, a carry the hold detector missed"),
+    ):
+        parser.add_argument(
+            f"--{name}",
+            action="store_true",
+            help=f"MuJoCo heap only, MS7f {what}: forwarded as --{name}",
+        )
+    parser.add_argument(
+        "--classifier",
+        type=str,
+        default=None,
+        help="MuJoCo heap only, MS7f C: forwarded as --classifier PATH, the TorchScript category "
+        "classifier",
+    )
+    parser.add_argument(
+        "--transport_speed",
+        type=float,
+        default=MS7F_OFF["transport_speed"],
+        help="MuJoCo heap only, MS7f S: forwarded as --transport_speed X, the teacher walk's pace",
+    )
+    parser.add_argument(
+        "--descend_speed",
+        type=float,
+        default=MS7F_OFF["descend_speed"],
+        help="MuJoCo heap only, MS7f S1: forwarded as --descend_speed X, DESCEND's pace",
+    )
+    for name in ("close_steps", "lift_hold_steps", "release_steps", "landing_steps"):
+        parser.add_argument(
+            f"--{name}",
+            type=int,
+            default=MS7F_OFF[name],
+            help=f"MuJoCo heap only, MS7f S1: forwarded as --{name} N, a teacher wait",
+        )
+    parser.add_argument(
+        "--lift_view_steps",
+        type=int,
+        default=MS7F_OFF["lift_view_steps"],
+        help="MuJoCo heap only, MS7f C: forwarded as --lift_view_steps N, the classifier's wrist "
+        "read N steps after the lift",
+    )
+    parser.add_argument(
+        "--lift_budget",
+        type=int,
+        default=MS7F_OFF["lift_budget"],
+        help="MuJoCo heap only, MS7f S2: forwarded as --lift_budget N, the serving loop's cut of "
+        "a cycle that lifted nothing",
+    )
+    parser.add_argument(
+        "--cell_failure_cap",
+        type=int,
+        default=MS7F_OFF["cell_failure_cap"],
+        help="MuJoCo heap only, MS7f: forwarded as --cell_failure_cap N, the perceived selector's "
+        "failures before it excludes a part's position",
+    )
+    parser.add_argument(
+        "--carry_votes",
+        type=int,
+        default=MS7F_OFF["carry_votes"],
+        help="MuJoCo heap only, MS7f C: forwarded as --carry_votes K, the extra wrist reads of a "
+        "vote's carry",
+    )
+    parser.add_argument(
         "--seen_seeds",
         type=_seed_pair,
         default=None,
@@ -1091,6 +1363,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def _build_cfg(args: argparse.Namespace) -> GateCfg:
+    if not 1.0 <= args.action_warp <= 3.0:  # the server's ACTION_WARP_MIN and ACTION_WARP_MAX
+        raise ValueError(f"--action_warp must be in [1.0, 3.0], got {args.action_warp}")
     if args.gripper != "binary" and (args.heap_k <= 0 or args.backend != "mujoco"):
         # Only the MuJoCo heap client drives a continuous gripper (phase B design 5.4).
         raise ValueError("--gripper continuous needs --heap_k > 0 and --backend mujoco")
@@ -1161,10 +1435,23 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError("--heap_family must name one of --families")
     if args.carry_via and not args.release_lean:
         raise ValueError("--carry_via bends the B2 carry: it needs --release_lean")
+    ms7f = {name: getattr(args, name) for name in MS7F_OFF}
+    for name, value in ms7f.items():
+        if value == MS7F_OFF[name]:
+            continue
+        if args.heap_k <= 0 or args.backend != "mujoco":
+            raise ValueError(f"--{name} needs --heap_k > 0 and --backend mujoco")
+        if name not in MS7F_READY:
+            # The client's own usage error (MS7f design section 12.2), before a server starts.
+            raise ValueError(f"--{name} is not built on this commit")
+    if args.categories and not args.box_draw:
+        raise ValueError("--categories maps the categories onto the drawn boxes: needs --box_draw")
     if args.seen_seeds and args.num_envs != 1:
         # The env's one generator draws env 0's boxes before any heap; each later env's boxes
         # follow the heap before it, which held-out parts change.
         raise ValueError("--seen_seeds reproduces a recorded run's env 0: it needs --num_envs 1")
+    if args.heap_k > MAX_HEAP_K:
+        raise ValueError(f"--heap_k {args.heap_k} exceeds {MAX_HEAP_K}, the MS7f heap")
     if args.heap_k > 0:
         if args.backend != "mujoco":
             raise ValueError("--heap_k needs --backend mujoco: the Isaac env has no heap")
@@ -1188,6 +1475,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         retries=args.retries,
         n_action_steps=args.n_action_steps,
         temporal_ensemble_coeff=args.temporal_ensemble_coeff,
+        action_warp=args.action_warp,
         only_processes=args.only_processes,
         eval_timeout_s=args.eval_timeout_s,
         backend=args.backend,
@@ -1200,6 +1488,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         parts_split=args.parts_split,
         cycle_budget=args.cycle_budget,
         max_cycles_per_stowed=args.max_cycles_per_stowed,
+        min_stows_per_hour=args.min_stows_per_hour,
+        heldout_threshold=args.heldout_threshold,
         gripper=args.gripper,
         desk_boxes=args.desk_boxes,
         tray=args.tray,
@@ -1216,6 +1506,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         thin_snap=args.thin_snap,
         snap_closed=args.snap_closed,
         seen_seeds=args.seen_seeds,
+        ms7f=ms7f,
         client_flags=tuple(shlex.split(args.client_flags))
         + (("--scripted_place",) if args.scripted_place else ())
         + (("--scripted_rake",) if args.scripted_rake else ())

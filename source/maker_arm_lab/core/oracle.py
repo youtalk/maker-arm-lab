@@ -108,10 +108,32 @@ MAX_GRASP_RETRIES = 2
 # RAISE_MAX_STEPS below.
 SETTLE_STEPS = 240
 CLOSE_STEPS = 45
+LIFT_HOLD_STEPS = 30
+"""LIFT's post-arrival hold before its gate reads the rise (``OracleRig._phase_result``)."""
+RELEASE_STEPS = 20
 DEFAULT_MAX_STEPS = 300
 DESCEND_STALL_STEPS = 12
 LIFT_HEIGHT = 0.10
 LIFT_MIN_RISE = 0.05  # m: the rise LIFT must see to call a part lifted (oracle_runtime)
+
+# MS7e teacher lever T2 (ledger R12, ``passenger_check``): at the LIFT gate a part other than
+# the carried one that stands this much over where it lay when the attempt's HOVER started,
+# within PASSENGER_XY_M of the pick point, rode up with the jaws. The D10 census of 2026-09-29
+# traced 21 of 22 wrong-box parts on count-8 heaps to such passengers, landing in the carried
+# part's box. LIFT raises 0.10 m, so a rider stands near that; a neighbour a finger nudges
+# rises a few mm.
+PASSENGER_MIN_RISE = 0.02  # INITIAL: m, the T2 heap reads on the D10 seeds
+PASSENGER_XY_M = 0.06  # INITIAL: m, a 1x8 across the jaws or a part on a long target
+
+
+def passengers(pos: torch.Tensor, start_z: torch.Tensor, pick_xy, carried: int) -> list[int]:
+    """The parts other than ``carried`` that rose with the jaws: ``pos`` (K, 3) now, ``start_z``
+    (K,) their heights at the start, ``pick_xy`` the pick point. Pure. T2 reads it at the LIFT
+    gate (``OracleRig._passengers``); MS7f reads it only to label and count, never to decide."""
+    near = (pos[:, :2] - torch.as_tensor(pick_xy, dtype=pos.dtype)[:2]).norm(dim=-1)
+    rose = (pos[:, 2] - start_z) > PASSENGER_MIN_RISE
+    return [b for b in range(pos.shape[0]) if b != carried and rose[b] and near[b] < PASSENGER_XY_M]
+
 
 # RAISE's own target height and budget -- OpenYAM MEASURED this (Task 8), not
 # the RELEASE_Z a first reading of "raise" suggests.
@@ -663,8 +685,15 @@ def watchdog_trips(
         joint_vel: (6,) arm joint velocities.
         limits: (6, 2) lower/upper joint limits.
     """
-    near = (joint_pos - limits[:, 0] < guard_rad) | (limits[:, 1] - joint_pos < guard_rad)
+    near = near_stops(joint_pos, limits, guard_rad)
     return bool(near.any() or (joint_vel.abs() > speed_max).any())
+
+
+def near_stops(
+    joint_pos: torch.Tensor, limits: torch.Tensor, guard_rad: float = _JOINT_LIMIT_GUARD_RAD
+) -> torch.Tensor:
+    """(6,) bool: the joints within ``guard_rad`` of a stop (or past it)."""
+    return (joint_pos - limits[:, 0] < guard_rad) | (limits[:, 1] - joint_pos < guard_rad)
 
 
 class EnvOracle:
@@ -724,6 +753,14 @@ class EnvOracle:
         another bin, and the gated corpus was recorded with this LIFT. ``HeapOracle`` turns it
         on, where one bin takes every part. The runtime's LIFT gate reads it
         (``oracle_runtime.OracleRig._lift_result``)."""
+        # The fixed waits of a pick cycle in control steps (CLOSE, LIFT's post-arrival hold,
+        # RELEASE): today's here, trimmed per oracle by a client (MS7f design section 8.2).
+        self.close_steps = CLOSE_STEPS
+        self.lift_hold_steps = LIFT_HOLD_STEPS
+        self.release_steps = RELEASE_STEPS
+        # MS7f: with a trimmed close_steps, a retry (retries_used > 0) closes for CLOSE_STEPS:
+        # a part the short hold cannot lift gets the full squeeze on its next attempt.
+        self.close_guard = False
         self.release_tilt = RELEASE_TILT_RAD
         """The tool tilt EXTEND, RELEASE and RETREAT hold: the shelf's measured release attitude.
         ``HeapOracle`` over desk boxes holds the pick tilt instead (MS7a design, desk boxes)."""
@@ -1059,8 +1096,9 @@ class EnvOracle:
         if self.phase == Phase.DESCEND:
             return self.descend_goal(self._target_yaw(scene))
         if self.phase == Phase.CLOSE:
+            steps = CLOSE_STEPS if self.close_guard and self.retries_used else self.close_steps
             return self._goal(
-                Phase.CLOSE, None, None, PICK_TILT_RAD, -1.0, None, 0, CLOSE_STEPS, hold=CLOSE_STEPS
+                Phase.CLOSE, None, None, PICK_TILT_RAD, -1.0, None, 0, steps, hold=steps
             )
         if self.phase == Phase.LIFT:
             target = scene.pick_point.clone()
@@ -1086,7 +1124,15 @@ class EnvOracle:
             else:
                 target[2] += LIFT_HEIGHT
             return self._goal(
-                Phase.LIFT, target, None, PICK_TILT_RAD, -1.0, 0.002, 0, DEFAULT_MAX_STEPS, hold=30
+                Phase.LIFT,
+                target,
+                None,
+                PICK_TILT_RAD,
+                -1.0,
+                0.002,
+                0,
+                DEFAULT_MAX_STEPS,
+                hold=self.lift_hold_steps,
             )
         if self.phase == Phase.REOPEN:
             return self._goal(Phase.REOPEN, None, None, 0.0, 1.0, None, 0, 20, hold=20)
@@ -1107,7 +1153,15 @@ class EnvOracle:
             return self.extend_goal()
         if self.phase == Phase.RELEASE:
             return self._goal(
-                Phase.RELEASE, None, None, self.release_tilt, 1.0, None, 0, 20, hold=20
+                Phase.RELEASE,
+                None,
+                None,
+                self.release_tilt,
+                1.0,
+                None,
+                0,
+                self.release_steps,
+                hold=self.release_steps,
             )
         if self.phase == Phase.RETREAT:
             # tilt_rad=RELEASE_TILT_RAD, not 0.0 (level): OpenYAM measured

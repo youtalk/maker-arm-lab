@@ -1,0 +1,216 @@
+"""The MS7f part classifier's training script: the token contract, the operating point, and a
+tiny train, export and read on synthetic render set files, CPU only and no weight download."""
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+import torch
+
+import train_part_classifier as tpc
+
+SCRIPT = Path(__file__).resolve().parent / "train_part_classifier.py"
+
+
+def _render_file(path: Path, seed: int, n: int = 12, **extra) -> Path:
+    """A render set file as ``scripts/mj_render_set.py`` writes it: the category shows as the
+    frame's colour, and a passenger as a bright band."""
+    rng = np.random.default_rng(seed)
+    cats = [tpc.CATEGORIES[k % 4] for k in range(n)]
+    views = [tpc.VIEWS[k % 3] for k in range(n)]
+    riders = [
+        1 if (v != "overhead" and k % 4 == 1) else (0 if v != "overhead" else -1)
+        for k, v in enumerate(views)
+    ]
+    frames = rng.integers(0, 30, (n, 224, 224, 3), dtype=np.uint8)
+    for k, c in enumerate(cats):
+        frames[k, :, :, tpc.CATEGORIES.index(c) % 3] += 200
+        if riders[k] > 0:
+            frames[k, :40] = 255
+    np.savez_compressed(
+        path,
+        frames=frames,
+        view=np.array(views),
+        category=np.array(cats),
+        part=np.array([f"{c}_kind" for c in cats]),
+        heldout=np.array([k % 5 == 0 for k in range(n)]),
+        passengers=np.array(riders),
+        riders=np.array(riders),
+        rider_seen=np.array([0.5 if r > 0 else -1.0 for r in riders]),
+        held=np.arange(n),
+        part_seen=np.array([1.0 if v == "overhead" else -1.0 for v in views]),
+        env=np.zeros(n, dtype=int),
+        step=np.arange(n),
+        args=np.array("{}"),
+        **extra,
+    )
+    return path
+
+
+def test_usage_errors_print_the_fail_token(tmp_path):
+    usage = (
+        (),
+        ("--out", str(tmp_path)),
+        ("--out", str(tmp_path), "--model", "m.pt"),
+        ("--out", str(tmp_path), "--model", "m.pt", "--read", "r.npz", "--flip_average"),
+    )
+    for argv in usage:
+        out = subprocess.run(
+            [sys.executable, str(SCRIPT), *argv], capture_output=True, text=True, check=False
+        )
+        assert out.returncode == 2, argv
+        lines = out.stdout.strip().splitlines()
+        assert len(lines) == 1 and lines[0].startswith("CLS_FAIL "), argv
+
+
+def test_the_operating_point_keeps_the_false_alarms_under_the_cap():
+    rng = np.random.default_rng(0)
+    riders = np.concatenate([rng.normal(0, 1, 1000), rng.normal(4, 1, 50)])
+    truth = np.arange(1050) >= 1000
+    t = tpc.operating_point(riders, truth)
+    assert ((riders >= t) & ~truth).sum() <= tpc.PASSENGER_FALSE_ALARMS * 1000
+    assert ((riders >= np.nextafter(t, -np.inf)) & ~truth).sum() > 0 or t == riders.min()
+
+
+def test_a_tiny_run_trains_exports_and_reads_as_the_loop_loads_it(tmp_path):
+    train = [_render_file(tmp_path / f"render_{s}.npz", s) for s in (1, 2)]
+    read = [_render_file(tmp_path / "render_9.npz", 9)]
+    args = tpc.parse_args(
+        ["--train", *map(str, train), "--read", *map(str, read), "--out", str(tmp_path / "m")]
+        + ["--epochs", "1", "--batch", "8", "--weights", "none", "--device", "cpu"]
+    )
+    summary = tpc.run(args)
+    served = torch.jit.load(summary["model"], map_location="cpu")
+    assert list(served.categories) == list(tpc.CATEGORIES)
+    assert isinstance(served.passenger_threshold, float)
+    for wrist in (False, True):
+        logits, rider = served(
+            torch.zeros(2, 224, 224, 3, dtype=torch.uint8), wrist, torch.zeros(2, 3)
+        )
+        assert logits.shape == (2, 6) and rider.shape == (2,)
+    assert list(served.wrist_roi) == list(tpc.WRIST_ROI)
+    assert list(served.overhead_roi) == list(tpc.OVERHEAD_ROI)
+    c1 = json.loads(Path(summary["c1"]).read_text())
+    assert c1["frames"] == 12 and c1["lift"]["total"] == 4
+    assert set(c1["confusion_lift"]) == set(c1["categories"]) == set(tpc.CATEGORIES[:4])
+    assert set(c1["bars"]) == {
+        "lift_accuracy",
+        "category_accuracy",
+        "passenger_recall",
+        "passenger_false_alarms",
+    }
+    again = tpc.run(
+        tpc.parse_args(
+            ["--model", summary["model"], "--read", str(read[0]), "--out", str(tmp_path / "r")]
+        )
+    )
+    assert json.loads(Path(again["c1"]).read_text())["lift"] == c1["lift"]
+    one = tpc.run(
+        tpc.parse_args(
+            ["--ensemble", summary["model"], "--read", str(read[0]), "--out", str(tmp_path / "e")]
+        )
+    )
+    assert json.loads(Path(one["c1"]).read_text())["lift"] == c1["lift"]
+
+
+def test_a_file_without_the_rider_label_reads_unknown(tmp_path):
+    new = _render_file(tmp_path / "render_1.npz", 1)
+    old = dict(np.load(new))
+    del old["riders"], old["rider_seen"]
+    np.savez_compressed(tmp_path / "render_2.npz", **old)
+    assert (tpc.load([tmp_path / "render_2.npz"])["riders"] == -1).all()
+    data = tpc.load([new, tmp_path / "render_2.npz"])
+    assert (data["riders"][12:] == -1).all() and (data["riders"][:12] >= -1).all()
+    assert (data["riders"][:12] == data["passengers"][:12]).all()
+
+
+def test_cycles_pair_each_lift_with_its_selection_and_carry():
+    # env 0: select part 3 (and 5) at step 0, lift 3 at 10, carry at 25; a lift of 5 at 40 with
+    # no selection of 5 since the one at step 30 (part 4) and no carry. env 1: its own selection.
+    view = ["overhead", "overhead", "lift", "carry", "overhead", "lift", "overhead", "lift"]
+    data = {
+        "view": np.array(view),
+        "held": np.array([3, 5, 3, 3, 4, 5, 3, 3]),
+        "step": np.array([0, 0, 10, 25, 30, 40, 0, 12]),
+        "env": np.array([0, 0, 0, 0, 0, 0, 1, 1]),
+        "file": np.zeros(8, dtype=int),
+    }
+    assert tpc.cycles(data).tolist() == [[2, 0, 3], [5, -1, -1], [7, 6, -1]]
+    assert tpc.targets(data).tolist() == [3, 3, 3, 3, 4, 4, 3, 3]
+
+
+def test_the_loop_vote_takes_the_third_view_only_on_a_split():
+    over, lift, carry = (
+        np.array(v) for v in (["a", "a", "a", "a"], ["a", "b", "b", "b"], ["c", "a", "b", "c"])
+    )
+    assert tpc.loop_vote(over, lift, carry).tolist() == ["a", "a", "b", "c"]
+
+
+def test_load_reads_the_size_beside_each_file(tmp_path):
+    a = _render_file(tmp_path / "render_1.npz", 1, n=4)
+    b = _render_file(tmp_path / "render_2.npz", 2, n=3)
+    np.save(tmp_path / "render_1.size.npy", np.full((4, 3), 0.01, np.float32))
+    size = tpc.load([a, b])["size"]
+    assert size.shape == (7, 3) and (size[:4] == 0.01).all() and (size[4:] == -1.0).all()
+
+
+def test_native_wrist_crops_make_a_crop_model_and_do_not_mix(tmp_path):
+    crop = np.array([448, 152, 376, 116, 340])
+    a = _render_file(tmp_path / "render_1.npz", 1, n=4, wrist_crop=crop)
+    b = _render_file(tmp_path / "render_2.npz", 2, n=3)
+    assert tpc.load([a])["wrist_crop"] == tuple(crop.tolist())
+    assert tpc.load([b])["wrist_crop"] is None
+    mixed = tpc.load([a, b])  # the older file gives its overhead frames only
+    assert mixed["wrist_mixed"] and mixed["wrist_crop"] == tuple(crop.tolist())
+    older_wrist = (mixed["file"] == 1) & (mixed["view"] != "overhead")
+    assert (mixed["category"][older_wrist] == "").all()
+    assert (mixed["category"][~older_wrist] != "").all()
+    c = _render_file(tmp_path / "render_3.npz", 3, n=3, wrist_crop=crop + 1)
+    with pytest.raises(ValueError, match="different wrist crops"):
+        tpc.load([a, c])
+    model = tpc.PartClassifier(None, wrist_crop=True)
+    assert model.wrist_input == "crop" and model.wrist_roi == [0, 224, 0, 224]
+
+
+def test_pick_keeps_every_lift_and_carry_and_caps_the_rest():
+    view = np.array(["overhead"] * 10 + ["lift", "carry"] * 3 + ["wrist"] * 7)
+    rows = tpc.pick(view, 2, "render_1.npz")
+    kept = view[rows].tolist()
+    assert kept.count("lift") == kept.count("carry") == 3
+    assert kept.count("overhead") == kept.count("wrist") == 2
+    assert rows.tolist() == tpc.pick(view, 2, "render_1.npz").tolist()
+    assert tpc.pick(view, 0, "render_1.npz").tolist() == list(range(len(view)))
+
+
+def test_erasing_paints_one_flat_rectangle():
+    frames = torch.zeros(4, 224, 224, 3, dtype=torch.uint8) + 128
+    gen = torch.Generator().manual_seed(0)
+    out = tpc.augment(frames, gen, erase=1.0)
+    assert out.shape == frames.shape and out.dtype == torch.uint8
+    for x in out:  # a uniform grey frame keeps its own value outside the rectangle
+        assert len(torch.unique(x.reshape(-1, 3), dim=0)) >= 2
+
+
+def test_an_ensemble_serves_the_mean_of_its_members_and_their_mirror(tmp_path):
+    torch.manual_seed(0)
+    members = []
+    for k, arch in enumerate(("resnet18", "resnet34")):
+        m = tpc.PartClassifier(None, wrist_crop=True, arch=arch).eval()
+        m.passenger_threshold = float(k)
+        members.append(torch.jit.script(m))
+    frames = torch.randint(0, 255, (2, 224, 224, 3), dtype=torch.uint8)
+    size = torch.full((2, 3), 0.01)
+    for flip in (False, True):
+        path = tmp_path / f"e{flip}.pt"
+        torch.jit.script(tpc.Ensemble(members, flip)).save(str(path))
+        served = torch.jit.load(str(path))
+        assert served.wrist_input == "crop" and served.passenger_threshold == 0.5
+        views = (frames, frames.flip(2)) if flip else (frames,)
+        for wrist in (False, True):
+            outs = [m(x, wrist, size) for m in members for x in views]
+            logits, rider = served(frames, wrist, size)
+            assert torch.allclose(logits, torch.stack([o[0] for o in outs]).mean(0), atol=1e-5)
+            assert torch.allclose(rider, torch.stack([o[1] for o in outs]).mean(0), atol=1e-5)
