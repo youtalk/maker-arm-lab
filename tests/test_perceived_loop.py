@@ -461,8 +461,7 @@ def test_perceived_needs_a_policy_desk_boxes_and_a_row_and_refuses_the_truth_swi
         (None, {}, "perceived"),
         (_Still(), {"row_refresh": True}, "perceived"),
         (_Still(), {"scripted_place": True}, "perceived"),
-        (_Still(), {"takeover": loop.TakeoverConfig(random_interval=None)}, "perceived"),
-    ]
+    ]  # ``takeover`` under perceived is the MS7f wave 3 DAgger mode (test_ms7f_dagger.py)
     for policy, extra, reason in cases:
         with pytest.raises(loop.EvalFailure) as err:
             _rollout(env, rig, policy, perceived=True, **extra)
@@ -1164,7 +1163,8 @@ def _ms7f_scene(monkeypatch):
     ready |= {"lift_budget", "abandon_cycle", "near_tracking", "classifier", "passenger_drop"}
     ready |= {"lift_view_steps"}
     ready |= {"missed_lift"}  # the riders track: a carry the hold detector missed
-    ready |= {"cell_failure_cap", "carry_votes"}
+    ready |= {"cell_failure_cap", "carry_votes", "stall_end"}
+    ready |= {"pile_pgs"}  # the env's solver: no loop decision either
     assert batch_loop.MS7F_READY == ready | teacher, "turn it on in this scene"
     # Two of the three bricks start in the tray and one part fills a box, so the refill and
     # an emptying both run between cycles. Set before the build: the box draw reads the ratio.
@@ -1180,6 +1180,7 @@ def _ms7f_scene(monkeypatch):
         tray_lean=30.0,
         deep_tray=True,
         tray_refill=True,
+        pile_pgs=True,
     )
     env.narrow_overhead = lambda i, point: np.full((224, 224, 3), 255, dtype=np.uint8)
     stub = _classifier(Path(tempfile.mkdtemp()), "special", "brick", names=parts.PART_CATEGORIES)
@@ -1188,7 +1189,10 @@ def _ms7f_scene(monkeypatch):
     on = {"box_empty": True, "book_miss": True, "lift_budget": 750}
     on |= {"classifier": stub, "passenger_drop": True, "lift_view_steps": 6, "missed_lift": True}
     # carry_votes adds reads to the class_views vote, so the scene turns the vote on too.
-    on |= {"cell_failure_cap": 5, "carry_votes": 2, "class_views": True}
+    on |= {"cell_failure_cap": 5, "carry_votes": 2, "class_views": True, "stall_end": True}
+    # At the recorder's 60-step span every cycle of this tray scene closes on nothing and ends
+    # on it, so none places; at 220 the fourth still places. ``_stall_end_scene`` fires it at 60.
+    monkeypatch.setattr(loop, "CLOSED_NO_PINCH_STEPS", 220)
     return env, rig, policy, budget, switches | on
 
 
@@ -1221,6 +1225,13 @@ def _snap_closed_scene(monkeypatch):
     reads the measured jaw gap, a proprioceptive read."""
     env, rig, policy, budget, switches = _thin_snap_scene(monkeypatch)
     return env, rig, policy, budget, switches | {"snap_closed": True}
+
+
+def _stall_end_scene(monkeypatch):
+    """The flat scene under ``stall_end`` (MS7f): two of its four cycles close on nothing and end
+    on it, and the other two place."""
+    env, rig, policy, budget, switches = _thin_snap_scene(monkeypatch)
+    return env, rig, policy, budget, switches | {"stall_end": True}
 
 
 def test_a_box_draw_episode_records_its_boxes(monkeypatch):
@@ -1314,6 +1325,7 @@ def test_every_ms7d_switch_at_once_runs_the_teacher_scene_to_its_end(monkeypatch
         _wall_band_scene,
         _thin_snap_scene,
         _snap_closed_scene,
+        _stall_end_scene,
         _ms7f_scene,
     ],
 )
@@ -1373,3 +1385,5 @@ def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):
         assert ep["cycle_reasons"] == ["placed", "placed"] and ep["rakes"] == 0, ep
     else:
         assert "placed" in ep["cycle_reasons"] and first["perception"]["lifts_classified"] > 0
+    if scene is _stall_end_scene and not ms7d:  # the MS7d levers place every cycle there
+        assert "stall_end" in ep["cycle_reasons"], ep

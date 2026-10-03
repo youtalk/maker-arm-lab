@@ -131,6 +131,16 @@ loop's own end-to-end check. A takeover holds the env until the rig hands it bac
 RETREAT, DONE or ABANDON, and the loop grades only while the rig is idle, so one takeover is
 one loop cycle.
 
+``takeover`` under ``perceived`` is the MS7f wave 3 DAgger mode (MS7f ledger D17): the policy
+drives the perceived loop of a read, and on a trigger the teacher takes the cycle over. The
+triggers and the teacher read the truth, as the expert of a DAgger corpus does; no decision of
+the policy's own cycles does. A rig built with ``perceivers`` (the recorder's MS7c rows) is
+handed the loop's perception, so a takeover records the row and marker point the episode's
+perception reports, as the teacher corpora do. A takeover that stows ends its cycle
+``placed``: the rig's release ends the hold while the loop does not grade, so the detector's
+lost hold never reaches the perceived cycle end. Its pre-selection is dropped, and the loop
+selects on the perceived scene.
+
 Two MS7f switches (MS7f design section 6), off by default. ``classifier`` (a
 ``perception.PartClassifier``, under ``perceived``) replaces the class stand-in in each view of the
 MS7d vote with the render-trained model on a rendered frame: the narrow overhead view of the
@@ -177,6 +187,13 @@ loop the taken class is right on 1253 of 1505 lifted cycles (0.833, the F1 100k 
 2026-10-01) against 0.94 on the C1 teacher lifts. The ``perception`` block then carries
 ``CARRY_VOTE_COUNTS``.
 
+``stall_end`` (MS7f, under ``perceived``, off by default) ends a cycle ``stall_end``, a failure
+booked as a budget end, once its gripper command has read closed for ``CLOSED_NO_PINCH_STEPS``
+steps in a row while the hold detector holds nothing and the cycle has read no lift
+(``closed_empty_count``, ``stall_ends``): the DAgger recorder's ``closed_no_pinch`` trigger on
+the detector's hold. On the latest checked read (2026-10-02) 162 of 3453 cycles closed on nothing
+and sat there to the 800-step budget, 14.6 % of all simulated time.
+
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
 """
@@ -194,7 +211,7 @@ import torch
 
 from maker_arm_lab.core import checker, desk_boxes, grasp, layout, oracle, perception
 from maker_arm_lab.core.checker import HELD_MIN_FORCE, held_brick_from_forces
-from maker_arm_lab.core.dagger_loop import DECLINE_COOLDOWN, trigger_reason
+from maker_arm_lab.core.dagger_loop import CLOSED_NO_PINCH_STEPS, DECLINE_COOLDOWN, trigger_reason
 from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW, EvalFailure, _nearest_brick_cm
 from maker_arm_lab.core.gate import RolloutTracker, clamp_arm_actions, policy_state
 from maker_arm_lab.core.global_ik import JAW_TIP_REACH, fold_to_half_turn, wrap_to_pi
@@ -430,6 +447,21 @@ def lift_budget_ends(age: int, lifted: bool, holding: bool, budget: int) -> bool
     holds a part keeps its row, as the carry grace does. The MS7e official read spent 43 % of
     its steps in failed cycles, most of them run to the 800-step budget. Pure."""
     return 0 < budget <= age and not lifted and not holding
+
+
+def closed_empty_count(count: int, grip_open: bool, holding: bool) -> int:
+    """``stall_end``: the steps in a row a cycle's gripper command has read closed while the
+    hold detector holds nothing, the DAgger recorder's ``closed_no_pinch`` count on the
+    detector's hold. An open read or a hold starts it again. Pure."""
+    return count + 1 if not grip_open and not holding else 0
+
+
+def stall_ends(closed_empty: int, lifted: bool, holding: bool) -> bool:
+    """``stall_end``: does a ``perceived`` cycle whose jaws closed on nothing end now? Yes once
+    ``closed_empty`` (``closed_empty_count``) reaches ``CLOSED_NO_PINCH_STEPS`` while the
+    detector has read no lift in the cycle (``lifted``) and holds nothing now (``holding``), the
+    two reads of ``lift_budget_ends``. Pure."""
+    return closed_empty >= CLOSED_NO_PINCH_STEPS and not lifted and not holding
 
 
 CARRY_GRACE_STEPS = 400
@@ -988,7 +1020,8 @@ class Cycle:
     takeover: int = 0  # the rig's takeover ordinal while the rig holds this cycle, else 0
     # "takeover_failed" or "takeover_declined": the rig's answer ends the cycle as a failure
     # (phase B design 5.5), after the stowed rule had its chance. A decline while the jaws
-    # hold a part is not an answer: the cycle runs on (``_take_over``).
+    # hold a part is not an answer: the cycle runs on (``_take_over``). "placed": a perceived
+    # takeover that stowed (the wave 3 DAgger mode).
     takeover_end: str | None = None
     taken_over: bool = False  # one takeover per loop cycle (phase B design 5.5)
     start_z: torch.Tensor | None = None  # (k,) part heights when the cycle opened, for the lift
@@ -1085,6 +1118,7 @@ class Cycle:
     # selection (``TruthReads.boxed``); None without desk boxes. A metric read only.
     target_in_box: bool | None = None
     hold_blocked: int = 0  # MS7d L6: hold entries the force gate refused in the cycle
+    closed_empty: int = 0  # ``stall_end``: closed steps in a row with no hold (closed_empty_count)
 
 
 @dataclass
@@ -1869,6 +1903,7 @@ def rollout(
     takeover=None,
     log=print,
     on_frame=None,
+    on_classify=None,
     select_at_release: bool = False,
     replan_on_switch: bool = False,
     row_refresh: bool = False,
@@ -1911,6 +1946,7 @@ def rollout(
     missed_lift: bool = False,
     cell_failure_cap: int = CELL_FAILURE_CAP,
     carry_votes: int = 0,
+    stall_end: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1922,13 +1958,18 @@ def rollout(
     gripper and a served target row.
     ``on_frame(ordinal, step_in_cycle, wrist, overhead)`` is called with env 0's two policy
     frames every ``FRAME_EVERY`` steps of each of its cycles, for a forensics dump.
+    ``on_classify(view, i, frame, size, step, cycle, detector)`` is called with every frame the
+    ``classifier`` reads, before it reads it: the view ("overhead", "lift", "carry", or "wrist"
+    for a ``carry_votes`` read), the env, the frame, the perceived size the read gets, the step,
+    the env's ``Cycle`` and ``HoldDetector``. It only records (``--classifier_frames``): nothing
+    it returns or changes reaches a decision.
     ``hold_trace``, when a list, receives one ``hold.TRACE_FIELDS`` row per live env per step,
     the input of ``hold.cycle_rows``'s threshold replay.
     ``perceived`` is the MS7c boundary of the module docstring, with ``noise_scales`` the
     ``perception.parse_scales`` knob scales (None: nominal) and ``contact_hold`` the stop
     flag's contact fallback. It needs a policy, desk boxes, the continuous gripper and a served
-    target row, and refuses the switches that read the truth (``takeover``,
-    ``scripted_place``, ``row_refresh``).
+    target row, and refuses the switches that read the truth (``scripted_place``,
+    ``row_refresh``); ``takeover`` under it is the wave 3 DAgger mode of the module docstring.
     The nine MS7d switches are the module docstring's; all but ``hold_force`` and
     ``force_cap`` need ``perceived``. Those two need the env's ``arm_torques``, and a
     ``hold_trace`` row then carries the force too.
@@ -1959,6 +2000,7 @@ def rollout(
     ``MAX_CELL_FAILURE_CAP``] and needs ``perceived`` unless it is ``CELL_FAILURE_CAP``.
     ``carry_votes`` (MS7f) is the module docstring's; it needs ``classifier`` and ``class_views``,
     and lies in [0, ``MAX_CARRY_VOTES``] and under ``CARRY_VIEW_STEPS - lift_view_steps``.
+    ``stall_end`` (MS7f) is the module docstring's; it needs ``perceived``.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -2051,6 +2093,8 @@ def rollout(
     ms7f_tray = refill or bool(getattr(env, "deep_tray", False))
     if lift_budget and not perceived:
         raise EvalFailure("lift_budget", "reads the hold detector's lift: it needs perceived")
+    if stall_end and not perceived:
+        raise EvalFailure("stall_end", "reads the hold detector's hold: it needs perceived")
     if perceived:
         if policy is None:
             raise EvalFailure("perceived", "serves a policy; the oracle driver reads the truth")
@@ -2059,7 +2103,6 @@ def rollout(
                 "perceived", "needs desk boxes, the continuous gripper and a served target row"
             )
         for name, on in (
-            ("takeover", takeover is not None),
             ("scripted_place", scripted_place),
             ("row_refresh", row_refresh),
         ):
@@ -2140,6 +2183,7 @@ def rollout(
                 f"the selector spends {st.selector.cycle_budget} cycles, the loop {cycle_budget}",
             )
     scales = {**perception.parse_scales(""), **(noise_scales or {})}  # a knob not named is 1
+    wave3 = perceived and takeover is not None  # MS7f wave 3, the module docstring's DAgger mode
     sensors = None  # MS7d L6 and L7: one pick-point force sensor per env
     if hold_force or force_cap:
         if getattr(env, "arm_torques", None) is None:
@@ -2158,6 +2202,8 @@ def rollout(
         for i, st in enumerate(states):
             st.perceiver = perception.Perceiver(run_seed, i, scales, class_names)
             st.perceiver.reset_episode(poses[i], env.desk_box_sizes[i] if drawn else ())
+            if wave3 and getattr(rig, "perceivers", None) is not None:
+                rig.perceivers[i] = st.perceiver  # a takeover records this perception
             if marker_bias:
                 st.marker = perception.MarkerBias(st.perceiver, run_seed, i)
             if class_views:
@@ -2181,7 +2227,9 @@ def rollout(
     ordinal = [0] * num_envs  # the recorder's takeover ordinal per env
     loop_done = torch.zeros(num_envs, dtype=torch.bool)
     triggers = (
-        _TriggerState(num_envs, takeover, run_seed, cycle_budget) if takeover is not None else None
+        _TriggerState(num_envs, takeover, run_seed, cycle_budget, wave3)
+        if takeover is not None
+        else None
     )
     switches = {
         "select_at_release": bool(select_at_release),
@@ -2215,6 +2263,8 @@ def rollout(
         switches["cell_failure_cap"] = int(cell_failure_cap)
     if carry_votes:
         switches["carry_votes"] = int(carry_votes)
+    if stall_end:
+        switches["stall_end"] = True
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
     pick_z_hist = [deque(maxlen=GATE_WINDOW + 1) for _ in range(num_envs)]
@@ -2292,10 +2342,13 @@ def rollout(
                 if select_at_release and reason == "budget" and grace:
                     c.grace_steps += 1
                     reason = None
+                lifted = c.lift_detected or c.carried
                 if reason is None and lift_budget_ends(
-                    step - c.start_step, c.lift_detected or c.carried, d.holding, lift_budget
+                    step - c.start_step, lifted, d.holding, lift_budget
                 ):
                     reason = "lift_budget"
+                if reason is None and stall_end and stall_ends(c.closed_empty, lifted, d.holding):
+                    reason = "stall_end"  # booked as a budget end
                 if reason is not None:
                     if reason != "placed":
                         st.fail_mem.book(c.target_xy)  # never the selector's _mark_failure
@@ -2468,6 +2521,8 @@ def rollout(
                 if classifier is not None:
                     # MS7f view 1: the narrow overhead view of the detection.
                     frame = env.narrow_overhead(i, seen.centre)
+                    if on_classify is not None:
+                        on_classify("overhead", i, frame, seen.size, step, st.cycle, detectors[i])
                     logp, _ = classifier.log_probs(frame, class_names, size=seen.size)
                     st.cycle.read_logp = logp
                     st.cycle.read_class = cls = summed_class(class_names, logp)
@@ -2698,6 +2753,8 @@ def rollout(
                 close_cm=close_cm,
                 pick_z=float(pick[2]),
             )
+            if stall_end:
+                c.closed_empty = closed_empty_count(c.closed_empty, grip_open, detectors[i].holding)
             if perceived:
                 lift_now = rig.idle[i] and detectors[i].lift_started and not c.carried
                 if (
@@ -2755,6 +2812,8 @@ def rollout(
                     }
                     # View 2 decides, or ends the cycle on a passenger.
                     frame = classifier.wrist_frame(env, i)
+                    if on_classify is not None:
+                        on_classify("lift", i, frame, c.seen_size, step, c, detectors[i])
                     logp, rider = classifier.log_probs(
                         frame, class_names, wrist=True, size=c.seen_size
                     )
@@ -2788,6 +2847,8 @@ def rollout(
                     c.carry_due.pop(0)
                     if detectors[i].lifted or c.carried:
                         frame = classifier.wrist_frame(env, i)
+                        if on_classify is not None:
+                            on_classify("wrist", i, frame, c.seen_size, step, c, detectors[i])
                         logp, _ = classifier.log_probs(frame, class_names, True, c.seen_size)
                         c.carry_logp.append(logp)
                         st.counts["carry_votes_read"] += 1
@@ -2802,6 +2863,8 @@ def rollout(
                         c.vote_lost = True
                         continue
                     frame = classifier.wrist_frame(env, i)
+                    if on_classify is not None:
+                        on_classify("carry", i, frame, c.seen_size, step, c, detectors[i])
                     lighter = {
                         cls: desk_boxes.lighter_box(own, st.box_load)
                         for cls, own in class_boxes[i].items()
@@ -2890,7 +2953,7 @@ def rollout(
                 continue
             st = states[i]
             orc = rig.oracles[i]
-            if getattr(orc, "next_brick", None) is not None:
+            if getattr(orc, "next_brick", None) is not None and not wave3:
                 st.preselected = (
                     orc.next_brick,
                     orc.next_brick_start,
@@ -2899,6 +2962,8 @@ def rollout(
                 )
             if result:
                 st.takeovers_stowed += 1
+                if wave3 and st.cycle is not None:
+                    st.cycle.takeover_end = "placed"  # the rig released over its box
             else:
                 st.takeovers_failed += 1
                 if recorder is not None:
@@ -3074,6 +3139,11 @@ def rollout(
         "rakes": sum(e["rakes"] for e in episodes),
         "triggers": {} if triggers is None else dict(triggers.counts),
         "takeovers_declined": 0 if triggers is None else triggers.declined,
+        **(
+            {"takeovers_any_part": sum(st.counts["any_part_takeovers"] for st in states)}
+            if wave3
+            else {}
+        ),
         "clamp_fraction": (
             sum(e["clamp_steps"] for e in episodes) / steps_total if steps_total else 0.0
         ),
@@ -3254,6 +3324,7 @@ def _take_over(
     reason: str,
     holding: bool = False,
     start_z=None,
+    any_part: bool = False,
 ) -> bool:
     """Hand env ``i`` to the rig on the loop's target; False when the rig declines.
 
@@ -3264,9 +3335,19 @@ def _take_over(
     ``OracleRig.resume`` declines most of a correct carry (RULING P32: a part above
     ``LIFT_HEIGHT - LIFT_MIN_RISE``), and ending the cycle there would spend it and mark the
     failure memory at a point in the air. ``start_z`` is the scripted place's: the cycle's part
-    heights at its open, from which the rig's LIFT measures the held part's rise."""
+    heights at its open, from which the rig's LIFT measures the held part's rise.
+
+    ``any_part`` is the wave 3 DAgger mode's: when the rig declines the target with nothing held
+    (no grasp ranks on it, or no plan reaches it), the teacher works the part it ranks first
+    instead, from the state the policy left, and the loop books its target failed where it was
+    perceived. The smoke heap of 2026-10-01 (p = 90) declined 8 of its 8 close_miss cycles."""
     lifted = {} if start_z is None else {"start_z": start_z}
-    if rig.resume(i, target=st.cycle.target, **lifted):
+    taken = rig.resume(i, target=st.cycle.target, **lifted)
+    if not taken and any_part and not holding and rig.resume(i):
+        st.fail_mem.book(st.cycle.target_xy)
+        st.counts["any_part_takeovers"] += 1
+        taken = True
+    if taken:
         st.cycle.taken_over = True
         ordinal[i] += 1
         st.takeovers += 1
@@ -3286,8 +3367,16 @@ class _TriggerState:
     actions are composed, on the envs the policy holds. Caps (design 5.5): one takeover per
     loop cycle, ``max_per_episode_factor * cycle_budget`` per episode."""
 
-    def __init__(self, num_envs: int, config: TakeoverConfig, run_seed: int, cycle_budget: int):
+    def __init__(
+        self,
+        num_envs: int,
+        config: TakeoverConfig,
+        run_seed: int,
+        cycle_budget: int,
+        any_part: bool = False,
+    ):
         self.config = config
+        self.any_part = any_part  # ``_take_over``'s, the wave 3 DAgger mode
         self.max_per_episode = math.floor(config.max_per_episode_factor * cycle_budget)
         self.rng = random.Random(run_seed)
         self.random_p = 0.0 if config.random_interval is None else 1.0 / config.random_interval
@@ -3368,7 +3457,10 @@ class _TriggerState:
             self.since_open[i] = 0
             self.closed_no_pinch[i] = 0
             self.held_no_rise[i] = 0
-            if _take_over(rig, env, st, i, ordinal, reason=reason, holding=int(held[i]) >= 0):
+            holding = int(held[i]) >= 0
+            if _take_over(
+                rig, env, st, i, ordinal, reason=reason, holding=holding, any_part=self.any_part
+            ):
                 self.counts[reason] += 1
             else:
                 # The decline cooldown stays (phase B design 5.5). A decline on a held part

@@ -43,6 +43,8 @@ ON = {
     "missed_lift": ["--missed_lift"],
     "cell_failure_cap": ["--cell_failure_cap", "5"],
     "carry_votes": ["--carry_votes", "2"],
+    "pile_pgs": ["--pile_pgs"],
+    "stall_end": ["--stall_end"],
 }
 """Each MS7f switch at a value that is not its off value. A track that adds a switch adds it
 here too (the first test holds the table to ``MS7F_OFF``)."""
@@ -97,6 +99,22 @@ def test_a_client_refuses_a_switch_whose_behaviour_is_not_in_the_commit(
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 1 and out[0].startswith(token), out
     assert f"--{name} is not built on this commit" in out[0]
+
+
+@pytest.mark.parametrize("script, argv, token, built", CLIENTS)
+def test_a_client_hands_pile_pgs_to_the_env(script, argv, token, built, monkeypatch, tmp_path):
+    # A physics switch the env never sees would read as a no-op run.
+    module = _load(ROOT / "scripts" / f"{script}.py")
+    seen = {}
+
+    def env(*args, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop at the env")
+
+    monkeypatch.setattr(module, "MjLegoSortEnv", env)
+    argv = [str(tmp_path) if a == "/tmp/x" else a for a in argv]
+    assert module.main(argv + ["--pile_pgs"]) == 1
+    assert seen["pile_pgs"] is True
 
 
 def _gate_argv(tmp_path: Path) -> list[str]:

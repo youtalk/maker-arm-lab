@@ -30,7 +30,9 @@ random rectangle (``--erase``), smooths the labels (``--label_smoothing``) and k
 with the best validation lift accuracy (``--patience``). ``--cap`` thins each file's overhead and
 burst frames so a large render set fits in memory. A tenth of the files (``--val_fraction``) is
 kept out for that and for the passenger operating point: the lowest logit threshold whose
-false-alarm rate on those wrist frames is at most ``PASSENGER_FALSE_ALARMS``.
+false-alarm rate on those wrist frames is at most ``PASSENGER_FALSE_ALARMS``. ``--repeat N`` with
+``--repeat_match GLOB`` draws the training frames of the files whose path matches GLOB N times
+an epoch (``train_rows``), the weight of a file group; the validation files stay as they are.
 
 ``--read`` reads files the training never sees (C1, design section 6.7) with the exported file on
 ``--read_device`` (the CPU, as served): every frame, argmax over the categories the read's labels
@@ -47,6 +49,7 @@ and exits through ``os._exit``.
 """
 
 import argparse
+import fnmatch
 import json
 import math
 import os
@@ -250,6 +253,17 @@ def load(paths, cap: int = 0) -> dict[str, np.ndarray]:
         ]
     )
     return out
+
+
+def train_rows(data: dict, rows: np.ndarray, names, match: str = "", times: int = 1) -> np.ndarray:
+    """``rows`` (the training split's frames) plus ``times - 1`` more copies of those whose file,
+    ``names[data["file"]]``, matches the fnmatch pattern ``match``. The validation split is by
+    file and never among ``rows``, so a heap stays on one side."""
+    if not match or times <= 1:
+        return rows
+    hit = np.array([fnmatch.fnmatch(str(n), match) for n in names])
+    more = rows[hit[data["file"][rows]]]
+    return np.concatenate([rows] + [more] * (times - 1))
 
 
 def usable(data: dict) -> np.ndarray:
@@ -643,6 +657,17 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=0,
         help="per file, at most this many frames of each view but lift and carry (0: all)",
     )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="with --repeat_match, draw those files' training frames this many times an epoch",
+    )
+    parser.add_argument(
+        "--repeat_match",
+        default="",
+        help="an fnmatch pattern on the --train paths whose frames --repeat weights (off: empty)",
+    )
     parser.add_argument("--label_smoothing", type=float, default=0.1)
     parser.add_argument(
         "--val_skip",
@@ -684,6 +709,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         parser.error("--flip_average applies to an --ensemble export")
     if args.model and not args.read:
         parser.error("--model reads an export: it needs --read files")
+    if args.repeat < 1 or (args.repeat_match and not args.train):
+        parser.error("--repeat is at least 1, and --repeat_match weights --train files")
     return args
 
 
@@ -703,7 +730,12 @@ def run(args) -> dict:
         )
         keep = usable(data)
         val = np.isin(data["file"], list(val_files))
-        idx = torch.from_numpy(np.flatnonzero(keep & ~val))
+        rows = np.flatnonzero(keep & ~val)
+        idx = torch.from_numpy(
+            train_rows(data, rows, sorted(args.train), args.repeat_match, args.repeat)
+        )
+        if args.repeat_match:
+            summary["train_frames_unique"] = len(rows)
         weights = (
             torchvision.models.get_model_weights(args.arch).DEFAULT
             if args.weights == "imagenet"

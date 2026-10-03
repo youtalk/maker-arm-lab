@@ -125,8 +125,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     serving = {"book_miss", "missed_lift", "cell_failure_cap"}
     check_ms7f(parser, args, (MS7F_READY - serving) | {"transport_speed"})
     check_teacher_waits(parser, args)
-    if args.lift_budget:
-        parser.error("--lift_budget cuts a served cycle: the recorder serves no policy")
+    for name in ("lift_budget", "stall_end"):
+        if getattr(args, name):
+            parser.error(f"--{name} cuts a served cycle: the recorder serves no policy")
     if args.end_at_done and args.attempts != args.num_envs:
         parser.error("--end_at_done ends one episode an env: it needs --attempts == --num_envs")
     for name in ("classifier", "passenger_drop", "lift_view_steps", "carry_votes"):
@@ -180,6 +181,7 @@ def run(args: argparse.Namespace) -> tuple[bool, int, int]:
         categories=args.categories,
         deep_tray=args.deep_tray,
         tray_refill=args.tray_refill,
+        pile_pgs=args.pile_pgs,
     )
     env.reset(seed=args.run_seed)
     induction = make_induction(args)

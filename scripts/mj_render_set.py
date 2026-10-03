@@ -51,6 +51,11 @@ Writes ``<out_dir>/render_<run_seed>.npz``: ``frames`` (N, 224, 224, 3) uint8 an
 per ``LABELS`` name, plus ``args`` (the command line as JSON). Prints exactly one ``RENDER_OK`` or
 ``RENDER_FAIL`` line on every exit path, argparse errors included, and exits through
 ``os._exit``.
+
+``PolicyFrames`` writes the same file from the served loop (``scripts/mj_eval_heap.py
+--classifier_frames``): the frames the classifier reads on the policy's own cycles, with these
+labels, and the perceived size each read got beside it (``.size.npy``, which
+``scripts/render_set_sizes.py`` would otherwise draw).
 """
 
 from __future__ import annotations
@@ -83,6 +88,7 @@ from maker_arm_lab.core.batch_loop import (
     check_ms7f,
     heap_classes,
     heap_parts,
+    heldout_names,
     install_heap_events,
     make_induction,
 )
@@ -125,10 +131,19 @@ step and the part's tilt in degrees (``_tilt``, -1 with no part)."""
 
 
 RENDER_READY = frozenset(
-    {"categories", "deep_tray", "tray_refill", "box_empty", "abandon_cycle", "transport_speed"}
+    {
+        "categories",
+        "deep_tray",
+        "tray_refill",
+        "box_empty",
+        "abandon_cycle",
+        "transport_speed",
+        "pile_pgs",
+    }
 )
-"""The MS7f switches the render set builds (the gate's scene and the recorder's jam rule): the
-classifier's, the heap loop's and the teacher trims refuse, so a render never runs a no-op."""
+"""The MS7f switches the render set builds (the gate's scene, the recorder's jam rule and the
+env's PGS solver of a full pile, which only renders use: every read stays on Newton, ledger D17):
+the classifier's, the heap loop's and the teacher trims refuse, so a render never runs a no-op."""
 
 
 class _TokenEmittingParser(argparse.ArgumentParser):
@@ -217,6 +232,7 @@ def build(args):
         categories=args.categories,
         deep_tray=args.deep_tray,
         tray_refill=args.tray_refill,
+        pile_pgs=args.pile_pgs,
     )
     env.cameras = False  # every view is rendered on demand at its event
     env.reset(seed=args.run_seed)
@@ -312,6 +328,39 @@ def _seen(env, i: int, b: int, cam: int | None = None) -> float:
     return hits / 9.0
 
 
+def _row(env, heldout, view, part, passengers, seen, i, step, tilt, riders, rider_seen) -> tuple:
+    """One ``LABELS`` row: the part's category, name and split side from ``part`` (-1: none)."""
+    cat = _parts.part_category(env.parts[part]) if part >= 0 else ""
+    name = env.parts[part].name if part >= 0 else ""
+    return (
+        view,
+        cat,
+        name,
+        name in heldout,
+        passengers,
+        riders,
+        part,
+        seen,
+        rider_seen,
+        i,
+        step,
+        tilt,
+    )
+
+
+def _wrist_labels(env, i: int, pick, start_z, hold_z: float) -> tuple:
+    """A wrist frame's labels: (held part, passengers, riders, rider_seen, tilt), the passengers
+    against the heights ``start_z`` and the riders against the jaws' rise from ``hold_z``."""
+    held = _held(env, i)
+    pos, quat = _positions(env, i)
+    others = oracle.passengers(pos, start_z, pick, held)
+    jaws = RIDE_SHARE * (float(pick[2]) - hold_z)
+    rode = [b for b in others if float(pos[b, 2] - start_z[b]) >= jaws]
+    shown = max((_seen(env, i, b, env._cam_wrist) for b in rode), default=-1.0)
+    tilt = _tilt(quat[held]) if held >= 0 else -1.0
+    return held, len(others), len(rode), shown, tilt
+
+
 def _overhead_views(env, i, target, pick, aim_rng, extra, jitter) -> list[tuple]:
     """The narrow views of one selection: (frame, part, share seen, tilt) for the target and up to
     ``extra`` other parts in the tray, each only if the perceived state would see it."""
@@ -348,24 +397,10 @@ def record(env, rig, args, heldout: set[str], deadline: float) -> tuple[list, li
     frames, rows = [], []
 
     def keep(frame, view, part, passengers, seen, i, step, tilt, riders=-1, rider_seen=-1.0):
-        cat = _parts.part_category(env.parts[part]) if part >= 0 else ""
-        name = env.parts[part].name if part >= 0 else ""
         frames.append(frame)
-        row = (
-            view,
-            cat,
-            name,
-            name in heldout,
-            passengers,
-            riders,
-            part,
-            seen,
-            rider_seen,
-            i,
-            step,
-            tilt,
+        rows.append(
+            _row(env, heldout, view, part, passengers, seen, i, step, tilt, riders, rider_seen)
         )
-        rows.append(row)
 
     step = 0
     while not all(finished):
@@ -409,15 +444,9 @@ def record(env, rig, args, heldout: set[str], deadline: float) -> tuple[list, li
             if extra and step != carry_at[i]:
                 wrist.append("wrist")
             for view in wrist:
-                held = _held(env, i)
-                pos, quat = _positions(env, i)
-                others = oracle.passengers(pos, start_z[i], pick, held)
-                jaws = RIDE_SHARE * (float(pick[2]) - d.start_z)
-                rode = [b for b in others if float(pos[b, 2] - start_z[i][b]) >= jaws]
-                shown = max((_seen(env, i, b, env._cam_wrist) for b in rode), default=-1.0)
-                tilt = _tilt(quat[held]) if held >= 0 else -1.0
+                held, others, rode, shown, tilt = _wrist_labels(env, i, pick, start_z[i], d.start_z)
                 frame = env.wrist_crop(i)
-                keep(frame, view, held, len(others), -1, i, step, tilt, len(rode), shown)
+                keep(frame, view, held, others, -1, i, step, tilt, rode, shown)
             if orc is not None and orc.phase in (oracle.Phase.DONE, oracle.Phase.ABANDON):
                 finished[i] = True
         action = rig.actions()
@@ -442,17 +471,8 @@ def run(args) -> dict:
         env.close()
     if not frames:
         raise RuntimeError("no view was rendered")
-    columns = {name: np.array(col) for name, col in zip(LABELS, zip(*rows))}
     out = Path(args.out_dir) / f"render_{args.run_seed}.npz"
-    tmp = out.with_suffix(".tmp.npz")
-    np.savez_compressed(
-        tmp,
-        frames=np.stack(frames),
-        args=np.array(json.dumps(vars(args))),
-        wrist_crop=np.array([cameras.WRIST_CLASSIFIER_PX, *cameras.WRIST_CLASSIFIER_CROP]),
-        **columns,
-    )
-    tmp.replace(out)
+    columns = save(out, frames, rows, json.dumps(vars(args)), crop=True)
     views = columns["view"].tolist()
     return {
         "out": str(out),
@@ -462,6 +482,88 @@ def run(args) -> dict:
         "rider_frames": int((columns["riders"] > 0).sum()),
         "empty_wrist": int(((columns["held"] < 0) & (columns["view"] != "overhead")).sum()),
     }
+
+
+def _replace(path: Path, write) -> None:
+    """``write(f)`` into ``<path>.tmp``, then move it onto ``path``: a write cut off leaves only the
+    ``.tmp`` file, which no ``*.npz`` glob matches (to a file object numpy appends no suffix)."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        write(f)
+    tmp.replace(path)
+
+
+def save(out: Path, frames, rows, args: str, crop: bool, sizes=None) -> dict:
+    """Write ``out`` (frames, the ``LABELS`` columns, ``args`` and with ``crop`` the native wrist
+    crop), and ``sizes`` (N, 3) first as its ``.size.npy``, so a reader never finds the file
+    longer than its sizes. Returns the columns."""
+    columns = {name: np.array(col) for name, col in zip(LABELS, zip(*rows))}
+    if sizes is not None:
+        side = out.with_name(out.name.removesuffix(".npz") + ".size.npy")
+        _replace(side, lambda f: np.save(f, np.asarray(sizes, dtype=np.float32)))
+    extra = {}
+    if crop:
+        extra["wrist_crop"] = np.array(
+            [cameras.WRIST_CLASSIFIER_PX, *cameras.WRIST_CLASSIFIER_CROP]
+        )
+    frames = np.stack(frames)
+    _replace(
+        out,
+        lambda f: np.savez_compressed(f, frames=frames, args=np.array(args), **extra, **columns),
+    )
+    return columns
+
+
+FLUSH_EVERY = 50
+"""``PolicyFrames`` rewrites its file after this many new frames: a stopped run keeps the rest."""
+
+
+class PolicyFrames:
+    """The served loop's ``on_classify`` (``scripts/mj_eval_heap.py --classifier_frames DIR``):
+    each frame the classifier reads, labelled from the simulator as ``record`` labels a view,
+    into ``DIR/policy_<run_seed>_<layout_seed>.npz`` with the size the read got (sorted, -1
+    unknown) in its ``.size.npy``. An overhead frame's part is the cycle target, whose detection
+    the view aims at; a wrist frame's is the part both jaws press, its passengers rose since the
+    selection and its riders since the hold began (``carry_z`` on a carry the detector missed).
+    It reads the simulator and writes nothing back. ``crop``: the classifier reads the native
+    wrist crop (``PartClassifier.wrist_crop``); else its wrist frames are the policy's."""
+
+    def __init__(self, env, rig, out_dir: str, args, crop: bool):
+        self.env, self.rig, self.crop = env, rig, crop
+        self.args = json.dumps(vars(args))
+        self.heldout = heldout_names(args)
+        self.out = Path(out_dir) / f"policy_{args.run_seed}_{args.layout_seed}.npz"
+        self.out.parent.mkdir(parents=True, exist_ok=True)
+        self.frames, self.rows, self.sizes, self.written = [], [], [], 0
+
+    def __call__(self, view, i, frame, size, step, cycle, detector) -> None:
+        env = self.env
+        if view == "overhead":
+            b = cycle.target
+            tilt = _tilt(_positions(env, i)[1][b])
+            row = _row(env, self.heldout, view, b, -1, _seen(env, i, b), i, step, tilt, -1, -1.0)
+        else:
+            pick = self.rig.pick_point(i).to("cpu")
+            hold_z = detector.start_z if detector.lifted else cycle.carry_z
+            held, others, rode, shown, tilt = _wrist_labels(env, i, pick, cycle.start_z, hold_z)
+            row = _row(env, self.heldout, view, held, others, -1.0, i, step, tilt, rode, shown)
+        self.frames.append(np.array(frame, dtype=np.uint8))  # a copy: the env reuses its buffers
+        self.rows.append(row)
+        self.sizes.append(sorted(size) if size is not None else [-1.0] * 3)
+        if len(self.frames) - self.written >= FLUSH_EVERY:
+            self.flush()
+
+    def flush(self) -> None:
+        """Write every frame so far, if any is new."""
+        if len(self.frames) > self.written:
+            save(self.out, self.frames, self.rows, self.args, self.crop, self.sizes)
+            self.written = len(self.frames)
+
+    def summary(self) -> dict:
+        views = [r[0] for r in self.rows]
+        return {"out": str(self.out), "frames": len(views)} | {
+            v: views.count(v) for v in ("overhead", "lift", "carry", "wrist")
+        }
 
 
 def main(argv=None) -> int:

@@ -45,9 +45,10 @@ def test_usage_errors_print_the_fail_token():
 def test_the_ms7f_scene_switches_parse_and_the_serving_ones_refuse():
     base = ["--out_dir", "/tmp/x", "--heap_k", "150", "--tray", "--desk_boxes", "8"]
     base += ["--box_draw", "8", "--release_lean"]
-    on = ["--categories", "--deep_tray", "--box_empty", "--abandon_cycle"]
+    on = ["--categories", "--deep_tray", "--box_empty", "--abandon_cycle", "--pile_pgs"]
     args = _load().parse_args(base + on)
     assert args.categories and args.deep_tray and args.box_empty and args.abandon_cycle
+    assert args.pile_pgs
     for extra in (["--classifier", "m.pt"], ["--passenger_drop"], ["--book_miss"]):
         out = subprocess.run(
             [sys.executable, str(SCRIPT), *base, *extra],
@@ -57,6 +58,21 @@ def test_the_ms7f_scene_switches_parse_and_the_serving_ones_refuse():
         )
         assert out.returncode == 2, extra
         assert out.stdout.strip().splitlines()[-1].startswith("RENDER_FAIL "), extra
+
+
+def test_pile_pgs_reaches_the_env(monkeypatch, tmp_path):
+    # A physics switch the env never sees would read as a no-op render.
+    module = _load()
+    seen = {}
+
+    def env(*args, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop at the env")
+
+    monkeypatch.setattr(module, "MjLegoSortEnv", env)
+    argv = ["--out_dir", str(tmp_path), "--heap_k", "3", "--desk_boxes", "4", "--pile_pgs"]
+    assert module.main(argv) == 1
+    assert seen["pile_pgs"] is True
 
 
 def test_mix_extra_replaces_the_share_it_is_given():

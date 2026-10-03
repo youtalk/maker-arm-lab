@@ -11,6 +11,15 @@ project's own venv:
 
 ``--oracle_driver`` replaces the policy with the oracle rig on every cycle: the preflight's
 driver and the loop's end-to-end check, no server and no cameras needed.
+
+``--dagger_dir`` is MS7f wave 3 (ledger D17): the same served loop, and on a failure trigger
+(``loop.TakeoverConfig`` without the random draw, ``loop.HELD_NO_RISE_STEPS``) the teacher takes
+the cycle over. Only the takeover frames are recorded, to ``<dagger_dir>/<shard_name>.hdf5``, for
+``convert_to_lerobot.py --split_cycles --dagger``; the payload names the shard.
+
+``--classifier_frames DIR`` records every frame the classifier reads on the policy's own cycles
+as a render set file (``mj_render_set.PolicyFrames``), labels read from the simulator; the run
+itself is the same.
 """
 
 import argparse
@@ -48,8 +57,10 @@ from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.core.loop import (
     CARRY_VIEW_STEPS,
     CYCLE_STEP_BUDGET,
+    HELD_NO_RISE_STEPS,
     MAX_CARRY_VOTES,
     MAX_CELL_FAILURE_CAP,
+    TakeoverConfig,
     cycle_budget,
     episode_length_s,
     rollout,
@@ -147,6 +158,14 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
     parser.add_argument(
         "--oracle_driver", action="store_true", help="the rig drives every cycle; no server"
     )
+    parser.add_argument(
+        "--dagger_dir",
+        type=str,
+        default="",
+        help="MS7f wave 3: the teacher takes a failing cycle over (the failure triggers) and "
+        "only its frames are recorded to <dagger_dir>/<shard_name>.hdf5; needs the server",
+    )
+    parser.add_argument("--shard_name", type=str, default="shard", help="with --dagger_dir")
     parser.add_argument(
         "--max_wall_minutes",
         type=float,
@@ -335,6 +354,14 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "loop.FRAME_EVERY steps of each cycle (forensics; needs the policy server)",
     )
     parser.add_argument(
+        "--classifier_frames",
+        type=str,
+        default="",
+        help="MS7f: write every frame the classifier reads, labelled from the simulator, to "
+        "DIR/policy_<run_seed>_<layout_seed>.npz in scripts/mj_render_set.py's layout, for "
+        "lerobot_stack/train_part_classifier.py; needs --classifier and --perceived",
+    )
+    parser.add_argument(
         "--hold_trace",
         type=str,
         default="",
@@ -367,6 +394,11 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
             "--classifier reads the categories on the perceived views: it needs --perceived and "
             "--categories"
         )
+    if args.classifier_frames and not (args.classifier and args.perceived):
+        parser.error(
+            "--classifier_frames records the classifier's reads: it needs --classifier and "
+            "--perceived"
+        )
     if args.passenger_drop and not args.classifier:
         parser.error(
             "--passenger_drop reads the classifier's passenger head: it needs --classifier"
@@ -395,6 +427,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         )
     if args.desk_boxes < 0:
         parser.error("--desk_boxes must be 0 or more")
+    if args.dagger_dir and args.oracle_driver:
+        parser.error("--dagger_dir takes cycles over from a policy: it needs the server")
     if args.perceived:
         if not args.desk_boxes:
             parser.error("--perceived needs --desk_boxes: a perceived box ends each cycle")
@@ -414,6 +448,7 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "class_views",
         "lift_budget",
         "missed_lift",
+        "stall_end",
     ):
         if getattr(args, name) not in (None, False) and not args.perceived:
             parser.error(f"--{name} needs --perceived")
@@ -445,6 +480,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
     token = parser_cls.token
     policy = None
     env = None
+    recorder = None
     close_error = None
     try:
         perm = tuple(int(v) for v in args.permutation.split(","))
@@ -477,6 +513,10 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             categories=args.categories,
             deep_tray=args.deep_tray,
             tray_refill=args.tray_refill,
+            pile_pgs=args.pile_pgs,
+            export_dir=args.dagger_dir or None,
+            shard_name=args.shard_name,
+            export_all=bool(args.dagger_dir),
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
@@ -503,6 +543,12 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             )
             return teacher_waits(orc, args)
 
+        perceivers = None  # wave 3: the takeover rows are the perceived ones, as the corpora's
+        if args.dagger_dir and args.perceived:
+            perceivers = [
+                perception.Perceiver(args.run_seed, i, args.noise_scales, env.class_names)
+                for i in range(args.num_envs)
+            ]
         rig = OracleRig(
             env,
             env.cfg.bin_layout,
@@ -510,6 +556,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             rig_rng,
             transport_speed=args.transport_speed,
             oracle_factory=factory,
+            perceivers=perceivers,
             release_lean=args.release_lean,
             carry_via=args.carry_via,
             passenger_check=args.passenger_check,
@@ -521,6 +568,13 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
         )
         policy = None if args.oracle_driver else policy_client.ServerPolicy(args.server)
         trace = [] if args.hold_trace else None
+        classifier = perception.PartClassifier(args.classifier) if args.classifier else None
+        if args.classifier_frames:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from mj_render_set import PolicyFrames
+
+            out_dir, crop = args.classifier_frames, classifier.wrist_crop
+            recorder = PolicyFrames(env, rig, out_dir, args, crop)
         payload = (run or rollout)(
             env,
             rig,
@@ -530,7 +584,13 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             permutation=perm,
             cycle_budget=args.cycle_budget,
             max_wall_minutes=args.max_wall_minutes,
+            takeover=(
+                TakeoverConfig(random_interval=None, held_no_rise_steps=HELD_NO_RISE_STEPS)
+                if args.dagger_dir
+                else None
+            ),
             on_frame=frame_writer(args.frames_dir) if args.frames_dir else None,
+            on_classify=recorder,
             select_at_release=args.select_at_release,
             replan_on_switch=args.replan_on_switch,
             row_refresh=args.row_refresh,
@@ -566,12 +626,13 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             box_empty=args.box_empty,
             book_miss=args.book_miss,
             lift_budget=args.lift_budget,
-            classifier=perception.PartClassifier(args.classifier) if args.classifier else None,
+            classifier=classifier,
             passenger_drop=args.passenger_drop,
             lift_view_steps=args.lift_view_steps,
             missed_lift=args.missed_lift,
             cell_failure_cap=args.cell_failure_cap,
             carry_votes=args.carry_votes,
+            stall_end=args.stall_end,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
@@ -581,9 +642,13 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
         payload["ms7e"] = ms7e_switches(args)
         payload["ms7f"] = ms7f_switches(args)
         payload["deep_box_floor"] = args.deep_box_floor
+        if args.dagger_dir:
+            payload["shard"] = str(Path(args.dagger_dir) / f"{args.shard_name}.hdf5")
         if args.passenger_check:
             # Each rejected LIFT's passengers, as indices into payload["parts"].
             payload["passenger_rejects"] = [r for log in rig.passenger_log for r in log]
+        if recorder is not None:
+            payload["classifier_frames"] = recorder.summary()
     except EvalFailure as err:
         print(
             f"{token}_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True
@@ -598,6 +663,8 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
         return 1
     finally:
         try:
+            if recorder is not None:
+                recorder.flush()  # first: an early end keeps its frames too
             if policy is not None:
                 policy.close()
             if env is not None:

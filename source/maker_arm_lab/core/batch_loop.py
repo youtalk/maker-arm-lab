@@ -282,6 +282,8 @@ MS7F_OFF: dict = {
     "missed_lift": False,
     "cell_failure_cap": CELL_FAILURE_CAP,
     "carry_votes": 0,
+    "pile_pgs": False,
+    "stall_end": False,
 }
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
 of a run with every one off, what an MS7e run ran with. categories is the base track's;
@@ -291,8 +293,10 @@ passenger_drop, lift_view_steps and carry_votes track C's (design section 6); tr
 descend_speed and the teacher waits (TEACHER_WAITS) track S's (design section 8), and so is
 lift_budget, a serving trim of the heap client, and end_at_done, the recorder's; missed_lift
 (the heap client's perceived loop) is the riders track's, and so is cell_failure_cap (the
-perceived selector's failure cap). The gate supervisor keeps a stdlib
-copy (``scripts/run_gate_eval.py``), pinned by a test."""
+perceived selector's failure cap), and so is stall_end (the perceived loop's end of a cycle
+whose jaws closed on nothing); pile_pgs is the env's solver of a large pile
+(``scene.PILE_PGS_MIN_NV``). The gate supervisor keeps a stdlib copy
+(``scripts/run_gate_eval.py``), pinned by a test."""
 MS7F_READY: frozenset[str] = frozenset(
     {
         "categories",
@@ -319,6 +323,8 @@ MS7F_READY: frozenset[str] = frozenset(
         "missed_lift",
         "cell_failure_cap",
         "carry_votes",
+        "pile_pgs",
+        "stall_end",
     }
 )
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
@@ -426,6 +432,12 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
         "so a landing under joint noise ends (OracleRig.net_stall)",
     )
     parser.add_argument(
+        "--pile_pgs",
+        action="store_true",
+        help="MS7f: the step solves a constraint island over scene.PILE_PGS_MIN_NV dofs (the "
+        "full deep tray) with PGS, every other with Newton; the reset keeps Newton",
+    )
+    parser.add_argument(
         "--lift_hold_steps",
         type=int,
         default=oracle.LIFT_HOLD_STEPS,
@@ -485,6 +497,13 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
         help="MS7f C, the heap client with --classifier and --class_views: read this many more "
         "wrist frames during a vote's carry, between view 2 and the carry view, into the vote's "
         "sum (loop.carry_vote_steps); 0 is off",
+    )
+    parser.add_argument(
+        "--stall_end",
+        action="store_true",
+        help="MS7f, the heap client with --perceived: end a cycle as a failure once its jaws read "
+        "closed for dagger_loop.CLOSED_NO_PINCH_STEPS steps in a row while the hold detector "
+        "holds nothing and the cycle has lifted nothing (loop.stall_ends)",
     )
 
 

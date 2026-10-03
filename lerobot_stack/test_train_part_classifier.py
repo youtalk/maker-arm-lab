@@ -185,6 +185,27 @@ def test_pick_keeps_every_lift_and_carry_and_caps_the_rest():
     assert tpc.pick(view, 0, "render_1.npz").tolist() == list(range(len(view)))
 
 
+def test_repeat_weights_the_matching_training_files_only(tmp_path):
+    names = [tmp_path / "rs" / "render_1.npz", tmp_path / "deep" / "render_2.npz"]
+    data = {"file": np.array([0, 0, 1, 1, 1])}
+    rows = np.array([0, 1, 2, 3])  # frame 4 is in the validation split
+    assert tpc.train_rows(data, rows, names).tolist() == rows.tolist()
+    assert tpc.train_rows(data, rows, names, "*/deep/*", 1).tolist() == rows.tolist()
+    out = tpc.train_rows(data, rows, names, "*/deep/*", 3)
+    assert sorted(out.tolist()) == [0, 1, 2, 2, 2, 3, 3, 3]
+    for argv in (
+        ["--train", "a", "--repeat", "0"],
+        ["--model", "m", "--read", "r", "--repeat_match", "*"],
+    ):
+        out = subprocess.run(
+            [sys.executable, str(SCRIPT), "--out", str(tmp_path), *argv],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert out.returncode == 2 and out.stdout.startswith("CLS_FAIL "), argv
+
+
 def test_erasing_paints_one_flat_rectangle():
     frames = torch.zeros(4, 224, 224, 3, dtype=torch.uint8) + 128
     gen = torch.Generator().manual_seed(0)
