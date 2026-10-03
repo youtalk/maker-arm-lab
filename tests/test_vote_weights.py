@@ -10,7 +10,9 @@ import torch
 from maker_arm_lab.core import desk_boxes, loop, parts
 from maker_arm_lab.core.eval_loop import EvalFailure
 from test_classifier_loop import SWITCHES, _classifier, _scene, _usage
+from test_ms7f_stack import ROOT, _gate_argv, _load, ge
 from test_perceived_loop import _rollout, _served
+from test_run_gate_eval import _heap_payload
 
 NAMES = parts.PART_CATEGORIES
 
@@ -146,3 +148,41 @@ def test_the_carry_guard_holds_a_part_while_the_fused_vote_is_pending(tmp_path, 
     assert row["read_class"] == row["lift_class"] == row["taken_class"] == "wide"
     assert row["guard_vote_steps"] > 0 and row["guard_rim_steps"] == 0
     assert row["guard_steps"] == row["guard_vote_steps"] + loop.GUARD_STALL_STEPS
+
+
+def test_the_client_parses_the_guards_and_the_vote_the_supervisor_forwards(tmp_path):
+    """The stack serves ``--vote_weights`` with ``--carry_guard`` and ``--overhang_guard``: the
+    supervisor forwards each once and keys its cache on each, and the client parses the command
+    it forwards, the nine values included."""
+    vote = _vote(names=parts.BASE_CLASSES, bias={"slope": 0.5})
+    path = tmp_path / "vote.json"
+    path.write_text(json.dumps(vote))
+    trio = ["--carry_guard", "--overhang_guard", "--vote_weights", str(path)]
+    argv = _gate_argv(tmp_path / "gate") + ["--tray", "--gripper", "continuous", "--perceived"]
+    argv += ["--box_draw", "4", "--categories", "--classifier", "m.pt", "--class_views"]
+    cfg = ge._build_cfg(ge._parse_args(argv + trio))
+    draw = ge.make_eval_draws(1, 1)[0]
+    cmd = ge._eval_command(cfg, draw)
+    assert all(cmd.count(flag) == 1 for flag in trio), cmd
+    assert cmd[cmd.index("--vote_weights") + 1] == str(path)
+    client = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    args = client.parse_args(cmd[cmd.index("scripts/mj_eval_heap.py") + 1 :])
+    assert args.carry_guard and args.overhang_guard and args.class_views and args.vote == vote
+    switches = ge.loop_switches(cfg.client_flags)
+    ms7f = ge.ms7f_block(cfg)
+    assert switches["carry_guard"] and switches["overhang_guard"]
+    assert ms7f["vote_weights"] == str(path)
+    out = tmp_path / "gate" / "eval_000.json"
+    out.parent.mkdir()
+
+    def hit(loop_block, block):
+        inference = {"n_action_steps": 50, "temporal_ensemble_coeff": None, "loop": loop_block}
+        heap = {"tray": True, "desk_boxes": 4, "gripper": "continuous", "ms7e": ge.ms7e_block(cfg)}
+        payload = _heap_payload(draw, inference=inference, ms7f=block, **heap)
+        out.write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    assert hit(switches, ms7f)
+    assert not hit(switches, ms7f | {"vote_weights": None})
+    for name in ("carry_guard", "overhang_guard"):
+        assert not hit(switches | {name: False}, ms7f), name
