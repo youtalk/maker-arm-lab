@@ -84,10 +84,13 @@ def test_the_switch_needs_the_vote_s_views_and_values(tmp_path, capsys):
     env, rig, policy = _scene()
     stub = _classifier(tmp_path, "slope", "wide")
     vote = _vote(names=parts.BASE_CLASSES)
+    per_class = {v: dict.fromkeys(parts.BASE_CLASSES, 1.0) for v in loop.FUSED_VIEWS}
     bad = (
         {"classifier": stub},
         {"classifier": stub, "class_views": True, "carry_votes": 2},
         {"classifier": stub, "class_views": True, "vote_weights": {"weights": {}, "bias": {}}},
+        # ledger D7's v2 form: a weight a view and class, which this loop does not serve
+        {"classifier": stub, "class_views": True, "vote_weights": vote | {"weights": per_class}},
     )
     for kwargs in bad:
         kwargs = {"vote_weights": vote} | kwargs
