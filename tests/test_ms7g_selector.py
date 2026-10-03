@@ -13,8 +13,17 @@ from maker_arm_lab.core import grasp, layout, loop, parts
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from test_grasp import BRICK, IDENTITY, _heap
 from test_mj_heap_oracle import _place
-from test_ms7f_stack import ROOT, _load
-from test_perceived_loop import ZERO, _env_and_rig, _rollout, _served, _Still, _wall_band_scene
+from test_ms7f_stack import ROOT, _gate_argv, _load
+from test_perceived_loop import (
+    CARRY_DROP,
+    ZERO,
+    _env_and_rig,
+    _rollout,
+    _served,
+    _Still,
+    _teacher_scene,
+    _wall_band_scene,
+)
 from test_run_gate_eval import _heap_payload, ge
 from test_thin_snap import _same
 
@@ -248,3 +257,39 @@ def test_the_supervisor_forwards_both_switches_and_keys_the_cache_on_them(tmp_pa
     no_tray = [a for a in heap if a != "--tray"]
     with pytest.raises(ValueError, match="--overhang_guard reads the tray wall's overhang"):
         ge._build_cfg(ge._parse_args(argv + no_tray + ["--overhang_guard"]))
+
+
+def test_the_client_parses_the_three_ms7g_switches_the_supervisor_forwards(tmp_path):
+    """The stack serves ``--carry_guard`` with the selector switches: the supervisor forwards
+    each once and keys its cache on each, and the client parses the command it forwards."""
+    trio = ["--carry_guard", "--overhang_guard", "--clear_first"]
+    argv = _gate_argv(tmp_path) + ["--tray", "--gripper", "continuous", "--perceived"]
+    cfg = ge._build_cfg(ge._parse_args(argv + trio))
+    cmd = ge._eval_command(cfg, ge.make_eval_draws(1, 1)[0])
+    assert all(cmd.count(flag) == 1 for flag in trio), cmd
+    on = {name for name, value in ge.loop_switches(cfg.client_flags).items() if value is True}
+    assert on == {"perceived", "carry_guard", "overhang_guard", "clear_first"}
+    client = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    args = client.parse_args(cmd[cmd.index("scripts/mj_eval_heap.py") + 1 :])
+    assert args.carry_guard and args.overhang_guard and args.clear_first
+
+
+def _tray_carry_scene(monkeypatch):
+    """The carry guard's carry scene on the flat tray: its parts lie inside the tray interior,
+    and its teacher opens over them, away from every box."""
+    env, rig, policy, budget, switches = _teacher_scene(monkeypatch, tray=True)
+    policy.rig.oracles[0].release_point = torch.tensor(CARRY_DROP)
+    return env, rig, policy, budget, switches | {"carry_guard": True}
+
+
+def test_the_overhang_guard_changes_no_step_of_a_carry_the_carry_guard_holds(monkeypatch):
+    """``overhang_guard`` drops the carry grace only for a hold that read no lift (``grace_hold``),
+    and ``carry_guard`` guards only a hold that did. With no part under a wall, the guard hands
+    the carry to the rig and the rig places it, with the overhang guard on as off."""
+    off, off_served = _run(_tray_carry_scene, monkeypatch)
+    on, on_served = _run(_tray_carry_scene, monkeypatch, overhang_guard=True)
+    assert "placed" in [row["handoff"] for row in on["episodes"][0]["cycle_census"]], on
+    assert on["inference"]["loop"].pop("overhang_guard") is True
+    assert on["perception"].pop("overhang_refusals") == 0
+    assert json.dumps(on, sort_keys=True) == json.dumps(off, sort_keys=True)
+    assert _same(on_served, off_served)
