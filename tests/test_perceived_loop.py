@@ -27,6 +27,7 @@ from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.hold import HoldDetector
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj.env import MjLegoSortEnv
+from maker_arm_lab.tasks.manager_based.lego_sort import oracle_runtime
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 from test_heap_loop import SPREAD
 from test_mj_desk_boxes import FIXED, _TeacherPolicy
@@ -1234,6 +1235,19 @@ def _stall_end_scene(monkeypatch):
     return env, rig, policy, budget, switches | {"stall_end": True}
 
 
+CARRY_DROP = (0.195, 0.0, 0.10)
+"""m: where the carry scene's teacher releases every part: over the parts it picks from."""
+
+
+def _carry_scene(monkeypatch):
+    """The teacher scene under ``carry_guard`` (MS7g), its teacher releasing every part over the
+    parts it picks from (``EnvOracle.release_point``), away from every box: the guard holds the
+    jaws, and each still guard hands the part to the rig's perceived carry."""
+    env, rig, policy, budget, switches = _teacher_scene(monkeypatch)
+    policy.rig.oracles[0].release_point = torch.tensor(CARRY_DROP)
+    return env, rig, policy, budget, switches | {"carry_guard": True}
+
+
 def test_a_box_draw_episode_records_its_boxes(monkeypatch):
     """The census rebuilds each drawn box from the episode record (MS7e ledger R11)."""
     env, rig, policy, budget, switches = _box_draw_scene(monkeypatch)
@@ -1326,6 +1340,7 @@ def test_every_ms7d_switch_at_once_runs_the_teacher_scene_to_its_end(monkeypatch
         _thin_snap_scene,
         _snap_closed_scene,
         _stall_end_scene,
+        _carry_scene,
         _ms7f_scene,
     ],
 )
@@ -1342,8 +1357,9 @@ def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):
     of these would raise or, fed noise, serve something else; so the second run must serve
     exactly what the first did on every step: the target row, the box row, the marker point
     and the action, and end the same cycles the same way. The teacher scene lifts and places
-    parts through the serving rules' stop flag; the rake scene runs a rake takeover, whose rig
-    must read neither ``snapshot`` nor the contacts either.
+    parts through the serving rules' stop flag; the rake scene runs a rake takeover, and the
+    carry scene the rig's perceived carry (MS7g ``carry_guard``), whose rig must read neither
+    ``snapshot``, the contacts, a part's pose nor its pinch either.
     """
     env, rig, policy, budget, switches = scene(monkeypatch)
     switches |= ms7d
@@ -1364,6 +1380,9 @@ def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):
     for name in TRUTH_DECISION_READS:
         monkeypatch.setattr(loop, name, _raises(name))
     rig.snapshot = _raises("rig.snapshot")
+    rig._brick_pos = _raises("rig._brick_pos")
+    rig.pinch_evidence = _raises("rig.pinch_evidence")
+    monkeypatch.setattr(oracle_runtime, "held_brick_from_forces", _raises("the rig's contacts"))
     second = _rollout(_TruthlessEnv(env), rig, policy, budget=budget, perceived=True, **switches)
     env.close()
 
@@ -1387,3 +1406,9 @@ def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):
         assert "placed" in ep["cycle_reasons"] and first["perception"]["lifts_classified"] > 0
     if scene is _stall_end_scene and not ms7d:  # the MS7d levers place every cycle there
         assert "stall_end" in ep["cycle_reasons"], ep
+    if scene is _carry_scene:
+        assert "placed" in {row["handoff"] for row in ep["cycle_census"]}, ep["cycle_census"]
+        guard = [[row[k] for k in loop.CARRY_GUARD_CENSUS] for row in ep["cycle_census"]]
+        assert guard == [
+            [row[k] for k in loop.CARRY_GUARD_CENSUS] for row in blind_ep["cycle_census"]
+        ]
