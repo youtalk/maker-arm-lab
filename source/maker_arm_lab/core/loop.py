@@ -187,6 +187,16 @@ loop the taken class is right on 1253 of 1505 lifted cycles (0.833, the F1 100k 
 2026-10-01) against 0.94 on the C1 teacher lifts. The ``perception`` block then carries
 ``CARRY_VOTE_COUNTS``.
 
+``vote_weights`` (MS7g design section 6.3, with ``classifier`` and ``class_views``; None is off)
+replaces the served vote with the fused vote (``fused_class``): every view's log probabilities
+times the view's weight, plus a bias per class, the views not yet read left out. Each view sets
+the box at its own step with that partial sum: the overhead view at selection, view 2 at the lift
+and the carry view ``CARRY_VIEW_STEPS`` later, which the fused vote always reads. A part that
+left the jaws before the carry view keeps view 2's box, so ``taken_class`` stays set with
+``vote_lost``. The nine values are a maximum-likelihood fit on the frame bank
+(``lerobot_stack/vote_bank.py``), a JSON file beside the model. ``read_class`` and
+``lift_class`` stay each view's own read.
+
 ``stall_end`` (MS7f, under ``perceived``, off by default) ends a cycle ``stall_end``, a failure
 booked as a budget end, once its gripper command has read closed for ``CLOSED_NO_PINCH_STEPS``
 steps in a row while the hold detector holds nothing and the cycle has read no lift
@@ -1597,6 +1607,22 @@ def summed_class(names, *views) -> str:
     return names[max(range(len(names)), key=sums.__getitem__)]
 
 
+FUSED_VIEWS = ("overhead", "lift", "carry")
+"""``vote_weights``' views, in the order ``fused_class`` takes their log probabilities."""
+
+
+def fused_class(names, vote: dict, *views) -> str:
+    """``vote_weights`` (MS7g design section 6.3): the name in ``names`` whose ``vote["bias"]``
+    plus the sum over the views given of ``vote["weights"][view]`` times its log probability is
+    largest. ``views`` are the overhead, lift and carry view's lists in the order of ``names``,
+    the views not yet read left out (or None). Pure."""
+    sums = [float(vote["bias"][n]) for n in names]
+    for view, logp in zip(FUSED_VIEWS, views):
+        if logp is not None:
+            sums = [t + float(vote["weights"][view]) * v for t, v in zip(sums, logp)]
+    return names[max(range(len(names)), key=sums.__getitem__)]
+
+
 def carry_vote_steps(lift_view: int, carry_view: int, k: int) -> list[int]:
     """``carry_votes``: the steps of ``k`` more wrist reads, spread evenly between view 2's step
     ``lift_view`` and the carry view's ``carry_view``, each strictly between them and on its own
@@ -2218,6 +2244,7 @@ def rollout(
     clear_first: bool = False,
     overhang_guard: bool = False,
     bank_views: bool = False,
+    vote_weights: dict | None = None,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -2279,6 +2306,9 @@ def rollout(
     ``passenger_drop``.
     ``clear_first`` and ``overhang_guard`` (MS7g) are the module docstring's; both need
     ``perceived``, and ``overhang_guard`` the tray.
+    ``vote_weights`` (MS7g) is the module docstring's, the vote's JSON as a dict (``weights`` per
+    ``FUSED_VIEWS``, ``bias`` per class); it needs ``classifier`` and ``class_views`` and refuses
+    ``carry_votes``.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -2443,6 +2473,14 @@ def rollout(
         raise EvalFailure("cell_failure_cap", "sets the perceived selector's cap: needs perceived")
     if bank_views and (classifier is None or on_classify is None):
         raise EvalFailure("bank_views", "hands on_classify a carry view: needs the classifier")
+    if vote_weights is not None:
+        if classifier is None or not class_views:
+            raise EvalFailure("vote_weights", "fuses the classifier's views: needs class_views")
+        if carry_votes:
+            raise EvalFailure("vote_weights", "fuses three views; carry_votes reads more")
+        weights, bias = vote_weights.get("weights", {}), vote_weights.get("bias", {})
+        if set(weights) != set(FUSED_VIEWS) or not set(class_names) <= set(bias):
+            raise EvalFailure("vote_weights", f"needs weights of {FUSED_VIEWS} and a bias a class")
     if carry_votes and not (classifier is not None and class_views):
         raise EvalFailure("carry_votes", "adds reads to the classifier's vote: needs class_views")
     if not 0 <= carry_votes <= MAX_CARRY_VOTES or carry_votes >= CARRY_VIEW_STEPS - lift_view_steps:
@@ -2568,6 +2606,8 @@ def rollout(
         switches["clear_first"] = True
     if overhang_guard:
         switches["overhang_guard"] = True
+    if vote_weights is not None:
+        switches["vote_weights"] = {k: vote_weights[k] for k in ("weights", "bias")}
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
     pick_z_hist = [deque(maxlen=GATE_WINDOW + 1) for _ in range(num_envs)]
@@ -2840,6 +2880,8 @@ def rollout(
                     logp, _ = classifier.log_probs(frame, class_names, size=seen.size)
                     st.cycle.read_logp = logp
                     st.cycle.read_class = cls = summed_class(class_names, logp)
+                    if vote_weights is not None:  # the fused vote's partial sum sets the box
+                        cls = fused_class(class_names, vote_weights, logp)
                 st.cycle.seen_yaw = float(scene.brick_yaw[target])
                 st.cycle.box = desk_boxes.lighter_box(class_boxes[i][cls], st.box_load)
                 st.cycle.volume = math.prod(seen.size)
@@ -3190,14 +3232,19 @@ def rollout(
                     else:
                         st.counts["lifts_classified"] += 1
                         st.counts["wrong_wrist_class"] += read != true_cls
-                    split = class_views and read != c.read_class
+                    # The fused vote always reads the carry view, and view 2's partial sum
+                    # sets the box now.
+                    split = class_views and (vote_weights is not None or read != c.read_class)
                     c.bank_at = lift_step + CARRY_VIEW_STEPS if bank_views and not split else None
                     if split:
                         c.vote = (read, true_cls, lift_step + CARRY_VIEW_STEPS, logp)
                         c.carry_due = carry_vote_steps(step, c.vote[2], carry_votes)
                         c.carry_vote_logp = []
-                    else:
-                        _, taken, box = lift_class_box(read, lambda x: x, lighter, c.box)
+                    if not split or vote_weights is not None:
+                        now = read
+                        if vote_weights is not None:
+                            now = fused_class(class_names, vote_weights, c.read_logp, logp)
+                        _, taken, box = lift_class_box(now, lambda x: x, lighter, c.box)
                         c.taken_class = taken
                         if box is not None:
                             c.box = box
@@ -3235,6 +3282,8 @@ def rollout(
                     logps = (c.read_logp, lift_logp, *c.carry_vote_logp, carry_logp)
                     views_logp = [v for v in logps if v]
                     summed = summed_class(class_names, *views_logp)  # no overhead read: two
+                    if vote_weights is not None:
+                        summed = fused_class(class_names, vote_weights, *logps)
                     _, taken, box = lift_class_box(summed, lambda x: x, lighter, c.box)
                     c.taken_class = taken
                     st.counts["third_views"] += 1

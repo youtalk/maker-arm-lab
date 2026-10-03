@@ -1166,6 +1166,9 @@ def _ms7f_scene(monkeypatch):
     ready |= {"missed_lift"}  # the riders track: a carry the hold detector missed
     ready |= {"cell_failure_cap", "carry_votes", "stall_end"}
     ready |= {"pile_pgs"}  # the env's solver: no loop decision either
+    # MS7g's fused vote refuses carry_votes, which this scene turns on; it changes only how the
+    # classifier's log probabilities are summed (test_vote_weights runs it).
+    ready |= {"vote_weights"}
     assert batch_loop.MS7F_READY == ready | teacher, "turn it on in this scene"
     # Two of the three bricks start in the tray and one part fills a box, so the refill and
     # an emptying both run between cycles. Set before the build: the box draw reads the ratio.

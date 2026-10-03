@@ -198,6 +198,7 @@ MS7F_OFF = {
     "carry_votes": 0,
     "pile_pgs": False,
     "stall_end": False,
+    "vote_weights": None,
 }
 """``core.batch_loop.MS7F_OFF``, copied because the supervisor imports no maker_arm_lab; the test
 pins it. The "ms7f" block of a read with every MS7f switch off, what an MS7e payload ran with."""
@@ -231,6 +232,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "carry_votes",
         "pile_pgs",
         "stall_end",
+        "vote_weights",
     }
 )
 """``core.batch_loop.MS7F_READY``, copied and pinned the same way: any other MS7f switch at a
@@ -1372,6 +1374,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             action="store_true",
             help=f"MuJoCo heap only, MS7g design {what}: forwarded as --{name}; needs --perceived",
         )
+    parser.add_argument(
+        "--vote_weights",
+        type=str,
+        default=None,
+        help="MuJoCo heap only, MS7g: forwarded as --vote_weights PATH, the fused vote's JSON",
+    )
     parser.add_argument(
         "--seen_seeds",
         type=_seed_pair,
