@@ -267,13 +267,17 @@ def under_overhang(
     shadow, its footprint on the desk to its footprint at its top (``wall_at``), grown by
     ``landing_half_gap(width, hold_band)`` and TIP_THICKNESS: a part inside the shadow lies
     under the overhang, one within the growth of the top's footprint under the fingers' path.
-    A desk box wall (``Wall.box``) stands vertical and never counts, nor does a part whose
-    centre lies inside the tray interior on the desk (``layout.tray_bounds``) or at or above
-    the wall's top.
+    A desk box wall (``Wall.box``) stands vertical and never counts, nor does a part at or
+    above the wall's top, nor one whose centre lies inside the tray interior at its own height:
+    ``layout.tray_bounds`` grown by the walls' lean times that height, the leaned inner face.
+    A part resting on that face lies in the tray with its centre past the interior's edge on
+    the desk; a diagnostic smoke of 2026-10-03 (K = 50, run 20323000) refused one at y 0.1017,
+    z 0.013 in 44 scans before the test read the height.
     """
     (x0, x1), (y0, y1) = layout.tray_bounds()
     x, y, z = (float(v) for v in pos[:3])
-    if x0 <= x <= x1 and y0 <= y <= y1:
+    grow = max((w.lean for w in walls if not w.box), default=0.0) * max(z, 0.0)
+    if x0 - grow <= x <= x1 + grow and y0 - grow <= y <= y1 + grow:
         return False
     reach = landing_half_gap(width, hold_band) + TIP_THICKNESS
     return any(
