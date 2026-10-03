@@ -99,6 +99,11 @@ def test_the_overhang_band_skips_the_interior_parts_over_the_top_and_box_walls()
     outside = torch.tensor([x, Y0 - layout.TRAY_WALL - 0.001, 0.0048])
     assert grasp.under_overhang(outside, w, vertical)
     assert not grasp.under_overhang(torch.tensor([x, -0.135, DEEP + 0.001]), w, WALLS)
+    # A part resting on the leaned wall's inner face lies in the tray, its centre past the
+    # interior's edge on the desk (the diagnostic smoke's refused part, mirrored to this wall).
+    leaning = torch.tensor([x, Y0 - 0.0017, 0.013])
+    assert not grasp.under_overhang(leaning, 0.0016, WALLS)
+    assert grasp.under_overhang(torch.tensor([x, Y0 - 0.0017, 0.0]), 0.0016, WALLS)
     boxed = tuple(grasp.Wall(wall.footprint, wall.heading, wall.top, box=True) for wall in vertical)
     assert not grasp.under_overhang(outside, w, boxed)
     assert not grasp.under_overhang(torch.tensor([x, -0.135, 0.0048]), w, ())
