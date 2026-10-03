@@ -524,6 +524,7 @@ def rank_grasps(
     closing_axes: Sequence[tuple[int, ...]] | None = None,
     walls: Sequence[Wall] = (),
     hold_band: float = JAW_HOLD_BAND,
+    clear_first: bool = False,
 ) -> list[Grasp]:
     """Every grasp of every candidate part with its clearance, best first.
 
@@ -533,6 +534,14 @@ def rank_grasps(
     wall. The order is the height band (highest first), then the swept count, then the
     clearance, then the narrower width: a wide grasp closes on one side first and slides the
     part away (docs/ms6-matched-jaw-opening.md section 5), so it is the last resort at a tie.
+
+    ``clear_first`` (the heap loop's MS7g ``--clear_first``, MS7g design 5.3) ranks every grasp
+    that sweeps no standing neighbour before the height band. Over four heaps of the MS7f video
+    diagnosis (2026-10-03, 703 selections) a selection whose stroke swept a neighbour stowed
+    0.53 against 0.65, and of the full-tray selections whose chosen clearance was under 5 mm
+    only 3 of 83 had a clear option in the ranked top 8, all of them in the top band. The rank
+    picks the target part, so the switch changes the part, not only its grasp. Off, the order
+    is the one above: the key's first item is False on every grasp.
     """
     _, hz = neighbor_extents(sizes, quat)
     prints = [footprint(sizes[b], pos[b], quat[b]) for b in range(sizes.shape[0])]
@@ -548,7 +557,15 @@ def rank_grasps(
                 pos[b], g.heading, g.width, g.half_height, other_pos, other_hz, other_prints
             )
             ranked.append(replace(g, clearance=clearance, swept=swept))
-    ranked.sort(key=lambda g: (-math.floor(g.height / HEIGHT_BAND), g.swept, -g.clearance, g.width))
+    ranked.sort(
+        key=lambda g: (
+            clear_first and g.swept > 0,
+            -math.floor(g.height / HEIGHT_BAND),
+            g.swept,
+            -g.clearance,
+            g.width,
+        )
+    )
     return ranked
 
 
