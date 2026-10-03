@@ -200,6 +200,11 @@ the true category of the part held at that lift, the chosen grasp's swept count,
 air stalls over the tray (``AirStall``) and each classifier view's log probabilities. No
 decision reads any of it, so every served step is what it was without it.
 
+``clear_first`` (MS7g design 5.3, under ``perceived``, off by default and in the ``inference``
+block only when on) ranks the perceived selector's grasps that sweep no standing neighbour before
+the height band (``grasp.rank_grasps``), so it can change the target part; the teacher's rank
+stays.
+
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
 """
@@ -2083,6 +2088,7 @@ def rollout(
     cell_failure_cap: int = CELL_FAILURE_CAP,
     carry_votes: int = 0,
     stall_end: bool = False,
+    clear_first: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -2137,6 +2143,7 @@ def rollout(
     ``carry_votes`` (MS7f) is the module docstring's; it needs ``classifier`` and ``class_views``,
     and lies in [0, ``MAX_CARRY_VOTES``] and under ``CARRY_VIEW_STEPS - lift_view_steps``.
     ``stall_end`` (MS7f) is the module docstring's; it needs ``perceived``.
+    ``clear_first`` (MS7g) is the module docstring's; it needs ``perceived``.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -2285,6 +2292,8 @@ def rollout(
         raise EvalFailure(
             "missed_lift", "reads a carry off the tray: it needs perceived and a tray"
         )
+    if clear_first and not perceived:
+        raise EvalFailure("clear_first", "ranks the perceived selector's grasps: needs perceived")
     if not 1 <= cell_failure_cap <= MAX_CELL_FAILURE_CAP:
         raise EvalFailure("cell_failure_cap", f"must lie in [1, {MAX_CELL_FAILURE_CAP}]")
     if cell_failure_cap != CELL_FAILURE_CAP and not perceived:
@@ -2356,6 +2365,7 @@ def rollout(
             st.selector.cell_failure_cap = cell_failure_cap
             st.selector.knows_destinations = False
             st.selector.box_filter_xy = box_filter_xy
+            st.selector.clear_first = clear_first
             if box_walls:
                 # L9: the grasp model and the rake also read the perceived boxes' walls.
                 boxes, sizes = st.perceiver.box_poses, st.perceiver.box_sizes
@@ -2406,6 +2416,8 @@ def rollout(
         switches["carry_votes"] = int(carry_votes)
     if stall_end:
         switches["stall_end"] = True
+    if clear_first:
+        switches["clear_first"] = True
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
     pick_z_hist = [deque(maxlen=GATE_WINDOW + 1) for _ in range(num_envs)]

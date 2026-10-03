@@ -1196,6 +1196,13 @@ def _ms7f_scene(monkeypatch):
     return env, rig, policy, budget, switches | on
 
 
+def _ms7g_selector_scene(monkeypatch):
+    """The MS7f scene with the MS7g selector switch on (MS7g design 5.3): the clear grasps rank
+    first, on perceived reads."""
+    env, rig, policy, budget, switches = _ms7f_scene(monkeypatch)
+    return env, rig, policy, budget, switches | {"clear_first": True}
+
+
 def _thin_snap_scene(monkeypatch):
     """The teacher scene with a 2x4 plate and a 2x2 tile for two of its bricks, under the eight
     MS7e classes and ``thin_snap`` (MS7e ledger R13 S2): the loop serves flat rows."""
@@ -1327,6 +1334,7 @@ def test_every_ms7d_switch_at_once_runs_the_teacher_scene_to_its_end(monkeypatch
         _snap_closed_scene,
         _stall_end_scene,
         _ms7f_scene,
+        _ms7g_selector_scene,
     ],
 )
 def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):

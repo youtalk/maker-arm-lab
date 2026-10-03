@@ -347,6 +347,12 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         help="MS7d L7: the arm holds still on a step with a large pick-point force",
     )
     parser.add_argument(
+        "--clear_first",
+        action="store_true",
+        help="MS7g, with --perceived: the selector ranks the grasps that sweep no standing "
+        "neighbour before the height band, so it may choose another part (grasp.rank_grasps)",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -449,6 +455,7 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "lift_budget",
         "missed_lift",
         "stall_end",
+        "clear_first",
     ):
         if getattr(args, name) not in (None, False) and not args.perceived:
             parser.error(f"--{name} needs --perceived")
@@ -633,6 +640,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             cell_failure_cap=args.cell_failure_cap,
             carry_votes=args.carry_votes,
             stall_end=args.stall_end,
+            clear_first=args.clear_first,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

@@ -253,6 +253,9 @@ class HeapOracle(oracle.EnvOracle):
         self.rake_part_cap = RAKE_PART_CAP
         self.max_rakes = MAX_RAKES
         self.rake_crowd = 0.0
+        # The heap loop's MS7g --clear_first sets this on its perceived selectors
+        # (``grasp.rank_grasps``'s ``clear_first``); the teacher keeps it off.
+        self.clear_first = False
         self.cycle_parts: list[int] = []
         self.out_of_reach = 0
         self._push_rng = rng if rng is not None else random.Random(0)
@@ -375,6 +378,7 @@ class HeapOracle(oracle.EnvOracle):
             [p.closing_axes for p in self.parts],
             self.walls,
             self.hold_band,
+            self.clear_first,
         )
 
     def _push_heading(self, center: tuple[float, float]) -> float:
