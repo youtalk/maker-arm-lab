@@ -1197,10 +1197,10 @@ def _ms7f_scene(monkeypatch):
 
 
 def _ms7g_selector_scene(monkeypatch):
-    """The MS7f scene with the MS7g selector switch on (MS7g design 5.3): the clear grasps rank
-    first, on perceived reads."""
+    """The MS7f scene with the two MS7g selector switches on (MS7g design 5.3 and 5.4): the
+    clear grasps rank first and the tray wall's overhang refuses a part, on perceived reads."""
     env, rig, policy, budget, switches = _ms7f_scene(monkeypatch)
-    return env, rig, policy, budget, switches | {"clear_first": True}
+    return env, rig, policy, budget, switches | {"clear_first": True, "overhang_guard": True}
 
 
 def _thin_snap_scene(monkeypatch):
