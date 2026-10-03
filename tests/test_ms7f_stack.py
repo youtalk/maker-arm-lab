@@ -63,6 +63,7 @@ NEW_SCRIPTS = [
     (ROOT / "scripts" / "mj_render_set.py", "RENDER_OK", "RENDER_FAIL"),
     (ROOT / "scripts" / "mj_stretch_run.py", "STRETCH_OK", "STRETCH_FAIL"),
     (ROOT / "lerobot_stack" / "train_part_classifier.py", "CLS_OK", "CLS_FAIL"),
+    (ROOT / "lerobot_stack" / "vote_bank.py", "VOTE_OK", "VOTE_FAIL"),
 ]
 """The new scripts of MS7f and their tokens (the shared interface, item 5)."""
 PROTOCOL_IMPORTS = {"io", "json", "numpy"}
