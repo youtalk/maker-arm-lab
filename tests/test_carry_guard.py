@@ -7,9 +7,11 @@ import math
 from typing import ClassVar
 
 import pytest
+import torch
 
-from maker_arm_lab.core import desk_boxes, grasp, loop
+from maker_arm_lab.core import desk_boxes, grasp, loop, parts
 from maker_arm_lab.core.hold import MIN_EXCESS
+from test_classifier_loop import SWITCHES, _classifier, _scene
 from test_ms7f_stack import ROOT, _gate_argv, _load, ge
 from test_perceived_loop import ZERO, _carry_scene, _rollout, _served, _teacher_scene
 from test_run_gate_eval import _heap_payload
@@ -102,7 +104,7 @@ def test_a_teacher_that_releases_inside_its_box_is_never_guarded(monkeypatch):
     rows = on["episodes"][0]["cycle_census"]
     assert rows and all(row.pop("guard_steps") == 0 for row in rows)
     assert all(row.pop("guard_rim_steps") == 0 and row.pop("handoff") is None for row in rows)
-    assert all(row.pop("stall_open") is False for row in rows)
+    assert all(row.pop("stall_open") is False and row.pop("guard_vote_steps") == 0 for row in rows)
     assert on == off and _same(on_served, off_served)
 
 
@@ -185,6 +187,46 @@ def test_an_air_stall_with_a_held_part_hands_it_to_the_rig(monkeypatch):
     handed = [row for row in rows if row["handoff"] is not None]
     assert [row["handoff"] for row in handed] == ["placed", "lifted_lost"], rows
     assert all(row["guard_steps"] == 0 for row in handed)
+
+
+def test_a_pending_vote_serves_no_box_so_the_part_goes_where_the_vote_moves_it(
+    tmp_path, monkeypatch
+):
+    """The overhead view reads slope and both wrist views read wide, the bricks' class, and the
+    teacher opens over the slope box after its lift but before the carry view decides
+    (CARRY_VIEW_STEPS 100 here). Off, the first part falls into the slope box: the g_cg_scr
+    M_late case. On, the guard holds the open while the vote is pending, holds it again once the
+    vote has moved the box to the wide box, and the still guard hands the part to the rig,
+    which places it there."""
+    monkeypatch.setattr(loop, "CARRY_VIEW_STEPS", 100)
+    stub = _classifier(tmp_path, "slope", "wide")
+    episodes = []
+    for guard in (False, True):
+        env, rig, policy = _scene()
+        slope = int(env.class_to_box[0][parts.BASE_CLASSES.index("slope")])
+        x, y = (float(v) for v in env.desk_box_poses[0, slope, :2])
+        release = (x, y, desk_boxes.DESK_BOX_RELEASE_Z)
+        policy.rig.oracles[0].release_point = torch.tensor(release)
+        payload = _rollout(
+            env,
+            rig,
+            policy,
+            perceived=True,
+            classifier=stub,
+            class_views=True,
+            carry_guard=guard,
+            **SWITCHES,
+        )
+        env.close()
+        episodes.append(payload["episodes"][0])
+    off, on = episodes
+    assert off["cycle_classes"][0] == "wrong_box"
+    assert off["cycle_census"][0]["release_place"] == "wrong_box"
+    row = on["cycle_census"][0]
+    assert on["cycle_classes"][0] == "stowed" and row["handoff"] == "placed", row
+    assert row["read_class"] == "slope" and row["taken_class"] == "wide"
+    assert row["guard_vote_steps"] > 0 and row["guard_rim_steps"] == 0
+    assert row["guard_steps"] == row["guard_vote_steps"] + loop.GUARD_STALL_STEPS
 
 
 def test_the_rollout_refuses_the_switch_without_perceived_or_with_the_passenger_drop(
