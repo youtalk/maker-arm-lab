@@ -1186,6 +1186,8 @@ class Cycle:
     vote: tuple | None = None
     # ``classifier``: view 2 is due, (its step, the lift's step, the true class at the lift).
     lift_view: tuple | None = None
+    # ``bank_views``: the step of the carry view no vote reads, after a lift that agreed.
+    bank_at: int | None = None
     # ``carry_votes``: the steps of the vote's extra carry reads still due, and the log
     # probabilities of those read.
     carry_due: list = field(default_factory=list)
@@ -2215,6 +2217,7 @@ def rollout(
     carry_guard: bool = False,
     clear_first: bool = False,
     overhang_guard: bool = False,
+    bank_views: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -2230,7 +2233,10 @@ def rollout(
     ``classifier`` reads, before it reads it: the view ("overhead", "lift", "carry", or "wrist"
     for a ``carry_votes`` read), the env, the frame, the perceived size the read gets, the step,
     the env's ``Cycle`` and ``HoldDetector``. It only records (``--classifier_frames``): nothing
-    it returns or changes reaches a decision.
+    it returns or changes reaches a decision. ``bank_views`` (MS7g ledger D2, the frame bank) also
+    hands it the view "bank": the wrist frame ``CARRY_VIEW_STEPS`` after a lift whose read agreed
+    with the overhead read, if the part is still up, the carry view a split vote would read. The
+    classifier does not read it, so every served step and decision stay the same.
     ``hold_trace``, when a list, receives one ``hold.TRACE_FIELDS`` row per live env per step,
     the input of ``hold.cycle_rows``'s threshold replay.
     ``perceived`` is the MS7c boundary of the module docstring, with ``noise_scales`` the
@@ -2435,6 +2441,8 @@ def rollout(
         raise EvalFailure("cell_failure_cap", f"must lie in [1, {MAX_CELL_FAILURE_CAP}]")
     if cell_failure_cap != CELL_FAILURE_CAP and not perceived:
         raise EvalFailure("cell_failure_cap", "sets the perceived selector's cap: needs perceived")
+    if bank_views and (classifier is None or on_classify is None):
+        raise EvalFailure("bank_views", "hands on_classify a carry view: needs the classifier")
     if carry_votes and not (classifier is not None and class_views):
         raise EvalFailure("carry_votes", "adds reads to the classifier's vote: needs class_views")
     if not 0 <= carry_votes <= MAX_CARRY_VOTES or carry_votes >= CARRY_VIEW_STEPS - lift_view_steps:
@@ -3182,7 +3190,9 @@ def rollout(
                     else:
                         st.counts["lifts_classified"] += 1
                         st.counts["wrong_wrist_class"] += read != true_cls
-                    if class_views and read != c.read_class:
+                    split = class_views and read != c.read_class
+                    c.bank_at = lift_step + CARRY_VIEW_STEPS if bank_views and not split else None
+                    if split:
                         c.vote = (read, true_cls, lift_step + CARRY_VIEW_STEPS, logp)
                         c.carry_due = carry_vote_steps(step, c.vote[2], carry_votes)
                         c.carry_vote_logp = []
@@ -3234,6 +3244,11 @@ def rollout(
                         c.box = box
                         env.set_context_box(i, box)
                         replan[i] = True
+                if c.bank_at is not None and step >= c.bank_at:
+                    c.bank_at = None  # ``bank_views``: recorded, never read
+                    if detectors[i].lifted or c.carried:
+                        frame = classifier.wrist_frame(env, i)
+                        on_classify("bank", i, frame, c.seen_size, step, c, detectors[i])
             elif (
                 adopt_held
                 and per_part

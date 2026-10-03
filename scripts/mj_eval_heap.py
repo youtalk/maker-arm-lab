@@ -19,7 +19,9 @@ the cycle over. Only the takeover frames are recorded, to ``<dagger_dir>/<shard_
 
 ``--classifier_frames DIR`` records every frame the classifier reads on the policy's own cycles
 as a render set file (``mj_render_set.PolicyFrames``), labels read from the simulator; the run
-itself is the same.
+itself is the same. ``--bank_views`` (the MS7g frame bank, ledger D2) also records the carry view
+of every lift whose read agreed with the overhead read, a frame the classifier does not read
+(``loop.rollout``'s ``bank_views``), so each lifted cycle keeps all three views.
 """
 
 import argparse
@@ -382,6 +384,13 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "lerobot_stack/train_part_classifier.py; needs --classifier and --perceived",
     )
     parser.add_argument(
+        "--bank_views",
+        action="store_true",
+        help="MS7g frame bank, with --classifier_frames: also record the carry view "
+        "loop.CARRY_VIEW_STEPS after a lift whose read agreed (view 'bank'), which the "
+        "classifier does not read; the run itself is the same",
+    )
+    parser.add_argument(
         "--hold_trace",
         type=str,
         default="",
@@ -421,6 +430,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
             "--classifier_frames records the classifier's reads: it needs --classifier and "
             "--perceived"
         )
+    if args.bank_views and not args.classifier_frames:
+        parser.error("--bank_views records more frames: it needs --classifier_frames")
     if args.passenger_drop and not args.classifier:
         parser.error(
             "--passenger_drop reads the classifier's passenger head: it needs --classifier"
@@ -663,6 +674,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             carry_guard=args.carry_guard,
             clear_first=args.clear_first,
             overhang_guard=args.overhang_guard,
+            bank_views=args.bank_views,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

@@ -54,8 +54,10 @@ per ``LABELS`` name, plus ``args`` (the command line as JSON). Prints exactly on
 
 ``PolicyFrames`` writes the same file from the served loop (``scripts/mj_eval_heap.py
 --classifier_frames``): the frames the classifier reads on the policy's own cycles, with these
-labels, and the perceived size each read got beside it (``.size.npy``, which
-``scripts/render_set_sizes.py`` would otherwise draw).
+labels, a ``cycle`` column (the loop's cycle ordinal in the env, which joins a frame to its
+payload census row), and the perceived size each read got beside it (``.size.npy``, which
+``scripts/render_set_sizes.py`` would otherwise draw). With ``--bank_views`` it also keeps the
+view "bank", the carry view of a lift whose read agreed, which the classifier does not read.
 """
 
 from __future__ import annotations
@@ -493,11 +495,13 @@ def _replace(path: Path, write) -> None:
     tmp.replace(path)
 
 
-def save(out: Path, frames, rows, args: str, crop: bool, sizes=None) -> dict:
-    """Write ``out`` (frames, the ``LABELS`` columns, ``args`` and with ``crop`` the native wrist
-    crop), and ``sizes`` (N, 3) first as its ``.size.npy``, so a reader never finds the file
-    longer than its sizes. Returns the columns."""
+def save(out: Path, frames, rows, args: str, crop: bool, sizes=None, cycles=None) -> dict:
+    """Write ``out`` (frames, the ``LABELS`` columns, ``args``, with ``crop`` the native wrist
+    crop and with ``cycles`` a ``cycle`` column), and ``sizes`` (N, 3) first as its
+    ``.size.npy``, so a reader never finds the file longer than its sizes. Returns the columns."""
     columns = {name: np.array(col) for name, col in zip(LABELS, zip(*rows))}
+    if cycles is not None:
+        columns["cycle"] = np.array(cycles)
     if sizes is not None:
         side = out.with_name(out.name.removesuffix(".npz") + ".size.npy")
         _replace(side, lambda f: np.save(f, np.asarray(sizes, dtype=np.float32)))
@@ -532,9 +536,10 @@ class PolicyFrames:
         self.env, self.rig, self.crop = env, rig, crop
         self.args = json.dumps(vars(args))
         self.heldout = heldout_names(args)
+        self.bank = bool(getattr(args, "bank_views", False))  # the summary counts its frames
         self.out = Path(out_dir) / f"policy_{args.run_seed}_{args.layout_seed}.npz"
         self.out.parent.mkdir(parents=True, exist_ok=True)
-        self.frames, self.rows, self.sizes, self.written = [], [], [], 0
+        self.frames, self.rows, self.sizes, self.cycles, self.written = [], [], [], [], 0
 
     def __call__(self, view, i, frame, size, step, cycle, detector) -> None:
         env = self.env
@@ -550,20 +555,23 @@ class PolicyFrames:
         self.frames.append(np.array(frame, dtype=np.uint8))  # a copy: the env reuses its buffers
         self.rows.append(row)
         self.sizes.append(sorted(size) if size is not None else [-1.0] * 3)
+        self.cycles.append(cycle.ordinal)
         if len(self.frames) - self.written >= FLUSH_EVERY:
             self.flush()
 
     def flush(self) -> None:
         """Write every frame so far, if any is new."""
         if len(self.frames) > self.written:
-            save(self.out, self.frames, self.rows, self.args, self.crop, self.sizes)
+            save(self.out, self.frames, self.rows, self.args, self.crop, self.sizes, self.cycles)
             self.written = len(self.frames)
 
     def summary(self) -> dict:
         views = [r[0] for r in self.rows]
-        return {"out": str(self.out), "frames": len(views)} | {
-            v: views.count(v) for v in ("overhead", "lift", "carry", "wrist")
-        }
+        return (
+            {"out": str(self.out), "frames": len(views)}
+            | {v: views.count(v) for v in ("overhead", "lift", "carry", "wrist")}
+            | ({"bank": views.count("bank")} if self.bank else {})
+        )
 
 
 def main(argv=None) -> int:
