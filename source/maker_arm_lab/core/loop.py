@@ -195,7 +195,8 @@ and the carry view ``CARRY_VIEW_STEPS`` later, which the fused vote always reads
 left the jaws before the carry view keeps view 2's box, so ``taken_class`` stays set with
 ``vote_lost``. The nine values are a maximum-likelihood fit on the frame bank
 (``lerobot_stack/vote_bank.py``), a JSON file beside the model. ``read_class`` and
-``lift_class`` stay each view's own read.
+``lift_class`` stay each view's own read. Its vote is pending (``Cycle.vote``) from every lift
+to the carry view, so ``carry_guard`` holds the jaws until the carry view sets the box.
 
 ``stall_end`` (MS7f, under ``perceived``, off by default) ends a cycle ``stall_end``, a failure
 booked as a budget end, once its gripper command has read closed for ``CLOSED_NO_PINCH_STEPS``
