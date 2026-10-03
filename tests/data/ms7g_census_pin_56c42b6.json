@@ -1,0 +1,1231 @@
+{
+ "desk": {
+  "clamp_fraction": 0.0,
+  "context": "camera_box_target",
+  "cycle_budget": 4,
+  "cycle_intervals": {
+   "by_outcome": {
+    "stowed": {
+     "cycles": 3,
+     "steps": [
+      1097,
+      180,
+      272,
+      47
+     ]
+    }
+   },
+   "names": [
+    "select_to_close",
+    "close_to_lift",
+    "lift_to_release",
+    "release_to_next"
+   ]
+  },
+  "cycle_step_budget": 800,
+  "cycles_per_stowed": 1.0,
+  "cycles_total": 3,
+  "episode_draws": false,
+  "episodes": [
+   {
+    "box_count": 4,
+    "bricks_stowed": 3,
+    "clamp_overshoot_max_per_joint": [
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ],
+    "clamp_steps": 0,
+    "clamp_steps_per_joint": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "class_to_box": {
+     "narrow": 1,
+     "slope": 2,
+     "tall": 3,
+     "wide": 0
+    },
+    "closes_held_window": [],
+    "closes_nearest_cm": [],
+    "cycle_census": [
+     {
+      "adopted": -1,
+      "close_below": 0.032,
+      "close_edges": 1,
+      "closed_steps": 161,
+      "ctx_stale": 0.0053,
+      "dwell_closes": 1,
+      "first_close_at": 512,
+      "first_held": 0,
+      "first_held_at": 520,
+      "first_held_is_target": true,
+      "first_hold_at": 524,
+      "floored_steps": 0,
+      "gap_close": 0.026,
+      "gated_steps": 0,
+      "grace_steps": 0,
+      "held_steps": 154,
+      "hold_detected": true,
+      "last_held": 0,
+      "last_held_is_target": true,
+      "lift_detected": true,
+      "max_rise": 0.1011,
+      "off_across": -0.0003,
+      "off_along": 0.0001,
+      "off_x": 0.0002,
+      "off_y": -0.0002,
+      "off_z": 0.0001,
+      "open_steps": 534,
+      "pick_z_close": 0.0049,
+      "pick_z_max": 0.1059,
+      "rearms": 0,
+      "refreshes": 0,
+      "reopen_steps": 161,
+      "snap_held_steps": 10,
+      "snapped_steps": 171,
+      "squared_steps": 171,
+      "squeeze_margin": -0.006,
+      "target_in_box": false,
+      "wait_capped": false,
+      "wait_steps": 0
+     },
+     {
+      "adopted": -1,
+      "close_below": 0.0074,
+      "close_edges": 1,
+      "closed_steps": 160,
+      "ctx_stale": 0.0034,
+      "dwell_closes": 1,
+      "first_close_at": 274,
+      "first_held": 2,
+      "first_held_at": 282,
+      "first_held_is_target": true,
+      "first_hold_at": 288,
+      "floored_steps": 142,
+      "gap_close": 0.0014,
+      "gated_steps": 0,
+      "grace_steps": 0,
+      "held_steps": 154,
+      "hold_detected": true,
+      "last_held": 2,
+      "last_held_is_target": true,
+      "lift_detected": true,
+      "max_rise": 0.1015,
+      "off_across": 0.0003,
+      "off_along": -0.001,
+      "off_x": 0.0008,
+      "off_y": -0.0006,
+      "off_z": 0.0001,
+      "open_steps": 296,
+      "pick_z_close": 0.0049,
+      "pick_z_max": 0.1061,
+      "rearms": 0,
+      "refreshes": 0,
+      "reopen_steps": 160,
+      "snap_held_steps": 0,
+      "snapped_steps": 173,
+      "squared_steps": 173,
+      "squeeze_margin": -0.006,
+      "target_in_box": false,
+      "wait_capped": false,
+      "wait_steps": 0
+     },
+     {
+      "adopted": -1,
+      "close_below": 0.018,
+      "close_edges": 1,
+      "closed_steps": 166,
+      "ctx_stale": 0.0033,
+      "dwell_closes": 1,
+      "first_close_at": 270,
+      "first_held": 1,
+      "first_held_at": 282,
+      "first_held_is_target": true,
+      "first_hold_at": 285,
+      "floored_steps": 0,
+      "gap_close": 0.012,
+      "gated_steps": 0,
+      "grace_steps": 0,
+      "held_steps": 156,
+      "hold_detected": true,
+      "last_held": 1,
+      "last_held_is_target": true,
+      "lift_detected": true,
+      "max_rise": 0.1018,
+      "off_across": -0.0001,
+      "off_along": -0.0008,
+      "off_x": -0.0005,
+      "off_y": -0.0007,
+      "off_z": -0.0003,
+      "open_steps": 279,
+      "pick_z_close": 0.0045,
+      "pick_z_max": 0.1063,
+      "rearms": 0,
+      "refreshes": 0,
+      "reopen_steps": 166,
+      "snap_held_steps": 11,
+      "snapped_steps": 175,
+      "squared_steps": 175,
+      "squeeze_margin": -0.006,
+      "target_in_box": false,
+      "wait_capped": false,
+      "wait_steps": 0
+     }
+    ],
+    "cycle_classes": [
+     "stowed",
+     "stowed",
+     "stowed"
+    ],
+    "cycle_first_close_cm": [
+     0.03,
+     0.1,
+     0.09
+    ],
+    "cycle_intervals": [
+     [
+      524,
+      60,
+      91,
+      20
+     ],
+     [
+      288,
+      60,
+      88,
+      20
+     ],
+     [
+      285,
+      60,
+      93,
+      7
+     ]
+    ],
+    "cycle_outcomes": [
+     true,
+     true,
+     true
+    ],
+    "cycle_reasons": [
+     "placed",
+     "placed",
+     "stowed"
+    ],
+    "cycle_steps": [
+     695,
+     456,
+     445
+    ],
+    "cycle_targets": [
+     0,
+     2,
+     1
+    ],
+    "cycles": 3,
+    "done_reason": "all_stowed",
+    "env_index": 0,
+    "events": {
+     "box_empty": 0,
+     "tray_refill": 0
+    },
+    "first_close_step": 512,
+    "grasp_attempts": 0,
+    "grasp_attempts_unresolved": 0,
+    "grasp_successes": 0,
+    "grasp_successes_strict": 0,
+    "gripper_band_steps": 1596,
+    "gripper_open_steps": 1109,
+    "gripper_transitions": 6,
+    "left_parts": [],
+    "num_bricks": 3,
+    "rakes": 0,
+    "releases": [],
+    "select_wait_steps": 0,
+    "steps": 1596,
+    "stowed_by_box": [
+     {
+      "stowed": 2,
+      "total": 2
+     },
+     {
+      "stowed": 1,
+      "total": 1
+     },
+     {
+      "stowed": 0,
+      "total": 0
+     },
+     {
+      "stowed": 0,
+      "total": 0
+     }
+    ],
+    "stowed_by_class": {
+     "narrow": {
+      "stowed": 1,
+      "total": 1
+     },
+     "slope": {
+      "stowed": 0,
+      "total": 0
+     },
+     "tall": {
+      "stowed": 0,
+      "total": 0
+     },
+     "wide": {
+      "stowed": 2,
+      "total": 2
+     }
+    },
+    "stowed_by_family": {
+     "brick": {
+      "stowed": 3,
+      "total": 3
+     }
+    },
+    "stowed_families": [
+     "brick",
+     "brick",
+     "brick"
+    ],
+    "stowed_heldout": {
+     "stowed": 0,
+     "total": 0
+    },
+    "stowed_parts": [
+     1,
+     0,
+     2
+    ],
+    "success": true,
+    "takeovers": 0,
+    "takeovers_failed": 0,
+    "takeovers_stowed": 0,
+    "torque": {
+     "approach_force": {
+      "max": 1.32,
+      "p50": 0.31,
+      "p90": 0.58,
+      "steps": 1056
+     },
+     "force_capped": 0,
+     "hold_blocked": 0,
+     "hold_blocked_cycles": 0
+    },
+    "wrong_bin_deposits": 0,
+    "wrong_box_parts": 0
+   }
+  ],
+  "events": {
+   "box_empty": 0,
+   "tray_refill": 0
+  },
+  "frame_jitter": false,
+  "gripper": "continuous",
+  "heap_k": 3,
+  "hold_agreement": {
+   "cycles": 3,
+   "first_hold_offset_median": 4,
+   "hold": {
+    "fn": 0,
+    "fp": 0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "tn": 0,
+    "tp": 3
+   },
+   "lift": {
+    "fn": 0,
+    "fp": 0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "tn": 0,
+    "tp": 3
+   },
+   "offset_cycles": 3
+  },
+  "inference": {
+   "loop": {
+    "adopt_held": true,
+    "box_filter_xy": true,
+    "box_walls": true,
+    "class_views": true,
+    "close_gate": false,
+    "contact_hold": false,
+    "dwell_close": true,
+    "force_cap": true,
+    "hold_force": true,
+    "marker_bias": true,
+    "noise_scales": "pos=1,heading=1,size=1,box=1,miss=1,class=1,tool=1,wrist=1,wrist_bias=1,wrist_miss=1,rho=1,torque=1,torque_k=1",
+    "park_done": true,
+    "part_failures": true,
+    "perceived": true,
+    "pick_snap": true,
+    "rake_cap": 0,
+    "rake_crowd": false,
+    "rake_turn": false,
+    "rearm_hold": true,
+    "release_gap": true,
+    "replan_on_switch": false,
+    "row_refresh": false,
+    "scripted_place": false,
+    "scripted_rake": false,
+    "select_at_release": true,
+    "square_wrist": true,
+    "squeeze_floor": true,
+    "wrist_fix": true
+   }
+  },
+  "layout_seed": 5,
+  "n_action_steps": 1,
+  "num_bricks": 3,
+  "num_envs": 1,
+  "parts": [
+   "brick_2x4",
+   "brick_2x2",
+   "brick_1x4"
+  ],
+  "perception": {
+   "box_wall_rakes": 0,
+   "box_wall_refusals": 0,
+   "contact_hold": false,
+   "lifts_classified": 3,
+   "lifts_empty": 0,
+   "look_again_found": 0,
+   "look_again_steps": 0,
+   "look_again_waits": 0,
+   "marker_error_mm": 2.0189949425942233,
+   "marker_looks": 3,
+   "noise_scales": "pos=1,heading=1,size=1,box=1,miss=1,class=1,tool=1,wrist=1,wrist_bias=1,wrist_miss=1,rho=1,torque=1,torque_k=1",
+   "perceived": true,
+   "rearms": 0,
+   "selections": 3,
+   "third_views": 0,
+   "votes_changed": 0,
+   "wrist_covered": 0,
+   "wrist_looks": 3,
+   "wrist_misses": 0,
+   "wrist_shift_mm": 5.446474153398093,
+   "wrist_turn_deg": 14.41580972964254,
+   "wrong_overhead_class": 0,
+   "wrong_voted_class": 0,
+   "wrong_wrist_class": 0
+  },
+  "permutation": [
+   0,
+   1,
+   2,
+   3
+  ],
+  "policy_id": "fake:teacher",
+  "rakes": 0,
+  "run_seed": 11,
+  "spatial_scale": 1.0,
+  "steps_run": 1596,
+  "steps_total": 1596,
+  "stowed_by_box": [
+   {
+    "stowed": 2,
+    "total": 2
+   },
+   {
+    "stowed": 1,
+    "total": 1
+   },
+   {
+    "stowed": 0,
+    "total": 0
+   },
+   {
+    "stowed": 0,
+    "total": 0
+   }
+  ],
+  "stowed_by_box_count": {
+   "4": {
+    "stowed": 3,
+    "total": 3
+   }
+  },
+  "stowed_by_class": {
+   "narrow": {
+    "stowed": 1,
+    "total": 1
+   },
+   "slope": {
+    "stowed": 0,
+    "total": 0
+   },
+   "tall": {
+    "stowed": 0,
+    "total": 0
+   },
+   "wide": {
+    "stowed": 2,
+    "total": 2
+   }
+  },
+  "stowed_by_family": {
+   "brick": {
+    "stowed": 3,
+    "total": 3
+   }
+  },
+  "stowed_heldout": {
+   "stowed": 0,
+   "total": 0
+  },
+  "stowed_total": 3,
+  "stows_per_hour": 203.00751879699249,
+  "takeovers": 0,
+  "takeovers_declined": 0,
+  "takeovers_failed": 0,
+  "takeovers_stowed": 0,
+  "torque": {
+   "approach_force": {
+    "max": 1.32,
+    "p50": 0.31,
+    "p90": 0.58,
+    "steps": 1056
+   },
+   "force_cap": true,
+   "force_cap_n": 15.0,
+   "force_capped": 0,
+   "hold_blocked": 0,
+   "hold_blocked_cycles": 0,
+   "hold_force": true,
+   "hold_force_max_n": 5.0,
+   "torque": 1.0,
+   "torque_k": 1.0
+  },
+  "triggers": {},
+  "wrong_box_cycles": 0,
+  "wrong_box_parts": 0
+ },
+ "tray": {
+  "clamp_fraction": 0.0,
+  "context": "camera_box_target",
+  "cycle_budget": 4,
+  "cycle_intervals": {
+   "by_outcome": {
+    "close_miss": {
+     "cycles": 3,
+     "steps": [
+      2400,
+      0,
+      0,
+      0
+     ]
+    },
+    "stowed": {
+     "cycles": 1,
+     "steps": [
+      44,
+      43,
+      79,
+      21
+     ]
+    }
+   },
+   "names": [
+    "select_to_close",
+    "close_to_lift",
+    "lift_to_release",
+    "release_to_next"
+   ]
+  },
+  "cycle_step_budget": 800,
+  "cycles_per_stowed": 4.0,
+  "cycles_total": 4,
+  "episode_draws": false,
+  "episodes": [
+   {
+    "box_count": 5,
+    "box_draw_rounds": 0,
+    "box_poses": [
+     [
+      0.0359,
+      -0.1816,
+      -0.2331
+     ],
+     [
+      0.0694,
+      0.1987,
+      -0.1316
+     ],
+     [
+      0.1474,
+      -0.1806,
+      0.0
+     ],
+     [
+      0.2185,
+      0.1893,
+      0.305
+     ],
+     [
+      0.25,
+      -0.1932,
+      -0.0
+     ]
+    ],
+    "box_sizes": [
+     [
+      0.0722,
+      0.0836,
+      0.0374
+     ],
+     [
+      0.0814,
+      0.0704,
+      0.0314
+     ],
+     [
+      0.0713,
+      0.0981,
+      0.0447
+     ],
+     [
+      0.0727,
+      0.0735,
+      0.0351
+     ],
+     [
+      0.0739,
+      0.0989,
+      0.0368
+     ]
+    ],
+    "bricks_stowed": 1,
+    "clamp_overshoot_max_per_joint": [
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ],
+    "clamp_steps": 0,
+    "clamp_steps_per_joint": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "class_boxes": {
+     "brick": [
+      0,
+      4,
+      2
+     ],
+     "special": [
+      1,
+      3
+     ]
+    },
+    "class_to_box": {
+     "brick": 0,
+     "special": 1
+    },
+    "closes_held_window": [],
+    "closes_nearest_cm": [],
+    "cycle_census": [
+     {
+      "adopted": -1,
+      "close_below": 0.0153,
+      "close_edges": 2,
+      "closed_steps": 192,
+      "ctx_stale": 0.0052,
+      "dwell_closes": 0,
+      "first_close_at": 360,
+      "first_held": -1,
+      "first_held_at": null,
+      "first_held_is_target": false,
+      "first_hold_at": null,
+      "floored_steps": 0,
+      "gap_close": 0.0018,
+      "gated_steps": 0,
+      "grace_steps": 0,
+      "held_steps": 0,
+      "hold_detected": false,
+      "last_held": -1,
+      "last_held_is_target": false,
+      "lift_class": null,
+      "lift_detected": false,
+      "max_rise": 0.0,
+      "off_across": -0.0282,
+      "off_along": 0.0826,
+      "off_x": 0.0026,
+      "off_y": 0.0872,
+      "off_z": 0.0011,
+      "open_steps": 608,
+      "pick_z_close": 0.0059,
+      "pick_z_max": 0.1458,
+      "read_class": "special",
+      "rearms": 0,
+      "refreshes": 0,
+      "reopen_steps": 96,
+      "rider_read": false,
+      "snap_held_steps": 0,
+      "snapped_steps": 0,
+      "squared_steps": 0,
+      "squeeze_margin": -0.0135,
+      "taken_class": null,
+      "target_in_box": false,
+      "vote_lost": false,
+      "wait_capped": false,
+      "wait_steps": 0
+     },
+     {
+      "adopted": -1,
+      "close_below": 0.0153,
+      "close_edges": 4,
+      "closed_steps": 384,
+      "ctx_stale": 0.0019,
+      "dwell_closes": 0,
+      "first_close_at": 16,
+      "first_held": -1,
+      "first_held_at": null,
+      "first_held_is_target": false,
+      "first_hold_at": null,
+      "floored_steps": 0,
+      "gap_close": 0.0018,
+      "gated_steps": 0,
+      "grace_steps": 0,
+      "held_steps": 0,
+      "hold_detected": false,
+      "last_held": -1,
+      "last_held_is_target": false,
+      "lift_class": null,
+      "lift_detected": false,
+      "max_rise": 0.0,
+      "off_across": 0.0285,
+      "off_along": 0.0315,
+      "off_x": 0.0028,
+      "off_y": 0.0424,
+      "off_z": 0.0011,
+      "open_steps": 416,
+      "pick_z_close": 0.0059,
+      "pick_z_max": 0.1457,
+      "read_class": "special",
+      "rearms": 0,
+      "refreshes": 0,
+      "reopen_steps": 96,
+      "rider_read": false,
+      "snap_held_steps": 0,
+      "snapped_steps": 0,
+      "squared_steps": 0,
+      "squeeze_margin": -0.0135,
+      "taken_class": null,
+      "target_in_box": false,
+      "vote_lost": false,
+      "wait_capped": false,
+      "wait_steps": 0
+     },
+     {
+      "adopted": -1,
+      "close_below": 0.0319,
+      "close_edges": 3,
+      "closed_steps": 624,
+      "ctx_stale": 0.0026,
+      "dwell_closes": 0,
+      "first_close_at": 16,
+      "first_held": -1,
+      "first_held_at": null,
+      "first_held_is_target": false,
+      "first_hold_at": null,
+      "floored_steps": 0,
+      "gap_close": 0.0158,
+      "gated_steps": 0,
+      "grace_steps": 0,
+      "held_steps": 0,
+      "hold_detected": false,
+      "last_held": -1,
+      "last_held_is_target": false,
+      "lift_class": null,
+      "lift_detected": false,
+      "max_rise": 0.0,
+      "off_across": 0.0826,
+      "off_along": 0.0284,
+      "off_x": 0.0027,
+      "off_y": 0.0873,
+      "off_z": 0.1012,
+      "open_steps": 176,
+      "pick_z_close": 0.106,
+      "pick_z_max": 0.1457,
+      "read_class": "special",
+      "rearms": 0,
+      "refreshes": 0,
+      "reopen_steps": 208,
+      "rider_read": false,
+      "snap_held_steps": 7,
+      "snapped_steps": 7,
+      "squared_steps": 7,
+      "squeeze_margin": -0.0161,
+      "taken_class": null,
+      "target_in_box": false,
+      "vote_lost": false,
+      "wait_capped": false,
+      "wait_steps": 0
+     },
+     {
+      "adopted": -1,
+      "close_below": 0.0172,
+      "close_edges": 0,
+      "closed_steps": 0,
+      "ctx_stale": null,
+      "dwell_closes": 0,
+      "first_close_at": null,
+      "first_held": 0,
+      "first_held_at": 38,
+      "first_held_is_target": false,
+      "first_hold_at": 44,
+      "floored_steps": 0,
+      "gap_close": null,
+      "gated_steps": 0,
+      "grace_steps": 0,
+      "held_steps": 128,
+      "hold_detected": true,
+      "last_held": 0,
+      "last_held_is_target": false,
+      "lift_class": "brick",
+      "lift_detected": true,
+      "max_rise": 0.1008,
+      "off_across": null,
+      "off_along": null,
+      "off_x": null,
+      "off_y": null,
+      "off_z": null,
+      "open_steps": 186,
+      "pick_z_close": null,
+      "pick_z_max": null,
+      "read_class": "special",
+      "rearms": 0,
+      "refreshes": 0,
+      "reopen_steps": null,
+      "rider_read": false,
+      "snap_held_steps": 0,
+      "snapped_steps": 0,
+      "squared_steps": 0,
+      "squeeze_margin": null,
+      "taken_class": "brick",
+      "target_in_box": false,
+      "vote_lost": false,
+      "wait_capped": false,
+      "wait_steps": 0
+     }
+    ],
+    "cycle_classes": [
+     "close_miss",
+     "close_miss",
+     "close_miss",
+     "stowed"
+    ],
+    "cycle_first_close_cm": [
+     8.72,
+     4.25,
+     8.74,
+     null
+    ],
+    "cycle_intervals": [
+     [
+      800,
+      0,
+      0,
+      0
+     ],
+     [
+      800,
+      0,
+      0,
+      0
+     ],
+     [
+      800,
+      0,
+      0,
+      0
+     ],
+     [
+      44,
+      43,
+      79,
+      21
+     ]
+    ],
+    "cycle_outcomes": [
+     false,
+     false,
+     false,
+     true
+    ],
+    "cycle_reasons": [
+     "budget",
+     "budget",
+     "budget",
+     "placed"
+    ],
+    "cycle_steps": [
+     800,
+     800,
+     800,
+     186
+    ],
+    "cycle_targets": [
+     0,
+     1,
+     0,
+     1
+    ],
+    "cycles": 4,
+    "done_reason": "cycle_budget",
+    "emptied_parts": [
+     [
+      0,
+      0,
+      true
+     ]
+    ],
+    "env_index": 0,
+    "events": {
+     "box_empty": 1,
+     "tray_refill": 1
+    },
+    "first_close_step": 360,
+    "grasp_attempts": 0,
+    "grasp_attempts_unresolved": 0,
+    "grasp_successes": 0,
+    "grasp_successes_strict": 0,
+    "gripper_band_steps": 2587,
+    "gripper_open_steps": 1387,
+    "gripper_transitions": 18,
+    "hidden_share": [
+     0.0,
+     0.3333333333333333,
+     0.3333333333333333,
+     0.3333333333333333
+    ],
+    "left_parts": [
+     [
+      0,
+      3.0,
+      0.0,
+      1.0,
+      0,
+      0
+     ],
+     [
+      1,
+      0.195,
+      -0.0,
+      0.0048,
+      0,
+      1
+     ],
+     [
+      2,
+      0.1675,
+      -0.0561,
+      0.0039,
+      0,
+      0
+     ]
+    ],
+    "num_bricks": 3,
+    "rakes": 0,
+    "releases": [],
+    "select_wait_steps": 0,
+    "steps": 2587,
+    "stowed_by_box": [
+     {
+      "stowed": 1,
+      "total": 3
+     },
+     {
+      "stowed": 0,
+      "total": 0
+     },
+     {
+      "stowed": 0,
+      "total": 0
+     },
+     {
+      "stowed": 0,
+      "total": 0
+     },
+     {
+      "stowed": 0,
+      "total": 0
+     }
+    ],
+    "stowed_by_category": {
+     "brick": {
+      "stowed": 1,
+      "total": 3
+     },
+     "special": {
+      "stowed": 0,
+      "total": 0
+     }
+    },
+    "stowed_by_class": {
+     "brick": {
+      "stowed": 1,
+      "total": 3
+     },
+     "special": {
+      "stowed": 0,
+      "total": 0
+     }
+    },
+    "stowed_by_family": {
+     "brick": {
+      "stowed": 1,
+      "total": 3
+     }
+    },
+    "stowed_families": [
+     "brick"
+    ],
+    "stowed_heldout": {
+     "stowed": 0,
+     "total": 0
+    },
+    "stowed_parts": [
+     0
+    ],
+    "success": false,
+    "takeovers": 0,
+    "takeovers_failed": 0,
+    "takeovers_stowed": 0,
+    "torque": {
+     "approach_force": {
+      "max": 1.21,
+      "p50": 0.3,
+      "p90": 0.57,
+      "steps": 578
+     },
+     "force_capped": 0,
+     "hold_blocked": 0,
+     "hold_blocked_cycles": 0
+    },
+    "wrong_bin_deposits": 0,
+    "wrong_box_parts": 0
+   }
+  ],
+  "events": {
+   "box_empty": 1,
+   "tray_refill": 1
+  },
+  "frame_jitter": false,
+  "gripper": "continuous",
+  "heap_k": 3,
+  "hidden_share_mean": 0.25,
+  "hold_agreement": {
+   "cycles": 4,
+   "first_hold_offset_median": 6,
+   "hold": {
+    "fn": 0,
+    "fp": 0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "tn": 3,
+    "tp": 1
+   },
+   "lift": {
+    "fn": 0,
+    "fp": 0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "tn": 3,
+    "tp": 1
+   },
+   "offset_cycles": 1
+  },
+  "inference": {
+   "loop": {
+    "adopt_held": true,
+    "box_filter_xy": true,
+    "box_walls": true,
+    "cell_failure_cap": 5,
+    "class_views": true,
+    "classifier": "stub_special_brick_-1.0.pt",
+    "close_gate": false,
+    "contact_hold": false,
+    "dwell_close": true,
+    "force_cap": true,
+    "hold_force": true,
+    "marker_bias": true,
+    "missed_lift": true,
+    "noise_scales": "pos=1,heading=1,size=1,box=1,miss=1,class=1,tool=1,wrist=1,wrist_bias=1,wrist_miss=1,rho=1,torque=1,torque_k=1",
+    "park_done": true,
+    "part_failures": true,
+    "passenger_drop": false,
+    "perceived": true,
+    "pick_snap": true,
+    "rake_cap": 0,
+    "rake_crowd": false,
+    "rake_turn": true,
+    "rearm_hold": true,
+    "release_gap": true,
+    "replan_on_switch": true,
+    "row_refresh": false,
+    "scripted_place": false,
+    "scripted_rake": true,
+    "select_at_release": true,
+    "square_wrist": true,
+    "squeeze_floor": true,
+    "wrist_fix": true
+   }
+  },
+  "layout_seed": 5,
+  "n_action_steps": 1,
+  "num_bricks": 3,
+  "num_envs": 1,
+  "parts": [
+   "brick_2x4",
+   "brick_2x2",
+   "brick_1x4"
+  ],
+  "perception": {
+   "box_wall_rakes": 0,
+   "box_wall_refusals": 0,
+   "carried_rechecks": 0,
+   "carried_releases": 0,
+   "contact_hold": false,
+   "lifts_classified": 1,
+   "lifts_empty": 0,
+   "look_again_found": 0,
+   "look_again_steps": 0,
+   "look_again_waits": 0,
+   "marker_error_mm": 2.4184926670205105,
+   "marker_looks": 5,
+   "missed_lifts": 0,
+   "noise_scales": "pos=1,heading=1,size=1,box=1,miss=1,class=1,tool=1,wrist=1,wrist_bias=1,wrist_miss=1,rho=1,torque=1,torque_k=1",
+   "passenger_drops": 0,
+   "passenger_reads": 0,
+   "perceived": true,
+   "rearms": 0,
+   "selections": 4,
+   "third_views": 1,
+   "votes_changed": 0,
+   "votes_lost": 0,
+   "wrist_covered": 0,
+   "wrist_looks": 1,
+   "wrist_misses": 0,
+   "wrist_shift_mm": 1.91966652603406,
+   "wrist_turn_deg": 0.8341659946617915,
+   "wrong_overhead_class": 4,
+   "wrong_voted_class": 0,
+   "wrong_wrist_class": 0
+  },
+  "permutation": [
+   0,
+   1,
+   2,
+   3
+  ],
+  "policy_id": "fake:teacher",
+  "rakes": 0,
+  "run_seed": 11,
+  "spatial_scale": 1.0,
+  "steps_run": 2587,
+  "steps_total": 2587,
+  "stowed_by_box": [
+   {
+    "stowed": 1,
+    "total": 3
+   },
+   {
+    "stowed": 0,
+    "total": 0
+   },
+   {
+    "stowed": 0,
+    "total": 0
+   },
+   {
+    "stowed": 0,
+    "total": 0
+   },
+   {
+    "stowed": 0,
+    "total": 0
+   }
+  ],
+  "stowed_by_box_count": {
+   "5": {
+    "stowed": 1,
+    "total": 3
+   }
+  },
+  "stowed_by_category": {
+   "brick": {
+    "stowed": 1,
+    "total": 3
+   },
+   "special": {
+    "stowed": 0,
+    "total": 0
+   }
+  },
+  "stowed_by_class": {
+   "brick": {
+    "stowed": 1,
+    "total": 3
+   },
+   "special": {
+    "stowed": 0,
+    "total": 0
+   }
+  },
+  "stowed_by_family": {
+   "brick": {
+    "stowed": 1,
+    "total": 3
+   }
+  },
+  "stowed_heldout": {
+   "stowed": 0,
+   "total": 0
+  },
+  "stowed_total": 1,
+  "stows_per_hour": 41.747197526092,
+  "takeovers": 0,
+  "takeovers_declined": 0,
+  "takeovers_failed": 0,
+  "takeovers_stowed": 0,
+  "torque": {
+   "approach_force": {
+    "max": 1.21,
+    "p50": 0.3,
+    "p90": 0.57,
+    "steps": 578
+   },
+   "force_cap": true,
+   "force_cap_n": 15.0,
+   "force_capped": 0,
+   "hold_blocked": 0,
+   "hold_blocked_cycles": 0,
+   "hold_force": true,
+   "hold_force_max_n": 5.0,
+   "torque": 1.0,
+   "torque_k": 1.0
+  },
+  "triggers": {},
+  "wrong_box_cycles": 0,
+  "wrong_box_parts": 0
+ }
+}
