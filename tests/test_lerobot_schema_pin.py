@@ -50,3 +50,11 @@ def test_the_part_classifier_names_the_ms7f_categories_in_order():
     text = (CONVERT.parent / "train_part_classifier.py").read_text()
     pinned = re.search(r"^CATEGORIES = \(([^)]*)\)", text, re.MULTILINE).group(1)
     assert tuple(v.strip().strip('"') for v in pinned.split(",")) == PART_CATEGORIES
+
+
+def test_the_corpus_mask_names_lift_and_reopen_by_their_ids():
+    from maker_arm_lab.core.oracle import PHASE_TO_INT
+
+    text = (CONVERT.parent / "reopen_mask.py").read_text()
+    lift, reopen = re.search(r"^LIFT_INT, REOPEN_INT = (\d+), (\d+)", text, re.MULTILINE).groups()
+    assert (int(lift), int(reopen)) == (PHASE_TO_INT["LIFT"], PHASE_TO_INT["REOPEN"])
