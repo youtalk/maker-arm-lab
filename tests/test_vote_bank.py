@@ -65,3 +65,52 @@ def test_the_fit_recovers_the_vote_that_drew_the_classes():
     centred = b - b.mean()
     for n, want in zip(NAMES, centred):
         assert vote["bias"][n] == pytest.approx(want, abs=0.15), n
+
+
+def test_each_form_scores_with_its_view_matrices():
+    """Ledger D7: nine values, a weight a view and class (v2) and a full matrix a view (v3), each
+    with a bias a class; a missing view drops out of every form."""
+    rng = np.random.default_rng(5)
+    k = len(NAMES)
+    diag, full, bias = (
+        rng.normal(1, 0.3, (3, k)),
+        rng.normal(0, 0.5, (3, k, k)),
+        rng.normal(0, 1, k),
+    )
+    v2 = {
+        "weights": {v: dict(zip(NAMES, diag[i])) for i, v in enumerate(bank.VIEWS)},
+        "bias": dict(zip(NAMES, bias)),
+    }
+    v3 = {
+        "matrix": {
+            v: {n: dict(zip(NAMES, full[i, a])) for a, n in enumerate(NAMES)}
+            for i, v in enumerate(bank.VIEWS)
+        },
+        "bias": dict(zip(NAMES, bias)),
+    }
+    for _ in range(200):
+        views = [np.log(rng.dirichlet(np.ones(k))) for _ in range(3)]
+        for given in (views, views[:2] + [None]):
+            want2 = bias + sum(diag[i] * x for i, x in enumerate(given) if x is not None)
+            want3 = bias + sum(full[i] @ x for i, x in enumerate(given) if x is not None)
+            assert bank.fused_class(v2, NAMES, *given) == int(np.argmax(want2))
+            assert bank.fused_class(v3, NAMES, *given) == int(np.argmax(want3))
+            rows = [{"logp": tuple(given), "truth": 0, "heldout": False}]
+            judged = bank.judge(rows, list(NAMES), v3)["whole"]["fused"]["right"]
+            assert judged == int(np.argmax(want3) == 0)
+
+
+def test_the_stacker_picks_its_l2_by_folds_of_files():
+    rng = np.random.default_rng(9)
+    rows = []
+    for n in range(600):
+        logp = [np.log(rng.dirichlet(np.full(len(NAMES), 0.7))) for _ in range(3)]
+        truth = int(np.argmax(logp[0] + logp[1] + rng.gumbel(size=len(NAMES))))
+        rows.append({"logp": tuple(logp), "truth": truth, "file": n % 7})
+    for form in ("v2", "v3"):
+        vote = bank.fit(rows, list(NAMES), form)
+        assert set(vote["bias"]) == set(NAMES) and vote["form"] == form
+        assert ("matrix" in vote) == (form == "v3") and ("weights" in vote) == (form == "v2")
+    assert vote["fit"]["l2"] in bank.L2_GRID and len(vote["fit"]["cv_nll"]) == len(bank.L2_GRID)
+    best = min(vote["fit"]["cv_nll"].values())
+    assert vote["fit"]["cv_nll"][str(vote["fit"]["l2"])] == best
