@@ -205,8 +205,11 @@ jaws until it is over its box and hands a still carry to the rig. While the hold
 a part whose hold read a lift (or a ``missed_lift`` carry is under way) and the FK pick point is
 not ``GUARD_BOX_MARGIN_M`` inside the interior of the box the loop serves now (``in_box_interior``,
 after any late vote), a gripper command that would end the hold is served closed
-(``guarded_gap``). A stall is ``GUARD_STALL_STEPS`` such steps in a row or the census's air
-stall (``AirStall``) for ``AIR_STALL_STEPS`` steps of the cycle. On a stall with a held part the
+(``guarded_gap``). While a class vote is pending no box is served, since the vote can still move
+it: on the MS7g read g_cg_scr 16 of the 26 class-right wrong-box cycles had a split vote that
+overturned a wrong overhead read, and opened over a wrong box, 15 of them with no guard step. A
+stall is ``GUARD_STALL_STEPS`` such steps in a row, the vote's steps not counted, or the census's
+air stall (``AirStall``) for ``AIR_STALL_STEPS`` steps of the cycle. On a stall with a held part the
 loop hands the part to the rig's perceived carry (``_hand_off``, ``OracleRig.resume(carry=...)``),
 which carries it to the served box at ``carry_release_z``, releases it there and retreats; the
 loop grades the carry as it grades a perceived release (``_end_handoff``). On an air stall with
@@ -1200,12 +1203,14 @@ class Cycle:
     air_stalls: int = 0  # stall entries while it holds a part
     # MS7g ``carry_guard`` (None and unexported without it): the steps the guard held an open
     # command closed, those inside the served box's interior but within GUARD_BOX_MARGIN_M of
-    # its walls, the current run of them and the run's fixed gap (``guarded_gap``); the rig
-    # carry's outcome ("carrying" while it runs, ``_end_handoff``) and whether the hold ended
-    # over a perceived box during it; whether an empty air stall opened the jaws; the
-    # selection's perceived scene, the carry's ``takeover_scene``.
+    # its walls, those inside it while a class vote was pending, the current run of them and
+    # the run's fixed gap (``guarded_gap``); the rig carry's outcome ("carrying" while it runs,
+    # ``_end_handoff``) and whether the hold ended over a perceived box during it; whether an
+    # empty air stall opened the jaws; the selection's perceived scene, the carry's
+    # ``takeover_scene``.
     guard_steps: int | None = None
     guard_rim_steps: int = 0
+    guard_vote_steps: int = 0
     guard_run: int = 0
     guard_gap: float | None = None
     handoff: str | None = None
@@ -2015,9 +2020,10 @@ CLASSIFIER_CENSUS = ("read_class", "lift_class", "taken_class", "vote_lost", "ri
 selection, the last lift's wrist read, the class that set the box at that lift or at its vote
 (None when no lift was read or the vote was lost, so the selection's box stayed), and whether
 the vote was lost or the passenger head fired. Observation only."""
-CARRY_GUARD_CENSUS = ("guard_steps", "guard_rim_steps", "handoff", "stall_open")
+CARRY_GUARD_CENSUS = ("guard_steps", "guard_rim_steps", "guard_vote_steps", "handoff", "stall_open")
 """``carry_guard``'s fields in a ``cycle_census`` row, there only with the switch on: the guard's
-steps, those over the served box's rim band, the rig carry's outcome (None: no handoff;
+steps, those over the served box's rim band, those inside the served box while a class vote was
+pending (held by the vote rule alone), the rig carry's outcome (None: no handoff;
 "placed", "lifted_lost", "failed", "declined", or "carrying" when the episode ended during it)
 and whether an empty air stall opened the jaws and failed the cycle."""
 MISSED_LIFT_COUNTS = ("missed_lifts", "carried_releases", "carried_rechecks")
@@ -3002,17 +3008,22 @@ def rollout(
                 d, p = detectors[i], st.perceiver
                 pose, size = p.box_poses[c.box], p.box_sizes[c.box]
                 lifted = d.lifted or (c.carried and not c.carry_released)
-                inside = in_box_interior(picks[i][:2], pose, size, GUARD_BOX_MARGIN_M)
+                # A pending class vote can still move the box: no box is served until it decides.
+                voting = c.vote is not None or c.lift_view is not None
+                deep = in_box_interior(picks[i][:2], pose, size, GUARD_BOX_MARGIN_M)
+                inside = deep and not voting
                 guarding = d.holding and lifted and not inside and c.handoff != "declined"
                 gap, kept = float(action_cpu[i, 6]), None
                 if guarding:
                     gap, kept = guarded_gap(gap, float(gaps[i]), gap_cmd[i], c.guard_gap)
                 c.guard_gap = kept
-                c.guard_run = 0 if kept is None else c.guard_run + 1
+                # A vote's steps are no stall: the policy opens over the box it was served.
+                c.guard_run = 0 if kept is None else c.guard_run + (not voting)
                 if kept is not None:
                     action_cpu[i, 6] = gap
                     c.guard_steps += 1
-                    c.guard_rim_steps += in_box_interior(picks[i][:2], pose, size)
+                    c.guard_vote_steps += voting and deep
+                    c.guard_rim_steps += not voting and in_box_interior(picks[i][:2], pose, size)
         for i, st in enumerate(states):
             if st.opening:
                 action_cpu[i, 6] = 2.0 * GRIPPER_OPEN_POS  # ``passenger_drop``: let both go
