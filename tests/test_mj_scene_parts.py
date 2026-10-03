@@ -182,7 +182,7 @@ def test_every_ldraw_part_rests_on_the_desk(ldraw_built):
     model, h = ldraw_built
     data = mujoco.MjData(model)
     for b, adr in enumerate(h.brick_qpos):
-        data.qpos[adr : adr + 3] = (0.10 + 0.07 * (b % 3), -0.42 + 0.05 * (b // 3), 0.03)
+        data.qpos[adr : adr + 3] = (0.10 + 0.07 * (b % 4), -0.42 + 0.05 * (b // 4), 0.03)
         data.qpos[adr + 3 : adr + 7] = (1.0, 0.0, 0.0, 0.0)
     mujoco.mj_forward(model, data)
     mujoco.mj_step(model, data, nstep=720)

@@ -97,6 +97,27 @@ the minifig heap read (run 20303500 + i, layout 20303550 + i) its 21 cycles took
 each against 346 for the parts of the same seeds without the new families."""
 LDRAW_FAMILY_IDS = {"ldraw": LDRAW_IDS, "joint": JOINT_IDS, "minifig": MINIFIG_IDS}
 """Every family read from ``LDRAW_DIR``, with its part ids in catalog order."""
+CLASSIFIER_EXTRA_V12 = (
+    *("brick_1x3x2", "brick_1x4x2", "brick_1x5x2", "brick_1x8x2", "brick_1x3x5"),
+    *("brick_1x1x4", "brick_2x2x4", "brick_2x4x3", "brick_2x6x2", "brick_2x8x2"),
+    *("brick_1x12", "brick_4x10"),
+    *("ldraw_47905", "ldraw_32952", "ldraw_2434", "ldraw_5565", "ldraw_2730", "ldraw_73230"),
+    *("ldraw_32064a", "ldraw_60477", "ldraw_61678", "ldraw_54200", "ldraw_42022", "ldraw_3297"),
+    *("ldraw_30363", "ldraw_3678b", "ldraw_6081"),
+    *("slope_1x5", "slope_1x6", "slope_1x4x2"),
+    *("plate_1x10", "plate_2x10", "tile_1x10", "tile_2x6"),
+    *("joint_3713", "joint_4519", "joint_32062"),
+    *("minifig_3878", "minifig_4485b"),
+)
+"""The classifier-only kinds MS7g adds for classifier v12 (MS7g design section 6.4), by MS7f
+D4's rule and chosen against the in-loop confusions of brick and special: side-stud and Technic
+bricks, slopes of other sizes and angles, a curved-top brick, taller and longer bricks, and a
+few flat, joint and minifig kinds. None shares a catalog kind's LDraw part number or, for a
+primitive, a held-out kind's family and footprint (``tests/test_parts.py``). The lone-part
+table (``scripts/mj_part_table.py``, 2026-10-03) stowed every kind at least 10 of 12 times and
+left out the double inverted slopes 32802 (2) and 4871 (8) and the 1x4 cheese slope 7835 (3,
+through the box floor). The list, each kind's category, the kinds left out and why:
+``~/data/maker-arm-ms7/g/tables/kinds/kinds_v12.txt``."""
 CLASSIFIER_EXTRA = (
     *("brick_1x1x2", "brick_1x1x5", "brick_1x4x3", "brick_2x2x2", "brick_2x4x2"),
     *("brick_1x10", "brick_2x10"),
@@ -109,6 +130,7 @@ CLASSIFIER_EXTRA = (
     *("joint_4276b", "joint_44301a", "joint_2430", "joint_14419"),
     *("minifig_6132", "minifig_3625", "minifig_3959", "minifig_973c01", "minifig_30162"),
     *("minifig_86035", "minifig_30135", "minifig_4530", "minifig_6025"),
+    *CLASSIFIER_EXTRA_V12,
 )
 """Kinds only the category classifier's render set sees (MS7f, the controller's deviation of
 2026-09-30): in no catalog, no split and no ``catalog_index``, so the catalog's held-out kinds

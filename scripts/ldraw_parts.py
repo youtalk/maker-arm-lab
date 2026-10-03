@@ -132,6 +132,27 @@ PARTS = {
     "30135": ((0, 1, 2), "a kepi as 3624: z top to rim, x and y across the crown and the peak"),
     "4530": ((0, 1, 2), "shoulder-length hair, as 3901"),
     "6025": ((0, 1, 2), "islander hair, as 3901"),
+    # MS7g classifier extras (classifier v12): in no catalog and no split.
+    "47905": ((0, 2), "y runs through the two side studs, as 87087's"),
+    "32952": ((0, 2), "y runs through the side studs, as 87087's"),
+    "2434": ((0, 2), "y runs through the studs on both long sides; x (32 mm) on the plain ends"),
+    "5565": ((0, 1, 2), "box-shaped like 3700"),
+    "2730": ((0, 1, 2), "box-shaped like 3700; x (80 mm) is over the grasp limit"),
+    "73230": ((0, 1, 2), "box-shaped like 6541"),
+    "32064a": ((0, 1, 2), "box-shaped like 3700"),
+    "60477": ((1, 2), "the 18 degree slope runs along x; y on the flat sides, z as a slope's"),
+    "61678": ((1, 2), "the curved slope runs along x; y on the flat sides, z as a slope's"),
+    "54200": ((0, 2), "the slope runs across y; x on the flat ends, z as a slope's"),
+    "42022": ((1, 2), "the curved slope runs along x (48 mm, over the grasp limit)"),
+    "3297": ((0, 2), "the 33 degree slope runs along y; x (32 mm) on the flat ends"),
+    "30363": ((1, 2), "the 18 degree slope runs along x; y on the flat sides, z as a slope's"),
+    "3678b": ((0, 2), "the 65 degree slope runs along y; x on the flat sides, z as a slope's"),
+    "6081": ((0, 2), "the curved top falls across y to the sides; x (32 mm) on the flat ends"),
+    "3713": ((0, 1, 2), "a bush: x on the two flanges, y and z across them"),
+    "4519": ((0, 1, 2), "an axle: x on the flat ends, y and z across the cross"),
+    "32062": ((0, 1, 2), "an axle as 4519"),
+    "3878": ((0, 1, 2), "a top hat as 3624: z top to brim, x and y across the brim"),
+    "4485b": ((0, 1, 2), "a cap as 86035: z top to rim, x and y across the crown and the peak"),
 }
 """Part id -> (closing axes, reason). The axes are body axes after this tool's orientation.
 
@@ -147,6 +168,8 @@ against 1.2 to 1.8 N across x on the table, or nothing). On the joint heap read 
 parts: 113877 of the joint read's 168738 steps, a median of 10 close edges a cycle."""
 HORIZONTAL_FILL = ("3700", "3701", "3894", "4490", "3659", "87087", "11211", "3660")
 HORIZONTAL_FILL += ("3037", "3298", "3665a", "3702", "32000", "6541", "4070", "30414")
+HORIZONTAL_FILL += ("47905", "32952", "2434", "5565", "2730", "73230", "32064a", "60477")
+HORIZONTAL_FILL += ("61678", "54200", "42022", "3297", "30363", "3678b", "6081")
 """The ``ldraw`` family's parts (MS7e and the classifier extras) fill their horizontal slices
 only, so 3700's pin hole stays open. Every joint and minifig part fills its slices across all
 three axes: a pin lies along x, and only its x slices close its bore (MS7f design section 13)."""
