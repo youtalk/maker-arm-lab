@@ -220,10 +220,13 @@ the part fell into the box of the overhead read, and on the video diagnosis trac
 tray (MS7g design 3.2, M1 and F1). It refuses ``passenger_drop``, which opens over the tray on
 purpose. The census rows then carry ``CARRY_GUARD_CENSUS``.
 
-``clear_first`` (MS7g design 5.3, under ``perceived``, off by default and in the ``inference``
-block only when on) ranks the perceived selector's grasps that sweep no standing neighbour before
-the height band (``grasp.rank_grasps``), so it can change the target part; the teacher's rank
-stays.
+Two MS7g selector switches (MS7g design 5.3 and 5.4), under ``perceived``, off by default and in
+the ``inference`` block only when on. ``clear_first`` ranks the perceived selector's grasps that
+sweep no standing neighbour before the height band (``grasp.rank_grasps``), so it can change the
+target part; the teacher's rank stays. ``overhang_guard`` (with the tray) refuses a part outside
+the tray interior under a tray wall's top edge (``grasp.under_overhang``), as neither a target
+nor a rake, and keeps the carry grace for a cycle that read a lift (``grace_hold``). The
+``perception`` block then carries ``OVERHANG_COUNTS``.
 
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
@@ -564,6 +567,16 @@ def budget_ends_cycle(steps: int, held: bool, grace_used: int) -> bool:
     if steps < CYCLE_STEP_BUDGET:
         return False
     return not held or grace_used >= CARRY_GRACE_STEPS
+
+
+def grace_hold(holding: bool, lifted: bool, overhang_guard: bool) -> bool:
+    """``perceived``: the held read ``budget_ends_cycle`` keeps a cycle open on, the hold
+    detector's hold (``holding``). Under ``overhang_guard`` (MS7g design 5.4) only a cycle that
+    read a lift (``lifted``: the detector's lift or the ``missed_lift`` carry) holds: the
+    detector reads a clamp on a wall top as a hold, and in the MS7f video diagnosis (draw 19
+    cycle 18, 2026-10-03) the grace then kept the arm on such a clamp for 680 more steps.
+    Pure."""
+    return holding and (lifted or not overhang_guard)
 
 
 """Control steps a part must stay between the jaws to count as held in the cycle census: the
@@ -2035,6 +2048,10 @@ MISSED_LIFT_COUNTS = ("missed_lifts", "carried_releases", "carried_rechecks")
 """``missed_lift``'s ``perception`` counts, in the payload only with the switch on: the carries
 ``carry_started`` read, the cycles a release ``carry_lost`` started ended, and the selections
 after one that still saw a part at the target's position and booked a failure there."""
+OVERHANG_COUNTS = ("overhang_refusals",)
+"""``overhang_guard``'s ``perception`` count, in the payload only with the switch on: over the
+selections that opened a cycle, the parts the band refused at that selection
+(``HeapOracle.overhang_refused``)."""
 TORQUE_COUNTS = ("force_capped", "hold_blocked", "hold_blocked_cycles")
 """The ``torque`` block's counts under ``hold_force`` or ``force_cap``: the steps L7 held the arm,
 the hold entries L6 refused (one per confirmed run of the jaw-gap rule) and the cycles with one."""
@@ -2197,6 +2214,7 @@ def rollout(
     stall_end: bool = False,
     carry_guard: bool = False,
     clear_first: bool = False,
+    overhang_guard: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -2253,7 +2271,8 @@ def rollout(
     ``stall_end`` (MS7f) is the module docstring's; it needs ``perceived``.
     ``carry_guard`` (MS7g) is the module docstring's; it needs ``perceived`` and refuses
     ``passenger_drop``.
-    ``clear_first`` (MS7g) is the module docstring's; it needs ``perceived``.
+    ``clear_first`` and ``overhang_guard`` (MS7g) are the module docstring's; both need
+    ``perceived``, and ``overhang_guard`` the tray.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -2408,6 +2427,10 @@ def rollout(
         )
     if clear_first and not perceived:
         raise EvalFailure("clear_first", "ranks the perceived selector's grasps: needs perceived")
+    if overhang_guard and not (perceived and tray):
+        raise EvalFailure(
+            "overhang_guard", "reads the tray wall's overhang: it needs perceived and a tray"
+        )
     if not 1 <= cell_failure_cap <= MAX_CELL_FAILURE_CAP:
         raise EvalFailure("cell_failure_cap", f"must lie in [1, {MAX_CELL_FAILURE_CAP}]")
     if cell_failure_cap != CELL_FAILURE_CAP and not perceived:
@@ -2480,6 +2503,7 @@ def rollout(
             st.selector.knows_destinations = False
             st.selector.box_filter_xy = box_filter_xy
             st.selector.clear_first = clear_first
+            st.selector.overhang_guard = overhang_guard
             if box_walls:
                 # L9: the grasp model and the rake also read the perceived boxes' walls.
                 boxes, sizes = st.perceiver.box_poses, st.perceiver.box_sizes
@@ -2534,6 +2558,8 @@ def rollout(
         switches["carry_guard"] = True
     if clear_first:
         switches["clear_first"] = True
+    if overhang_guard:
+        switches["overhang_guard"] = True
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
     pick_z_hist = [deque(maxlen=GATE_WINDOW + 1) for _ in range(num_envs)]
@@ -2612,12 +2638,13 @@ def rollout(
                 gap = float(gaps[i]) if release_gap else None
                 released = perceived_release(c, lost, d.started, over, float(openings[i]), gap)
                 reason = perceived_cycle_end(c, step, released, bool(c.release_over))
+                lifted = c.lift_detected or c.carried
                 # The carry grace keeps a cycle open while the detector holds.
-                grace = not budget_ends_cycle(step - c.start_step, d.holding, c.grace_steps)
+                held_now = grace_hold(d.holding, lifted, overhang_guard)
+                grace = not budget_ends_cycle(step - c.start_step, held_now, c.grace_steps)
                 if select_at_release and reason == "budget" and grace:
                     c.grace_steps += 1
                     reason = None
-                lifted = c.lift_detected or c.carried
                 if reason is None and lift_budget_ends(
                     step - c.start_step, lifted, d.holding, lift_budget
                 ):
@@ -2815,6 +2842,8 @@ def rollout(
                 st.counts["wrong_overhead_class"] += cls != true_classes[target]
                 if box_walls:
                     st.counts["box_wall_refusals"] += box_wall_refusals(st.selector, scene, target)
+                if overhang_guard:
+                    st.counts["overhang_refusals"] += st.selector.overhang_refused
                 if st.marker is not None:
                     st.counts["marker_error_mm"] += st.marker.error_mm()
             else:
@@ -3512,6 +3541,7 @@ def rollout(
                 + (LIFT_VIEW_COUNTS if lift_view_steps else ())
                 + (MISSED_LIFT_COUNTS if missed_lift else ())
                 + (CARRY_VOTE_COUNTS if carry_votes else ())
+                + (OVERHANG_COUNTS if overhang_guard else ())
             },
             # The MS7g census: the category order of the cycle rows' log probabilities.
             **({"logp_order": list(class_names)} if classifier is not None else {}),

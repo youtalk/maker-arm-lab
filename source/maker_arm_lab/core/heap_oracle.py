@@ -253,9 +253,12 @@ class HeapOracle(oracle.EnvOracle):
         self.rake_part_cap = RAKE_PART_CAP
         self.max_rakes = MAX_RAKES
         self.rake_crowd = 0.0
-        # The heap loop's MS7g --clear_first sets this on its perceived selectors
-        # (``grasp.rank_grasps``'s ``clear_first``); the teacher keeps it off.
+        # The heap loop's MS7g --clear_first and --overhang_guard set these on its perceived
+        # selectors (``grasp.rank_grasps``'s ``clear_first``, ``grasp.under_overhang``); the
+        # teacher keeps both off. ``overhang_refused`` counts the parts the last scan refused.
         self.clear_first = False
+        self.overhang_guard = False
+        self.overhang_refused = 0
         self.cycle_parts: list[int] = []
         self.out_of_reach = 0
         self._push_rng = rng if rng is not None else random.Random(0)
@@ -356,6 +359,7 @@ class HeapOracle(oracle.EnvOracle):
             done |= {b for b in range(self.num_bricks) if bool(boxed[b])}
         mask = torch.zeros(self.num_bricks, dtype=torch.bool)
         self.out_of_reach = 0
+        self.overhang_refused = 0
         for b in range(self.num_bricks):
             x, y, z = scene.brick_pos[b].tolist()
             if b in done or z > CANDIDATE_MAX_Z:
@@ -365,8 +369,19 @@ class HeapOracle(oracle.EnvOracle):
                 continue
             if self.failures.get(self._failure_key(b, (x, y)), 0) >= self.cell_failure_cap:
                 continue
+            if self.overhang_guard and grasp.under_overhang(
+                scene.brick_pos[b], self._narrowest_width(b), self.walls, self.hold_band
+            ):
+                self.overhang_refused += 1  # neither a target nor a rake: the jaws cannot reach it
+                continue
             mask[b] = True
         return mask
+
+    def _narrowest_width(self, part: int) -> float:
+        """The part's size along its narrowest closing axis: no grasp on it lands its jaws
+        closer in (``grasp.landing_half_gap``), so ``grasp.under_overhang`` refuses at this width
+        only a part whose every grasp reaches the band."""
+        return min(float(self.sizes[part][k]) for k in self.parts[part].closing_axes)
 
     def _ranked(self, scene: oracle.SceneSnapshot, mask: torch.Tensor) -> list[grasp.Grasp]:
         return grasp.rank_grasps(

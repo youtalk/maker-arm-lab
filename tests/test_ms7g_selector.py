@@ -1,6 +1,7 @@
-"""MS7g design 5.3, the selector switch ``clear_first``: it ranks a grasp that sweeps no standing
-neighbour before the height band. Off, every step and payload byte is what it was; the supervisor
-forwards it and keys its cache on it."""
+"""MS7g design 5.3 and 5.4, the selector switches: ``clear_first`` ranks a grasp that sweeps no
+standing neighbour before the height band, and ``overhang_guard`` refuses a part outside the tray
+under a tray wall's top edge and keeps the carry grace for a cycle that read a lift. Off, every
+step and payload byte is what it was; the supervisor forwards both and keys its cache on them."""
 
 import json
 import math
@@ -8,15 +9,21 @@ import math
 import pytest
 import torch
 
-from maker_arm_lab.core import grasp, loop, parts
+from maker_arm_lab.core import grasp, layout, loop, parts
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from test_grasp import BRICK, IDENTITY, _heap
+from test_mj_heap_oracle import _place
 from test_ms7f_stack import ROOT, _load
-from test_perceived_loop import _env_and_rig, _rollout, _served, _Still, _wall_band_scene
+from test_perceived_loop import ZERO, _env_and_rig, _rollout, _served, _Still, _wall_band_scene
 from test_run_gate_eval import _heap_payload, ge
 from test_thin_snap import _same
 
 STUD = parts.make_part("brick", 1, 1)
+DEEP = layout.DEEP_TRAY_WALL_HEIGHT
+WALLS = grasp.tray_walls(30.0, DEEP)
+(_, _), (Y0, _) = layout.tray_bounds()
+EDGE = Y0 - layout.TRAY_WALL - layout.tray_rim_growth(30.0, DEEP)
+"""y of the left wall's outer face at its top: the rim face of the video diagnosis, -0.131."""
 
 
 def _old_key(g):
@@ -61,6 +68,66 @@ def test_clear_first_leaves_a_one_part_ranking_alone():
     )
 
 
+def _reach(width, band=grasp.JAW_HOLD_BAND):
+    return grasp.landing_half_gap(width, band) + grasp.TIP_THICKNESS
+
+
+def test_the_overhang_band_is_the_wall_shadow_grown_by_the_landing_gap_and_the_tip():
+    x, w = 0.222, 0.0078
+    # The video diagnosis's part: ldraw_87087 at y -0.135, 4 mm outside the rim face.
+    assert grasp.under_overhang(torch.tensor([x, -0.135, 0.0048]), w, WALLS)
+    assert grasp.under_overhang(torch.tensor([x, -0.135, 0.0048]), w, WALLS, grasp.CONT_HOLD_BAND)
+    for band in (grasp.JAW_HOLD_BAND, grasp.CONT_HOLD_BAND):
+        out = EDGE - _reach(w, band)
+        assert grasp.under_overhang(torch.tensor([x, out + 1e-4, 0.0048]), w, WALLS, band)
+        assert not grasp.under_overhang(torch.tensor([x, out - 1e-4, 0.0048]), w, WALLS, band)
+    # A wider grasp lands its fingers further out, so its band is wider.
+    out = EDGE - _reach(w)
+    assert grasp.under_overhang(torch.tensor([x, out - 0.002, 0.0048]), 0.0158, WALLS)
+    # Under the overhang next to the foot, far from the top edge: inside the shadow.
+    foot = Y0 - layout.TRAY_WALL - 0.002
+    assert EDGE - foot < -_reach(w) and grasp.under_overhang(
+        torch.tensor([x, foot, 0.0048]), w, WALLS
+    )
+
+
+def test_the_overhang_band_skips_the_interior_parts_over_the_top_and_box_walls():
+    x, w = 0.222, 0.0078
+    vertical = grasp.tray_walls(0.0, DEEP)
+    inside = torch.tensor([x, Y0 + 0.001, 0.0048])  # 1 mm off the foot, inside the tray
+    assert not grasp.under_overhang(inside, w, vertical)
+    outside = torch.tensor([x, Y0 - layout.TRAY_WALL - 0.001, 0.0048])
+    assert grasp.under_overhang(outside, w, vertical)
+    assert not grasp.under_overhang(torch.tensor([x, -0.135, DEEP + 0.001]), w, WALLS)
+    boxed = tuple(grasp.Wall(wall.footprint, wall.heading, wall.top, box=True) for wall in vertical)
+    assert not grasp.under_overhang(outside, w, boxed)
+    assert not grasp.under_overhang(torch.tensor([x, -0.135, 0.0048]), w, ())
+
+
+def test_the_grace_holds_only_a_lifted_cycle_under_the_guard():
+    for holding in (True, False):
+        for lifted in (True, False):
+            assert loop.grace_hold(holding, lifted, False) is holding
+            assert loop.grace_hold(holding, lifted, True) is (holding and lifted)
+    budget = loop.CYCLE_STEP_BUDGET
+    clamp = loop.grace_hold(True, False, True)  # a wall clamp the detector reads as a hold
+    assert not loop.budget_ends_cycle(budget, loop.grace_hold(True, False, False), 0)
+    assert loop.budget_ends_cycle(budget, clamp, 0)
+    assert not loop.budget_ends_cycle(budget, loop.grace_hold(True, True, True), 0)
+
+
+def _overhang_scene(monkeypatch):
+    """A 1x1 brick on the desk at the video diagnosis's place, under the 30 degree deep tray's
+    left wall top, and two 2x2 bricks 40 mm apart in the open tray. The 1x1 ranks first on its
+    clearance, the still policy fails every 60-step cycle, and the perception is exact."""
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 60)
+    trio = [STUD, parts.make_part("brick", 2, 2), parts.make_part("brick", 2, 2)]
+    env, rig = _env_and_rig(trio, budget=3, tray=True, tray_lean=30.0, deep_tray=True)
+    x = layout.TRAY_CENTER[0]
+    _place(env, [(0.222, -0.135, 0.0049, 0.0), (x, 0.0, 0.0049, 0.3), (x, 0.04, 0.0049, 0.0)])
+    return env, rig, _Still(), 3, {"select_at_release": True, "noise_scales": ZERO}
+
+
 def _run(scene, monkeypatch, **switch):
     """The scene's perceived rollout without its wall clock, and what env 0 was served."""
     env, rig, policy, budget, switches = scene(monkeypatch)
@@ -87,25 +154,46 @@ def test_the_loop_hands_clear_first_to_its_selector_and_not_to_the_teacher(monke
     assert on["inference"]["loop"]["clear_first"] is True
 
 
-def test_with_the_switch_off_every_step_and_payload_byte_is_the_same(monkeypatch):
-    base, base_served = _run(_wall_band_scene, monkeypatch)
-    off, off_served = _run(_wall_band_scene, monkeypatch, clear_first=False)
+def test_the_guard_refuses_the_part_under_the_overhang_as_a_target(monkeypatch):
+    off, _ = _run(_overhang_scene, monkeypatch)
+    on, _ = _run(_overhang_scene, monkeypatch, overhang_guard=True)
+    assert off["episodes"][0]["cycle_targets"][0] == 0, off["episodes"][0]
+    targets = on["episodes"][0]["cycle_targets"]
+    assert targets and 0 not in targets, on["episodes"][0]
+    assert on["perception"]["overhang_refusals"] == len(targets)
+    assert on["inference"]["loop"]["overhang_guard"] is True
+    assert "overhang_refusals" not in off["perception"]
+
+
+@pytest.mark.parametrize("scene", [_wall_band_scene, _overhang_scene])
+def test_with_both_switches_off_every_step_and_payload_byte_is_the_same(scene, monkeypatch):
+    base, base_served = _run(scene, monkeypatch)
+    off, off_served = _run(scene, monkeypatch, clear_first=False, overhang_guard=False)
     assert json.dumps(off, sort_keys=True) == json.dumps(base, sort_keys=True)
     assert _same(off_served, base_served)
-    assert "clear_first" not in off["inference"]["loop"]
+    assert not {"clear_first", "overhang_guard"} & set(off["inference"]["loop"])
 
 
-def test_the_rollout_refuses_the_switch_off_the_perceived_loop(monkeypatch):
-    env, rig = _env_and_rig()
-    with pytest.raises(loop.EvalFailure) as err:
-        _rollout(env, rig, _Still(), clear_first=True)
-    env.close()
-    assert err.value.reason == "clear_first"
+def test_the_rollout_refuses_the_switches_off_the_perceived_loop_or_the_tray(monkeypatch):
+    for kwargs, reason in (
+        ({"clear_first": True}, "clear_first"),
+        ({"overhang_guard": True}, "overhang_guard"),
+        ({"perceived": True, "overhang_guard": True}, "overhang_guard"),  # the bare desk
+    ):
+        env, rig = _env_and_rig()
+        with pytest.raises(loop.EvalFailure) as err:
+            _rollout(env, rig, _Still(), **kwargs)
+        env.close()
+        assert err.value.reason == reason
 
 
 @pytest.mark.parametrize(
     "argv, message",
-    [(["--oracle_driver", "--tray", "--clear_first"], "--clear_first needs --perceived")],
+    [
+        (["--oracle_driver", "--tray", "--clear_first"], "--clear_first needs --perceived"),
+        (["--oracle_driver", "--tray", "--overhang_guard"], "--overhang_guard needs --perceived"),
+        (["--overhang_guard"], "--overhang_guard reads the tray wall's overhang: it needs --tray"),
+    ],
 )
 def test_the_client_refuses_the_switches_where_no_perceived_selector_reads_them(
     argv, message, capsys
@@ -118,7 +206,7 @@ def test_the_client_refuses_the_switches_where_no_perceived_selector_reads_them(
     assert len(out) == 1 and out[0].startswith("EVAL_FAIL") and message in out[0], out
 
 
-def test_the_supervisor_forwards_the_switches_and_keys_the_cache_on_them(tmp_path):
+def test_the_supervisor_forwards_both_switches_and_keys_the_cache_on_them(tmp_path):
     argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
     argv += ["--threshold", "0.7", "--seed", "1"]
     heap = ["--backend", "mujoco", "--heap_k", "50", "--tray", "--desk_boxes", "4"]
@@ -152,3 +240,6 @@ def test_the_supervisor_forwards_the_switches_and_keys_the_cache_on_them(tmp_pat
             ge._build_cfg(ge._parse_args(argv + heap[:-1] + [f"--{name}"]))
         with pytest.raises(ValueError, match=f"--{name} needs --heap_k"):
             ge._build_cfg(ge._parse_args(argv + ["--backend", "isaac", f"--{name}"]))
+    no_tray = [a for a in heap if a != "--tray"]
+    with pytest.raises(ValueError, match="--overhang_guard reads the tray wall's overhang"):
+        ge._build_cfg(ge._parse_args(argv + no_tray + ["--overhang_guard"]))

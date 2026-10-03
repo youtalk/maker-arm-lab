@@ -252,6 +252,38 @@ def wall_allows(
     return True
 
 
+def under_overhang(
+    pos: torch.Tensor, width: float, walls: Sequence[Wall], hold_band: float = JAW_HOLD_BAND
+) -> bool:
+    """The heap loop's MS7g ``--overhang_guard`` (MS7g design 5.4): does a part at ``pos``
+    outside the tray interior lie under a tray wall's top edge, in reach of a finger landing
+    beside it?
+
+    ``wall_allows`` reads a wall only in the part's grip band, so it never sees the top edge
+    of a leaned wall that overhangs a part on the desk outside the tray. The MS7f video
+    diagnosis (2026-10-03, draw 19 of the checked read) found ldraw_87087 selected five times
+    at y -0.135, 4 mm outside that edge (the rim face at y -0.126 to -0.131): 3,986 steps, no
+    stow, the jaws closing in the air or on the wall top. The band is the wall's top-down
+    shadow, its footprint on the desk to its footprint at its top (``wall_at``), grown by
+    ``landing_half_gap(width, hold_band)`` and TIP_THICKNESS: a part inside the shadow lies
+    under the overhang, one within the growth of the top's footprint under the fingers' path.
+    A desk box wall (``Wall.box``) stands vertical and never counts, nor does a part whose
+    centre lies inside the tray interior on the desk (``layout.tray_bounds``) or at or above
+    the wall's top.
+    """
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    x, y, z = (float(v) for v in pos[:3])
+    if x0 <= x <= x1 and y0 <= y <= y1:
+        return False
+    reach = landing_half_gap(width, hold_band) + TIP_THICKNESS
+    return any(
+        not w.box
+        and z < w.top
+        and polygon_distance([(x, y)], convex_hull([*w.footprint, *wall_at(w, w.top)])) < reach
+        for w in walls
+    )
+
+
 @dataclass(frozen=True)
 class Grasp:
     part: int

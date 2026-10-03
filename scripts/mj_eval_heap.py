@@ -360,6 +360,13 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "neighbour before the height band, so it may choose another part (grasp.rank_grasps)",
     )
     parser.add_argument(
+        "--overhang_guard",
+        action="store_true",
+        help="MS7g, with --perceived and --tray: the selector refuses a part outside the tray "
+        "under a wall's top edge (grasp.under_overhang), and the carry grace needs a lift "
+        "(loop.grace_hold)",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -424,6 +431,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         parser.error(f"--lift_view_steps must lie in [0, {CARRY_VIEW_STEPS})")
     if args.missed_lift and not args.tray:
         parser.error("--missed_lift reads a carry off the tray: it needs --tray")
+    if args.overhang_guard and not args.tray:
+        parser.error("--overhang_guard reads the tray wall's overhang: it needs --tray")
     if not 1 <= args.cell_failure_cap <= MAX_CELL_FAILURE_CAP:
         parser.error(f"--cell_failure_cap must lie in [1, {MAX_CELL_FAILURE_CAP}]")
     if args.cell_failure_cap != CELL_FAILURE_CAP and not args.perceived:
@@ -466,6 +475,7 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "stall_end",
         "carry_guard",
         "clear_first",
+        "overhang_guard",
     ):
         if getattr(args, name) not in (None, False) and not args.perceived:
             parser.error(f"--{name} needs --perceived")
@@ -652,6 +662,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             stall_end=args.stall_end,
             carry_guard=args.carry_guard,
             clear_first=args.clear_first,
+            overhang_guard=args.overhang_guard,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
