@@ -267,10 +267,10 @@ MS7D_LEVERS = {
 }
 """The MS7d switches and their levers (MS7d design section 4), each forwarded to the MuJoCo
 heap client as its own flag. All but ``hold_force`` and ``force_cap`` need ``--perceived``."""
-MS7G_SWITCHES = ("clear_first",)
-"""The MS7g selector switches (MS7g design 5.3), each forwarded to the MuJoCo heap client as its
-own flag; each needs ``--perceived``. The client records one in the inference block only when it
-is on, so a payload with every one off is one that predates them."""
+MS7G_SWITCHES = ("clear_first", "overhang_guard")
+"""The MS7g selector switches (MS7g design 5.3 and 5.4), each forwarded to the MuJoCo heap client
+as its own flag; both need ``--perceived``. The client records one in the inference block only
+when it is on, so a payload with both off is one that predates them."""
 LOOP_SWITCHES = (
     "select_at_release",
     "replan_on_switch",
@@ -1365,6 +1365,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     for name, what in (
         ("clear_first", "5.3, the selector ranks a grasp that sweeps no neighbour first"),
+        ("overhang_guard", "5.4, the selector refuses a part under a tray wall's top edge"),
     ):
         parser.add_argument(
             f"--{name}",
@@ -1426,6 +1427,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
             raise ValueError(f"--{name} needs --perceived")
     if args.carry_guard and args.passenger_drop:
         raise ValueError("--carry_guard refuses --passenger_drop, which opens over the tray")
+    if args.overhang_guard and not args.tray:
+        raise ValueError("--overhang_guard reads the tray wall's overhang: it needs --tray")
     if args.perceived and (not args.desk_boxes or args.gripper != "continuous"):
         # The client's own usage error, before a server starts and every draw loses to it.
         raise ValueError("--perceived needs --desk_boxes and --gripper continuous")
