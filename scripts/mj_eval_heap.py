@@ -455,6 +455,16 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         )
     if not 0 <= args.carry_votes <= MAX_CARRY_VOTES:
         parser.error(f"--carry_votes must lie in [0, {MAX_CARRY_VOTES}]")
+    if args.vote_weights:
+        if not (args.classifier and args.class_views) or args.carry_votes:
+            parser.error(
+                "--vote_weights fuses the classifier's three views: it needs --classifier and "
+                "--class_views and refuses --carry_votes"
+            )
+        try:
+            args.vote = json.loads(Path(args.vote_weights).read_text())
+        except (OSError, ValueError) as err:
+            parser.error(f"--vote_weights: {err}")
     if args.carry_votes >= CARRY_VIEW_STEPS - args.lift_view_steps:
         parser.error(
             f"--carry_votes must be under {CARRY_VIEW_STEPS} - --lift_view_steps, a step for "
@@ -675,6 +685,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             clear_first=args.clear_first,
             overhang_guard=args.overhang_guard,
             bank_views=args.bank_views,
+            vote_weights=args.vote if args.vote_weights else None,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
