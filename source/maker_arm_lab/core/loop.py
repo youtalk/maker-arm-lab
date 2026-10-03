@@ -1880,6 +1880,7 @@ def rollout(
     takeover=None,
     log=print,
     on_frame=None,
+    on_classify=None,
     select_at_release: bool = False,
     replan_on_switch: bool = False,
     row_refresh: bool = False,
@@ -1933,6 +1934,11 @@ def rollout(
     gripper and a served target row.
     ``on_frame(ordinal, step_in_cycle, wrist, overhead)`` is called with env 0's two policy
     frames every ``FRAME_EVERY`` steps of each of its cycles, for a forensics dump.
+    ``on_classify(view, i, frame, size, step, cycle, detector)`` is called with every frame the
+    ``classifier`` reads, before it reads it: the view ("overhead", "lift", "carry", or "wrist"
+    for a ``carry_votes`` read), the env, the frame, the perceived size the read gets, the step,
+    the env's ``Cycle`` and ``HoldDetector``. It only records (``--classifier_frames``): nothing
+    it returns or changes reaches a decision.
     ``hold_trace``, when a list, receives one ``hold.TRACE_FIELDS`` row per live env per step,
     the input of ``hold.cycle_rows``'s threshold replay.
     ``perceived`` is the MS7c boundary of the module docstring, with ``noise_scales`` the
@@ -2483,6 +2489,8 @@ def rollout(
                 if classifier is not None:
                     # MS7f view 1: the narrow overhead view of the detection.
                     frame = env.narrow_overhead(i, seen.centre)
+                    if on_classify is not None:
+                        on_classify("overhead", i, frame, seen.size, step, st.cycle, detectors[i])
                     logp, _ = classifier.log_probs(frame, class_names, size=seen.size)
                     st.cycle.read_logp = logp
                     st.cycle.read_class = cls = summed_class(class_names, logp)
@@ -2770,6 +2778,8 @@ def rollout(
                     }
                     # View 2 decides, or ends the cycle on a passenger.
                     frame = classifier.wrist_frame(env, i)
+                    if on_classify is not None:
+                        on_classify("lift", i, frame, c.seen_size, step, c, detectors[i])
                     logp, rider = classifier.log_probs(
                         frame, class_names, wrist=True, size=c.seen_size
                     )
@@ -2803,6 +2813,8 @@ def rollout(
                     c.carry_due.pop(0)
                     if detectors[i].lifted or c.carried:
                         frame = classifier.wrist_frame(env, i)
+                        if on_classify is not None:
+                            on_classify("wrist", i, frame, c.seen_size, step, c, detectors[i])
                         logp, _ = classifier.log_probs(frame, class_names, True, c.seen_size)
                         c.carry_logp.append(logp)
                         st.counts["carry_votes_read"] += 1
@@ -2817,6 +2829,8 @@ def rollout(
                         c.vote_lost = True
                         continue
                     frame = classifier.wrist_frame(env, i)
+                    if on_classify is not None:
+                        on_classify("carry", i, frame, c.seen_size, step, c, detectors[i])
                     lighter = {
                         cls: desk_boxes.lighter_box(own, st.box_load)
                         for cls, own in class_boxes[i].items()

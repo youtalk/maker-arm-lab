@@ -16,6 +16,10 @@ driver and the loop's end-to-end check, no server and no cameras needed.
 (``loop.TakeoverConfig`` without the random draw, ``loop.HELD_NO_RISE_STEPS``) the teacher takes
 the cycle over. Only the takeover frames are recorded, to ``<dagger_dir>/<shard_name>.hdf5``, for
 ``convert_to_lerobot.py --split_cycles --dagger``; the payload names the shard.
+
+``--classifier_frames DIR`` records every frame the classifier reads on the policy's own cycles
+as a render set file (``mj_render_set.PolicyFrames``), labels read from the simulator; the run
+itself is the same.
 """
 
 import argparse
@@ -350,6 +354,14 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "loop.FRAME_EVERY steps of each cycle (forensics; needs the policy server)",
     )
     parser.add_argument(
+        "--classifier_frames",
+        type=str,
+        default="",
+        help="MS7f: write every frame the classifier reads, labelled from the simulator, to "
+        "DIR/policy_<run_seed>_<layout_seed>.npz in scripts/mj_render_set.py's layout, for "
+        "lerobot_stack/train_part_classifier.py; needs --classifier and --perceived",
+    )
+    parser.add_argument(
         "--hold_trace",
         type=str,
         default="",
@@ -381,6 +393,11 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         parser.error(
             "--classifier reads the categories on the perceived views: it needs --perceived and "
             "--categories"
+        )
+    if args.classifier_frames and not (args.classifier and args.perceived):
+        parser.error(
+            "--classifier_frames records the classifier's reads: it needs --classifier and "
+            "--perceived"
         )
     if args.passenger_drop and not args.classifier:
         parser.error(
@@ -462,6 +479,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
     token = parser_cls.token
     policy = None
     env = None
+    recorder = None
     close_error = None
     try:
         perm = tuple(int(v) for v in args.permutation.split(","))
@@ -549,6 +567,13 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
         )
         policy = None if args.oracle_driver else policy_client.ServerPolicy(args.server)
         trace = [] if args.hold_trace else None
+        classifier = perception.PartClassifier(args.classifier) if args.classifier else None
+        if args.classifier_frames:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from mj_render_set import PolicyFrames
+
+            out_dir, crop = args.classifier_frames, classifier.wrist_crop
+            recorder = PolicyFrames(env, rig, out_dir, args, crop)
         payload = (run or rollout)(
             env,
             rig,
@@ -564,6 +589,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
                 else None
             ),
             on_frame=frame_writer(args.frames_dir) if args.frames_dir else None,
+            on_classify=recorder,
             select_at_release=args.select_at_release,
             replan_on_switch=args.replan_on_switch,
             row_refresh=args.row_refresh,
@@ -599,7 +625,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             box_empty=args.box_empty,
             book_miss=args.book_miss,
             lift_budget=args.lift_budget,
-            classifier=perception.PartClassifier(args.classifier) if args.classifier else None,
+            classifier=classifier,
             passenger_drop=args.passenger_drop,
             lift_view_steps=args.lift_view_steps,
             missed_lift=args.missed_lift,
@@ -619,6 +645,8 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
         if args.passenger_check:
             # Each rejected LIFT's passengers, as indices into payload["parts"].
             payload["passenger_rejects"] = [r for log in rig.passenger_log for r in log]
+        if recorder is not None:
+            payload["classifier_frames"] = recorder.summary()
     except EvalFailure as err:
         print(
             f"{token}_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail}), flush=True
@@ -633,6 +661,8 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
         return 1
     finally:
         try:
+            if recorder is not None:
+                recorder.flush()  # first: an early end keeps its frames too
             if policy is not None:
                 policy.close()
             if env is not None:
