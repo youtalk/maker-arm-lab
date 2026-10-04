@@ -196,7 +196,13 @@ left the jaws before the carry view keeps view 2's box, so ``taken_class`` stays
 ``vote_lost``. The nine values are a maximum-likelihood fit on the frame bank
 (``lerobot_stack/vote_bank.py``), a JSON file beside the model. ``read_class`` and
 ``lift_class`` stay each view's own read. Its vote is pending (``Cycle.vote``) from every lift
-to the carry view, so ``carry_guard`` holds the jaws until the carry view sets the box.
+to the carry view, so ``carry_guard`` holds the jaws until the carry view sets the box. A JSON
+with ``"stage": "final"`` (MS7g ledger D13) is the final-only fused vote: the box moves at the
+selection and the lift exactly as the served vote moves it (the overhead read, an agreeing lift
+keeps it, a split waits), the carry view is still read on every lift, and there the fused sum of
+the three views decides the box once; a part lost before the carry view keeps the served box. On
+g_Sv2_scr the partial sum's bias moved the box at selection (685 wrong overhead boxes of 3298
+against 499 of 3271) and the read lost 46 correct stows while its taken class gained.
 
 ``stall_end`` (MS7f, under ``perceived``, off by default) ends a cycle ``stall_end``, a failure
 booked as a budget end, once its gripper command has read closed for ``CLOSED_NO_PINCH_STEPS``
@@ -2485,6 +2491,9 @@ def rollout(
         scalar = all(isinstance(w, (int, float)) for w in weights.values())
         if set(weights) != set(FUSED_VIEWS) or not scalar or not set(class_names) <= set(bias):
             raise EvalFailure("vote_weights", f"needs a weight of {FUSED_VIEWS} and a bias a class")
+        if vote_weights.get("stage", "partial") not in ("partial", "final"):
+            raise EvalFailure("vote_weights", "stage is 'partial' (the default) or 'final'")
+    final = vote_weights is not None and vote_weights.get("stage") == "final"  # MS7g D13
     if carry_votes and not (classifier is not None and class_views):
         raise EvalFailure("carry_votes", "adds reads to the classifier's vote: needs class_views")
     if not 0 <= carry_votes <= MAX_CARRY_VOTES or carry_votes >= CARRY_VIEW_STEPS - lift_view_steps:
@@ -2614,6 +2623,8 @@ def rollout(
         switches["overhang_guard"] = True
     if vote_weights is not None:
         switches["vote_weights"] = {k: vote_weights[k] for k in ("weights", "bias")}
+        if final:
+            switches["vote_weights"]["stage"] = "final"
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
     pick_z_hist = [deque(maxlen=GATE_WINDOW + 1) for _ in range(num_envs)]
@@ -2886,7 +2897,7 @@ def rollout(
                     logp, _ = classifier.log_probs(frame, class_names, size=seen.size)
                     st.cycle.read_logp = logp
                     st.cycle.read_class = cls = summed_class(class_names, logp)
-                    if vote_weights is not None:  # the fused vote's partial sum sets the box
+                    if vote_weights is not None and not final:  # the partial sum's box
                         cls = fused_class(class_names, vote_weights, logp)
                 st.cycle.seen_yaw = float(scene.brick_yaw[target])
                 st.cycle.box = desk_boxes.lighter_box(class_boxes[i][cls], st.box_load)
@@ -3239,16 +3250,17 @@ def rollout(
                         st.counts["lifts_classified"] += 1
                         st.counts["wrong_wrist_class"] += read != true_cls
                     # The fused vote always reads the carry view, and view 2's partial sum
-                    # sets the box now.
-                    split = class_views and (vote_weights is not None or read != c.read_class)
+                    # sets the box now; the final-only one moves it now as the served vote does.
+                    served_split = class_views and read != c.read_class
+                    split = class_views and (vote_weights is not None or served_split)
                     c.bank_at = lift_step + CARRY_VIEW_STEPS if bank_views and not split else None
                     if split:
                         c.vote = (read, true_cls, lift_step + CARRY_VIEW_STEPS, logp)
                         c.carry_due = carry_vote_steps(step, c.vote[2], carry_votes)
                         c.carry_vote_logp = []
-                    if not split or vote_weights is not None:
+                    if not split or (vote_weights is not None and not (final and served_split)):
                         now = read
-                        if vote_weights is not None:
+                        if vote_weights is not None and not final:
                             now = fused_class(class_names, vote_weights, c.read_logp, logp)
                         _, taken, box = lift_class_box(now, lambda x: x, lighter, c.box)
                         c.taken_class = taken

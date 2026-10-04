@@ -14,6 +14,7 @@ from test_classifier_loop import SWITCHES, _classifier, _scene, _usage
 from test_ms7f_stack import ROOT, _gate_argv, _load, ge
 from test_perceived_loop import _rollout, _served
 from test_run_gate_eval import _heap_payload
+from test_thin_snap import _same
 
 NAMES = parts.PART_CATEGORIES
 
@@ -248,3 +249,65 @@ def test_with_a_mirror_symmetric_model_the_flip_changes_no_decision(tmp_path, ca
     heap = ["--heap_k", "3", "--desk_boxes", "4", "--box_draw", "4", "--gripper", "continuous"]
     line = _usage("mj_eval_heap", heap + ["--perceived", "--categories", "--cls_flip"], capsys)
     assert line.startswith("EVAL_FAIL ") and "--cls_flip" in line, line
+
+
+def test_the_final_only_vote_moves_the_box_as_served_until_the_carry_view_fuses(tmp_path):
+    """Ledger D13. Overhead reads slope and every wrist frame wide, so each lift splits. The vote
+    weighs the overhead view 3 times and biases tall by 4: its partial sum would take tall at the
+    selection already, the served vote takes wide at the carry view, and the fused sum of the
+    three views takes tall there. The final-only vote serves every step the served vote serves up
+    to its first carry view, which then moves the box to tall instead of wide."""
+    names = parts.BASE_CLASSES
+    vote = _vote(o=3.0, names=names, bias={"tall": 4.0})
+    off, off_served, env = _run(tmp_path)
+    partial, partial_served, _ = _run(tmp_path, vote=vote)
+    final, final_served, _ = _run(tmp_path, vote=vote | {"stage": "final"})
+    assert final["inference"]["loop"]["vote_weights"]["stage"] == "final"
+    assert "stage" not in partial["inference"]["loop"]["vote_weights"]
+    box = final["episodes"][0]["class_to_box"]  # the env redraws at its end
+    poses = env.perceived_box_poses[0]
+    assert np.allclose(off_served[0][1], poses[box["slope"]])
+    assert np.allclose(partial_served[0][1], poses[box["tall"]])  # the partial sum at selection
+    k = next(n for n, row in enumerate(off_served) if not np.allclose(row[1], poses[box["slope"]]))
+    assert np.allclose(off_served[k][1], poses[box["wide"]])  # the served vote's carry view
+    assert _same(final_served[:k], off_served[:k])
+    assert np.allclose(final_served[k][1], poses[box["tall"]])
+    for payload, taken in ((off, "wide"), (final, "tall")):
+        rows = [r for e in payload["episodes"] for r in e["cycle_census"] if r["lift_class"]]
+        assert rows and {r["taken_class"] for r in rows if not r["vote_lost"]} == {taken}
+        assert all(r["read_class"] == "slope" and r["lift_class"] == "wide" for r in rows)
+
+
+def test_a_vote_stage_is_partial_or_final(tmp_path):
+    env, rig, policy = _scene()
+    stub = _classifier(tmp_path, "slope", "wide")
+    vote = _vote(names=parts.BASE_CLASSES) | {"stage": "carry"}
+    with pytest.raises(EvalFailure, match="stage"):
+        _rollout(
+            env, rig, policy, perceived=True, classifier=stub, class_views=True,
+            vote_weights=vote, **SWITCHES,
+        )  # fmt: skip
+    env.close()
+
+
+def test_the_carry_guard_holds_the_open_while_the_final_only_vote_is_pending(tmp_path, monkeypatch):
+    """Ledger D13: every view reads wide, so the final-only vote serves the wide box from the
+    selection on, and the teacher opens over it before the carry view (CARRY_VIEW_STEPS 100). The
+    carry view is still pending, so the guard holds that open until the vote decides, and the part
+    goes into the wide box all the same."""
+    monkeypatch.setattr(loop, "CARRY_VIEW_STEPS", 100)
+    stub = _classifier(tmp_path, "wide", "wide")
+    vote = _vote(carry=2.0, names=parts.BASE_CLASSES, bias={"slope": 3.0}) | {"stage": "final"}
+    env, rig, policy = _scene()
+    wide = int(env.class_to_box[0][parts.BASE_CLASSES.index("wide")])
+    x, y = (float(v) for v in env.desk_box_poses[0, wide, :2])
+    policy.rig.oracles[0].release_point = torch.tensor((x, y, desk_boxes.DESK_BOX_RELEASE_Z))
+    payload = _rollout(
+        env, rig, policy, perceived=True, classifier=stub, class_views=True, vote_weights=vote,
+        carry_guard=True, **SWITCHES,
+    )  # fmt: skip
+    env.close()
+    row = payload["episodes"][0]["cycle_census"][0]
+    assert payload["episodes"][0]["cycle_classes"][0] == "stowed", row
+    assert row["read_class"] == row["lift_class"] == row["taken_class"] == "wide"
+    assert row["guard_vote_steps"] > 0 and row["guard_rim_steps"] == 0
