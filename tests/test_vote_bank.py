@@ -169,3 +169,18 @@ def test_members_and_the_flip_read_as_the_ensemble_export_and_its_mirror(tmp_pat
     mirror = ensemble(np.ascontiguousarray(frames[:, :, ::-1]))
     assert np.allclose(flipped, (ensemble(frames) + mirror) / 2.0, atol=1e-5)
     assert not np.allclose(flipped, plain)
+
+
+def test_the_final_stage_keeps_the_served_class_of_a_lift_lost_before_the_carry_view():
+    """Ledger D13: with the carry view the final-only vote is the fused sum; without it the served
+    rule's class stands, where the partial sum would decide on two views."""
+    names = list(NAMES)
+    vote = _vote(o=1.0, names=names, bias={"joint": 5.0})
+    o, lift = np.log(np.full(len(names), 1.0 / len(names))), np.log(np.full(len(names), 0.1))
+    o[0], lift[1] = np.log(0.5), np.log(0.5)  # a split: brick overhead, special at the lift
+    rows = [{"logp": (o, lift, None), "truth": 0, "heldout": False}]
+    partial = bank.judge(rows, names, vote)["whole"]["fused"]["right"]
+    final = bank.judge(rows, names, vote | {"stage": "final"})["whole"]["fused"]["right"]
+    assert (partial, final) == (0, 1)  # joint by the bias, against the overhead read kept
+    rows = [{"logp": (o, lift, lift), "truth": names.index("joint"), "heldout": False}]
+    assert bank.judge(rows, names, vote | {"stage": "final"})["whole"]["fused"]["right"] == 1

@@ -29,6 +29,8 @@ Three steps, one call:
 3. Judge both rules on the evaluation part (odd p): the final class of each event under the
    served rule (``served_class``, ``core.loop``'s ``class_views`` vote) and each form
    (``fused_class``), on the events with all three views (the decision rows) and on all events.
+   With ``--stage final`` (MS7g ledger D13) a lift whose part left before the carry view keeps the
+   served rule's class, as the loop's final-only vote keeps the served box.
    Rows: whole, train, held-out and each category. G8 adopts a form if the whole row gains at
    least 0.01, the held-out row falls by at most 0.005 and no category falls by more than 0.02;
    of the D7 forms (v2, v3) that pass, the higher whole row wins.
@@ -343,9 +345,12 @@ def judge(rows: list[dict], names, vote: dict) -> dict:
     and each category, as {"right", "total", "rate"} for "served" and "fused"."""
     served = np.array([served_class(*r["logp"]) for r in rows], dtype=int)
     w, b = matrices(vote, names)
+    final = vote.get("stage") == "final"  # ledger D13: a part lost before the carry view
     fused = np.array(
         [
-            np.argmax(b + sum(w[v] @ x for v, x in enumerate(r["logp"]) if x is not None))
+            served_class(*r["logp"])
+            if final and r["logp"][2] is None
+            else np.argmax(b + sum(w[v] @ x for v, x in enumerate(r["logp"]) if x is not None))
             for r in rows
         ],
         dtype=int,
@@ -458,6 +463,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--payloads", action="append", default=[], help="glob of run payloads")
     parser.add_argument("--out", required=True, help="dir: the logp cache and summary.json")
     parser.add_argument("--forms", default=",".join(FORMS), help="comma list of FORMS to fit")
+    parser.add_argument(
+        "--stage",
+        choices=("partial", "final"),
+        default="partial",
+        help="final (ledger D13): the fused sum decides only at the carry view, and a part lost "
+        "before it keeps the served rule's box; the JSON carries the stage",
+    )
     parser.add_argument("--vote_dir", default="", help="write each form's vote_<form>.json here")
     parser.add_argument("--against", default="", help="another model's summary.json: G8 bars")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -504,7 +516,7 @@ def run(args) -> dict:
     three = [r for r in eval_rows if r["logp"][2] is not None]
     forms = {}
     for form in args.forms:
-        vote = fit(fit_rows, names, form)
+        vote = fit(fit_rows, names, form) | ({"stage": "final"} if args.stage == "final" else {})
         decision = judge(three, names, vote)
         forms[form] = {
             "vote": vote,
