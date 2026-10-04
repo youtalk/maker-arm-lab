@@ -1,10 +1,13 @@
 """``lerobot_stack/vote_bank.py`` (MS7g design sections 6.1 and 6.3): the frame bank tool applies
 the loop's served and fused rules, groups a cycle's views into lift events and fits the vote."""
 
+import json
 import random
+from typing import List  # noqa: UP035 -- TorchScript reads the typing names
 
 import numpy as np
 import pytest
+import torch
 
 from maker_arm_lab.core import loop
 from test_ms7f_stack import ROOT, _load
@@ -114,3 +117,55 @@ def test_the_stacker_picks_its_l2_by_folds_of_files():
     assert vote["fit"]["l2"] in bank.L2_GRID and len(vote["fit"]["cv_nll"]) == len(bank.L2_GRID)
     best = min(vote["fit"]["cv_nll"].values())
     assert vote["fit"]["cv_nll"][str(vote["fit"]["l2"])] == best
+
+
+class _Halves(torch.nn.Module):
+    """Category 0's logit is the left half's mean brightness and category 1's the right half's,
+    times ``gain``, so a mirrored frame reads the other way round."""
+
+    categories: List[str]  # noqa: UP006
+    size_input: bool
+
+    def __init__(self, gain: float):
+        super().__init__()
+        self.categories = list(NAMES)
+        self.size_input = True
+        self.gain = gain
+
+    def forward(self, frames: torch.Tensor, wrist: bool, size: torch.Tensor):
+        x = frames.float().mean(dim=(1, 3)) / 255.0  # (N, W)
+        logits = torch.zeros(frames.shape[0], len(self.categories))
+        logits[:, 0] = self.gain * x[:, :112].mean(1)
+        logits[:, 1] = self.gain * x[:, 112:].mean(1)
+        return logits, torch.zeros(frames.shape[0])
+
+
+def test_members_and_the_flip_read_as_the_ensemble_export_and_its_mirror(tmp_path):
+    """``--members``: the log softmax of the members' mean logits (``Ensemble``); ``--flip``: the
+    mean of that on the frame and on the frame mirrored left to right."""
+    frames = np.zeros((3, 224, 224, 3), np.uint8)
+    for n, left in enumerate((200, 50, 120)):  # each frame's left half
+        frames[n, :, :112] = left
+    path = tmp_path / "policy_1_2.npz"
+    view = np.array(["overhead", "lift", "carry"])
+    np.savez(path, frames=frames, args=np.array(json.dumps({"run_seed": 1, "layout_seed": 2})),
+             view=view, env=np.zeros(3, int), category=np.array(["brick"] * 3))  # fmt: skip
+    members = []
+    for gain in (1.0, 3.0):
+        members.append(tmp_path / f"m{gain}.pt")
+        torch.jit.script(_Halves(gain)).save(str(members[-1]))
+    for m in members:
+        bank.CATEGORIES_OF[m] = list(NAMES)
+    bank.fill_cache([path], members, tmp_path / "cache", "cpu", flip=True)
+
+    def ensemble(x):
+        logits = np.mean([m.numpy() for m in (_Halves(g)(torch.from_numpy(x), True, None)[0]
+                                               for g in (1.0, 3.0))], axis=0)  # fmt: skip
+        return torch.log_softmax(torch.from_numpy(logits), dim=1).numpy()
+
+    plain = bank.load_file(path, members, list(NAMES), tmp_path / "cache", flip=False)["logp"]
+    flipped = bank.load_file(path, members, list(NAMES), tmp_path / "cache", flip=True)["logp"]
+    assert np.allclose(plain, ensemble(frames), atol=1e-5)
+    mirror = ensemble(np.ascontiguousarray(frames[:, :, ::-1]))
+    assert np.allclose(flipped, (ensemble(frames) + mirror) / 2.0, atol=1e-5)
+    assert not np.allclose(flipped, plain)
