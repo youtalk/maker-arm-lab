@@ -46,6 +46,7 @@ ON = {
     "pile_pgs": ["--pile_pgs"],
     "stall_end": ["--stall_end"],
     "vote_weights": ["--vote_weights", "/tmp/ms7g_no_such_vote.json"],
+    "cls_flip": ["--cls_flip"],
 }
 """Each MS7f switch at a value that is not its off value. A track that adds a switch adds it
 here too (the first test holds the table to ``MS7F_OFF``)."""

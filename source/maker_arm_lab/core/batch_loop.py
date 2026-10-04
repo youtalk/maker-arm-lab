@@ -285,6 +285,7 @@ MS7F_OFF: dict = {
     "pile_pgs": False,
     "stall_end": False,
     "vote_weights": None,
+    "cls_flip": False,
 }
 """The MS7f switches (MS7f design section 12.1, branch 1) at their off values: the "ms7f" block
 of a run with every one off, what an MS7e run ran with. categories is the base track's;
@@ -296,8 +297,9 @@ lift_budget, a serving trim of the heap client, and end_at_done, the recorder's;
 (the heap client's perceived loop) is the riders track's, and so is cell_failure_cap (the
 perceived selector's failure cap), and so is stall_end (the perceived loop's end of a cycle
 whose jaws closed on nothing); pile_pgs is the env's solver of a large pile
-(``scene.PILE_PGS_MIN_NV``); vote_weights (the heap client's fused vote, a JSON path) is MS7g's
-vote track's (MS7g design section 6.3). The gate supervisor keeps a stdlib copy
+(``scene.PILE_PGS_MIN_NV``); vote_weights (the heap client's fused vote, a JSON path) and
+cls_flip (its classifier's test-time flip, MS7g ledger D10) are MS7g's vote track's (MS7g design
+section 6.3). The gate supervisor keeps a stdlib copy
 (``scripts/run_gate_eval.py``), pinned by a test."""
 MS7F_READY: frozenset[str] = frozenset(
     {
@@ -328,6 +330,7 @@ MS7F_READY: frozenset[str] = frozenset(
         "pile_pgs",
         "stall_end",
         "vote_weights",
+        "cls_flip",
     }
 )
 """The MS7f switches whose behaviour is in this commit. Any other at a value but its off value is
@@ -515,6 +518,12 @@ def add_ms7f_arguments(parser, transport_speed: bool = True) -> None:
         help="MS7g, the heap client with --classifier and --class_views: the fused vote's JSON "
         "(three view weights and a bias a category, lerobot_stack/vote_bank.py) in place of the "
         "served vote (loop.fused_class)",
+    )
+    parser.add_argument(
+        "--cls_flip",
+        action="store_true",
+        help="MS7g ledger D10, the heap client with --classifier: read every classifier view also "
+        "mirrored left to right and average the two log probabilities (PartClassifier.flip)",
     )
 
 
