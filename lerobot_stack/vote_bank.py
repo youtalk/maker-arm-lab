@@ -12,7 +12,11 @@ Three steps, one call:
 
 1. Read ``--model`` (a TorchScript export, as ``core.perception.PartClassifier`` loads it: wrist
    frames as recorded, the overhead frame, the perceived size beside the file) on every frame, the
-   log probability of each of the model's categories. Cached per model and file under ``--out``.
+   log probability of each of the model's categories. ``--members a.pt,b.pt,...`` reads an
+   ensemble as ``train_part_classifier.py --ensemble`` exports one (model_v9e is v6a + v8): the
+   log softmax of the members' mean category logits. ``--flip`` (MS7g ledger D10) also reads each
+   frame mirrored left to right, the frame the classifier is given, and averages the two log
+   probabilities a view. Each member's logits are cached per file under ``--cache``.
 2. Fit each fused vote form of ``--forms`` by maximum likelihood of a multinomial logit on the fit
    part: even p of the bank and every ``--extra`` file (the 51 D24 policy files), train kinds
    only. Each class k scores ``b[k] + sum_v (W_v logp_v)[k]`` over the views read (a missing view
@@ -50,6 +54,7 @@ and exits through ``os._exit``.
 from __future__ import annotations
 
 import argparse
+import functools
 import glob
 import hashlib
 import json
@@ -140,13 +145,12 @@ def events(data: dict) -> list[dict]:
     return out
 
 
-def model_logp(model, frames, wrist, size, names, device, batch: int = 64) -> np.ndarray:
-    """Each frame's log probability over ``names`` (a subset of the model's categories, in that
-    order), read as ``PartClassifier.log_probs`` reads one frame: the model on uint8 frames, whether
-    they are wrist frames and the sorted perceived size, then a log softmax over ``names``."""
-    cols = [list(model.categories).index(n) for n in names]
+def model_logits(model, frames, wrist, size, device, batch: int = 64) -> np.ndarray:
+    """Each frame's category logits over the model's categories, read as
+    ``PartClassifier.log_probs`` reads one frame: the model on uint8 frames, whether they are wrist
+    frames and the sorted perceived size."""
     sized = bool(getattr(model, "size_input", False))
-    out = np.zeros((len(frames), len(names)), dtype=np.float32)
+    out = np.zeros((len(frames), len(model.categories)), dtype=np.float32)
     with torch.no_grad():
         for is_wrist in (False, True):
             rows = np.flatnonzero(wrist == is_wrist)
@@ -157,29 +161,75 @@ def model_logp(model, frames, wrist, size, names, device, batch: int = 64) -> np
                     logits, _ = model(x, is_wrist, torch.from_numpy(size[at]).float().to(device))
                 else:
                     logits, _ = model(x, is_wrist)
-                logp = torch.log_softmax(logits[:, cols].float(), dim=1)
-                out[at] = logp.cpu().numpy()
+                out[at] = logits.float().cpu().numpy()
     return out
 
 
-def load_file(path: Path, model, names, cache: Path, device) -> dict:
-    """One frames file's label columns, its ``logp`` under the model (cached) and its seeds."""
+def combine(logits: list[np.ndarray], cols: list[int]) -> np.ndarray:
+    """An ensemble's log probabilities over ``cols``: the log softmax of the members' mean logits
+    (``train_part_classifier.Ensemble``), as ``PartClassifier.log_probs`` takes it."""
+    mean = torch.from_numpy(np.mean(logits, axis=0)[:, cols]).float()
+    return torch.log_softmax(mean, dim=1).numpy()
+
+
+def _cached(cache: Path, member: Path, path: Path, n: int, mirrored: bool) -> Path:
+    return cache / _sha(member) / f"{path.stem}.{n}.{'flip' if mirrored else 'orig'}.npy"
+
+
+def fill_cache(paths: list[Path], members: list[Path], cache: Path, device, flip: bool) -> None:
+    """Each member's logits on each file's frames (and mirrored ones with ``flip``), member by
+    member so each export loads once, skipping what the cache holds."""
+    for member in members:
+        model = None
+        for path in paths:
+            z = np.load(path)
+            n = len(z["view"])
+            todo = [m for m in ((False, True) if flip else (False,))]
+            todo = [m for m in todo if not _cached(cache, member, path, n, m).exists()]
+            if not todo:
+                continue
+            if model is None:
+                model = torch.jit.load(str(member), map_location=device).eval()
+            side = path.with_name(path.stem + ".size.npy")
+            size = (np.load(side)[:n] if side.exists() else np.full((n, 3), -1.0)).astype(
+                np.float32
+            )
+            frames, wrist = z["frames"], z["view"] != "overhead"
+            for mirrored in todo:
+                hit = _cached(cache, member, path, n, mirrored)
+                hit.parent.mkdir(parents=True, exist_ok=True)
+                x = np.ascontiguousarray(frames[:, :, ::-1]) if mirrored else frames
+                np.save(hit, model_logits(model, x, wrist, size, device))
+        del model
+
+
+def load_file(path: Path, members: list[Path], names, cache: Path, flip: bool) -> dict:
+    """One frames file's label columns, its seeds and its ``logp`` from the members' cached
+    logits: the ensemble's log probabilities, with ``flip`` the mean of the frame's and the mirrored
+    frame's."""
     z = np.load(path)
     data = {k: z[k] for k in z.files if k not in ("frames", "args", "wrist_crop")}
     data.setdefault("cycle", None)
     args = json.loads(str(z["args"]))
     data["run_seed"], data["layout_seed"] = int(args["run_seed"]), int(args["layout_seed"])
-    hit = cache / f"{path.stem}.{len(data['view'])}.npy"
-    if hit.exists():
-        data["logp"] = np.load(hit)
-        return data
-    side = path.with_name(path.stem + ".size.npy")
     n = len(data["view"])
-    size = np.load(side)[:n] if side.exists() else np.full((n, 3), -1.0, np.float32)
-    wrist = data["view"] != "overhead"
-    data["logp"] = model_logp(model, z["frames"], wrist, size.astype(np.float32), names, device)
-    np.save(hit, data["logp"])
+    sides = [
+        combine(
+            [np.load(_cached(cache, m, path, n, mirrored)) for m in members],
+            [CATEGORIES_OF[members[0]].index(c) for c in names],
+        )
+        for mirrored in ((False, True) if flip else (False,))
+    ]
+    data["logp"] = np.mean(sides, axis=0)
     return data
+
+
+CATEGORIES_OF: dict = {}  # member path -> its categories, filled by ``run``
+
+
+@functools.cache
+def _sha(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]
 
 
 def table(files: list[dict], names) -> list[dict]:
@@ -399,7 +449,10 @@ def check_replay(files: list[dict], payloads: list[Path], names) -> dict:
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = _Parser(description=__doc__)
-    parser.add_argument("--model", required=True, help="the TorchScript classifier to read")
+    parser.add_argument("--model", default="", help="the TorchScript classifier to read")
+    parser.add_argument("--members", default="", help="comma list of exports read as one ensemble")
+    parser.add_argument("--flip", action="store_true", help="also read each frame mirrored")
+    parser.add_argument("--cache", default="", help="dir of the member logits cache (--out)")
     parser.add_argument("--bank", action="append", default=[], help="glob of bank files (p)")
     parser.add_argument("--extra", action="append", default=[], help="glob of fit-only files")
     parser.add_argument("--payloads", action="append", default=[], help="glob of run payloads")
@@ -411,6 +464,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if not args.bank and not args.extra:
         parser.error("--bank and --extra name no file")
+    if bool(args.model) == bool(args.members):
+        parser.error("give either --model or --members")
+    args.members = [Path(m).expanduser() for m in (args.members or args.model).split(",")]
     args.forms = args.forms.split(",")
     if not set(args.forms) <= set(FORMS):
         parser.error(f"--forms takes {FORMS}")
@@ -424,17 +480,21 @@ def expand(patterns) -> list[Path]:
 def run(args) -> dict:
     torch.backends.cudnn.allow_tf32 = False  # the served read is float32 on the CPU
     torch.backends.cuda.matmul.allow_tf32 = False
-    model = torch.jit.load(args.model, map_location=args.device).eval()
-    names = list(model.categories)
-    tag = hashlib.sha256(Path(args.model).read_bytes()).hexdigest()[:12]
-    cache = Path(args.out) / f"logp_{tag}"
-    cache.mkdir(parents=True, exist_ok=True)
+    for member in args.members:
+        CATEGORIES_OF[member] = list(torch.jit.load(str(member), map_location="cpu").categories)
+    names = CATEGORIES_OF[args.members[0]]
+    if any(c != names for c in CATEGORIES_OF.values()):
+        raise ValueError("the members read different categories or orders")
+    tag = "+".join(_sha(m) for m in args.members) + ("+flip" if args.flip else "")
+    cache = Path(args.cache or args.out)
+    Path(args.out).mkdir(parents=True, exist_ok=True)
     bank, extra = expand(args.bank), expand(args.extra)
     if not bank + extra:
         raise FileNotFoundError(f"no file matches {args.bank + args.extra}")
     files = []
+    fill_cache(bank + extra, args.members, cache, args.device, args.flip)
     for path in bank + extra:
-        data = load_file(path, model, names, cache, args.device)
+        data = load_file(path, args.members, names, cache, args.flip)
         data["p"] = data["run_seed"] - BANK_RUN0 if path in bank else None
         files.append(data)
     rows = [r for r in table(files, names) if r["logp"][0] is not None]
@@ -459,7 +519,8 @@ def run(args) -> dict:
         default=None,
     )
     summary = {
-        "model": args.model,
+        "model": [str(m) for m in args.members],
+        "flip": args.flip,
         "model_sha": tag,
         "categories": names,
         "files": {"bank": len(bank), "extra": len(extra)},
