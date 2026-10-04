@@ -678,3 +678,68 @@ def test_the_per_env_queue_equals_the_batched_forward_on_the_checkpoint():
     cut = policy_fn(state, wrist, overhead, context, replan=np.array([False, True]))
     np.testing.assert_array_equal(cut[0], batched[1][0])
     np.testing.assert_allclose(cut[1], first[1], atol=1e-5)
+
+
+# MS7g D12: the wrapped, normalized context, gated by the checkpoint's marker.
+
+
+def test_the_roll_wraps_to_a_small_signed_angle_on_numpy_and_torch():
+    import torch
+
+    from policy_server import CONTEXT_ROLL, wrap_context_roll
+
+    context = np.zeros((3, 16), np.float32)
+    context[:, CONTEXT_ROLL] = [3.13, -3.135, np.pi]
+    context[:, 0] = 0.16
+    for array in (context, torch.from_numpy(context)):
+        out = wrap_context_roll(array)
+        np.testing.assert_allclose(
+            np.asarray(out[:, CONTEXT_ROLL]), [3.13 - np.pi, -3.135 + np.pi, 0.0], atol=1e-6
+        )
+        np.testing.assert_array_equal(np.asarray(out[:, 0]), context[:, 0])
+        assert out.dtype == array.dtype
+    assert context[0, CONTEXT_ROLL] == np.float32(3.13)  # the caller's array is untouched
+
+
+def test_the_context_marker_gates_the_transform(tmp_path):
+    from policy_server import CONTEXT_NORM, find_context_marker
+
+    ckpt = tmp_path / "checkpoints" / "050000" / "pretrained_model"
+    ckpt.mkdir(parents=True)
+    assert find_context_marker(str(ckpt)) is None
+    marker = tmp_path / "action_space.json"
+    marker.write_text('{"action_space": "absolute", "gripper": "continuous"}')
+    assert find_context_marker(str(ckpt)) is None  # every checkpoint before D12
+    marker.write_text(json.dumps({"action_space": "absolute", "context": CONTEXT_NORM}))
+    assert find_context_marker(str(ckpt)) == CONTEXT_NORM
+    marker.write_text('{"action_space": "absolute", "context": "zscore"}')
+    with pytest.raises(ValueError, match="unknown context transform"):
+        find_context_marker(str(ckpt))
+
+
+def test_policy_id_marks_a_normalized_context_only():
+    assert inference_policy_id("ck", {}, context_dim=16, gripper="continuous") == "act:ck+ctx16+gap"
+    assert (
+        inference_policy_id("ck", {}, context_dim=16, gripper="continuous", context_norm="x")
+        == "act:ck+ctx16+ctxnorm+gap"
+    )
+
+
+F5 = Path.home() / "data/maker-arm-ms7/f/train_F5/checkpoints/200000/pretrained_model"
+
+
+@pytest.mark.skipif(not F5.is_dir(), reason="the F5 200k checkpoint is not on this host")
+def test_an_old_checkpoint_serves_its_context_untouched(monkeypatch):
+    import policy_server
+
+    def refuse(context):
+        raise AssertionError("an old checkpoint must not wrap its context")
+
+    monkeypatch.setattr(policy_server, "wrap_context_roll", refuse)
+    policy_fn, _reset, policy_id, *_ = policy_server.load_act(str(F5), "cpu", n_action_steps=1)
+    rng = np.random.default_rng(0)
+    state = rng.uniform(-1.0, 1.0, (1, 7)).astype(np.float32)
+    image = rng.integers(0, 256, (1, 224, 224, 3), dtype=np.uint8)
+    context = np.full((1, 16), 0.1, np.float32)
+    assert policy_fn(state, image, image, context).shape == (1, 7)
+    assert "ctxnorm" not in policy_id

@@ -58,3 +58,11 @@ def test_the_corpus_mask_names_lift_and_reopen_by_their_ids():
     text = (CONVERT.parent / "reopen_mask.py").read_text()
     lift, reopen = re.search(r"^LIFT_INT, REOPEN_INT = (\d+), (\d+)", text, re.MULTILINE).groups()
     assert (int(lift), int(reopen)) == (PHASE_TO_INT["LIFT"], PHASE_TO_INT["REOPEN"])
+
+
+def test_the_served_context_roll_index_is_the_camera_roll():
+    from maker_arm_lab.mj.context_names import CONTEXT_CAMERA_NAMES
+
+    text = (CONVERT.parent / "policy_server.py").read_text()
+    index = int(re.search(r"^CONTEXT_ROLL = (\d+)", text, re.MULTILINE).group(1))
+    assert CONTEXT_CAMERA_NAMES.index("overhead_cam_roll") == index
