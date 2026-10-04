@@ -122,8 +122,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     # --book_miss is the heap loop's; the rig driving here keeps its own failure memory.
     # --missed_lift reads the serving loop's carries; the teacher here holds its own.
     # --cell_failure_cap is the serving loop's selector; the teacher keeps CELL_FAILURE_CAP.
-    # --vote_weights is the serving loop's classifier vote; the teacher reads the truth.
-    serving = {"book_miss", "missed_lift", "cell_failure_cap", "vote_weights"}
+    # --vote_weights and --cls_flip are the serving loop's classifier; the teacher reads the truth.
+    serving = {"book_miss", "missed_lift", "cell_failure_cap", "vote_weights", "cls_flip"}
     check_ms7f(parser, args, (MS7F_READY - serving) | {"transport_speed"})
     check_teacher_waits(parser, args)
     for name in ("lift_budget", "stall_end"):

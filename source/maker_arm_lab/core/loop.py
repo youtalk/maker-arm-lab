@@ -2594,6 +2594,8 @@ def rollout(
     }
     if classifier is not None:
         switches |= {"classifier": classifier.path, "passenger_drop": bool(passenger_drop)}
+        if getattr(classifier, "flip", False):
+            switches["cls_flip"] = True  # MS7g ledger D10: every view also read mirrored
     if lift_view_steps:
         switches["lift_view_steps"] = int(lift_view_steps)
     if missed_lift:

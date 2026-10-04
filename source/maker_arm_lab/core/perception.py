@@ -519,10 +519,16 @@ class PartClassifier:
     (``passenger_threshold``, a logit); it takes uint8 (N, 224, 224, 3) frames and whether they are
     wrist frames, which it crops itself, and with ``size_input`` the part's perceived size. A model
     with ``wrist_input`` "crop" reads the env's native-pixel fingertip crop
-    (``MjLegoSortEnv.wrist_crop``) in place of the policy's 224 px wrist frame."""
+    (``MjLegoSortEnv.wrist_crop``) in place of the policy's 224 px wrist frame.
 
-    def __init__(self, path):
+    ``flip`` (``--cls_flip``, MS7g ledger D10, off by default) reads every frame also mirrored left
+    to right, the frame the model is given, and averages the two log probabilities; the passenger
+    read stays the frame's own. On the MS7g frame bank's evaluation part (5700 lifts, 2026-10-03)
+    v6a + v8 + v10 with its nine-value vote read 5367 right with the flip and 5356 without."""
+
+    def __init__(self, path, flip: bool = False):
         self.path = str(path)
+        self.flip = bool(flip)
         self.model = torch.jit.load(self.path, map_location="cpu").eval()
         self.categories = tuple(self.model.categories)
         self.threshold = float(self.model.passenger_threshold)
@@ -544,14 +550,19 @@ class PartClassifier:
         passenger head reads a second part in the jaws. ``size`` is the part's perceived size
         (a detection's ``size``), which a ``size_input`` model reads sorted; None reads unknown."""
         x = torch.as_tensor(frame)[None]
+        known = None
         if self.size_input:
             known = torch.tensor([sorted(size)]) if size is not None else torch.full((1, 3), -1.0)
-            logits, rider = self.model(x, wrist, known)
-        else:
-            logits, rider = self.model(x, wrist)
+        logits, rider = self._forward(x, wrist, known)
         cols = [self.categories.index(c) for c in active]
-        logp = torch.log_softmax(logits[0, cols].float(), dim=0).tolist()
-        return logp, float(rider[0]) >= self.threshold
+        logp = torch.log_softmax(logits[0, cols].float(), dim=0)
+        if self.flip:  # the mean with the frame mirrored left to right (NHWC: dim 2)
+            mirrored, _ = self._forward(x.flip(2), wrist, known)
+            logp = (logp + torch.log_softmax(mirrored[0, cols].float(), dim=0)) / 2.0
+        return logp.tolist(), float(rider[0]) >= self.threshold
+
+    def _forward(self, x, wrist: bool, known):
+        return self.model(x, wrist) if known is None else self.model(x, wrist, known)
 
     def read(
         self, frame, active: Sequence[str], wrist: bool = False, size=None

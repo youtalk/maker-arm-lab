@@ -1,13 +1,14 @@
 """MS7g design section 6.3: the fused vote ``--vote_weights`` (``loop.fused_class``), the loop with
-the switch on and off, and its refusals."""
+the switch on and off, and its refusals; and ledger D10's classifier flip ``--cls_flip``."""
 
 import json
+from typing import List, Tuple  # noqa: UP035 -- TorchScript reads the typing names
 
 import numpy as np
 import pytest
 import torch
 
-from maker_arm_lab.core import desk_boxes, loop, parts
+from maker_arm_lab.core import desk_boxes, loop, parts, perception
 from maker_arm_lab.core.eval_loop import EvalFailure
 from test_classifier_loop import SWITCHES, _classifier, _scene, _usage
 from test_ms7f_stack import ROOT, _gate_argv, _load, ge
@@ -186,3 +187,64 @@ def test_the_client_parses_the_guards_and_the_vote_the_supervisor_forwards(tmp_p
     assert not hit(switches, ms7f | {"vote_weights": None})
     for name in ("carry_guard", "overhang_guard"):
         assert not hit(switches | {name: False}, ms7f), name
+
+
+class _Sided(torch.nn.Module):
+    """Class 0's logit is the frame's left half mean brightness and class 1's the right half's: a
+    mirrored frame reads the other way round."""
+
+    categories: List[str]  # noqa: UP006
+    passenger_threshold: float
+
+    def __init__(self):
+        super().__init__()
+        self.categories = list(parts.BASE_CLASSES)
+        self.passenger_threshold = 0.0
+
+    def forward(self, frames: torch.Tensor, wrist: bool) -> Tuple[torch.Tensor, torch.Tensor]:  # noqa: UP006
+        x = frames.float().mean(dim=(1, 3)) / 255.0
+        logits = torch.zeros(frames.shape[0], len(self.categories))
+        logits[:, 0] = 4.0 * x[:, :112].mean(1)
+        logits[:, 1] = 4.0 * x[:, 112:].mean(1)
+        return logits, torch.full((frames.shape[0],), -1.0)
+
+
+def test_the_flip_averages_the_frame_s_and_its_mirror_s_log_probabilities(tmp_path):
+    path = tmp_path / "sided.pt"
+    torch.jit.script(_Sided()).save(str(path))
+    names = parts.BASE_CLASSES
+    frame = np.zeros((224, 224, 3), np.uint8)
+    frame[:, :112] = 200
+    plain = perception.PartClassifier(path)
+    flipped = perception.PartClassifier(path, flip=True)
+    own, _ = plain.log_probs(frame, names, wrist=True)
+    mirror, _ = plain.log_probs(np.ascontiguousarray(frame[:, ::-1]), names, wrist=True)
+    both, _ = flipped.log_probs(frame, names, wrist=True)
+    assert own[0] > own[1] and mirror[1] > mirror[0]
+    assert np.allclose(both, (np.array(own) + np.array(mirror)) / 2.0, atol=1e-6)
+    assert not plain.flip and flipped.flip
+
+
+def test_with_a_mirror_symmetric_model_the_flip_changes_no_decision(tmp_path, capsys):
+    """The scene's stub reads mean brightness, the same on a frame and its mirror: with the flip
+    every served step and payload byte are the run's without it, but the inference block's
+    ``cls_flip``, which only the flipped run records."""
+    off, off_served, _ = _run(tmp_path)
+    env, rig, policy = _scene()
+    served = _served(env)
+    stub = _classifier(tmp_path, "slope", "wide")
+    stub.flip = True
+    on = _rollout(env, rig, policy, perceived=True, classifier=stub, class_views=True, **SWITCHES)
+    env.close()
+    for key in ("wall_sec", "wall_sec_per_episode"):
+        on.pop(key)
+    assert (
+        on["inference"]["loop"].pop("cls_flip") is True
+        and "cls_flip" not in off["inference"]["loop"]
+    )
+    assert json.dumps(on, sort_keys=True) == json.dumps(off, sort_keys=True)
+    assert len(served) == len(off_served) > 0
+    capsys.readouterr()  # the runs' progress lines
+    heap = ["--heap_k", "3", "--desk_boxes", "4", "--box_draw", "4", "--gripper", "continuous"]
+    line = _usage("mj_eval_heap", heap + ["--perceived", "--categories", "--cls_flip"], capsys)
+    assert line.startswith("EVAL_FAIL ") and "--cls_flip" in line, line

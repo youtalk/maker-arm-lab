@@ -1169,6 +1169,7 @@ def _ms7f_scene(monkeypatch):
     # MS7g's fused vote refuses carry_votes, which this scene turns on; it changes only how the
     # classifier's log probabilities are summed (test_vote_weights runs it).
     ready |= {"vote_weights"}
+    ready |= {"cls_flip"}  # MS7g D10: the scene's classifier reads every frame mirrored too
     assert batch_loop.MS7F_READY == ready | teacher, "turn it on in this scene"
     # Two of the three bricks start in the tray and one part fills a box, so the refill and
     # an emptying both run between cycles. Set before the build: the box draw reads the ratio.
@@ -1188,6 +1189,7 @@ def _ms7f_scene(monkeypatch):
     )
     env.narrow_overhead = lambda i, point: np.full((224, 224, 3), 255, dtype=np.uint8)
     stub = _classifier(Path(tempfile.mkdtemp()), "special", "brick", names=parts.PART_CATEGORIES)
+    stub.flip = True
     # A lift budget under the 800-step cycle budget: the tray scene's first three cycles lift
     # nothing and end on it, and the fourth places its part at step 487 (150 cuts it too).
     on = {"box_empty": True, "book_miss": True, "lift_budget": 750}

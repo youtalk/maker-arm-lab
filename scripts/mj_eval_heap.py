@@ -455,6 +455,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         )
     if not 0 <= args.carry_votes <= MAX_CARRY_VOTES:
         parser.error(f"--carry_votes must lie in [0, {MAX_CARRY_VOTES}]")
+    if args.cls_flip and not args.classifier:
+        parser.error("--cls_flip mirrors the classifier's frames: it needs --classifier")
     if args.vote_weights:
         if not (args.classifier and args.class_views) or args.carry_votes:
             parser.error(
@@ -616,7 +618,9 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
         )
         policy = None if args.oracle_driver else policy_client.ServerPolicy(args.server)
         trace = [] if args.hold_trace else None
-        classifier = perception.PartClassifier(args.classifier) if args.classifier else None
+        classifier = None
+        if args.classifier:
+            classifier = perception.PartClassifier(args.classifier, flip=args.cls_flip)
         if args.classifier_frames:
             sys.path.insert(0, str(Path(__file__).resolve().parent))
             from mj_render_set import PolicyFrames
