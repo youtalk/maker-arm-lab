@@ -50,3 +50,11 @@ def test_the_part_classifier_names_the_ms7f_categories_in_order():
     text = (CONVERT.parent / "train_part_classifier.py").read_text()
     pinned = re.search(r"^CATEGORIES = \(([^)]*)\)", text, re.MULTILINE).group(1)
     assert tuple(v.strip().strip('"') for v in pinned.split(",")) == PART_CATEGORIES
+
+
+def test_the_served_context_roll_index_is_the_camera_roll():
+    from maker_arm_lab.mj.context_names import CONTEXT_CAMERA_NAMES
+
+    text = (CONVERT.parent / "policy_server.py").read_text()
+    index = int(re.search(r"^CONTEXT_ROLL = (\d+)", text, re.MULTILINE).group(1))
+    assert CONTEXT_CAMERA_NAMES.index("overhead_cam_roll") == index
