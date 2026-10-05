@@ -2,8 +2,13 @@
 # pi0.5 fine-tune on Google Colab (MS7h design 7.2): stock lerobot-train 0.5.1 on the dataset
 # derive_vla_dataset.py builds, from lerobot/pi05_base (revision pinned below), a full fine-tune
 # in bfloat16 with gradient checkpointing on an A100 80GB. The notebook stays outside the
-# repository: it mounts Drive (drive.mount("/content/drive")), exports HF_TOKEN from a Colab
-# secret (a subprocess cannot read Colab secrets itself) and runs this script in a cell.
+# repository. Its cells, in order:
+#   1. from google.colab import drive; drive.mount("/content/drive")
+#   2. import os; from google.colab import userdata
+#      os.environ["HF_TOKEN"] = userdata.get("HF_TOKEN")
+#      (a Colab secret named HF_TOKEN with notebook access on. A subprocess cannot read Colab
+#      secrets itself, so without this export the script sees no token.)
+#   3. !DIR=<Drive folder> bash colab_train_pi05.sh --smoke   (then without --smoke)
 #
 # Drive layout under /content/drive/MyDrive/$DIR:
 #   dataset/              the derived dataset (DATASET=dataset_third for the one-third copy)
@@ -17,7 +22,9 @@
 # session that ends (24 hours at most) resumes from the Drive copy: run the same cell again.
 #
 # The pi05 tokenizer google/paligemma-3b-pt-224 is a gated repo: HF_TOKEN must belong to an
-# account that accepted its licence. The script checks that first, before it copies anything.
+# account that was granted access (the owner's was, 2026-10-05). The script checks that first,
+# before it copies anything. transformers 5.3's AutoTokenizer reads the repo's config.json as
+# well as the tokenizer files, so an offline host needs config.json in its HF cache too.
 #
 # usage: DIR=<Drive folder> bash colab_train_pi05.sh [--smoke] [--expert_only]
 #   --smoke        200 steps into a fresh local dir with one checkpoint at the end and no Drive
@@ -75,6 +82,7 @@ fi
 
 python3 -c 'import lerobot, sys; sys.exit(lerobot.__version__ != "0.5.1")' 2>/dev/null \
     || pip install -q "lerobot[pi]==0.5.1"
+[ -n "${HF_TOKEN:-}" ] || fail "HF_TOKEN is not set: export it from the Colab secret (cell 2)"
 python3 -c 'from transformers import AutoTokenizer
 AutoTokenizer.from_pretrained("google/paligemma-3b-pt-224")' \
     || fail "no google/paligemma-3b-pt-224: HF_TOKEN of an account that accepted its licence"
