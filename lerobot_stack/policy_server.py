@@ -22,6 +22,7 @@ import argparse
 import json
 import traceback
 from collections import deque
+from types import SimpleNamespace
 
 import numpy as np
 import zmq
@@ -506,12 +507,106 @@ def load_act(
     temporal_ensemble_coeff: float | None = None,
     blank_camera: str | None = None,
     action_warp: float = 1.0,
+    ensemble_with: str | None = None,
 ):
     """Build (policy_fn, reset_fn, policy_id, n_action_steps, inference, context_dim, action_space,
     gripper).
 
     checkpoint_dir is a `pretrained_model` directory (e.g.
-    <output_dir>/checkpoints/last/pretrained_model). The checkpoint's own
+    <output_dir>/checkpoints/last/pretrained_model), loaded by ``_load_member``.
+    ``action_warp`` plays each queued chunk faster (``ActionQueues``); the ensembler queues no
+    chunk to warp.
+
+    ``ensemble_with`` (MS7g D20) is a second `pretrained_model` directory, loaded the same way
+    with its own pre- and postprocessor (so its own context marker), and every forward serves
+    the elementwise mean of the two members' unnormalized actions. The queues, the warp, the
+    replan flags and temporal ensembling run on the mean as they run on one checkpoint. The two
+    must agree on each member's ``contract``, or the load is refused. The policy id keeps
+    ``act:<checkpoint_dir>`` first and ends ``+ens:<ensemble_with>`` (plus the member's
+    ``+ctxnorm``); the inference block gains ``ensemble_with``. None loads one checkpoint
+    exactly as before.
+    """
+    if action_warp != 1.0 and temporal_ensemble_coeff is not None:
+        raise ValueError("action_warp plays the queued chunk: temporal ensembling queues none")
+    members = [
+        _load_member(
+            path, device, n_action_steps, temporal_ensemble_coeff, blank_camera, action_warp
+        )
+        for path in [checkpoint_dir, *([ensemble_with] if ensemble_with else [])]
+    ]
+    first = members[0]
+    for member in members[1:]:
+        diff = {
+            key: (value, member.contract[key])
+            for key, value in first.contract.items()
+            if member.contract[key] != value
+        }
+        if diff:
+            raise ValueError(f"--ensemble_with refused, the members differ: {diff}")
+
+    def predict_chunk(obs: dict) -> np.ndarray:
+        return mean_action([m.predict_chunk(obs) for m in members])
+
+    queues = ActionQueues(predict_chunk, first.n_action_steps, action_warp)
+
+    def policy_fn(
+        state: np.ndarray,
+        wrist: np.ndarray,
+        overhead: np.ndarray,
+        context: np.ndarray | None,
+        replan: np.ndarray | None = None,
+    ) -> np.ndarray:
+        if first.temporal_ensemble:
+            # The ensembler runs the model every step, so there is no queue to cut short.
+            return mean_action([m.select(state, wrist, overhead, context) for m in members])
+        obs = {"state": state, "wrist": wrist, "overhead": overhead}
+        if first.context_dim:
+            obs["context"] = context
+        return queues.step(obs, replan)
+
+    def reset_fn() -> None:
+        for member in members:
+            member.policy.reset()
+        queues.reset()
+
+    policy_id = first.policy_id
+    inference = {**first.inference, "action_warp": action_warp}
+    if ensemble_with:
+        policy_id += f"+ens:{ensemble_with}" + ("+ctxnorm" if members[1].context_norm else "")
+        inference["ensemble_with"] = ensemble_with
+    return (
+        policy_fn,
+        reset_fn,
+        policy_id,
+        first.n_action_steps,
+        inference,
+        first.context_dim,
+        first.contract["action_space"],
+        first.contract["gripper"],
+    )
+
+
+def mean_action(actions: list[np.ndarray]) -> np.ndarray:
+    """The elementwise mean of the members' unnormalized actions; one member's own array as is,
+    so a read without --ensemble_with serves the same bytes as before the switch."""
+    return actions[0] if len(actions) == 1 else np.mean(actions, axis=0, dtype=np.float32)
+
+
+def _load_member(
+    checkpoint_dir: str,
+    device: str,
+    n_action_steps: int | None,
+    temporal_ensemble_coeff: float | None,
+    blank_camera: str | None,
+    action_warp: float,
+):
+    """One checkpoint with its own pre/post processor pipelines, as a namespace: ``policy``,
+    ``predict_chunk(obs)``, ``select(state, wrist, overhead, context)`` (one temporal-ensemble
+    step), ``policy_id``, ``inference``, ``n_action_steps``, ``context_dim``,
+    ``context_norm``, ``temporal_ensemble`` and ``contract`` (what two ensemble members must
+    share).
+
+    The checkpoint's own
     saved pre/post processor pipelines carry normalization + device transfer,
     the same way lerobot_eval loads them (verified against lerobot 0.5.1:
     `preprocessor_overrides={"device_processor": {"device": ...}}`).
@@ -520,11 +615,9 @@ def load_act(
     when the checkpoint has image features. `context_dim` is the checkpoint's
     `env_state_feature.shape[0]`, or 0 for a checkpoint that takes no context.
     Inference-config overrides (n_action_steps, temporal_ensemble_coeff) are applied
-    at checkpoint load and reflected in the returned policy_id suffix. ``action_warp`` plays
-    each queued chunk faster (``ActionQueues``); the ensembler queues no chunk to warp.
+    at checkpoint load and reflected in the returned policy_id suffix (``action_warp`` only
+    names itself there).
     """
-    if action_warp != 1.0 and temporal_ensemble_coeff is not None:
-        raise ValueError("action_warp plays the queued chunk: temporal ensembling queues none")
     import dataclasses
 
     import torch
@@ -601,33 +694,15 @@ def load_act(
             chunk = policy.predict_action_chunk(batch)[:, : policy.config.n_action_steps]
         return _finish(chunk)
 
-    queues = ActionQueues(predict_chunk, int(policy.config.n_action_steps), action_warp)
+    def select(state, wrist, overhead, context) -> np.ndarray:
+        with torch.inference_mode():
+            return _finish(policy.select_action(_batch(state, wrist, overhead, context)))
 
-    def policy_fn(
-        state: np.ndarray,
-        wrist: np.ndarray,
-        overhead: np.ndarray,
-        context: np.ndarray | None,
-        replan: np.ndarray | None = None,
-    ) -> np.ndarray:
-        if policy.config.temporal_ensemble_coeff is not None:
-            # The ensembler runs the model every step, so there is no queue to cut short.
-            with torch.inference_mode():
-                action = policy.select_action(_batch(state, wrist, overhead, context))
-            return _finish(action)
-        obs = {"state": state, "wrist": wrist, "overhead": overhead}
-        if context_dim:
-            obs["context"] = context
-        return queues.step(obs, replan)
-
-    def reset_fn() -> None:
-        policy.reset()
-        queues.reset()
-
-    return (
-        policy_fn,
-        reset_fn,
-        inference_policy_id(
+    return SimpleNamespace(
+        policy=policy,
+        predict_chunk=predict_chunk,
+        select=select,
+        policy_id=inference_policy_id(
             checkpoint_dir,
             overrides,
             blank_camera,
@@ -638,11 +713,19 @@ def load_act(
             action_warp=action_warp,
             context_norm=context_norm,
         ),
-        policy.config.n_action_steps,
-        {**served_inference(policy.config), "action_warp": action_warp},
-        context_dim,
-        action_space,
-        gripper,
+        inference=served_inference(policy.config),
+        n_action_steps=int(policy.config.n_action_steps),
+        context_dim=context_dim,
+        context_norm=context_norm,
+        temporal_ensemble=policy.config.temporal_ensemble_coeff is not None,
+        contract={
+            "action_space": action_space,
+            "gripper": gripper,
+            "gripper_squash": marker is not None,
+            "action_shape": list(policy.config.action_feature.shape),
+            "context_dim": context_dim,
+            **served_inference(policy.config),
+        },
     )
 
 
@@ -698,6 +781,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="occlusion ablation: zero this camera stream before inference (diagnostic only)",
     )
+    parser.add_argument(
+        "--ensemble_with",
+        default=None,
+        help="MS7g D20: a second pretrained_model directory; serve the mean of both "
+        "checkpoints' unnormalized actions, each through its own pre/post processor",
+    )
     return parser
 
 
@@ -727,6 +816,7 @@ def main() -> int:
             temporal_ensemble_coeff=args.temporal_ensemble_coeff,
             blank_camera=args.blank_camera,
             action_warp=args.action_warp,
+            ensemble_with=args.ensemble_with,
         )
         server = PolicyServer(
             policy_fn,
