@@ -96,16 +96,17 @@ def _unpack(raw: bytes) -> np.ndarray:
     return np.load(io.BytesIO(raw), allow_pickle=False)
 
 
-def send_message(socket, header: dict, arrays: dict[str, np.ndarray] | None = None) -> None:
+def encode_frames(header: dict, arrays: dict[str, np.ndarray] | None = None) -> list[bytes]:
+    """The multipart frames of one message. A ROUTER socket sends them after its envelope."""
     frames = [json.dumps(header).encode()]
     for name, array in (arrays or {}).items():
         frames.append(name.encode())
         frames.append(_pack(np.ascontiguousarray(array)))
-    socket.send_multipart(frames)
+    return frames
 
 
-def recv_message(socket) -> tuple[dict, dict[str, np.ndarray]]:
-    frames = socket.recv_multipart()
+def decode_frames(frames: list[bytes]) -> tuple[dict, dict[str, np.ndarray]]:
+    """(header, arrays) of one message's frames, the envelope already stripped."""
     header = json.loads(frames[0].decode())
     if len(frames) % 2 != 1:
         raise ValueError(f"malformed message: {len(frames)} frames (want 1 + 2 per array)")
@@ -113,6 +114,14 @@ def recv_message(socket) -> tuple[dict, dict[str, np.ndarray]]:
     for i in range(1, len(frames), 2):
         arrays[frames[i].decode()] = _unpack(frames[i + 1])
     return header, arrays
+
+
+def send_message(socket, header: dict, arrays: dict[str, np.ndarray] | None = None) -> None:
+    socket.send_multipart(encode_frames(header, arrays))
+
+
+def recv_message(socket) -> tuple[dict, dict[str, np.ndarray]]:
+    return decode_frames(socket.recv_multipart())
 
 
 def _check(name: str, array: np.ndarray, sample_shape: tuple, dtype: str, batch_size: int) -> None:
