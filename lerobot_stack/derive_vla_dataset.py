@@ -6,12 +6,14 @@ moves into the state: the derived ``observation.state`` is the 7 state values an
 (``policy_server.wrap_context_roll``, MS7g D12), and ``observation.environment_state`` leaves the
 dataset. Every episode gets the one task string ``TASK``: pi05 writes it into its prompt.
 
-The state's statistics are computed over every kept frame, quantiles too (LeRobot's
-``get_feature_stats`` on the whole column): pi05 maps the state to [-1, 1] by q01 and q99, and the
-corpus's own quantiles are the frame-weighted mean of the per-episode quantiles
-(``aggregate_stats``), which for a per-episode constant such as the camera pose collapses q01 and
-q99 onto the mean. The per-episode state stats in meta/episodes are recomputed the same way; every
-other feature's stats are copied. The videos are hard links to the source files (one filesystem
+The statistics of the state and the action are computed over every kept frame, quantiles too
+(LeRobot's ``get_feature_stats`` on the whole column): pi05 maps both to [-1, 1] by q01 and q99,
+and the corpus's own quantiles are the frame-weighted mean of the per-episode quantiles
+(``aggregate_stats``). For a per-episode constant such as the camera pose that collapses q01 and
+q99 onto the mean, and for the action it is about a third of the true spread (2026-10-05, the
+whole corpus: joint 1 q01 -0.601 against -1.779, so the normalized joint actions reached +-4).
+The per-episode state stats in meta/episodes are recomputed too; every other feature's stats are
+copied. The videos are hard links to the source files (one filesystem
 needed), the images and the action are untouched, and the source is never written.
 
 ``--episode_fraction P/Q`` keeps the first ceil(n P/Q) episodes of each wave of n (MS7h design 5.4
@@ -118,7 +120,7 @@ def derive(src: Path, out: Path, fraction: Fraction = Fraction(1)) -> dict:
     renumber = np.cumsum(keep) - 1  # source episode -> derived episode, where kept
 
     out.mkdir(parents=True)
-    states, offset = [], 0
+    states, actions, offset = [], [], 0
     for path in sorted((src / "data").glob("*/*.parquet")):
         table = pq.read_table(path)
         index = table["index"].to_numpy()
@@ -132,6 +134,7 @@ def derive(src: Path, out: Path, fraction: Fraction = Fraction(1)) -> dict:
         n, width = state.shape
         done = sum(len(s) for s in states)
         states.append(state)
+        actions.append(columns(table, "action"))
         offsets = pa.array(np.arange(0, (n + 1) * width, width, dtype=np.int32))
         flat = pa.array(state.ravel())
         table = put(table, STATE, pa.ListArray.from_arrays(offsets, flat, table[STATE].type))
@@ -169,7 +172,8 @@ def derive(src: Path, out: Path, fraction: Fraction = Fraction(1)) -> dict:
 
     stats = json.loads((src / "meta/stats.json").read_text())
     stats.pop(ENV)
-    stats[STATE] = {k: v.tolist() for k, v in feature_stats(state).items()}
+    for key, values in ((STATE, state), ("action", np.concatenate(actions))):
+        stats[key] = {k: v.tolist() for k, v in feature_stats(values).items()}
     (out / "meta/stats.json").write_text(json.dumps(stats, indent=4))
 
     wrapped = [f"{ROLL_NAME}_wrapped" if n == ROLL_NAME else n for n in names]

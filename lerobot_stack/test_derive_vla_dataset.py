@@ -132,7 +132,7 @@ def test_the_state_is_23_wide_in_order_and_the_context_leaves(merged, derived):
     np.testing.assert_array_equal(np.stack(new["action"]), np.stack(src["action"]))
 
 
-def test_one_task_and_recomputed_state_stats(merged, derived):
+def test_one_task_and_recomputed_state_and_action_stats(merged, derived):
     from lerobot.datasets.compute_stats import get_feature_stats
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
@@ -141,18 +141,22 @@ def test_one_task_and_recomputed_state_stats(merged, derived):
     assert {ds[i]["task"] for i in range(len(ds))} == {dv.TASK}
     assert ds[0]["observation.state"].shape == (23,)
     assert ds[0]["observation.images.overhead"].shape == (3, 64, 64)
-    state = np.stack(frames(derived)["observation.state"]).astype(np.float64)
-    want = get_feature_stats(state, axis=0, keepdims=False)
-    for key in ("min", "max", "mean", "std", "q01", "q99"):
-        np.testing.assert_allclose(ds.meta.stats["observation.state"][key], want[key])
+    for name in ("observation.state", "action"):
+        column = np.stack(frames(derived)[name]).astype(np.float64)
+        want = get_feature_stats(column, axis=0, keepdims=False)
+        for key in ("min", "max", "mean", "std", "q01", "q99"):
+            np.testing.assert_allclose(ds.meta.stats[name][key], want[key])
     assert (
         ds.meta.stats["observation.state"]["q01"][10]
         < ds.meta.stats["observation.state"]["q99"][10]
     )
     src = LeRobotDataset(REPO, root=merged)
     assert "observation.environment_state" not in ds.meta.stats
-    for key in src.meta.stats["action"]:
-        np.testing.assert_array_equal(ds.meta.stats["action"][key], src.meta.stats["action"][key])
+    for key in src.meta.stats["observation.images.wrist"]:
+        np.testing.assert_array_equal(
+            ds.meta.stats["observation.images.wrist"][key],
+            src.meta.stats["observation.images.wrist"][key],
+        )
 
 
 def test_videos_are_hard_links(merged, derived):
