@@ -187,12 +187,63 @@ loop the taken class is right on 1253 of 1505 lifted cycles (0.833, the F1 100k 
 2026-10-01) against 0.94 on the C1 teacher lifts. The ``perception`` block then carries
 ``CARRY_VOTE_COUNTS``.
 
+``vote_weights`` (MS7g design section 6.3, with ``classifier`` and ``class_views``; None is off)
+replaces the served vote with the fused vote (``fused_class``): every view's log probabilities
+times the view's weight, plus a bias per class, the views not yet read left out. Each view sets
+the box at its own step with that partial sum: the overhead view at selection, view 2 at the lift
+and the carry view ``CARRY_VIEW_STEPS`` later, which the fused vote always reads. A part that
+left the jaws before the carry view keeps view 2's box, so ``taken_class`` stays set with
+``vote_lost``. The nine values are a maximum-likelihood fit on the frame bank
+(``lerobot_stack/vote_bank.py``), a JSON file beside the model. ``read_class`` and
+``lift_class`` stay each view's own read. Its vote is pending (``Cycle.vote``) from every lift
+to the carry view, so ``carry_guard`` holds the jaws until the carry view sets the box. A JSON
+with ``"stage": "final"`` (MS7g ledger D13) is the final-only fused vote: the box moves at the
+selection and the lift exactly as the served vote moves it (the overhead read, an agreeing lift
+keeps it, a split waits), the carry view is still read on every lift, and there the fused sum of
+the three views decides the box once; a part lost before the carry view keeps the served box. On
+g_Sv2_scr the partial sum's bias moved the box at selection (685 wrong overhead boxes of 3298
+against 499 of 3271) and the read lost 46 correct stows while its taken class gained.
+
 ``stall_end`` (MS7f, under ``perceived``, off by default) ends a cycle ``stall_end``, a failure
 booked as a budget end, once its gripper command has read closed for ``CLOSED_NO_PINCH_STEPS``
 steps in a row while the hold detector holds nothing and the cycle has read no lift
 (``closed_empty_count``, ``stall_ends``): the DAgger recorder's ``closed_no_pinch`` trigger on
 the detector's hold. On the latest checked read (2026-10-02) 162 of 3453 cycles closed on nothing
 and sat there to the 800-step budget, 14.6 % of all simulated time.
+
+The MS7g census rides along, observation only (MS7g design 5.1 and 6.2, ``MS7G_CENSUS``): each
+cycle row records where the jaws first opened after a lift (``release_place``, a metric read),
+the true category of the part held at that lift, the chosen grasp's swept count, the steps of
+air stalls over the tray (``AirStall``) and each classifier view's log probabilities. No
+decision reads any of it, so every served step is what it was without it.
+
+``carry_guard`` (MS7g design 5.2, under ``perceived``, off by default) keeps a lifted part in the
+jaws until it is over its box and hands a still carry to the rig. While the hold detector holds
+a part whose hold read a lift (or a ``missed_lift`` carry is under way) and the FK pick point is
+not ``GUARD_BOX_MARGIN_M`` inside the interior of the box the loop serves now (``in_box_interior``,
+after any late vote), a gripper command that would end the hold is served closed
+(``guarded_gap``). While a class vote is pending no box is served, since the vote can still move
+it: on the MS7g read g_cg_scr 16 of the 26 class-right wrong-box cycles had a split vote that
+overturned a wrong overhead read, and opened over a wrong box, 15 of them with no guard step. A
+stall is ``GUARD_STALL_STEPS`` such steps in a row, the vote's steps not counted, or the census's
+air stall (``AirStall``) for ``AIR_STALL_STEPS`` steps of the cycle. On a stall with a held part the
+loop hands the part to the rig's perceived carry (``_hand_off``, ``OracleRig.resume(carry=...)``),
+which carries it to the served box at ``carry_release_z``, releases it there and retreats; the
+loop grades the carry as it grades a perceived release (``_end_handoff``). On an air stall with
+nothing held it opens the jaws and ends the cycle ``stall_open``, a failure at the target. On
+the MS7f checked read f_F6R_chk 17 wrong-box cycles had a vote that corrected the class while
+the part fell into the box of the overhead read, and on the video diagnosis traces of
+2026-10-03 the policy opened over the tray after 3 to 15 % of its lifts and hovered over the
+tray (MS7g design 3.2, M1 and F1). It refuses ``passenger_drop``, which opens over the tray on
+purpose. The census rows then carry ``CARRY_GUARD_CENSUS``.
+
+Two MS7g selector switches (MS7g design 5.3 and 5.4), under ``perceived``, off by default and in
+the ``inference`` block only when on. ``clear_first`` ranks the perceived selector's grasps that
+sweep no standing neighbour before the height band (``grasp.rank_grasps``), so it can change the
+target part; the teacher's rank stays. ``overhang_guard`` (with the tray) refuses a part outside
+the tray interior under a tray wall's top edge (``grasp.under_overhang``), as neither a target
+nor a rake, and keeps the carry grace for a cycle that read a lift (``grace_hold``). The
+``perception`` block then carries ``OVERHANG_COUNTS``.
 
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
@@ -222,7 +273,7 @@ from maker_arm_lab.core.heap_oracle import (
     RAKE_PART_CAP,
     target_context,
 )
-from maker_arm_lab.core.hold import HoldDetector, agreement, commanded_gap
+from maker_arm_lab.core.hold import MIN_EXCESS, HoldDetector, agreement, commanded_gap
 from maker_arm_lab.core.parts import BASE_CLASSES, FAMILIES, part_class
 from maker_arm_lab.core.quat import quat_apply
 from maker_arm_lab.core.stowed import (
@@ -412,10 +463,10 @@ def release_ready(open_fraction: float, waited: int, after_stow: bool) -> bool:
     return open_fraction >= SELECT_OPEN_FRACTION
 
 
-RELEASE_ENDS = ("stowed", "released", "placed", "dropped", "passenger")
+RELEASE_ENDS = ("stowed", "released", "placed", "dropped", "passenger", "stall_open")
 """The cycle ends a release makes; ``release_ready`` waits for the jaws' full gap after them.
 ``placed`` and ``dropped`` are ``perceived``'s (``perceived_cycle_end``), ``passenger`` is
-``passenger_drop``'s."""
+``passenger_drop``'s and ``stall_open`` ``carry_guard``'s."""
 RELEASE_OPEN_M = 0.010  # INITIAL: the MS7d isolation row R1 measures it
 """m: ``release_gap`` (L2) completes a perceived release once the measured jaw gap is this much
 wider than it was when the hold ended (MS7d design section 4.2). The MS7c rule alone waited
@@ -464,6 +515,48 @@ def stall_ends(closed_empty: int, lifted: bool, holding: bool) -> bool:
     return closed_empty >= CLOSED_NO_PINCH_STEPS and not lifted and not holding
 
 
+AIR_STALL_STEPS = 60  # INITIAL: the MS7g design's stall (its 5.2); the R0 census reads it
+"""Control steps in a row the FK pick point must hover over the tray (``AirStall``). The MS7f
+video diagnosis (2026-10-03): the policy stalls at lift height over the tray, about 16 % of the
+steps of the diagnosed episodes, and only the step budget ends such a hover."""
+AIR_STALL_MIN_Z = 0.06  # INITIAL: the MS7g design's stall (its 5.2); the R0 census reads it
+"""m: the lowest pick point height above the desk an air stall counts: the hovers of the MS7f
+video diagnosis sit at lift height."""
+AIR_STALL_SPEED = 0.0003  # INITIAL: the MS7g design's stall (its 5.2); the R0 census reads it
+"""m a step: an air stall's mean pick point speed over ``AIR_STALL_WINDOW`` steps stays under it."""
+AIR_STALL_WINDOW = 30
+"""Control steps the air stall's mean speed spans (the MS7g design's stall)."""
+
+
+class AirStall:
+    """One env's in-air stall state (MS7g design 5.2, the F1 watchdog of the MS7f video
+    diagnosis). ``update`` once per control step with the FK pick point and whether it lies over
+    the tray interior (``over_tray``). The state is stalled from the step on which
+    ``AIR_STALL_STEPS`` steps in a row had the point over the tray, at least ``AIR_STALL_MIN_Z``
+    above the desk and a mean speed (path length over the last ``AIR_STALL_WINDOW`` steps)
+    under ``AIR_STALL_SPEED``, until a step breaks one of them; ``entered`` marks the step it
+    began. The census counts it (``Cycle.air_stall_steps``), and only ``carry_guard`` acts on it.
+    Known geometry and the FK pick point only."""
+
+    def __init__(self):
+        self.last: list[float] | None = None
+        self.moves: deque = deque(maxlen=AIR_STALL_WINDOW)
+        self.run = 0
+        self.stalled = self.entered = False
+
+    def update(self, pick, over_tray: bool) -> bool:
+        p = [float(v) for v in pick[:3]]
+        if self.last is not None:
+            self.moves.append(math.dist(p, self.last))
+        self.last = p
+        slow = len(self.moves) == AIR_STALL_WINDOW
+        slow = slow and sum(self.moves) < AIR_STALL_SPEED * AIR_STALL_WINDOW
+        self.run = self.run + 1 if over_tray and p[2] >= AIR_STALL_MIN_Z and slow else 0
+        was, self.stalled = self.stalled, self.run >= AIR_STALL_STEPS
+        self.entered = self.stalled and not was
+        return self.stalled
+
+
 CARRY_GRACE_STEPS = 400
 """Control steps ``budget_ends_cycle`` keeps a cycle open past ``CYCLE_STEP_BUDGET`` while
 the jaws hold a part."""
@@ -491,6 +584,16 @@ def budget_ends_cycle(steps: int, held: bool, grace_used: int) -> bool:
     if steps < CYCLE_STEP_BUDGET:
         return False
     return not held or grace_used >= CARRY_GRACE_STEPS
+
+
+def grace_hold(holding: bool, lifted: bool, overhang_guard: bool) -> bool:
+    """``perceived``: the held read ``budget_ends_cycle`` keeps a cycle open on, the hold
+    detector's hold (``holding``). Under ``overhang_guard`` (MS7g design 5.4) only a cycle that
+    read a lift (``lifted``: the detector's lift or the ``missed_lift`` carry) holds: the
+    detector reads a clamp on a wall top as a hold, and in the MS7f video diagnosis (draw 19
+    cycle 18, 2026-10-03) the grace then kept the arm on such a clamp for 680 more steps.
+    Pure."""
+    return holding and (lifted or not overhang_guard)
 
 
 """Control steps a part must stay between the jaws to count as held in the cycle census: the
@@ -1100,10 +1203,12 @@ class Cycle:
     vote: tuple | None = None
     # ``classifier``: view 2 is due, (its step, the lift's step, the true class at the lift).
     lift_view: tuple | None = None
+    # ``bank_views``: the step of the carry view no vote reads, after a lift that agreed.
+    bank_at: int | None = None
     # ``carry_votes``: the steps of the vote's extra carry reads still due, and the log
     # probabilities of those read.
     carry_due: list = field(default_factory=list)
-    carry_logp: list = field(default_factory=list)
+    carry_vote_logp: list = field(default_factory=list)
     # ``perceived_release``: a lifted hold ended over a box (True) or off one (False), and the
     # jaws have not yet opened to ``SELECT_OPEN_FRACTION``; None with no release under way.
     release_over: bool | None = None
@@ -1119,6 +1224,36 @@ class Cycle:
     target_in_box: bool | None = None
     hold_blocked: int = 0  # MS7d L6: hold entries the force gate refused in the cycle
     closed_empty: int = 0  # ``stall_end``: closed steps in a row with no hold (closed_empty_count)
+    # The MS7g census (MS7g design 5.1 and 6.2), observation only. ``classifier``: the
+    # last lift's wrist read (view 2) and the carry view after it (view 3), each run category's
+    # log probability in the run's order, None for a view not read.
+    lift_logp: list | None = None
+    carry_logp: list | None = None
+    swept: int | None = None  # the swept count of the grasp the selector chose (grasp.Grasp)
+    lift_seen: bool = False  # the census read the cycle's first lift (detector or carry)
+    lift_part: int = -1  # the contact-held part at that lift
+    held_class: str | None = None  # and its true category
+    lift_gap: float | None = None  # m, the narrowest measured jaw gap since that lift
+    release_place: str | None = None  # where the jaws first opened after it (release_place)
+    air_stall_steps: int = 0  # steps in an air stall (AirStall) while the detector holds a part
+    air_stall_empty_steps: int = 0  # and while it holds nothing
+    air_stalls: int = 0  # stall entries while it holds a part
+    # MS7g ``carry_guard`` (None and unexported without it): the steps the guard held an open
+    # command closed, those inside the served box's interior but within GUARD_BOX_MARGIN_M of
+    # its walls, those inside it while a class vote was pending, the current run of them and
+    # the run's fixed gap (``guarded_gap``); the rig carry's outcome ("carrying" while it runs,
+    # ``_end_handoff``) and whether the hold ended over a perceived box during it; whether an
+    # empty air stall opened the jaws; the selection's perceived scene, the carry's
+    # ``takeover_scene``.
+    guard_steps: int | None = None
+    guard_rim_steps: int = 0
+    guard_vote_steps: int = 0
+    guard_run: int = 0
+    guard_gap: float | None = None
+    handoff: str | None = None
+    handoff_over: bool | None = None
+    stall_open: bool = False
+    scene: object = None
 
 
 @dataclass
@@ -1347,6 +1482,120 @@ def over_box(xy, boxes, sizes) -> bool:
     return bool(checker.in_boxes(point, torch.tensor([frames]), half).any())
 
 
+RELEASE_READ_M = 0.004  # INITIAL: the R0 census reads where the jaws open
+"""m: the census reads the jaws open once the measured gap is this much wider than its narrowest
+since the cycle's first lift (``jaws_opened``). The teacher's RELEASE opens to the landing gap,
+the width plus 8 mm (``grasp.landing_half_gap``), and the policy imitates it: on the pinned desk
+scene of 2026-10-03 (``tests/test_ms7g_census.py``) the jaws held a brick 15.8 mm across them
+at 13.64 mm and opened by 0.7, 2.1, 3.4, 4.4 and 5.3 mm over the release's first five steps and
+by 7.2 mm at its eighth, where the episode ended, so ``RELEASE_OPEN_M``'s 10 mm would read it
+late or not at all. A slip closes the jaws on the command and reads no open."""
+
+
+def jaws_opened(cycle: Cycle, gap: float) -> bool:
+    """The MS7g census: do the jaws open on this step, the first time since the cycle's first
+    lift (``Cycle.lift_seen``)? The measured jaw ``gap`` keeps its narrowest value since the lift
+    in ``cycle.lift_gap``, and a gap ``RELEASE_READ_M`` wider than that is the open. Once
+    ``release_place`` is read it answers no. Pure except for ``lift_gap``."""
+    if not cycle.lift_seen or cycle.release_place is not None:
+        return False
+    cycle.lift_gap = gap if cycle.lift_gap is None else min(cycle.lift_gap, gap)
+    return gap >= cycle.lift_gap + RELEASE_READ_M
+
+
+RELEASE_PLACES = ("tray", "right_box", "wrong_box", "desk", "rim")
+"""The census's ``release_place`` values (MS7g interface section 3)."""
+
+
+def release_place(xy, boxes, right, lean_deg: float | None, height=layout.TRAY_WALL_HEIGHT) -> str:
+    """The census's ``release_place`` (MS7g design 5.1): where the point ``xy`` lies. ``boxes``
+    holds each desk box's true (pose, interior size), ``right`` the indices of the boxes of the
+    released part's true category, and ``lean_deg`` the tray's lean (None: no tray, walls
+    ``height`` high). Over a box's interior, the grader's footprint: ``right_box`` or
+    ``wrong_box``. Over its wall: ``rim``. Over the tray interior at its rim (``over_tray``):
+    ``tray``; over the tray wall's top, ``layout.TRAY_WALL`` wider again: ``rim``. Anywhere else:
+    ``desk``. A metric read. Pure."""
+    for m, (pose, size) in enumerate(boxes):
+        if desk_boxes.in_outer_footprint(xy, [pose], [size], -desk_boxes.DESK_BOX_WALL):
+            return "right_box" if m in right else "wrong_box"
+        if desk_boxes.in_outer_footprint(xy, [pose], [size], 0.0):
+            return "rim"
+    if lean_deg is None:
+        return "desk"
+    if over_tray(xy, lean_deg, height):
+        return "tray"
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    grow = layout.tray_rim_growth(lean_deg, height) + layout.TRAY_WALL
+    x, y = float(xy[0]), float(xy[1])
+    rim = x0 - grow <= x <= x1 + grow and y0 - grow <= y <= y1 + grow
+    return "rim" if rim else "desk"
+
+
+GUARD_BOX_MARGIN_M = 0.010  # INITIAL: the g_cg_scr read's guard_rim_steps say whether it holds
+"""m: ``carry_guard`` (MS7g design 5.2) lets the jaws open on a lifted part only with the FK pick
+point this far inside the served box's interior walls (``in_box_interior``). A guard step with
+the point inside the interior but within the margin counts as one of ``guard_rim_steps``."""
+GUARD_STALL_STEPS = 15
+"""``carry_guard``: steps in a row the guard holds an open command closed before the loop hands
+the carry to the rig (MS7g design 5.2), half a second."""
+CARRY_WIDTH_PAD_M = 0.002
+"""m: the rig's perceived carry takes the measured jaw gap plus this as its grasp width
+(``OracleRig.resume(carry=...)``). Its carry legs then hold ``grasp.close_gap`` of it, 4 mm under
+the measured gap and 2 mm past ``hold.MIN_EXCESS``, so the detector keeps the hold, and RELEASE
+opens 10 mm over the measured gap, past the widest settle of ``grasp.CLOSE_SQUEEZE_M``'s table
+(4.25 mm a side inside the part's width)."""
+CARRY_RELEASE_PAD_M = 0.010
+"""m: the perceived carry's clearance over the served box's rim (``carry_release_z``)."""
+CARRY_RELEASE_MAX_Z = 0.12
+"""m: the highest perceived carry release. At 0.12 m the driven desk-box reach already shrinks
+(``desk_boxes.DESK_BOX_RELEASE_Z``'s note), and ``_hand_off`` falls back to 0.10 m."""
+
+
+def in_box_interior(xy, pose, size, margin: float = 0.0) -> bool:
+    """Does the point ``xy`` lie over the interior of the box at ``pose`` (x, y, yaw) of
+    interior ``size``, at least ``margin`` inside its walls, in the box's own frame? Pure."""
+    dx, dy = float(xy[0]) - float(pose[0]), float(xy[1]) - float(pose[1])
+    c, s = math.cos(float(pose[2])), math.sin(float(pose[2]))
+    return (
+        abs(c * dx + s * dy) <= size[0] / 2 - margin
+        and abs(c * dy - s * dx) <= size[1] / 2 - margin
+    )
+
+
+def guarded_gap(
+    gap: float, measured: float, last: float, held: float | None
+) -> tuple[float, float | None]:
+    """``carry_guard``, on a step it guards (the hold detector holds a part its hold lifted, and
+    the FK pick point is not ``GUARD_BOX_MARGIN_M`` inside the served box): the gap command
+    served, and the gap the guard run holds. A command that would end the hold, wider than the
+    ``measured`` jaw gap less ``hold.MIN_EXCESS``, is served as the run's gap ``held``; the
+    run's first such step sets it to the tighter of the ``last`` served command and
+    ``grasp.close_gap(measured)``, the teacher's squeeze on the width the jaws hold. Any other
+    command passes and ends the run (None). The run's gap stays fixed on purpose: a part that
+    slips out then lets the jaws close onto it and the detector's hold end. A gap that followed
+    the measured one kept the hold alive on empty jaws, and its stall handed the rig a carry of
+    nothing (cg smoke trace, 2026-10-03: a part dropped at step 10757, a handoff at 10771).
+    Pure."""
+    if gap <= measured - MIN_EXCESS:
+        return gap, None
+    held = min(last, grasp.close_gap(measured)) if held is None else held
+    return held, held
+
+
+def carry_release_z(start_z: float, size) -> float:
+    """m: the pick point height the rig's perceived carry releases at over a box of interior
+    ``size``, for a part the loop cannot name. ``start_z`` is the hold detector's pick point
+    height when the hold began. The part lay on the desk, the tray floor or a pile then, so it
+    reaches at most that far below the pick point while it keeps its pose in the jaws. The rule
+    takes the teacher's ``desk_boxes.DESK_BOX_RELEASE_Z`` (0.10 m) and raises it until that depth
+    clears the box rim (``desk_boxes.rim_z``, 0.035 to 0.055 m on the drawn boxes) by
+    ``CARRY_RELEASE_PAD_M``, to at most ``CARRY_RELEASE_MAX_Z``: a grip 0.035 m up or lower,
+    every part lying flat on the floor, releases at 0.10 m over the deepest drawn box, and a grip
+    0.05 m up on a pile at 0.115 m. Pure."""
+    rise = desk_boxes.rim_z(size) + start_z + CARRY_RELEASE_PAD_M
+    return min(max(desk_boxes.DESK_BOX_RELEASE_Z, rise), CARRY_RELEASE_MAX_Z)
+
+
 def voted_class(views) -> str:
     """``class_views``: the class that two of three views share, the third view's on a split.
     Pure. The loop draws a third view only when the first two disagree, and then this is always
@@ -1362,6 +1611,22 @@ def summed_class(names, *views) -> str:
     ``voted_class`` read 0.875: right on 60 lifts the vote got wrong and wrong on 24 it got
     right."""
     sums = [sum(v[k] for v in views) for k in range(len(names))]
+    return names[max(range(len(names)), key=sums.__getitem__)]
+
+
+FUSED_VIEWS = ("overhead", "lift", "carry")
+"""``vote_weights``' views, in the order ``fused_class`` takes their log probabilities."""
+
+
+def fused_class(names, vote: dict, *views) -> str:
+    """``vote_weights`` (MS7g design section 6.3): the name in ``names`` whose ``vote["bias"]``
+    plus the sum over the views given of ``vote["weights"][view]`` times its log probability is
+    largest. ``views`` are the overhead, lift and carry view's lists in the order of ``names``,
+    the views not yet read left out (or None). Pure."""
+    sums = [float(vote["bias"][n]) for n in names]
+    for view, logp in zip(FUSED_VIEWS, views):
+        if logp is not None:
+            sums = [t + float(vote["weights"][view]) * v for t, v in zip(sums, logp)]
     return names[max(range(len(names)), key=sums.__getitem__)]
 
 
@@ -1528,9 +1793,32 @@ CENSUS_EXPORT = (
     "first_held_at",
     "target_in_box",
     "rearms",
+    "release_place",
+    "held_class",
+    "swept",
+    "air_stall_steps",
+    "air_stall_empty_steps",
+    "air_stalls",
+    "read_logp",
+    "lift_logp",
+    "carry_logp",
 )
 """The ``Cycle`` fields each episode's ``cycle_census`` row exports, plus the two is_target
-flags of ``first_held`` and ``last_held``. Observation only, never the metric."""
+flags of ``first_held`` and ``last_held``. Observation only, never the metric. The last nine are
+the MS7g census's (``MS7G_CENSUS``)."""
+MS7G_CENSUS = CENSUS_EXPORT[-9:]
+"""The MS7g census fields (MS7g interface section 3), on every row, None where they do not
+apply. ``release_place``: where the jaws first opened after the cycle's first lift (the hold
+detector's or ``missed_lift``'s carry), at the FK pick point, the point the jaws let go at and
+the one ``over_box`` and ``over_tray`` read (``release_place``, graded for the part between the
+jaws then, else the part held at the lift, else the target); None if they never opened after a
+lift. The jaws open when the measured gap reads ``RELEASE_READ_M`` wider than its narrowest
+since the lift (``jaws_opened``): a slip closes the jaws and reads no release, and the read
+needs no close threshold, which a grasp across another axis than the served row's misreads
+(the cycle's ``close_below``). ``held_class``: the true category of the contact-held part at
+that lift. ``swept``: the selector's chosen grasp's swept count at the selection
+(``grasp.rank_grasps``). The three ``AirStall`` counts. The three views' log probabilities,
+whose category order the payload's ``perception`` block names (``logp_order``)."""
 
 
 def cycle_class(cycle: Cycle, reason: str) -> str:
@@ -1575,7 +1863,8 @@ def box_census(
     it becomes ``wrong_box`` in ``classes``, in place (``census`` rows hold ``last_held``).
     Returns the rows: parts stowed and parts in total per class (every one of the active
     ``class_names``), per family of the heap (MS7e design section 8.1) and per box, the
-    wrong-box parts and the episode's box count.
+    wrong-box parts (their count, and their indices for the MS7g census's riders) and the
+    episode's box count.
 
     ``keys`` is each part's class (``part_class`` by default; its category under MS7f
     ``--categories``) and ``sets`` each part's boxes (``destination`` alone by default): a part
@@ -1608,6 +1897,7 @@ def box_census(
         "stowed_by_family": by_family,
         "stowed_by_box": by_box,
         "wrong_box_parts": len(wrong),
+        "wrong_box_part_ids": wrong,
         "box_count": num_boxes,
     }
 
@@ -1783,10 +2073,20 @@ CLASSIFIER_CENSUS = ("read_class", "lift_class", "taken_class", "vote_lost", "ri
 selection, the last lift's wrist read, the class that set the box at that lift or at its vote
 (None when no lift was read or the vote was lost, so the selection's box stayed), and whether
 the vote was lost or the passenger head fired. Observation only."""
+CARRY_GUARD_CENSUS = ("guard_steps", "guard_rim_steps", "guard_vote_steps", "handoff", "stall_open")
+"""``carry_guard``'s fields in a ``cycle_census`` row, there only with the switch on: the guard's
+steps, those over the served box's rim band, those inside the served box while a class vote was
+pending (held by the vote rule alone), the rig carry's outcome (None: no handoff;
+"placed", "lifted_lost", "failed", "declined", or "carrying" when the episode ended during it)
+and whether an empty air stall opened the jaws and failed the cycle."""
 MISSED_LIFT_COUNTS = ("missed_lifts", "carried_releases", "carried_rechecks")
 """``missed_lift``'s ``perception`` counts, in the payload only with the switch on: the carries
 ``carry_started`` read, the cycles a release ``carry_lost`` started ended, and the selections
 after one that still saw a part at the target's position and booked a failure there."""
+OVERHANG_COUNTS = ("overhang_refusals",)
+"""``overhang_guard``'s ``perception`` count, in the payload only with the switch on: over the
+selections that opened a cycle, the parts the band refused at that selection
+(``HeapOracle.overhang_refused``)."""
 TORQUE_COUNTS = ("force_capped", "hold_blocked", "hold_blocked_cycles")
 """The ``torque`` block's counts under ``hold_force`` or ``force_cap``: the steps L7 held the arm,
 the hold entries L6 refused (one per confirmed run of the jaw-gap rule) and the cycles with one."""
@@ -1947,6 +2247,11 @@ def rollout(
     cell_failure_cap: int = CELL_FAILURE_CAP,
     carry_votes: int = 0,
     stall_end: bool = False,
+    carry_guard: bool = False,
+    clear_first: bool = False,
+    overhang_guard: bool = False,
+    bank_views: bool = False,
+    vote_weights: dict | None = None,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -1962,7 +2267,10 @@ def rollout(
     ``classifier`` reads, before it reads it: the view ("overhead", "lift", "carry", or "wrist"
     for a ``carry_votes`` read), the env, the frame, the perceived size the read gets, the step,
     the env's ``Cycle`` and ``HoldDetector``. It only records (``--classifier_frames``): nothing
-    it returns or changes reaches a decision.
+    it returns or changes reaches a decision. ``bank_views`` (MS7g ledger D2, the frame bank) also
+    hands it the view "bank": the wrist frame ``CARRY_VIEW_STEPS`` after a lift whose read agreed
+    with the overhead read, if the part is still up, the carry view a split vote would read. The
+    classifier does not read it, so every served step and decision stay the same.
     ``hold_trace``, when a list, receives one ``hold.TRACE_FIELDS`` row per live env per step,
     the input of ``hold.cycle_rows``'s threshold replay.
     ``perceived`` is the MS7c boundary of the module docstring, with ``noise_scales`` the
@@ -2001,6 +2309,13 @@ def rollout(
     ``carry_votes`` (MS7f) is the module docstring's; it needs ``classifier`` and ``class_views``,
     and lies in [0, ``MAX_CARRY_VOTES``] and under ``CARRY_VIEW_STEPS - lift_view_steps``.
     ``stall_end`` (MS7f) is the module docstring's; it needs ``perceived``.
+    ``carry_guard`` (MS7g) is the module docstring's; it needs ``perceived`` and refuses
+    ``passenger_drop``.
+    ``clear_first`` and ``overhang_guard`` (MS7g) are the module docstring's; both need
+    ``perceived``, and ``overhang_guard`` the tray.
+    ``vote_weights`` (MS7g) is the module docstring's, the vote's JSON as a dict (``weights`` per
+    ``FUSED_VIEWS``, ``bias`` per class); it needs ``classifier`` and ``class_views`` and refuses
+    ``carry_votes``.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -2040,6 +2355,7 @@ def rollout(
     # MS7a desk boxes: one destination box per part, and the served box part follows the target.
     per_part = torch.as_tensor(env.destination_bins).dim() == 2
     class_names = getattr(env, "class_names", BASE_CLASSES)  # the active class list (MS7e)
+    keys = part_keys(env)  # each part's class; the census's held_class reads it too (MS7g)
     if per_part:
         # The loop runs one episode per env: its truth, before an env's own end resets it.
         destination = torch.as_tensor(env.destination_bins).clone().to("cpu")
@@ -2047,7 +2363,6 @@ def rollout(
         # MS7f --categories (design section 6.2): every box of each class, the first one
         # class_to_box's, and each part's. With the switch off each class and each part has its
         # one box, read where the loop always read them.
-        keys = part_keys(env)
         if getattr(env, "categories", False):
             class_boxes = [dict(zip(class_names, row)) for row in env.class_boxes]
             part_sets = [[own[c] for c in keys] for own in class_boxes]
@@ -2070,6 +2385,11 @@ def rollout(
                 }
                 geometry.append(rows)
         final_box = torch.full((num_envs, k), -1, dtype=torch.long)
+        # The MS7g census's release_place: each box's true pose and interior, a metric read.
+        true_boxes = [
+            list(zip(env.desk_box_poses[i][:n], env.desk_box_sizes[i][:n]))
+            for i, n in enumerate(box_count)
+        ]
     if adopt_held and not per_part:
         raise EvalFailure("adopt_held", "needs desk boxes: a part's own box is the one it adopts")
     for name, on in (
@@ -2095,6 +2415,10 @@ def rollout(
         raise EvalFailure("lift_budget", "reads the hold detector's lift: it needs perceived")
     if stall_end and not perceived:
         raise EvalFailure("stall_end", "reads the hold detector's hold: it needs perceived")
+    if carry_guard and not perceived:
+        raise EvalFailure("carry_guard", "reads the hold detector and the perceived boxes")
+    if carry_guard and passenger_drop:
+        raise EvalFailure("carry_guard", "refuses passenger_drop, which opens over the tray")
     if perceived:
         if policy is None:
             raise EvalFailure("perceived", "serves a policy; the oracle driver reads the truth")
@@ -2138,14 +2462,38 @@ def rollout(
             "classifier", f"reads {classifier.categories}; the run sorts by {class_names}"
         )
     tray = bool(getattr(env, "tray", False))
+    lean = float(getattr(env, "tray_lean_deg", 0.0)) if tray else 0.0
+    wall_height = getattr(env, "tray_wall_height", layout.TRAY_WALL_HEIGHT)  # MS7f H1
     if missed_lift and not (perceived and tray):
         raise EvalFailure(
             "missed_lift", "reads a carry off the tray: it needs perceived and a tray"
+        )
+    if clear_first and not perceived:
+        raise EvalFailure("clear_first", "ranks the perceived selector's grasps: needs perceived")
+    if overhang_guard and not (perceived and tray):
+        raise EvalFailure(
+            "overhang_guard", "reads the tray wall's overhang: it needs perceived and a tray"
         )
     if not 1 <= cell_failure_cap <= MAX_CELL_FAILURE_CAP:
         raise EvalFailure("cell_failure_cap", f"must lie in [1, {MAX_CELL_FAILURE_CAP}]")
     if cell_failure_cap != CELL_FAILURE_CAP and not perceived:
         raise EvalFailure("cell_failure_cap", "sets the perceived selector's cap: needs perceived")
+    if bank_views and (classifier is None or on_classify is None):
+        raise EvalFailure("bank_views", "hands on_classify a carry view: needs the classifier")
+    if vote_weights is not None:
+        if classifier is None or not class_views:
+            raise EvalFailure("vote_weights", "fuses the classifier's views: needs class_views")
+        if carry_votes:
+            raise EvalFailure("vote_weights", "fuses three views; carry_votes reads more")
+        weights, bias = vote_weights.get("weights", {}), vote_weights.get("bias", {})
+        # The frame bank's richer forms (ledger D7: a weight a view and class, or a matrix a
+        # view) adopted none, so this serves the nine values only.
+        scalar = all(isinstance(w, (int, float)) for w in weights.values())
+        if set(weights) != set(FUSED_VIEWS) or not scalar or not set(class_names) <= set(bias):
+            raise EvalFailure("vote_weights", f"needs a weight of {FUSED_VIEWS} and a bias a class")
+        if vote_weights.get("stage", "partial") not in ("partial", "final"):
+            raise EvalFailure("vote_weights", "stage is 'partial' (the default) or 'final'")
+    final = vote_weights is not None and vote_weights.get("stage") == "final"  # MS7g D13
     if carry_votes and not (classifier is not None and class_views):
         raise EvalFailure("carry_votes", "adds reads to the classifier's vote: needs class_views")
     if not 0 <= carry_votes <= MAX_CARRY_VOTES or carry_votes >= CARRY_VIEW_STEPS - lift_view_steps:
@@ -2195,8 +2543,6 @@ def rollout(
         # the perceived ones replace them in the served row, the selector's any-box filter and
         # the cycle end. The selector books failures by position and reads no destination.
         true_classes = list(part_keys(env))  # the metric's wrong-class counts
-        lean = float(getattr(env, "tray_lean_deg", 0.0)) if getattr(env, "tray", False) else 0.0
-        wall_height = getattr(env, "tray_wall_height", layout.TRAY_WALL_HEIGHT)  # MS7f H1
         poses = env.desk_box_poses.copy()
         drawn = bool(getattr(env, "box_draw", 0))  # MS7e: each box's size is perceived too
         for i, st in enumerate(states):
@@ -2215,6 +2561,8 @@ def rollout(
             st.selector.cell_failure_cap = cell_failure_cap
             st.selector.knows_destinations = False
             st.selector.box_filter_xy = box_filter_xy
+            st.selector.clear_first = clear_first
+            st.selector.overhang_guard = overhang_guard
             if box_walls:
                 # L9: the grasp model and the rake also read the perceived boxes' walls.
                 boxes, sizes = st.perceiver.box_poses, st.perceiver.box_sizes
@@ -2255,6 +2603,8 @@ def rollout(
     }
     if classifier is not None:
         switches |= {"classifier": classifier.path, "passenger_drop": bool(passenger_drop)}
+        if getattr(classifier, "flip", False):
+            switches["cls_flip"] = True  # MS7g ledger D10: every view also read mirrored
     if lift_view_steps:
         switches["lift_view_steps"] = int(lift_view_steps)
     if missed_lift:
@@ -2265,6 +2615,16 @@ def rollout(
         switches["carry_votes"] = int(carry_votes)
     if stall_end:
         switches["stall_end"] = True
+    if carry_guard:
+        switches["carry_guard"] = True
+    if clear_first:
+        switches["clear_first"] = True
+    if overhang_guard:
+        switches["overhang_guard"] = True
+    if vote_weights is not None:
+        switches["vote_weights"] = {k: vote_weights[k] for k in ("weights", "bias")}
+        if final:
+            switches["vote_weights"]["stage"] = "final"
     replan = torch.zeros(num_envs, dtype=torch.bool)  # envs whose row changed since the last step
     # The pick point's last GATE_WINDOW + 1 heights per env, the gate's descent read.
     pick_z_hist = [deque(maxlen=GATE_WINDOW + 1) for _ in range(num_envs)]
@@ -2272,6 +2632,7 @@ def rollout(
     last_roll = robot.data.joint_pos[:, WRIST_ROLL_INDEX].to("cpu").clone()
     parked = None  # ``park_done``: the command each env got on the step before
     detectors = [HoldDetector() for _ in range(num_envs)]  # the MS7c hold census
+    stalls = [AirStall() for _ in range(num_envs)]  # the MS7g census's air stalls
     # m, the gap each env's last command asked for; before the first, the jaws' own gap.
     gap_cmd = robot.data.joint_pos[:, jaw_ids].sum(dim=-1).tolist()
     # MS7f H2: per part the grade and the box of an emptying.
@@ -2321,6 +2682,11 @@ def rollout(
                     stamp_span(states[i].span, d, step)
                 if d.blocked:
                     _count_blocked(states[i])
+                c = states[i].cycle
+                if c is not None and c.handoff == "carrying" and d.ended and c.handoff_over is None:
+                    # ``carry_guard``: where the hold ended during the rig's carry grades it.
+                    p = states[i].perceiver
+                    c.handoff_over = over_box(top_picks[i][:2], p.box_poses, p.box_sizes)
         # 1. Grade and select on the envs the loop holds: episode live, rig idle.
         for i in range(num_envs):
             if bool(tracker.done[i]) or not rig.idle[i]:
@@ -2337,12 +2703,13 @@ def rollout(
                 gap = float(gaps[i]) if release_gap else None
                 released = perceived_release(c, lost, d.started, over, float(openings[i]), gap)
                 reason = perceived_cycle_end(c, step, released, bool(c.release_over))
+                lifted = c.lift_detected or c.carried
                 # The carry grace keeps a cycle open while the detector holds.
-                grace = not budget_ends_cycle(step - c.start_step, d.holding, c.grace_steps)
+                held_now = grace_hold(d.holding, lifted, overhang_guard)
+                grace = not budget_ends_cycle(step - c.start_step, held_now, c.grace_steps)
                 if select_at_release and reason == "budget" and grace:
                     c.grace_steps += 1
                     reason = None
-                lifted = c.lift_detected or c.carried
                 if reason is None and lift_budget_ends(
                     step - c.start_step, lifted, d.holding, lift_budget
                 ):
@@ -2509,6 +2876,7 @@ def rollout(
                 wait_steps=waited,
                 wait_capped=waited >= int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET),
                 target_in_box=None if boxed is None else bool(boxed[i, target]),
+                swept=None if chosen is None else int(chosen.swept),
             )
             if ms7f_tray:
                 hidden[i].append(hidden_share(env, pos[i], truth.quat[i], top_picks[i]))
@@ -2518,6 +2886,9 @@ def rollout(
                 seen = next(d for d in state.detections if d.sim_index == target)
                 st.cycle.target_xy = seen.centre[:2]
                 st.cycle.seen_class = cls = seen.cls
+                st.opening = False  # ``passenger_drop`` and ``carry_guard``'s stall_open
+                if carry_guard:
+                    st.cycle.guard_steps, st.cycle.scene = 0, scene
                 if classifier is not None:
                     # MS7f view 1: the narrow overhead view of the detection.
                     frame = env.narrow_overhead(i, seen.centre)
@@ -2526,7 +2897,8 @@ def rollout(
                     logp, _ = classifier.log_probs(frame, class_names, size=seen.size)
                     st.cycle.read_logp = logp
                     st.cycle.read_class = cls = summed_class(class_names, logp)
-                    st.opening = False
+                    if vote_weights is not None and not final:  # the partial sum's box
+                        cls = fused_class(class_names, vote_weights, logp)
                 st.cycle.seen_yaw = float(scene.brick_yaw[target])
                 st.cycle.box = desk_boxes.lighter_box(class_boxes[i][cls], st.box_load)
                 st.cycle.volume = math.prod(seen.size)
@@ -2537,6 +2909,8 @@ def rollout(
                 st.counts["wrong_overhead_class"] += cls != true_classes[target]
                 if box_walls:
                     st.counts["box_wall_refusals"] += box_wall_refusals(st.selector, scene, target)
+                if overhang_guard:
+                    st.counts["overhang_refusals"] += st.selector.overhang_refused
                 if st.marker is not None:
                     st.counts["marker_error_mm"] += st.marker.error_mm()
             else:
@@ -2597,6 +2971,25 @@ def rollout(
                             start_z=c.start_z,
                         )
                         c.taken_over = True  # one scripted place a cycle, taken or declined
+            if carry_guard:
+                for i, st in enumerate(states):
+                    c, d = st.cycle, detectors[i]
+                    if c is None or c.handoff is not None or not rig.idle[i] or tracker.done[i]:
+                        continue
+                    # The stall (MS7g design 5.2): the census's air stall for AIR_STALL_STEPS
+                    # steps of this cycle (it ran at least as long as the cycle is old), or a
+                    # guard held for GUARD_STALL_STEPS. A held part goes to the rig once a
+                    # pending class vote has set its box; with none held the jaws open and the
+                    # cycle fails at its target (F1).
+                    air = stalls[i].stalled and step - c.start_step >= AIR_STALL_STEPS
+                    voting = c.vote is not None or c.lift_view is not None
+                    if d.holding and (air or c.guard_run >= GUARD_STALL_STEPS) and not voting:
+                        _hand_off(st, rig, i, d, float(gaps[i]))
+                    elif air and not d.holding:
+                        c.stall_open = True
+                        st.fail_mem.book(c.target_xy)
+                        _close_cycle(st, "stall_open", [], step, None)
+                        st.idle_since, st.opening = step, True
         # 3. Compose: the rig's row where it drives, the policy's where the rig is idle.
         rig_action = rig.actions().to("cpu")
         action_cpu = rig_action.clone()
@@ -2715,6 +3108,30 @@ def rollout(
                             gap = floored
                             st.cycle.floored_steps += 1
                     action_cpu[i, 6] = gap
+        if carry_guard:
+            for i, st in enumerate(states):
+                c = st.cycle
+                if c is None or not rig.idle[i] or bool(tracker.done[i]):
+                    continue
+                d, p = detectors[i], st.perceiver
+                pose, size = p.box_poses[c.box], p.box_sizes[c.box]
+                lifted = d.lifted or (c.carried and not c.carry_released)
+                # A pending class vote can still move the box: no box is served until it decides.
+                voting = c.vote is not None or c.lift_view is not None
+                deep = in_box_interior(picks[i][:2], pose, size, GUARD_BOX_MARGIN_M)
+                inside = deep and not voting
+                guarding = d.holding and lifted and not inside and c.handoff != "declined"
+                gap, kept = float(action_cpu[i, 6]), None
+                if guarding:
+                    gap, kept = guarded_gap(gap, float(gaps[i]), gap_cmd[i], c.guard_gap)
+                c.guard_gap = kept
+                # A vote's steps are no stall: the policy opens over the box it was served.
+                c.guard_run = 0 if kept is None else c.guard_run + (not voting)
+                if kept is not None:
+                    action_cpu[i, 6] = gap
+                    c.guard_steps += 1
+                    c.guard_vote_steps += voting and deep
+                    c.guard_rim_steps += not voting and in_box_interior(picks[i][:2], pose, size)
         for i, st in enumerate(states):
             if st.opening:
                 action_cpu[i, 6] = 2.0 * GRIPPER_OPEN_POS  # ``passenger_drop``: let both go
@@ -2819,6 +3236,7 @@ def rollout(
                     )
                     read = summed_class(class_names, logp)
                     c.lift_class, c.rider_read, c.taken_class = read, bool(rider), None
+                    c.lift_logp, c.carry_logp = logp, None  # the MS7g census, view 2's read
                     st.counts["passenger_reads"] += rider
                     if passenger_drop and rider and tray and over_tray(pick, lean, wall_height):
                         st.counts["passenger_drops"] += 1
@@ -2831,12 +3249,20 @@ def rollout(
                     else:
                         st.counts["lifts_classified"] += 1
                         st.counts["wrong_wrist_class"] += read != true_cls
-                    if class_views and read != c.read_class:
+                    # The fused vote always reads the carry view, and view 2's partial sum
+                    # sets the box now; the final-only one moves it now as the served vote does.
+                    served_split = class_views and read != c.read_class
+                    split = class_views and (vote_weights is not None or served_split)
+                    c.bank_at = lift_step + CARRY_VIEW_STEPS if bank_views and not split else None
+                    if split:
                         c.vote = (read, true_cls, lift_step + CARRY_VIEW_STEPS, logp)
                         c.carry_due = carry_vote_steps(step, c.vote[2], carry_votes)
-                        c.carry_logp = []
-                    else:
-                        _, taken, box = lift_class_box(read, lambda x: x, lighter, c.box)
+                        c.carry_vote_logp = []
+                    if not split or (vote_weights is not None and not (final and served_split)):
+                        now = read
+                        if vote_weights is not None and not final:
+                            now = fused_class(class_names, vote_weights, c.read_logp, logp)
+                        _, taken, box = lift_class_box(now, lambda x: x, lighter, c.box)
                         c.taken_class = taken
                         if box is not None:
                             c.box = box
@@ -2850,7 +3276,7 @@ def rollout(
                         if on_classify is not None:
                             on_classify("wrist", i, frame, c.seen_size, step, c, detectors[i])
                         logp, _ = classifier.log_probs(frame, class_names, True, c.seen_size)
-                        c.carry_logp.append(logp)
+                        c.carry_vote_logp.append(logp)
                         st.counts["carry_votes_read"] += 1
                     else:
                         st.counts["carry_votes_lost"] += 1
@@ -2870,9 +3296,12 @@ def rollout(
                         for cls, own in class_boxes[i].items()
                     }
                     carry_logp, _ = classifier.log_probs(frame, class_names, True, c.seen_size)
-                    logps = (c.read_logp, lift_logp, *c.carry_logp, carry_logp)
+                    c.carry_logp = carry_logp  # the MS7g census, view 3's read
+                    logps = (c.read_logp, lift_logp, *c.carry_vote_logp, carry_logp)
                     views_logp = [v for v in logps if v]
                     summed = summed_class(class_names, *views_logp)  # no overhead read: two
+                    if vote_weights is not None:
+                        summed = fused_class(class_names, vote_weights, *logps)
                     _, taken, box = lift_class_box(summed, lambda x: x, lighter, c.box)
                     c.taken_class = taken
                     st.counts["third_views"] += 1
@@ -2882,6 +3311,11 @@ def rollout(
                         c.box = box
                         env.set_context_box(i, box)
                         replan[i] = True
+                if c.bank_at is not None and step >= c.bank_at:
+                    c.bank_at = None  # ``bank_views``: recorded, never read
+                    if detectors[i].lifted or c.carried:
+                        frame = classifier.wrist_frame(env, i)
+                        on_classify("bank", i, frame, c.seen_size, step, c, detectors[i])
             elif (
                 adopt_held
                 and per_part
@@ -2906,6 +3340,8 @@ def rollout(
                 continue
             d, c, h = detectors[i], st.cycle, int(held[i])
             gap, pick_z = float(gaps[i]), float(top_picks[i][2])
+            stall = stalls[i]
+            stall.update(top_picks[i], tray and over_tray(top_picks[i][:2], lean, wall_height))
             if c is not None:
                 if d.holding and c.first_hold_at is None:
                     c.first_hold_at = step - c.start_step
@@ -2913,6 +3349,25 @@ def rollout(
                 c.lift_detected = c.lift_detected or d.lifted
                 if rearm_hold:
                     st.counts["rearms"] += rearm_stop(c, d)
+                # The MS7g census (``MS7G_CENSUS``): the cycle's first lift, the jaws' first
+                # open after it, and the air stalls. Observation only.
+                if (c.lift_detected or c.carried) and not c.lift_seen:
+                    c.lift_seen, c.lift_part = True, h
+                    c.held_class = keys[h] if h >= 0 else None
+                if jaws_opened(c, gap):
+                    part = h if h >= 0 else c.lift_part if c.lift_part >= 0 else c.target
+                    c.release_place = release_place(
+                        top_picks[i][:2],
+                        true_boxes[i] if per_part else (),
+                        part_sets[i][part] if per_part else (),
+                        lean if tray else None,
+                        wall_height,
+                    )
+                if stall.stalled and d.holding:
+                    c.air_stall_steps += 1
+                    c.air_stalls += stall.entered
+                elif stall.stalled:
+                    c.air_stall_empty_steps += 1
             if hold_trace is not None:
                 rise = float(pos[i, h, 2] - c.start_z[h]) if h >= 0 and c is not None else 0.0
                 ordinal_i = -1 if c is None else c.ordinal
@@ -2952,6 +3407,10 @@ def rollout(
             if result is None:
                 continue
             st = states[i]
+            if st.cycle is not None and st.cycle.handoff == "carrying":
+                _end_handoff(st, step)  # ``carry_guard``: the loop grades its own carry
+                rig.takeover_result[i] = None
+                continue
             orc = rig.oracles[i]
             if getattr(orc, "next_brick", None) is not None and not wave3:
                 st.preselected = (
@@ -3164,7 +3623,10 @@ def rollout(
                 + (LIFT_VIEW_COUNTS if lift_view_steps else ())
                 + (MISSED_LIFT_COUNTS if missed_lift else ())
                 + (CARRY_VOTE_COUNTS if carry_votes else ())
+                + (OVERHANG_COUNTS if overhang_guard else ())
             },
+            # The MS7g census: the category order of the cycle rows' log probabilities.
+            **({"logp_order": list(class_names)} if classifier is not None else {}),
         },
     }
     if ms7f_tray:
@@ -3300,7 +3762,16 @@ def _book_census(st: EnvState, cycle: Cycle, reason: str) -> None:
     row["last_held_is_target"] = cycle.last_held == cycle.target
     if cycle.read_logp is not None:  # ``classifier``: the reads behind the cycle's box
         row |= {k: getattr(cycle, k) for k in CLASSIFIER_CENSUS}
-    st.census.append({k: round(v, 4) if isinstance(v, float) else v for k, v in row.items()})
+    if cycle.guard_steps is not None:  # ``carry_guard``
+        row |= {k: getattr(cycle, k) for k in CARRY_GUARD_CENSUS}
+    st.census.append({k: _rounded(v) for k, v in row.items()})
+
+
+def _rounded(v):
+    """A census value as the payload records it: a float, also in a list, to 4 decimals."""
+    if isinstance(v, list):
+        return [_rounded(x) for x in v]
+    return round(v, 4) if isinstance(v, float) else v
 
 
 def _close_cycle_unmarked(st: EnvState, step: int) -> None:
@@ -3358,6 +3829,44 @@ def _take_over(
         st.cycle.taken_over = True
         st.cycle.takeover_end = "takeover_declined"
     return False
+
+
+def _hand_off(st: EnvState, rig, i: int, detector: HoldDetector, gap: float) -> None:
+    """``carry_guard``: hand the part the detector holds to the rig's perceived carry
+    (``OracleRig.resume(carry=...)``), over the served box's perceived pose at
+    ``carry_release_z`` and, if that does not plan, at the teacher's release height. ``gap`` is
+    the measured jaw gap. The cycle's ``handoff`` reads "carrying" until the rig hands the env
+    back (``_end_handoff``), or "declined"; one handoff a cycle."""
+    c, p = st.cycle, st.perceiver
+    x, y, _ = p.box_poses[c.box]
+    z = carry_release_z(detector.start_z, p.box_sizes[c.box])
+    for height in dict.fromkeys((z, desk_boxes.DESK_BOX_RELEASE_Z)):
+        carry = ((x, y, height), gap + CARRY_WIDTH_PAD_M, detector)
+        if rig.resume(i, scene=c.scene, carry=carry):
+            c.handoff = "carrying"
+            return
+    c.handoff = "declined"
+
+
+HANDOFF_ENDS = {
+    True: ("placed", "placed"),
+    False: ("lifted_lost", "dropped"),
+    None: ("failed", "takeover_failed"),
+}
+"""``carry_guard``: (handoff outcome, cycle reason) by where the hold ended during the rig's carry:
+over a perceived box, off every box, or not at all (the rig handed the env back still holding)."""
+
+
+def _end_handoff(st: EnvState, step: int) -> None:
+    """``carry_guard``: the rig handed a carry back. The loop grades it as it grades a perceived
+    release (``perceived_cycle_end``), by ``HANDOFF_ENDS``, books any failure at the target's
+    perceived position and closes the cycle now."""
+    c = st.cycle
+    c.handoff, reason = HANDOFF_ENDS[c.handoff_over]
+    if reason != "placed":
+        st.fail_mem.book(c.target_xy)
+    _close_cycle(st, reason, [], step, None)
+    st.idle_since = step
 
 
 class _TriggerState:

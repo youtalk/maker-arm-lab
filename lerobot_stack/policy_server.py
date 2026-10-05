@@ -377,6 +377,34 @@ def find_gripper_marker(checkpoint_dir: str) -> str:
     return "binary" if marker is None else marker.get("gripper", "binary")
 
 
+# MS7g D12 (2026-10-03): the overhead camera looks down, so its roll sits near pi and
+# core.quat.rpy_from_quat's atan2 wraps it to either sign (f/w12345: 52.8 % in +3.107..+pi,
+# 47.2 % in -pi..-3.107, a +-2.0 degree wobble), and LeRobot 0.5.1 ACT maps no ENV feature,
+# so its context entered raw. A checkpoint whose action_space.json says "context":
+# "roll_wrapped_norm" was trained on wrap(roll - pi) with the context MEAN_STD normalized by its
+# own preprocessor (train_masked.py --context_norm); without the key the context passes as is.
+CONTEXT_NORM = "roll_wrapped_norm"
+CONTEXT_ROLL = 3  # overhead_cam_roll's index (tests/test_lerobot_schema_pin.py)
+
+
+def find_context_marker(checkpoint_dir: str) -> str | None:
+    """The context transform recorded next to the checkpoints, None if none (every checkpoint
+    before MS7g D12). Same walk as find_action_space_marker; an unknown value is refused."""
+    marker = _read_action_space_marker(checkpoint_dir)
+    value = None if marker is None else marker.get("context")
+    if value not in (None, CONTEXT_NORM):
+        raise ValueError(f"unknown context transform {value!r} in {ACTION_SPACE_MARKER}")
+    return value
+
+
+def wrap_context_roll(context):
+    """``context`` with the camera roll replaced by wrap(roll - pi), a small signed angle in
+    [-pi, pi). A copy, for a numpy array or a torch tensor (..., K)."""
+    context = context * 1
+    context[..., CONTEXT_ROLL] = context[..., CONTEXT_ROLL] % (2 * np.pi) - np.pi
+    return context
+
+
 def integrate_delta(action: np.ndarray, state: np.ndarray) -> np.ndarray:
     """A delta_prev checkpoint's joint part plus the client's anchor, the previous clamped
     arm command: an absolute target again. The gripper column is a command, not a position,
@@ -446,6 +474,7 @@ def inference_policy_id(
     action_space: str = "absolute",
     gripper: str = "binary",
     action_warp: float = 1.0,
+    context_norm: str | None = None,
 ) -> str:
     """Suffix the policy id with the active overrides so eval payloads are self-describing."""
     policy_id = f"act:{checkpoint_dir}"
@@ -461,6 +490,8 @@ def inference_policy_id(
         policy_id += f"+blank{blank_camera}"
     if context_dim:
         policy_id += f"+ctx{context_dim}"
+    if context_norm:
+        policy_id += "+ctxnorm"
     if action_space == "delta_prev":
         policy_id += "+dprev"
     if gripper == "continuous":
@@ -524,6 +555,9 @@ def load_act(
     marker = find_gripper_bce_marker(checkpoint_dir)
     action_space = find_action_space_marker(checkpoint_dir)
     gripper = find_gripper_marker(checkpoint_dir)
+    context_norm = find_context_marker(checkpoint_dir)
+    if context_norm and "ENV" not in policy.config.normalization_mapping:
+        raise ValueError(f"the marker says {context_norm} but the checkpoint maps no ENV feature")
     if action_space == "delta":
         raise ValueError(
             "this checkpoint was trained on the c1 delta definition (target minus the measured "
@@ -546,6 +580,8 @@ def load_act(
             batch["observation.images.wrist"] = _images(wrist)
             batch["observation.images.overhead"] = _images(overhead)
         if context_dim:
+            if context_norm:
+                context = wrap_context_roll(context)
             batch["observation.environment_state"] = torch.from_numpy(context)
         return pre(batch)
 
@@ -600,6 +636,7 @@ def load_act(
             action_space=action_space,
             gripper=gripper,
             action_warp=action_warp,
+            context_norm=context_norm,
         ),
         policy.config.n_action_steps,
         {**served_inference(policy.config), "action_warp": action_warp},

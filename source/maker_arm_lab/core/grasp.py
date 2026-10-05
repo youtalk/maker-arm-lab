@@ -252,6 +252,42 @@ def wall_allows(
     return True
 
 
+def under_overhang(
+    pos: torch.Tensor, width: float, walls: Sequence[Wall], hold_band: float = JAW_HOLD_BAND
+) -> bool:
+    """The heap loop's MS7g ``--overhang_guard`` (MS7g design 5.4): does a part at ``pos``
+    outside the tray interior lie under a tray wall's top edge, in reach of a finger landing
+    beside it?
+
+    ``wall_allows`` reads a wall only in the part's grip band, so it never sees the top edge
+    of a leaned wall that overhangs a part on the desk outside the tray. The MS7f video
+    diagnosis (2026-10-03, draw 19 of the checked read) found ldraw_87087 selected five times
+    at y -0.135, 4 mm outside that edge (the rim face at y -0.126 to -0.131): 3,986 steps, no
+    stow, the jaws closing in the air or on the wall top. The band is the wall's top-down
+    shadow, its footprint on the desk to its footprint at its top (``wall_at``), grown by
+    ``landing_half_gap(width, hold_band)`` and TIP_THICKNESS: a part inside the shadow lies
+    under the overhang, one within the growth of the top's footprint under the fingers' path.
+    A desk box wall (``Wall.box``) stands vertical and never counts, nor does a part at or
+    above the wall's top, nor one whose centre lies inside the tray interior at its own height:
+    ``layout.tray_bounds`` grown by the walls' lean times that height, the leaned inner face.
+    A part resting on that face lies in the tray with its centre past the interior's edge on
+    the desk; a diagnostic smoke of 2026-10-03 (K = 50, run 20323000) refused one at y 0.1017,
+    z 0.013 in 44 scans before the test read the height.
+    """
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    x, y, z = (float(v) for v in pos[:3])
+    grow = max((w.lean for w in walls if not w.box), default=0.0) * max(z, 0.0)
+    if x0 - grow <= x <= x1 + grow and y0 - grow <= y <= y1 + grow:
+        return False
+    reach = landing_half_gap(width, hold_band) + TIP_THICKNESS
+    return any(
+        not w.box
+        and z < w.top
+        and polygon_distance([(x, y)], convex_hull([*w.footprint, *wall_at(w, w.top)])) < reach
+        for w in walls
+    )
+
+
 @dataclass(frozen=True)
 class Grasp:
     part: int
@@ -524,6 +560,7 @@ def rank_grasps(
     closing_axes: Sequence[tuple[int, ...]] | None = None,
     walls: Sequence[Wall] = (),
     hold_band: float = JAW_HOLD_BAND,
+    clear_first: bool = False,
 ) -> list[Grasp]:
     """Every grasp of every candidate part with its clearance, best first.
 
@@ -533,6 +570,14 @@ def rank_grasps(
     wall. The order is the height band (highest first), then the swept count, then the
     clearance, then the narrower width: a wide grasp closes on one side first and slides the
     part away (docs/ms6-matched-jaw-opening.md section 5), so it is the last resort at a tie.
+
+    ``clear_first`` (the heap loop's MS7g ``--clear_first``, MS7g design 5.3) ranks every grasp
+    that sweeps no standing neighbour before the height band. Over four heaps of the MS7f video
+    diagnosis (2026-10-03, 703 selections) a selection whose stroke swept a neighbour stowed
+    0.53 against 0.65, and of the full-tray selections whose chosen clearance was under 5 mm
+    only 3 of 83 had a clear option in the ranked top 8, all of them in the top band. The rank
+    picks the target part, so the switch changes the part, not only its grasp. Off, the order
+    is the one above: the key's first item is False on every grasp.
     """
     _, hz = neighbor_extents(sizes, quat)
     prints = [footprint(sizes[b], pos[b], quat[b]) for b in range(sizes.shape[0])]
@@ -548,7 +593,15 @@ def rank_grasps(
                 pos[b], g.heading, g.width, g.half_height, other_pos, other_hz, other_prints
             )
             ranked.append(replace(g, clearance=clearance, swept=swept))
-    ranked.sort(key=lambda g: (-math.floor(g.height / HEIGHT_BAND), g.swept, -g.clearance, g.width))
+    ranked.sort(
+        key=lambda g: (
+            clear_first and g.swept > 0,
+            -math.floor(g.height / HEIGHT_BAND),
+            g.swept,
+            -g.clearance,
+            g.width,
+        )
+    )
     return ranked
 
 

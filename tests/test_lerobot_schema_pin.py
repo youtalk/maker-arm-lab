@@ -50,3 +50,19 @@ def test_the_part_classifier_names_the_ms7f_categories_in_order():
     text = (CONVERT.parent / "train_part_classifier.py").read_text()
     pinned = re.search(r"^CATEGORIES = \(([^)]*)\)", text, re.MULTILINE).group(1)
     assert tuple(v.strip().strip('"') for v in pinned.split(",")) == PART_CATEGORIES
+
+
+def test_the_corpus_mask_names_lift_and_reopen_by_their_ids():
+    from maker_arm_lab.core.oracle import PHASE_TO_INT
+
+    text = (CONVERT.parent / "reopen_mask.py").read_text()
+    lift, reopen = re.search(r"^LIFT_INT, REOPEN_INT = (\d+), (\d+)", text, re.MULTILINE).groups()
+    assert (int(lift), int(reopen)) == (PHASE_TO_INT["LIFT"], PHASE_TO_INT["REOPEN"])
+
+
+def test_the_served_context_roll_index_is_the_camera_roll():
+    from maker_arm_lab.mj.context_names import CONTEXT_CAMERA_NAMES
+
+    text = (CONVERT.parent / "policy_server.py").read_text()
+    index = int(re.search(r"^CONTEXT_ROLL = (\d+)", text, re.MULTILINE).group(1))
+    assert CONTEXT_CAMERA_NAMES.index("overhead_cam_roll") == index

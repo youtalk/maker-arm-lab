@@ -1,0 +1,116 @@
+{
+ "id": "47905",
+ "title": "Brick 1 x 1 with Studs on Two Opposite Sides",
+ "size": [
+  0.008,
+  0.008,
+  0.0096
+ ],
+ "closing_axes": [
+  0,
+  2
+ ],
+ "closing_axes_reason": "y runs through the two side studs, as 87087's",
+ "hulls": [
+  [
+   [
+    0.004,
+    0.004,
+    0.0048
+   ],
+   [
+    -0.004,
+    0.004,
+    0.0048
+   ],
+   [
+    0.004,
+    -0.004,
+    0.0048
+   ],
+   [
+    0.004,
+    0.004,
+    -0.0048
+   ],
+   [
+    -0.004,
+    -0.004,
+    0.0048
+   ],
+   [
+    -0.004,
+    0.004,
+    -0.0048
+   ],
+   [
+    0.004,
+    -0.004,
+    -0.0048
+   ],
+   [
+    -0.004,
+    -0.004,
+    -0.0048
+   ]
+  ]
+ ],
+ "hull_volumes": [
+  6.144e-07
+ ],
+ "studs": [
+  {
+   "base": [
+    0.0,
+    0.0,
+    0.0048
+   ],
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "height": 0.0016,
+   "radius": 0.0024001
+  },
+  {
+   "base": [
+    0.0,
+    -0.004,
+    0.0008
+   ],
+   "axis": [
+    0.0,
+    -1.0,
+    0.0
+   ],
+   "height": 0.0016,
+   "radius": 0.0024001
+  },
+  {
+   "base": [
+    0.0,
+    0.004,
+    0.0008
+   ],
+   "axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "height": 0.0016,
+   "radius": 0.0024001
+  }
+ ],
+ "source": {
+  "file": "47905.dat",
+  "author": "Sven Moritz Hein [smhltec]",
+  "license": "Licensed under CC BY 2.0 and CC BY 4.0 : see CAreadme.txt",
+  "update": "Part UPDATE 2025-09",
+  "files": 9,
+  "triangles": {
+   "collision": 180,
+   "visual": 420
+  }
+ }
+}

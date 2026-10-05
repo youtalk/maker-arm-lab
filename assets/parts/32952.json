@@ -1,0 +1,116 @@
+{
+ "id": "32952",
+ "title": "Brick 1 x 1 x 1.667 with Studs on 1 Side",
+ "size": [
+  0.008,
+  0.008,
+  0.016
+ ],
+ "closing_axes": [
+  0,
+  2
+ ],
+ "closing_axes_reason": "y runs through the side studs, as 87087's",
+ "hulls": [
+  [
+   [
+    0.004,
+    0.004,
+    0.008
+   ],
+   [
+    -0.004,
+    0.004,
+    0.008
+   ],
+   [
+    0.004,
+    -0.004,
+    0.008
+   ],
+   [
+    0.004,
+    0.004,
+    -0.008
+   ],
+   [
+    -0.004,
+    -0.004,
+    0.008
+   ],
+   [
+    -0.004,
+    0.004,
+    -0.008
+   ],
+   [
+    0.004,
+    -0.004,
+    -0.008
+   ],
+   [
+    -0.004,
+    -0.004,
+    -0.008
+   ]
+  ]
+ ],
+ "hull_volumes": [
+  1.024e-06
+ ],
+ "studs": [
+  {
+   "base": [
+    0.0,
+    0.0,
+    0.008
+   ],
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "height": 0.0016,
+   "radius": 0.0024001
+  },
+  {
+   "base": [
+    0.0,
+    -0.004,
+    0.004
+   ],
+   "axis": [
+    0.0,
+    -1.0,
+    0.0
+   ],
+   "height": 0.0016,
+   "radius": 0.0024001
+  },
+  {
+   "base": [
+    0.0,
+    -0.004,
+    -0.004
+   ],
+   "axis": [
+    0.0,
+    -1.0,
+    0.0
+   ],
+   "height": 0.0016,
+   "radius": 0.0024001
+  }
+ ],
+ "source": {
+  "file": "32952.dat",
+  "author": "Gerald Lasser [GeraldLasser]",
+  "license": "Licensed under CC BY 4.0 : see CAreadme.txt",
+  "update": "Part UPDATE 2017-01",
+  "files": 9,
+  "triangles": {
+   "collision": 28,
+   "visual": 268
+  }
+ }
+}

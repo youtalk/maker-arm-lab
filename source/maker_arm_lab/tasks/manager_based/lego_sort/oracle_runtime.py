@@ -65,7 +65,7 @@ import random
 
 import torch
 
-from maker_arm_lab.core import grasp, layout, oracle, perception, trajectory
+from maker_arm_lab.core import desk_boxes, grasp, layout, oracle, perception, trajectory
 from maker_arm_lab.core.action_scale import IK_SCALE
 from maker_arm_lab.core.checker import (
     HELD_MIN_FORCE,
@@ -485,6 +485,13 @@ def leg_resolution(
     return min(count, budget), min(steps, budget)
 
 
+CARRY_VIA_POINT = desk_boxes.DESK_BOX_RETREAT_POINT
+"""m: where the perceived carry (``OracleRig.resume(carry=...)``) goes first when its EXTEND to the
+box does not plan: over the near half of the tray, where the teacher's own carries to the desk
+boxes start. A carry from beside one box to a box on the other side crosses the base, and on
+the cg test scene neither its straight leg nor the joint-space fallback planned (2026-10-03)."""
+
+
 class OracleRig:
     """Per-env GPU binding of ``core.oracle.EnvOracle`` onto batched joint-position actions.
 
@@ -654,6 +661,9 @@ class OracleRig:
         # takeover runs, then whether the cycle's brick reached its bin.
         self.single_cycle = [False] * self.num_envs
         self.takeover_result: list[bool | None] = [None] * self.num_envs
+        # MS7g ``--carry_guard``: (the hold detector, the release point) of an env's perceived
+        # carry (``resume(carry=)``), None for any other takeover; the detector is its one hold read.
+        self.carries: list = [None] * self.num_envs
         self._planned: list[torch.Tensor] = []
         # MS6 design 7.5: who builds an env's oracle. The default is the six-brick EnvOracle;
         # the heap script installs HeapOracle without a rig subclass. Called by rearm and resume.
@@ -1064,6 +1074,9 @@ class OracleRig:
             if goal is None:
                 continue
             self.steps_in_phase[i] += 1
+            if self.carries[i] is not None:
+                self._carry_step(i, goal)
+                continue
             result = self._phase_result(i, goal)
             if result is None:
                 continue
@@ -1418,8 +1431,13 @@ class OracleRig:
             self.unplanned[i] = True
             return
         self.commanded_lean[i] = lean
-        if goal.phase == oracle.Phase.EXTEND and getattr(
-            self.oracles[i], "matched_jaw_opening", False
+        # A perceived carry's leg to CARRY_VIA_POINT releases nothing, so it keeps the roll.
+        carry = self.carries[i]
+        via = carry is not None and self.oracles[i].release_point is not carry[1]
+        if (
+            goal.phase == oracle.Phase.EXTEND
+            and not via
+            and getattr(self.oracles[i], "matched_jaw_opening", False)
         ):
             roll = self._roll_waypoints(plan[-1])
             if roll and self.gripper_mode != "binary":
@@ -1907,6 +1925,7 @@ class OracleRig:
                 self.stats[i]["events"] = {"tray_refill": 0, "box_empty": 0}  # loop.EVENT_NAMES
             self.single_cycle[i] = False
             self.takeover_result[i] = None
+            self.carries[i] = None
             if not idle:
                 self.goals[i] = self.oracles[i].next_goal(self.snapshot(i))  # SETTLE
                 if self.perceivers is not None:
@@ -1926,7 +1945,14 @@ class OracleRig:
         self.stats[i].update(perceived_selections=0, perceived_fallbacks=0)
 
     def resume(
-        self, i: int, target: int | None = None, push=None, start_z=None, held=None, scene=None
+        self,
+        i: int,
+        target: int | None = None,
+        push=None,
+        start_z=None,
+        held=None,
+        scene=None,
+        carry=None,
     ) -> bool:
         """Take idle env ``i`` over from the policy for one brick cycle (MS4 c2 design 6.2).
 
@@ -1949,6 +1975,25 @@ class OracleRig:
         part to resume on and a push never runs held, and the takeover then reads that one
         scene until it hands the env back (``takeover_scene``, which ``_advance_phases`` and
         ``_run_watchdog`` read).
+
+        ``carry`` is the perceived carry of MS7g ``--carry_guard`` (MS7g design 5.2): a
+        ``(release, width, hold)`` triple for a part the policy lifted and then held still or
+        tried to drop away from its box. The oracle names no part, so the takeover enters
+        EXTEND at once from the arm's pose and carries to ``release`` (x, y, z: the served box's
+        perceived centre at the loop's release height), RELEASE opens there, RETREAT follows,
+        and the env goes back to the loop (``_carry_step``). The release height of an unknown
+        part (``loop.carry_release_z``) starts at the teacher's ``DESK_BOX_RELEASE_Z``, 0.10 m,
+        and rises until a part reaching the hold's start height below the pick point (it lay on
+        the floor or a pile there) clears the box rim by 10 mm, to at most 0.12 m; the loop asks
+        again at 0.10 m when the higher leg does not plan. It reads
+        three things: ``hold``, the loop's ``HoldDetector`` (a hold that ends during EXTEND ends
+        the carry at once, handed back False), the FK pick point every leg plans from, and the
+        perceived box pose inside ``release``. ``width`` (m, the measured jaw gap plus
+        ``loop.CARRY_WIDTH_PAD_M``) stands for the grasp width: the carrying legs hold
+        ``grasp.close_gap(width)``, 4 mm under the measured gap and so 2 mm past the
+        detector's ``MIN_EXCESS``, and RELEASE opens to ``width`` + 8 mm. No contact, no part
+        pose and no true box pose is read; ``scene`` (required) only fills ``takeover_scene``.
+        Declined (False) when EXTEND does not plan. The loop grades the carry itself.
         """
         if not self.idle[i]:
             raise RuntimeError(f"env {i} is not idle")
@@ -1975,6 +2020,8 @@ class OracleRig:
         self.stats[i] = self._fresh_stats()
         if scene is not None:
             orc.takeover_scene = scene
+        if carry is not None:
+            return self._enter_carry(i, *carry)
         if held is None:
             left = self.left_brick.data.force_matrix_w[i, 0].norm(dim=-1)
             right = self.right_brick.data.force_matrix_w[i, 0].norm(dim=-1)
@@ -2032,6 +2079,57 @@ class OracleRig:
             return False
         return True
 
+    def _enter_carry(self, i: int, release, width: float, hold) -> bool:
+        """``resume(carry=...)``'s entry: EXTEND to ``release`` on the fresh oracle, or, when that
+        leg does not plan, first to ``CARRY_VIA_POINT`` over the tray (``_carry_step``)."""
+        orc = self.oracles[i]
+        target = torch.tensor([float(v) for v in release])
+        orc.release_point = target
+        orc.grasp_width = float(width)
+        orc.phase = oracle.Phase.EXTEND
+        self.carries[i] = (hold, target)
+        self.brick_start[i] = self.parts_start[i] = None
+        self.idle[i] = False
+        self.single_cycle[i] = True
+        self.takeover_result[i] = None
+        self._enter_phase(i, orc.takeover_scene)
+        if self.unplanned[i]:
+            orc.release_point = torch.tensor(CARRY_VIA_POINT)
+            self._enter_phase(i, orc.takeover_scene)
+        if self.goals[i] is None or self.unplanned[i]:
+            self._go_idle(i, None)
+            return False
+        return True
+
+    def _carry_step(self, i: int, goal: oracle.Goal) -> None:
+        """One step of a perceived carry: EXTEND (by way of ``CARRY_VIA_POINT`` when the direct
+        leg did not plan), RELEASE, RETREAT, then the env goes back to the loop, True. A hold
+        that ends in EXTEND ends the carry at once, False, and so does a second EXTEND leg that
+        does not plan, which would release over the tray. The oracle's ``report`` is not
+        called: its bookkeeping grades a named part on the true boxes."""
+        hold, target = self.carries[i]
+        if goal.phase == oracle.Phase.EXTEND and not hold.holding:
+            self._go_idle(i, False)
+            return
+        if self._phase_result(i, goal) is None:
+            return
+        orc = self.oracles[i]
+        if goal.phase == oracle.Phase.EXTEND and orc.release_point is not target:
+            orc.release_point = target  # the via leg ended: on to the box
+            self._enter_phase(i, orc.takeover_scene)
+            if self.unplanned[i]:
+                self._go_idle(i, False)
+            return
+        following = {
+            oracle.Phase.EXTEND: oracle.Phase.RELEASE,
+            oracle.Phase.RELEASE: oracle.Phase.RETREAT,
+        }
+        if goal.phase not in following:
+            self._go_idle(i, True)
+            return
+        orc.phase = following[goal.phase]
+        self._enter_phase(i, orc.takeover_scene)
+
     def _push_takeover_over(self, i: int) -> bool:
         """A takeover that ran one push (``resume(push=...)``) ends when its oracle is back
         at HOVER with no target; hand the env back so the loop selects again."""
@@ -2051,6 +2149,7 @@ class OracleRig:
         self.single_cycle[i] = False
         self.goals[i] = None
         self.takeover_result[i] = stowed
+        self.carries[i] = None
 
     def episode_stats(self, env_id: int) -> dict:
         """Everything a metadata sidecar needs about the finished episode.

@@ -198,6 +198,8 @@ MS7F_OFF = {
     "carry_votes": 0,
     "pile_pgs": False,
     "stall_end": False,
+    "vote_weights": None,
+    "cls_flip": False,
 }
 """``core.batch_loop.MS7F_OFF``, copied because the supervisor imports no maker_arm_lab; the test
 pins it. The "ms7f" block of a read with every MS7f switch off, what an MS7e payload ran with."""
@@ -231,6 +233,8 @@ MS7F_READY: frozenset[str] = frozenset(
         "carry_votes",
         "pile_pgs",
         "stall_end",
+        "vote_weights",
+        "cls_flip",
     }
 )
 """``core.batch_loop.MS7F_READY``, copied and pinned the same way: any other MS7f switch at a
@@ -267,6 +271,10 @@ MS7D_LEVERS = {
 }
 """The MS7d switches and their levers (MS7d design section 4), each forwarded to the MuJoCo
 heap client as its own flag. All but ``hold_force`` and ``force_cap`` need ``--perceived``."""
+MS7G_SWITCHES = ("clear_first", "overhang_guard")
+"""The MS7g selector switches (MS7g design 5.3 and 5.4), each forwarded to the MuJoCo heap client
+as its own flag; both need ``--perceived``. The client records one in the inference block only
+when it is on, so a payload with both off is one that predates them."""
 LOOP_SWITCHES = (
     "select_at_release",
     "replan_on_switch",
@@ -286,9 +294,12 @@ LOOP_SWITCHES = (
     "perceived",
     "contact_hold",
     *MS7D_LEVERS,
+    "carry_guard",
+    *MS7G_SWITCHES,
 )
 """The heap loop's protocol switches (core.loop.rollout); the client records them in the
-payload's inference block under "loop", and the cache matches on them."""
+payload's inference block under "loop", and the cache matches on them. ``carry_guard`` (MS7g)
+is recorded only when on, so a payload without it ran with it off."""
 LOOP_SETTINGS = ("rake_cap",)
 """The heap loop's integer settings, recorded and matched like the switches; 0 is off."""
 PERCEPTION_KNOBS = (
@@ -1205,6 +1216,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             help=f"MuJoCo heap only: forwarded to the heap client as --{name}, MS7d {lever}",
         )
     parser.add_argument(
+        "--carry_guard",
+        action="store_true",
+        help="MuJoCo heap only, with --perceived: forwarded as --carry_guard (MS7g), the guard on "
+        "a lifted part's release and the rig's carry of a still one; refuses --passenger_drop",
+    )
+    parser.add_argument(
         "--families",
         type=str,
         default="",
@@ -1290,6 +1307,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ("missed_lift", "riders, a carry the hold detector missed"),
         ("pile_pgs", "the PGS solver of a large pile"),
         ("stall_end", "the serving loop's end of a cycle whose jaws closed on nothing"),
+        ("cls_flip", "block (MS7g D10), the classifier's test-time flip"),
     ):
         parser.add_argument(
             f"--{name}",
@@ -1350,6 +1368,21 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="MuJoCo heap only, MS7f C: forwarded as --carry_votes K, the extra wrist reads of a "
         "vote's carry",
     )
+    for name, what in (
+        ("clear_first", "5.3, the selector ranks a grasp that sweeps no neighbour first"),
+        ("overhang_guard", "5.4, the selector refuses a part under a tray wall's top edge"),
+    ):
+        parser.add_argument(
+            f"--{name}",
+            action="store_true",
+            help=f"MuJoCo heap only, MS7g design {what}: forwarded as --{name}; needs --perceived",
+        )
+    parser.add_argument(
+        "--vote_weights",
+        type=str,
+        default=None,
+        help="MuJoCo heap only, MS7g: forwarded as --vote_weights PATH, the fused vote's JSON",
+    )
     parser.add_argument(
         "--seen_seeds",
         type=_seed_pair,
@@ -1393,13 +1426,20 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         "rake_turn",
         "perceived",
         *MS7D_LEVERS,
+        "carry_guard",
+        *MS7G_SWITCHES,
     ):
         if getattr(args, name) and (args.heap_k <= 0 or args.backend != "mujoco"):
             raise ValueError(f"--{name} needs --heap_k > 0 and --backend mujoco")
     perceived_only = [n for n in MS7D_LEVERS if n not in ("hold_force", "force_cap")]
-    for name in ("noise_scales", "contact_hold", *perceived_only):
+    perceived_only += MS7G_SWITCHES
+    for name in ("noise_scales", "contact_hold", *perceived_only, "carry_guard"):
         if getattr(args, name) and not args.perceived:
             raise ValueError(f"--{name} needs --perceived")
+    if args.carry_guard and args.passenger_drop:
+        raise ValueError("--carry_guard refuses --passenger_drop, which opens over the tray")
+    if args.overhang_guard and not args.tray:
+        raise ValueError("--overhang_guard reads the tray wall's overhang: it needs --tray")
     if args.perceived and (not args.desk_boxes or args.gripper != "continuous"):
         # The client's own usage error, before a server starts and every draw loses to it.
         raise ValueError("--perceived needs --desk_boxes and --gripper continuous")
@@ -1527,7 +1567,9 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         + (("--perceived",) if args.perceived else ())
         + (("--noise_scales", scales) if scales else ())
         + (("--contact_hold",) if args.contact_hold else ())
-        + tuple(f"--{name}" for name in MS7D_LEVERS if getattr(args, name)),
+        + tuple(f"--{name}" for name in MS7D_LEVERS if getattr(args, name))
+        + (("--carry_guard",) if args.carry_guard else ())
+        + tuple(f"--{name}" for name in MS7G_SWITCHES if getattr(args, name)),
     )
 
 

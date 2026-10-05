@@ -38,13 +38,14 @@ def _trainer(monkeypatch):
     return _load(ROOT / "lerobot_stack" / "train_part_classifier.py")
 
 
-def _run(tmp_path, record: bool):
+def _run(tmp_path, record: bool, wrist: str = "wide", bank: bool = False):
     """The classifier scene with the vote and two carry reads: overhead reads slope and the black
-    wrist frames wide, so every lift reads all four views. Returns the payload without its wall
-    clock, the served steps, each read's (frame, wrist, size) and each recorded read's truth."""
+    wrist frames ``wrist``, so with "wide" every lift reads all four views and with "slope" every
+    lift agrees and no vote runs. Returns the payload without its wall clock, the served steps,
+    each read's (frame, wrist, size), each recorded read's truth, the recorder and the env."""
     env, rig, policy = _scene()
     served = _served(env)
-    stub = _classifier(tmp_path, "slope", "wide")
+    stub = _classifier(tmp_path, "slope", wrist)
     given, truth = [], []
     real = stub.log_probs
 
@@ -53,7 +54,8 @@ def _run(tmp_path, record: bool):
         return real(frame, active, wrist, size)
 
     stub.log_probs = log_probs
-    recorder = render.PolicyFrames(env, rig, str(tmp_path / "frames"), ARGS, crop=False)
+    out = tmp_path / ("bank" if bank else "frames")
+    recorder = render.PolicyFrames(env, rig, str(out), ARGS, crop=False)
 
     def spy(view, i, frame, size, step, cycle, detector):
         truth.append(cycle.target if view == "overhead" else loop.wrist_class(env, i)[1])
@@ -62,6 +64,8 @@ def _run(tmp_path, record: bool):
     kwargs = {"perceived": True, "classifier": stub, "class_views": True, "carry_votes": 2}
     if record:
         kwargs["on_classify"] = spy
+    if bank:
+        kwargs["bank_views"] = True
     payload = _rollout(env, rig, policy, **kwargs, **SWITCHES)
     recorder.flush()
     env.close()
@@ -82,7 +86,12 @@ def test_recording_changes_no_step_and_no_payload_byte(tmp_path):
 def test_one_frame_per_read_labelled_with_the_truth_that_the_trainer_loads(tmp_path, monkeypatch):
     _, _, given, truth, recorder, env = _run(tmp_path, record=True)
     z = np.load(recorder.out)
-    assert set(z.files) == {"frames", "args", *render.LABELS}  # no crop: the policy's wrist frames
+    # No crop: the policy's wrist frames. Each frame's cycle is the loop's ordinal.
+    assert set(z.files) == {"frames", "args", "cycle", *render.LABELS}
+    assert z["cycle"][0] == 1 and (np.diff(z["cycle"]) >= 0).all()
+    assert (
+        z["cycle"][z["view"] == "overhead"] == np.arange(1, (z["view"] == "overhead").sum() + 1)
+    ).all()
     views = z["view"].tolist()
     assert {"overhead", "lift", "carry", "wrist"} <= set(views)
     assert len(views) == len(given) == len(truth)
@@ -107,6 +116,42 @@ def test_one_frame_per_read_labelled_with_the_truth_that_the_trainer_loads(tmp_p
     data = _trainer(monkeypatch).load([recorder.out])
     assert data["wrist_crop"] is None and len(data["view"]) == len(views)
     assert data["size"].shape == (len(views), 3)
+
+
+def test_bank_views_record_the_agreed_carry_view_and_change_no_step_and_no_payload_byte(
+    tmp_path,
+):
+    off, off_served, off_given, _, _, _ = _run(tmp_path, record=True, wrist="slope")
+    on, on_served, on_given, truth, recorder, _ = _run(
+        tmp_path, record=True, wrist="slope", bank=True
+    )
+    assert json.dumps(on, sort_keys=True) == json.dumps(off, sort_keys=True)
+    assert _same(on_served, off_served)
+    assert len(on_given) == len(off_given) > 0  # the classifier reads no bank frame
+    z = np.load(recorder.out)
+    views, steps, cycles = z["view"].tolist(), z["step"].tolist(), z["cycle"].tolist()
+    assert "carry" not in views and "wrist" not in views  # every lift agreed: no vote ran
+    banks = [n for n, v in enumerate(views) if v == "bank"]
+    assert banks and len(views) == len(on_given) + len(banks)
+    for n in banks:  # the bank frame is its cycle's, CARRY_VIEW_STEPS after the lift before it
+        lift = max(m for m in range(n) if views[m] == "lift")
+        assert cycles[lift] == cycles[n] and steps[n] == steps[lift] + loop.CARRY_VIEW_STEPS
+    assert z["held"].tolist() == truth  # the held part's labels, as on every wrist view
+    assert "bank" not in recorder.summary()  # ARGS carries no bank_views
+    recorder.bank = True
+    assert recorder.summary()["bank"] == len(banks)
+
+
+def test_bank_views_need_the_recorder_and_the_classifier(tmp_path, capsys):
+    env, rig, policy = _scene()
+    stub = _classifier(tmp_path, "slope", "slope")
+    for kwargs in ({"classifier": stub}, {"on_classify": lambda *a: None}):
+        with pytest.raises(EvalFailure, match="bank_views"):
+            _rollout(env, rig, policy, perceived=True, bank_views=True, **kwargs, **SWITCHES)
+    env.close()
+    flags = HEAP + ["--perceived", "--categories", "--classifier", "m.pt", "--bank_views"]
+    line = _usage("mj_eval_heap", flags, capsys)
+    assert line.startswith("EVAL_FAIL ") and "needs --classifier_frames" in line, line
 
 
 def test_a_stopped_run_keeps_the_frames_of_its_last_flush(tmp_path, monkeypatch):

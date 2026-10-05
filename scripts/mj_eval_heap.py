@@ -19,7 +19,9 @@ the cycle over. Only the takeover frames are recorded, to ``<dagger_dir>/<shard_
 
 ``--classifier_frames DIR`` records every frame the classifier reads on the policy's own cycles
 as a render set file (``mj_render_set.PolicyFrames``), labels read from the simulator; the run
-itself is the same.
+itself is the same. ``--bank_views`` (the MS7g frame bank, ledger D2) also records the carry view
+of every lift whose read agreed with the overhead read, a frame the classifier does not read
+(``loop.rollout``'s ``bank_views``), so each lifted cycle keeps all three views.
 """
 
 import argparse
@@ -347,6 +349,26 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         help="MS7d L7: the arm holds still on a step with a large pick-point force",
     )
     parser.add_argument(
+        "--carry_guard",
+        action="store_true",
+        help="MS7g, with --perceived: keep a lifted part in the jaws until the pick point is over "
+        "its served box, and hand a still guard to the rig's perceived carry (loop.guarded_gap); "
+        "refuses --passenger_drop",
+    )
+    parser.add_argument(
+        "--clear_first",
+        action="store_true",
+        help="MS7g, with --perceived: the selector ranks the grasps that sweep no standing "
+        "neighbour before the height band, so it may choose another part (grasp.rank_grasps)",
+    )
+    parser.add_argument(
+        "--overhang_guard",
+        action="store_true",
+        help="MS7g, with --perceived and --tray: the selector refuses a part outside the tray "
+        "under a wall's top edge (grasp.under_overhang), and the carry grace needs a lift "
+        "(loop.grace_hold)",
+    )
+    parser.add_argument(
         "--frames_dir",
         type=str,
         default="",
@@ -360,6 +382,13 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         help="MS7f: write every frame the classifier reads, labelled from the simulator, to "
         "DIR/policy_<run_seed>_<layout_seed>.npz in scripts/mj_render_set.py's layout, for "
         "lerobot_stack/train_part_classifier.py; needs --classifier and --perceived",
+    )
+    parser.add_argument(
+        "--bank_views",
+        action="store_true",
+        help="MS7g frame bank, with --classifier_frames: also record the carry view "
+        "loop.CARRY_VIEW_STEPS after a lift whose read agreed (view 'bank'), which the "
+        "classifier does not read; the run itself is the same",
     )
     parser.add_argument(
         "--hold_trace",
@@ -389,6 +418,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
     check_ms7e(parser, args)
     check_ms7f(parser, args)
     check_teacher_waits(parser, args)
+    if args.carry_guard and args.passenger_drop:
+        parser.error("--carry_guard refuses --passenger_drop, which opens over the tray")
     if args.classifier and not (args.perceived and args.categories):
         parser.error(
             "--classifier reads the categories on the perceived views: it needs --perceived and "
@@ -399,6 +430,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
             "--classifier_frames records the classifier's reads: it needs --classifier and "
             "--perceived"
         )
+    if args.bank_views and not args.classifier_frames:
+        parser.error("--bank_views records more frames: it needs --classifier_frames")
     if args.passenger_drop and not args.classifier:
         parser.error(
             "--passenger_drop reads the classifier's passenger head: it needs --classifier"
@@ -409,6 +442,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         parser.error(f"--lift_view_steps must lie in [0, {CARRY_VIEW_STEPS})")
     if args.missed_lift and not args.tray:
         parser.error("--missed_lift reads a carry off the tray: it needs --tray")
+    if args.overhang_guard and not args.tray:
+        parser.error("--overhang_guard reads the tray wall's overhang: it needs --tray")
     if not 1 <= args.cell_failure_cap <= MAX_CELL_FAILURE_CAP:
         parser.error(f"--cell_failure_cap must lie in [1, {MAX_CELL_FAILURE_CAP}]")
     if args.cell_failure_cap != CELL_FAILURE_CAP and not args.perceived:
@@ -420,6 +455,18 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         )
     if not 0 <= args.carry_votes <= MAX_CARRY_VOTES:
         parser.error(f"--carry_votes must lie in [0, {MAX_CARRY_VOTES}]")
+    if args.cls_flip and not args.classifier:
+        parser.error("--cls_flip mirrors the classifier's frames: it needs --classifier")
+    if args.vote_weights:
+        if not (args.classifier and args.class_views) or args.carry_votes:
+            parser.error(
+                "--vote_weights fuses the classifier's three views: it needs --classifier and "
+                "--class_views and refuses --carry_votes"
+            )
+        try:
+            args.vote = json.loads(Path(args.vote_weights).read_text())
+        except (OSError, ValueError) as err:
+            parser.error(f"--vote_weights: {err}")
     if args.carry_votes >= CARRY_VIEW_STEPS - args.lift_view_steps:
         parser.error(
             f"--carry_votes must be under {CARRY_VIEW_STEPS} - --lift_view_steps, a step for "
@@ -449,6 +496,9 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "lift_budget",
         "missed_lift",
         "stall_end",
+        "carry_guard",
+        "clear_first",
+        "overhang_guard",
     ):
         if getattr(args, name) not in (None, False) and not args.perceived:
             parser.error(f"--{name} needs --perceived")
@@ -568,7 +618,9 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
         )
         policy = None if args.oracle_driver else policy_client.ServerPolicy(args.server)
         trace = [] if args.hold_trace else None
-        classifier = perception.PartClassifier(args.classifier) if args.classifier else None
+        classifier = None
+        if args.classifier:
+            classifier = perception.PartClassifier(args.classifier, flip=args.cls_flip)
         if args.classifier_frames:
             sys.path.insert(0, str(Path(__file__).resolve().parent))
             from mj_render_set import PolicyFrames
@@ -633,6 +685,11 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             cell_failure_cap=args.cell_failure_cap,
             carry_votes=args.carry_votes,
             stall_end=args.stall_end,
+            carry_guard=args.carry_guard,
+            clear_first=args.clear_first,
+            overhang_guard=args.overhang_guard,
+            bank_views=args.bank_views,
+            vote_weights=args.vote if args.vote_weights else None,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

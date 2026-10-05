@@ -2,6 +2,7 @@
 
 import math
 import random
+import re
 from collections import Counter
 
 import pytest
@@ -179,3 +180,27 @@ def test_the_classifier_extras_stay_out_of_every_catalog_split_and_draw():
         *("slope_1x3", "round_2x2x2", "ldraw_3894", "ldraw_11211", "plate_1x4", "plate_2x2"),
         *("tile_1x4", "joint_14418", "joint_4081b", "minifig_3901", "minifig_3624"),
     ]
+
+
+def test_the_v12_extras_share_no_ldraw_number_and_no_held_out_footprint():
+    """MS7g design sections 6.4 and 9 (risk 5): no v12 kind is a catalog kind under another
+    name. An LDraw kind shares no part number (variant letter dropped) with a catalog kind or a
+    known twin of a held-out kind; a primitive shares no family and footprint with a held-out
+    kind. The v12 block is the tail of ``CLASSIFIER_EXTRA``, after MS7f's kinds unchanged."""
+    number = lambda part_id: re.match(r"\d+", part_id).group()
+    catalog_numbers = {number(i) for ids in parts.LDRAW_FAMILY_IDS.values() for i in ids}
+    # LDraw twins of held-out kinds: slope_1x2, slope_1x3 (MS7f D4), joint_43093's axle pin,
+    # minifig_3624's police hat and ldraw_11211's 1x2 side-stud bricks
+    twins = {"3040", "4286", "3749", "6562", "15530", "22885", "52107", "86876"}
+    _, held = parts.split(parts.catalog(tuple(parts.FAMILY_KEYS)), 20260915)
+    footprint = lambda p: (p.family, min(p.nx, p.ny), max(p.nx, p.ny))
+    held_prints = {footprint(p) for p in held if not p.hulls}
+    v12 = parts.by_name(parts.CLASSIFIER_EXTRA_V12)
+    n = len(v12)
+    assert parts.CLASSIFIER_EXTRA[-n:] == parts.CLASSIFIER_EXTRA_V12 and len(set(v12)) == n
+    assert not set(parts.CLASSIFIER_EXTRA_V12) & set(parts.CLASSIFIER_EXTRA[:-n])
+    for part in v12:
+        if part.hulls:
+            assert number(part.name.split("_", 1)[1]) not in catalog_numbers | twins, part.name
+        else:
+            assert footprint(part) not in held_prints, part.name

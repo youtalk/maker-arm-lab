@@ -45,6 +45,8 @@ ON = {
     "carry_votes": ["--carry_votes", "2"],
     "pile_pgs": ["--pile_pgs"],
     "stall_end": ["--stall_end"],
+    "vote_weights": ["--vote_weights", "/tmp/ms7g_no_such_vote.json"],
+    "cls_flip": ["--cls_flip"],
 }
 """Each MS7f switch at a value that is not its off value. A track that adds a switch adds it
 here too (the first test holds the table to ``MS7F_OFF``)."""
@@ -62,6 +64,7 @@ NEW_SCRIPTS = [
     (ROOT / "scripts" / "mj_render_set.py", "RENDER_OK", "RENDER_FAIL"),
     (ROOT / "scripts" / "mj_stretch_run.py", "STRETCH_OK", "STRETCH_FAIL"),
     (ROOT / "lerobot_stack" / "train_part_classifier.py", "CLS_OK", "CLS_FAIL"),
+    (ROOT / "lerobot_stack" / "vote_bank.py", "VOTE_OK", "VOTE_FAIL"),
 ]
 """The new scripts of MS7f and their tokens (the shared interface, item 5)."""
 PROTOCOL_IMPORTS = {"io", "json", "numpy"}
