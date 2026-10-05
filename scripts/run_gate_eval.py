@@ -74,6 +74,8 @@ class GateCfg:
     n_action_steps: int | None = None
     temporal_ensemble_coeff: float | None = None
     action_warp: float = 1.0  # the server plays each chunk this many times faster (MS7f speed)
+    # MS7g D20: a second pretrained_model dir; the server serves the mean of both checkpoints.
+    ensemble_with: str | None = None
     only_processes: tuple | None = None
     eval_timeout_s: float = 4 * 3600
     backend: str = "isaac"  # "mujoco" spawns scripts/mj_eval_policy.py under .venv/bin/python
@@ -677,6 +679,8 @@ def _server_command(cfg: GateCfg) -> list[str]:
         cmd += ["--temporal_ensemble_coeff", str(cfg.temporal_ensemble_coeff)]
     if cfg.action_warp != 1.0:
         cmd += ["--action_warp", str(cfg.action_warp)]
+    if cfg.ensemble_with:
+        cmd += ["--ensemble_with", cfg.ensemble_with]
     return cmd
 
 
@@ -878,6 +882,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     )
     # A payload that predates the warp ran unwarped.
     same_inference = same_inference and served.get("action_warp", 1.0) == cfg.action_warp
+    # A payload that predates the ensemble served one checkpoint.
+    same_inference = same_inference and served.get("ensemble_with") == cfg.ensemble_with
     # The loop's protocol switches are part of what a draw measured; a payload that predates
     # them ran with every switch off.
     recorded = served.get("loop") or {}
@@ -1047,6 +1053,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=float,
         default=1.0,
         help="the server plays each predicted chunk this many times faster, 1.0 (off) to 3.0",
+    )
+    parser.add_argument(
+        "--ensemble_with",
+        type=str,
+        default=None,
+        help="MS7g D20: a second pretrained_model dir at the same path on every host; the "
+        "server serves the mean of both checkpoints' actions",
     )
     parser.add_argument("--only_processes", type=_process_list, default=None)
     parser.add_argument("--eval_timeout_s", type=float, default=4 * 3600)
@@ -1522,6 +1535,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         n_action_steps=args.n_action_steps,
         temporal_ensemble_coeff=args.temporal_ensemble_coeff,
         action_warp=args.action_warp,
+        ensemble_with=args.ensemble_with,
         only_processes=args.only_processes,
         eval_timeout_s=args.eval_timeout_s,
         backend=args.backend,

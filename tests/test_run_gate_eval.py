@@ -787,6 +787,40 @@ def test_action_warp_reaches_the_server_splits_the_cache_and_refuses_out_of_rang
         assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--action_warp" in out.err
 
 
+def test_ensemble_with_reaches_the_server_and_splits_the_cache(tmp_path):
+    ledger = _fake_ledger(tmp_path)
+    plain = _cfg(tmp_path, ledger, processes=1, n_action_steps=None, temporal_ensemble_coeff=None)
+    assert "--ensemble_with" not in ge._server_command(plain)  # the plain command is unchanged
+    ens = _cfg(
+        tmp_path,
+        ledger,
+        processes=1,
+        n_action_steps=None,
+        temporal_ensemble_coeff=None,
+        ensemble_with="/m/b",
+    )
+    server = ge._server_command(ens)
+    assert server[server.index("--ensemble_with") + 1] == "/m/b"
+    plain.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None, "chunk_size": 100}
+
+    def cached(cfg, inference, policy_id="act:ck+nas50"):
+        payload = _payload(draw, [_episode(6)], policy_id=policy_id, inference=inference)
+        (plain.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    # An ensemble read never reuses a one-checkpoint payload, nor the reverse, nor another
+    # member's; its policy id still starts with the primary checkpoint.
+    with_b = {**served, "ensemble_with": "/m/b"}
+    assert cached(plain, served) and not cached(plain, with_b, "act:ck+nas50+ens:/m/b")
+    assert cached(ens, with_b, "act:ck+nas50+ens:/m/b") and not cached(ens, served)
+    assert not cached(ens, {**served, "ensemble_with": "/m/c"}, "act:ck+nas50+ens:/m/c")
+    args = ge._parse_args(_argv(tmp_path) + ["--ensemble_with", "/m/b"])
+    assert ge._build_cfg(args).ensemble_with == "/m/b"
+    assert ge._build_cfg(ge._parse_args(_argv(tmp_path))).ensemble_with is None
+
+
 def _argv(tmp_path: Path) -> list[str]:
     return [
         "--checkpoint",
