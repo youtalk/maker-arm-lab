@@ -743,3 +743,155 @@ def test_an_old_checkpoint_serves_its_context_untouched(monkeypatch):
     context = np.full((1, 16), 0.1, np.float32)
     assert policy_fn(state, image, image, context).shape == (1, 7)
     assert "ctxnorm" not in policy_id
+
+
+# MS7g D20: the serving-side policy ensemble (--ensemble_with).
+
+
+def _stub_member(path, scale, *, context_norm=None, gripper="continuous"):
+    """A member whose chunk is scale * (state + t) and whose temporal-ensemble step is scale *
+    state, with the contract and id fields _load_member returns."""
+    from types import SimpleNamespace
+
+    resets = []
+    inference = {"n_action_steps": 3, "temporal_ensemble_coeff": None, "chunk_size": 100}
+    return SimpleNamespace(
+        policy=SimpleNamespace(reset=lambda: resets.append(path)),
+        resets=resets,
+        predict_chunk=lambda obs: scale * _chunk_of(obs["state"], 3),
+        select=lambda state, wrist, overhead, context: scale * state,
+        policy_id=f"act:{path}+nas3+ctx16" + ("+ctxnorm" if context_norm else "") + "+gap",
+        inference=inference,
+        n_action_steps=3,
+        context_dim=16,
+        context_norm=context_norm,
+        temporal_ensemble=False,
+        contract={
+            "action_space": "absolute",
+            "gripper": gripper,
+            "gripper_squash": False,
+            "action_shape": [7],
+            "context_dim": 16,
+            **inference,
+        },
+    )
+
+
+def _stub_members(monkeypatch, **members):
+    import policy_server
+
+    loaded = []
+
+    def load(path, *_args):
+        loaded.append(members[path])
+        return members[path]
+
+    monkeypatch.setattr(policy_server, "_load_member", load)
+    return loaded
+
+
+def test_without_ensemble_with_the_server_serves_one_member_unchanged(monkeypatch):
+    from policy_server import load_act
+
+    member = _stub_member("a", 1.0)
+    _stub_members(monkeypatch, a=member)
+    policy_fn, _reset, policy_id, n, inference, context_dim, space, gripper = load_act("a", "cpu")
+    obs = {**_obs(), "context": np.zeros((2, 16), np.float32)}
+    obs["state"][:] = np.arange(14, dtype=np.float32).reshape(2, 7)
+    out = policy_fn(**obs)
+    np.testing.assert_array_equal(out, _chunk_of(obs["state"], 3)[:, 0])
+    assert policy_id == member.policy_id and "+ens" not in policy_id
+    assert inference == {**member.inference, "action_warp": 1.0}  # no ensemble_with key
+    assert (n, context_dim, space, gripper) == (3, 16, "absolute", "continuous")
+
+
+def test_the_ensemble_serves_the_mean_of_its_members_and_names_both(monkeypatch):
+    from policy_server import load_act, mean_action, warp_chunk
+
+    one = np.ones((2, 7), np.float32)
+    assert mean_action([one]) is one  # a single member's own array, byte for byte
+    loaded = _stub_members(
+        monkeypatch, a=_stub_member("a", 1.0), b=_stub_member("b", 3.0, context_norm="x")
+    )
+    policy_fn, reset_fn, policy_id, _n, inference, *_ = load_act(
+        "a", "cpu", n_action_steps=3, action_warp=1.5, ensemble_with="b"
+    )
+    obs = {**_obs(), "context": np.zeros((2, 16), np.float32)}
+    obs["state"][:] = np.arange(14, dtype=np.float32).reshape(2, 7)
+    # The mean of the 1x and 3x chunks, then the warp, as on one checkpoint.
+    want = warp_chunk(2.0 * _chunk_of(obs["state"], 3), 1.5)
+    for t in range(want.shape[1]):
+        row = policy_fn(**obs)
+        np.testing.assert_array_equal(row, want[:, t])
+        assert row.dtype == np.float32
+    assert policy_id == "act:a+nas3+ctx16+gap+ens:b+ctxnorm"
+    assert policy_id.startswith("act:a")  # the supervisor's cache prefix
+    assert inference["ensemble_with"] == "b" and inference["action_warp"] == 1.5
+    reset_fn()
+    assert [m.resets for m in loaded] == [["a"], ["b"]]
+
+
+def test_the_ensemble_averages_the_temporal_ensemble_steps(monkeypatch):
+    from policy_server import load_act
+
+    a, b = _stub_member("a", 1.0), _stub_member("b", 2.0)
+    a.temporal_ensemble = b.temporal_ensemble = True
+    _stub_members(monkeypatch, a=a, b=b)
+    policy_fn, *_ = load_act("a", "cpu", ensemble_with="b")
+    state = np.ones((1, 7), np.float32)
+    np.testing.assert_array_equal(policy_fn(state, None, None, None), 1.5 * state)
+
+
+def test_the_ensemble_refuses_members_that_differ(monkeypatch):
+    from policy_server import load_act
+
+    _stub_members(monkeypatch, a=_stub_member("a", 1.0), c=_stub_member("c", 1.0, gripper="binary"))
+    with pytest.raises(ValueError, match="ensemble_with refused.*gripper"):
+        load_act("a", "cpu", ensemble_with="c")
+
+
+F9N = Path.home() / "data/maker-arm-ms7/g/train_F9n/checkpoints/800000/pretrained_model"
+
+
+@pytest.mark.skipif(
+    not (F5.is_dir() and F9N.is_dir()), reason="the F5 200k and F9n 800k checkpoints are not here"
+)
+def test_each_member_runs_its_own_preprocessing_and_only_f9n_wraps_the_roll(monkeypatch):
+    import policy_server
+
+    wraps = []
+    wrap = policy_server.wrap_context_roll
+
+    def counted(context):
+        wraps.append(context.shape)
+        return wrap(context)
+
+    monkeypatch.setattr(policy_server, "wrap_context_roll", counted)
+    load = policy_server._load_member
+    members = []
+    monkeypatch.setattr(
+        policy_server, "_load_member", lambda *a: members.append(load(*a)) or members[-1]
+    )
+    policy_fn, _reset, policy_id, *_ = policy_server.load_act(
+        str(F5), "cpu", n_action_steps=1, ensemble_with=str(F9N)
+    )
+    assert policy_id.startswith(f"act:{F5}+nas1+ctx16+gap+ens:{F9N}") and policy_id.endswith(
+        "+ctxnorm"
+    )
+    rng = np.random.default_rng(0)
+    obs = {
+        "state": rng.uniform(-1.0, 1.0, (1, 7)).astype(np.float32),
+        "wrist": rng.integers(0, 256, (1, 224, 224, 3), dtype=np.uint8),
+        "overhead": rng.integers(0, 256, (1, 224, 224, 3), dtype=np.uint8),
+        "context": np.full((1, 16), 0.1, np.float32),
+    }
+    obs["context"][:, policy_server.CONTEXT_ROLL] = 3.1
+    f5 = members[0].predict_chunk(obs)
+    assert wraps == []  # F5 carries no context marker
+    f9n = members[1].predict_chunk(obs)
+    assert len(wraps) == 1  # F9n's marker wraps its own copy of the context
+    assert not np.allclose(f5, f9n, atol=1e-3)
+    served = policy_fn(obs["state"], obs["wrist"], obs["overhead"], obs["context"])
+    assert len(wraps) == 2  # one forward of each member, one wrap
+    np.testing.assert_allclose(served, (f5[:, 0] + f9n[:, 0]) / 2, atol=1e-5)
+    assert obs["context"][0, policy_server.CONTEXT_ROLL] == np.float32(3.1)
