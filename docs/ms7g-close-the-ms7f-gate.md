@@ -1,8 +1,8 @@
 # MS7g: close the MS7f gate
 
-Date: 2026-10-04. Status: draft. This draft uses the ledger up to its entry of 05:43 on 2026-10-04.
-The checked read and the official read did not finish by that time. Their numbers and verdicts are
-placeholders marked "TBD (controller fills)".
+Date: 2026-10-05. Status: final. This report uses the ledger through its entry of 05:59 on
+2026-10-05, deviation D22. MS7g closes as a near miss. The checked read of S misses the staged share
+bar by 5 correct stows. It passes the held-out bar and the rate bar. The official read did not run.
 
 The design of MS7g is the document that the owner reviewed and approved in chat on 2026-10-03. This
 report cites it as "design section N" and restates every rule that it uses. The MS7f report,
@@ -14,14 +14,16 @@ are under `~/data/maker-arm-ms7/g/tables/<track>/`. Each read has a TAG, its nam
 read are under `~/data/maker-arm-ms7/reads/<TAG>/`. Every MS7g TAG starts with `g_`.
 
 The names. The design names its decisions G1 to G6. The ledger names its rules G1 to G12 and its
-deviations D1 to D18. This report writes "decision G1" for the design and "rule G1" for the ledger.
+deviations D1 to D22. This report writes "decision G1" for the design and "rule G1" for the ledger.
 A deviation of MS7f is written "MS7f D19". Candidate 6 is the final MS7f candidate: the checkpoint
-F5 200k, the classifier v9e and the flags of MS7f report section 9.22. The MS7g retrains are F7,
-F7n, F8 and F8n, and a checkpoint is written as "F7 100k". S0 and S are the two stacks of loop
-switches that section 4 builds.
+F5 200k, the classifier v9e and the flags of MS7f report section 9.22. The warm MS7g retrains are
+F7, F7n, F8 and F8n. The runs from random init are F9n and its control F9. The low-rate finishes
+are A5 and A9. A checkpoint is written as "F7 100k". S0 and S are the two stacks of loop switches
+that section 4 builds. Se is S with the policy ensemble of D20.
 
-The times. All times are PDT. Each time is the stamp of the ledger entry that records the event.
-Times from 09:29 to 23:59 are on 2026-10-03. Times from 00:44 to 05:43 are on 2026-10-04. Three
+The times. All times are PDT. Each time is the stamp of the ledger entry that records the event. A
+time without a date from 09:29 to 23:59 is on 2026-10-03. A time without a date from 00:44 to 06:40
+is on 2026-10-04. Every later time carries its date, as "10-04 16:12" or "10-05 05:59". Three
 ledger entries stand out of time order: 11:50, 14:18 and 04:21. This report keeps each stamp as the
 ledger writes it.
 
@@ -50,7 +52,7 @@ policy nor the classifier saw in training.
 | staged bars, the gate | at least 0.85 (2550 of 3000, 5100 of 6000) | at least 200 | at least 0.80 |
 | stretch row, report-only | at least 0.92 | at least 300 | at least 0.85 |
 
-The result so far. The stack S is F5 200k with `--carry_guard --overhang_guard`, the classifier
+The final candidate. The stack S is F5 200k with `--carry_guard --overhang_guard`, the classifier
 v10e3 with `--cls_flip` and the final-only vote `g/tables/vote/vote_v10e3_flip_final.json`, served
 at bfdffb2 (22:39). Its screen read g_Sf_scr stows 2548 of 3000, 0.8493 [0.836, 0.862], at 372.5
 correct stows an hour. Its held-out row reads 594 of 744, 0.798. A report-only read of S on 20 fresh
@@ -59,8 +61,32 @@ held-out row of 1215 of 1545, 0.786. Both rows are under the staged bars, and th
 its bar. The ledger reads the pass chance of an official read at this level as a few percent
 (05:31).
 
-The checked read: TBD (controller fills). The official read: TBD (controller fills). The verdict of
-MS7g: TBD (controller fills).
+The checked read (section 8.1). g_S_chk reads S on seed 20307100, draws 0 to 19, from 05:54 to
+06:29. It stows 2545 of 3000, 0.8483 [0.835, 0.861], at 378.8 correct stows an hour. Its held-out
+row reads 629 of 785, 0.801 [0.772, 0.828].
+
+| staged bar | bar | g_S_chk | verdict |
+| --- | --- | --- | --- |
+| correct in a box of the category | at least 2550 of 3000 | 2545 | FAIL by 5 correct stows |
+| correct stows an hour | at least 200 | 378.8 | PASS |
+| held-out row | at least 0.80 (628 of 785) | 629 of 785, 0.801 | PASS |
+
+Against candidate 6's checked read f_F6R_chk (2522, held-out 620 of 785, 308.0 an hour), S reads 23
+more correct stows. It also reads 9 more held-out parts and 70.8 more correct stows an hour. Over 60
+heaps (the 40 screen heaps and the checked read), S stows 7600 of 9000, 0.8444.
+
+The official read (section 8.2). It did not run, because rule G9 starts it only on a checked pass.
+Seed 20307200 stays unburned.
+
+After the checked miss, the owner asked for a policy trained from random init with the context fix
+(D19). F9n peaked at 2554 on the screen seed at 800k and fell after it. Its paired control F9
+without the fix read 2430 at 800k, so the fix is worth 124 correct stows from scratch. A policy
+ensemble (D20, 2545) and a finish at a low learning rate (D21, 2544 and 2519) followed. No policy
+reached the adoption bar of 2578 (section 9).
+
+The verdict of MS7g (D22, 10-05 05:59, an owner decision). MS7g closes as a near miss. The final
+candidate is S, with the checked read g_S_chk. It is 5 correct stows short on the share bar, and it
+passes the held-out bar and the rate bar. The emptying capacity of the boxes stays as it is.
 
 What moved:
 
@@ -82,11 +108,22 @@ What did not move:
   under the warp of 1.5.
 - The nine-value fused vote raised the right class on the frame bank by 0.0133. In the loop it lost
   46 correct stows (g_Sv2_scr).
-- Every retrain read under F5 200k: F7, with the REOPEN mask, by 103 and 116, F7n by 130 and 95, F8
-  by 56 and F8n by 39. The context fix of D12 showed no effect beyond the noise.
+- Every warm retrain read under F5 200k: F7, with the REOPEN mask, by 103 and 116, F7n by 130 and
+  95, F8 by 56 and F8n by 39. On these warm starts the context fix of D12 showed no effect beyond
+  the noise.
+- No policy from random init reached its bar of 2578. F9n read 2473 to 2554 from 200k to 1.2M steps.
+  The ensemble of F5 200k and F9n 800k read 2545, and the low-rate finishes read 2544 and 2519.
 - Classifier v12 and its ensembles read under v10e3 on the frame bank, and they stay out.
 - The release track found no robot-side fix for the parts that bounce out of a full box (D16). The
-  passenger track found no passenger detector (D17).
+  passenger track found no passenger detector (D17). The carry squeeze against grip slips failed its
+  smoke gate (D18).
+
+What the run found:
+
+- From random init the context fix is worth 124 correct stows at 800k steps (F9n 2554 against F9
+  2430, about 4 pair SEs), 97 more correct stows an hour and 0.039 more on the held-out row.
+- Five reads of different policies and servings lie from 2544 to 2554 (section 9.5). S, Se, A9, A5
+  and F9n 800k read 2519 to 2554 on the screen seed. The share has a plateau at this level.
 
 Where the misses of S go (section 7). The two S reads put 298 and 316 parts in a wrong box. About
 148 parts a read end outside every box. About 50 cycles a read release a part over the right box and
@@ -114,9 +151,11 @@ The owner took these decisions on 2026-10-03, in chat (design section 2):
 | --- | --- | --- | --- |
 | 12:40 | D5 | `--carry_guard` joins S without the mechanism bars of rule G6. The version is 7a2562a, with the vote-window fix. g_cg2_scr still reads as the report row. If it reads under 2471 (R0's correct stows minus 30), S takes b8c35d6, which passed the non-inferiority bound. | The owner wants the visual effect beyond the score: no hovers over the tray. |
 | 20:36 | D12 | A small A/B test of the context findings of another session (section 6.3), at once. F7n is F7's recipe plus two input fixes. The owner accepts a restart of training from scratch. D12 replaces the single-retrain limit of D11. | The peer note of 20:33: the context of the policy enters unnormalized, and the camera roll flips its sign. |
+| 06:35 | D19 | A policy retrain from random init with the context fix, F9n, after the checked miss (section 9). | The owner chose it after a detailed review of the levers in chat. |
+| 10-05 05:59 | D22 | MS7g closes as a near miss. The final candidate is S with its checked read g_S_chk. The emptying capacity stays as it is (rule G2). | Every pre-registered lever was read, and none reached its bar (10-04 23:04). |
 
-At 05:33 the controller asked the owner about the box emptying rule (section 7.6). The ledger
-records no answer up to 05:43. The answer: TBD (controller fills).
+At 05:33 the controller asked the owner about the box emptying rule (section 7.6). The owner
+answered with D22 (10-05 05:59): no change. The emptying capacity stays as it is, under rule G2.
 
 ### 2.3 The rules of the ledger
 
@@ -135,7 +174,7 @@ The ledger wrote rules G1 to G12 at 09:50, before any MS7g number:
 | G9 | the checked read and the official read | 8 |
 | G10 | the fallback: wave 7, the REOPEN mask and retrain F7 | 6 |
 | G11 | the time box, 2026-10-06 23:59 | 1 |
-| G12 | the hosts and the code | 3.1, 11 |
+| G12 | the hosts and the code | 3.1, 12 |
 
 The MS7f ledger and its rules R1 to R15 stay valid where the MS7g ledger does not replace them.
 
@@ -161,6 +200,13 @@ The MS7f ledger and its rules R1 to R15 stay valid where the MS7g ledger does no
 | 04:26 | D16 | Pre-registered: a release fix for the bounce-outs behind its own switch, read as g_Sb_scr. Adopted with M_bounce at most 25 and at least 2518 correct stows. | M_bounce reads 50 and 51 under S against 31 under S0 and R0, the largest single loss after the wrong class. |
 | 04:27 | D17 | Pre-registered: a passenger detector from the measured jaw gap at the lift. Only a detector with a precision of at least 0.9 and a recall of at least 0.5 gets a switch and a read g_Sp_scr. | About 60 passengers a read ride with the held part into its box under the guard. |
 | 05:43 | D18 | Pre-registered: a carry squeeze against grip slips. Under `--carry_guard`, the loop tightens a closing gripper command to the measured gap minus `CARRY_SQUEEZE_M` (INITIAL). The squeeze lasts from the lift to the open over the served box. A smoke gate comes first. The read g_Sq_scr decides: the switch is adopted with at least a quarter fewer `lifted_lost` cycles than g_Sf_scr and at least 2518 correct stows. | About half of the bounce-outs are grip slips of flat and odd parts (D16 forensics). |
+| 06:35 | D19 | Owner decision, pre-registered before any number: F9n is ACT trained from random init on waves 1 to 7 (no mask) with the context fix from step 0, about 400k steps. Its screens use S's serving and classifier. The best screen replaces F5 200k in S at 2578 or more (g_Sf_scr + 30). A second checked read follows, and the official read only on a pass. | The checked read missed by 5. The warm starts did not show the context fix. |
+| 06:35 | D19a | Pre-registered: a paired control F9, F9n's recipe without the context fix, with the same random init and the same batch order. F9 400k gets one screen. D19's rule takes the best of F9n and F9. | The from-scratch run answers the owner's context question. |
+| 06:38 | D19b | Amended before any F9 number: both runs continue to 800k at the same constant learning rate. The decision screens are F9n 400k, 600k, 800k and F9 800k. F9n 200k reads report-only. | The project's runs from scratch went to 600k to 800k, and the time box allows it. |
+| 10-04 16:13 | D19c | Pre-registered before any number past 800k: both runs continue to 1.2M. The screens are F9n 1.0M and 1.2M. F9 1.2M also reads on one condition: F9 800k reads within 30 of F9n 800k. D19's rule stays. | The F9n curve still rose at 800k. |
+| 10-04 19:49 | D20 | Pre-registered before the F9n 1.2M number: the policy server serves the mean of two policies' action chunks, F5 200k and the best F9n of 600k to 1.2M. When no F9 screen reaches 2578, g_Se_scr reads. It replaces S's policy at 2578 or more. | F5 200k and F9n read near 2550 each with S's serving (2548 and 2554 at 800k). |
+| 10-04 20:49 | D21 | Pre-registered: two warm runs of 100k steps at a constant learning rate of 2e-6, A5 from F5 200k and A9 from F9n 800k. The better one replaces F5 200k in S at 2578 or more. | Every policy so far trained at a constant 1e-5, and F9n fell after 800k. |
+| 10-05 05:59 | D22 | Owner decision: MS7g closes as a near miss (section 2.2). | Every pre-registered lever was read. |
 
 ### 2.5 The protocol changes without a D number
 
@@ -176,6 +222,13 @@ The MS7f ledger and its rules R1 to R15 stay valid where the MS7g ledger does no
   has them, or at 2026-10-05 18:00 at the latest. That leaves a day for the official read and the
   report inside rule G11. The reason: a pass of the checked read starts the official read at once
   (rule G9). The 40-heap estimate of S gives that read a pass chance of a few percent.
+- 05:54: the lever list closed after D18, and the checked read of S started (section 8.1). The
+  06:02 entry states that D16 to D18 close the lever list.
+- 06:35: the MS7g branches became the GitHub stack #182 (section 12.1). Tag `ms7g-read-F9` = 273fabf
+  holds S's code and the roll transform, and it serves the reads of D19.
+- 10-04 17:07: F9 800k read more than 30 under F9n 800k, so F9 1.2M is not read (D19c). Its run
+  stopped to give F9n the GPU.
+- 10-04 20:14: tag `ms7g-read-Se` = 769c2eb serves the ensemble read of D20.
 
 ## 3. The protocol and the noise
 
@@ -201,7 +254,7 @@ more in a fresh TAG. A payload from the supervisor cache is not a read (MS7f R14
 
 `g/bin/sync_read.sh` wraps one read. It puts the read worktree `~/src/maker-arm-lab-7g-r<N>` at the
 SHA on Machine A and Machine B with `scripts/fleet.py sync`. Then it runs `read_g.sh`, writes the
-mechanism table with `g/bin/mech.py` and prints `SYNC_READ_DONE`. Section 11 gives the commands.
+mechanism table with `g/bin/mech.py` and prints `SYNC_READ_DONE`. Section 12 gives the commands.
 
 ### 3.2 The seeds
 
@@ -243,8 +296,12 @@ The MS7g reads show the same spread:
 - The in-loop taken class under the served rule is right on 0.9157 of the lifts of R0, 0.9309 of S0
   and 0.9237 of g_cg2_scr, a read-to-read spread of about 0.015 (21:12).
 - M_bounce spans 31 to 59 over 13 reads on the same draws (`rel/forensics.txt`).
+- The F9n curve reads 2473 to 2554 from 200k to 1.0M steps. Its spread lies within about 2.5 read
+  SEs (10-04 18:47).
+- Five reads of different policies and servings lie from 2544 to 2554. On the screen seed, S reads
+  2548, Se 2545, A9 2544 and F9n 800k 2554. S reads 2545 on the checked seed (10-04 22:29).
 
-So rules G6, D6, D11, D12, D15, D16, D17 and D18 use a step of 30 correct stows, one SE of a 20-heap
+So rules G6, D6, D11, D12 and D15 to D21 use a step of 30 correct stows, one SE of a 20-heap
 pair. The step is an adoption step or a non-inferiority bound.
 
 ## 4. The loop levers
@@ -390,8 +447,10 @@ about 67 agreed.
 The guard margin. Design section 5.2 asks this report to state whether the margin of 0.010 m holds.
 The census counts the guard steps over a box rim: 106 of 4127 on g_cg_scr, 75 of 4217 on g_cg2_scr,
 94 of 4744 on g_S0_scr and 54 of 6186 on g_Sf_scr. The release forensics found no release within 2
-cm of a wall and none near the margin (`rel/forensics.txt`). The ledger states no verdict on the
-margin. The verdict: TBD (controller fills).
+cm of a wall and none near the margin (`rel/forensics.txt`). The verdict (06:02): the margin of
+0.010 m (INITIAL) holds. On the guard reads, 75 to 106 of 4127 to 4217 guard steps lie over a rim.
+The release geometry does not separate the bounce-outs from the stows. The checked read g_S_chk puts
+95 of 5794 guard steps over a rim (`g_S_chk.mech.txt`).
 
 ### 4.3 `--clear_first`
 
@@ -842,7 +901,8 @@ The context verdict for the owner. F8n - F8 = +17. F7n - F7 = -27 at 100k and +2
 lie inside the SE of a pair, 30. The only consistent sign is `close_miss` in the unmasked pair, 471
 against 559. The masked pairs do not show it (850 against 841, 880 against 922). At 100k warm steps
 the fix moves no share that a read can measure. It stays a recommended input fix for the next
-training from scratch, where it costs nothing. MS7g does not adopt it.
+training from scratch, where it costs nothing. MS7g does not adopt it for F5 200k. Section 9.2 gives
+the answer from scratch: +124 correct stows.
 
 ## 7. The loss decomposition of S
 
@@ -939,8 +999,10 @@ The unboxed census (03:41, the left parts of g_Sf_scr and g_Sf2_scr). About 148 
 outside every box. 245 of 335 were never in a failed cycle. The places on the 40 heaps: the desk
 within 0.30 m and low 147, the tray 80, the desk farther 48, and raised on a rim 20. Of the 195 desk
 parts, only 33 are in `layout.in_reach`, and 25 of them are also in the overhead view. So a desk
-pickup is not a lever: the desk parts come from drops and knocks out of reach. The four places in
-the ledger do not add up to 335. The place of the rest: TBD (controller fills).
+pickup is not a lever: the desk parts come from drops and knocks out of reach. The ledger addition
+of 06:02 gives the rest. 40 of the 335 parts lie parked off the scene (x > 2 m). The four places and
+the 40 parked parts make up 335. The loop never perceives a parked part, and the grade counts it as
+unboxed.
 
 The bounce census (04:25, `bounce_census.txt`). M_bounce counts the `lifted_lost` cycles whose jaws
 opened over the right box and whose part ends unboxed. g_Sf_scr reads 50, g_Sf2_scr 51, g_S0_scr 31
@@ -1002,8 +1064,8 @@ Releases with the part still in the jaws, by the pile top over the rim at the op
 
 So a box holds a pile 2 to 4 cm over its rim for a long stretch of each heap. About 16 % of the
 releases onto such piles slide off, about 25 parts a read (05:33). A new calibration of the event to
-"pile at the rim" is a scene change under rule G2. The decision belongs to the owner, and the scene
-stays as it is until then (section 2.2).
+"pile at the rim" is a scene change under rule G2. The decision belongs to the owner. The owner kept
+the scene as it is (D22, section 2.2).
 
 ### 7.7 The grip slips: D18
 
@@ -1016,7 +1078,20 @@ grip problem, not a release problem.
 
 D18 (05:43) builds a carry squeeze (section 2.4). Its smoke gate: on the 6 traced smoke heaps of the
 release track, the slips fall to at most half of the 12, with no new failure mode. Then g_Sq_scr
-reads S plus the switch. The smoke gate, the read and the verdict: TBD (controller fills).
+reads S plus the switch.
+
+The D18 verdict (05:53): the carry squeeze failed its smoke gate, and g_Sq_scr did not run. The
+switch `--carry_squeeze` used `CARRY_SQUEEZE_M` 0.010. That is about 5 N a jaw, against the policy's
+usual 2 N. The smoke compared it with S on the 6 smoke heaps, over the first 12,000 steps:
+
+| row | the squeeze | S |
+| --- | --- | --- |
+| slips among the releases over the right box | 7 of 187 | 7 of 260 |
+| parts out of the jaws within 30 steps of the lift | 52 | 5 |
+| dropped cycles | 73 | 22 |
+
+A command that follows the measured gap keeps closing on a part held at an edge until the part
+squirts out. Nothing was pushed. The patch is in `g/tables/rel/carry_squeeze.patch`.
 
 ## 8. The checked read and the official read
 
@@ -1024,20 +1099,52 @@ reads S plus the switch. The smoke gate, the read and the verdict: TBD (controll
 
 Rule G9. The checked read of S runs on seed 20307100, draws 0 to 19, with 10 Machine A and 10 Machine B
 lanes. `g/bin/chk_official.sh` runs it and, on a pass, the official read. Every file that a switch
-names is on Machine B first.
+names is on Machine B first. The md5 checks of v10e3 and of the vote JSON on Machine B ran at 21:05 and 22:12.
 
 | item | value |
 | --- | --- |
-| TAG | TBD (controller fills) |
-| configuration | S at bfdffb2. The D18 switch joins it on an adoption: TBD (controller fills) |
-| start and end | TBD (controller fills) |
-| correct of 3000, share, Wilson 95 % interval | TBD (controller fills) |
-| cycles, steps | TBD (controller fills) |
-| correct stows an hour | TBD (controller fills) |
-| held-out row | TBD (controller fills) |
-| staged bars (2550, 200, 0.80) | TBD (controller fills) |
-| stretch row (2760, 300, 0.85) | TBD (controller fills) |
-| mechanism numbers | TBD (controller fills) |
+| TAG | g_S_chk |
+| configuration | S at bfdffb2: F5 200k, `--carry_guard --overhang_guard`, v10e3, `--cls_flip` and the final-only vote. D18 failed its smoke gate, so no other switch joins S. |
+| hosts | worktree 7g-r1, 10 lanes on `a_g1l` and 10 lanes on `b_g1`, PORT_BASE 26600, unit ms7g-chk |
+| start and end | 05:54 to 06:29 on 2026-10-04 |
+| correct of 3000, share, Wilson 95 % interval | 2545, 0.8483, [0.835, 0.861] |
+| cycles, steps | 3219, 725,567 |
+| correct stows an hour | 378.8 |
+| held-out row | 629 of 785, 0.801 [0.772, 0.828] |
+| staged bars (2550, 200, 0.80) | The share FAILS by 5 correct stows. The rate PASSES. The held-out row PASSES (the bar is 628 of 785). The supervisor token is GATE_FAIL. |
+| stretch row (2760, 300, 0.85) | Report-only. The share and the held-out row are under it. The rate is over it. |
+
+The mechanism numbers against g_Sf_scr, S on the screen seed (`g_S_chk.mech.txt`):
+
+| row | g_S_chk | g_Sf_scr |
+| --- | --- | --- |
+| M_tray_open | 111 | 104 |
+| M_late | 22 | 26 |
+| M_late_wb | 12 | 9 |
+| M_stall | 625 | 857 |
+| M_swept | 0.1976 | 0.1862 |
+| riders | 148 | 124 |
+| passengers | 83 | 61 |
+| `close_miss` cycles | 419 | 456 |
+| `wrong_box` cycles | 170 | 174 |
+| wrong-box parts | 318 | 298 |
+| `wrong_box` cycles, agreed (cycles / class wrong) | 57 / 50 | 75 / 62 |
+| `wrong_box` cycles, split and voted (cycles / class wrong) | 107 / 92 | 93 / 80 |
+| handoffs, placed, stowed | 207, 193, 147 | 243, 223, 175 |
+| guard steps, over a rim | 5794, 95 | 6186, 54 |
+| `stall_open` cycles | 44 | 74 |
+| release over the right box | 2673 | 2641 |
+| release over a wrong box | 220 | 220 |
+| release over the desk | 35 | 51 |
+| release over a rim | 6 | 16 |
+| lifted, never opened | 14 | 25 |
+
+Against candidate 6's checked read f_F6R_chk (2522, held-out 620 of 785, 308.0 an hour), S reads 23
+more correct stows. It also reads 9 more held-out parts and 70.8 more correct stows an hour. Over 60
+heaps (the screen draws 0 to 39 and the checked read), S stows 7600 of 9000, 0.8444. Design section
+4.2 excludes a second read of the checked seed with the same S. The ledger named three next steps
+for the owner: close, a new calibration of the emptying event (the question of 05:33), or a retrain
+from scratch with the context fix. The owner chose the retrain (D19, section 9).
 
 ### 8.2 The official read
 
@@ -1046,18 +1153,10 @@ read is TAG `g_official`, seed 20307200, draws 0 to 39, one shot, 20 Machine A a
 chain that finds `reads/g_official` already started does not start another. If the official read
 fails, MS7g fails.
 
-| item | value |
-| --- | --- |
-| ran | TBD (controller fills) |
-| correct of 6000, share, Wilson 95 % interval | TBD (controller fills) |
-| cycles, steps | TBD (controller fills) |
-| correct stows an hour | TBD (controller fills) |
-| held-out row | TBD (controller fills) |
-| staged bars (5100, 200, 0.80) | TBD (controller fills) |
-| stretch row (5520, 300, 0.85) | TBD (controller fills) |
-
-The verdict of MS7g: TBD (controller fills). The two-tray video of the final candidate from the
-owner's camera (design section 11): TBD (controller fills).
+The official read did not run. The checked read g_S_chk missed the share bar, and rule G9 starts the
+official read only on a pass. Seed 20307200 stays unburned (D22). The chains of D19 to D21 held a
+second checked read each: g_S9_chk, g_Se_chk and g_SA_chk. None of them ran, because no screen
+reached its bar of 2578. Section 9.6 gives the verdict of MS7g.
 
 ### 8.3 All reads in time order
 
@@ -1085,15 +1184,187 @@ rates are the ledger's.
 | 03:06 | g_Sfc_scr | S + `--clear_first` | 2517 | 0.8390 | [0.825, 0.852] | 364.9 | 573 of 744, 0.770 | not adopted (D15) |
 | 03:40 | g_Sf2_scr | S, draws 20 to 39 | 2507 | 0.8357 | [0.822, 0.848] | 362.6 | 621 of 801, 0.775 | report-only |
 | 04:21 | g_S02_scr | S0, draws 20 to 39 | 2470 | 0.8233 | [0.809, 0.837] | 363.6 | 626 of 801, 0.782 | report-only |
-| TBD | g_Sq_scr | S + the carry squeeze (D18) | TBD | TBD | TBD | TBD | TBD | TBD (controller fills) |
-| TBD | checked read | TBD | TBD | TBD | TBD | TBD | TBD | TBD (controller fills) |
-| TBD | g_official, 6000 parts | TBD | TBD | TBD | TBD | TBD | TBD | TBD (controller fills) |
+| 06:29 | g_S_chk | S, the checked read, seed 20307100 | 2545 | 0.8483 | [0.835, 0.861] | 378.8 | 629 of 785, 0.801 | FAILS the share bar by 5, passes the held-out and rate bars |
+| 10-04 09:39 | g_F9n_200000_scr | F9n 200k + S's serving and classifier | 2473 | 0.8243 | [0.810, 0.838] | 273.8 | 588 of 744, 0.790 | report-only (D19b) |
+| 10-04 11:59 | g_F9n_400000_scr | F9n 400k + S's serving and classifier | 2474 | 0.8247 | [0.811, 0.838] | 296.9 | 589 of 744, 0.792 | under 2578 (D19) |
+| 10-04 14:05 | g_F9n_600000_scr | F9n 600k + S's serving and classifier | 2513 | 0.8377 | [0.824, 0.850] | 325.8 | 578 of 744, 0.777 | under 2578 (D19) |
+| 10-04 16:12 | g_F9n_800000_scr | F9n 800k + S's serving and classifier | 2554 | 0.8513 | [0.838, 0.864] | 357.3 | 609 of 744, 0.8185 | under 2578 (D19) |
+| 10-04 17:07 | g_F9_800000_scr | F9 800k, the control without the context fix | 2430 | 0.8100 | [0.796, 0.824] | 260.1 | 580 of 744, 0.780 | the control of D19a, under 2578 |
+| 10-04 18:47 | g_F9n_1000000_scr | F9n 1.0M + S's serving and classifier | 2490 | 0.8300 | [0.816, 0.843] | 363.7 | 579 of 744, 0.778 | under 2578 (D19c) |
+| 10-04 20:15 | g_F9n_1200000_scr | F9n 1.2M + S's serving and classifier | 2444 | 0.8147 | [0.800, 0.828] | 371.6 | 573 of 744, 0.770 | under 2578 (D19c) |
+| 10-04 20:48 | g_Se_scr | S with the chunk mean of F5 200k and F9n 800k | 2545 | 0.8483 | [0.835, 0.861] | 377.3 | 600 of 744, 0.8065 | not adopted (D20) |
+| 10-04 22:29 | g_A9_100000_scr | A9 100k + S's serving and classifier | 2544 | 0.8480 | [0.835, 0.860] | 363.9 | 608 of 744, 0.817 | under 2578 (D21) |
+| 10-04 23:04 | g_A5_100000_scr | A5 100k + S's serving and classifier | 2519 | 0.8397 | [0.826, 0.852] | 354.9 | 591 of 744, 0.794 | not adopted (D21) |
+| | g_official, 6000 parts | did not run | | | | | | seed 20307200 unburned (rule G9, D22) |
 
-Every screen above misses the staged share bar or the held-out bar, and every screen passes the
-staged rate bar. A screen has no gate verdict of its own. The verdict column gives the adoption
-rule.
+g_Sq_scr (D18) did not run, because the carry squeeze failed its smoke gate (section 7.7). A screen
+has no gate verdict of its own, and the verdict column gives the adoption rule. Every screen but one
+misses the staged share bar or the held-out bar. g_F9n_800000_scr reads 2554 and 0.8185, over both
+staged bars, but its adoption bar was 2578. Every read passes the staged rate bar.
 
-## 9. Errata to the MS7f report
+## 9. After the checked read: the policy levers
+
+### 9.1 The policy from random init: D19 to D19c
+
+The owner decided D19 at 06:35, after the checked miss and a detailed review of the levers in chat.
+The rule went into the ledger before any number. F9n is ACT trained from random init with the
+context fix. Its screens use S's serving and classifier. The best screen replaces F5 200k in S at
+2578 or more, g_Sf_scr + 30. A second checked read on seed 20307100 follows, and the official read
+only on a pass. D19a adds a paired control, F9, without the fix. It has the same random init and the
+same batch order, so the run also answers the owner's context question.
+
+The recipe (06:38, `g/tables/ctx/retrain_F9.sh`) is the project's recipe for ACT from scratch. The
+MS6 runs m/train (400k), l/train_g (600k) and n/train_t1/t4 (800k) used it.
+
+| item | value |
+| --- | --- |
+| policy | `--policy.type=act`, resnet18 backbone from ImageNet, chunk 100 |
+| optimizer | constant learning rate 1e-5, with no scheduler |
+| batch, seed | 8, 1000 |
+| corpus | `g/w1234567/dataset`, waves 1 to 7, no mask |
+| F9n | `train_masked.py --context_norm=roll_wrapped_norm` from step 0: the roll is unwrapped, and `observation.environment_state` is normalized MEAN_STD. The context projection starts fresh, with no fold. |
+| F9, the control (D19a) | the same recipe without the fix, with the same init and batch order |
+| code, units | 273fabf, units ms7g-train-f9n and ms7g-train-f9 from 06:37, 27.1 steps a second each |
+
+D19b (06:38) took both runs to 800k before any F9 number, because the project's runs from scratch
+went to 600k to 800k. Each run resumed at 400k with `lerobot-train --resume`. The resume keeps the
+run's own training file, the constant rate of 1e-5 and the optimizer and RNG state. F9n adds
+`--context_norm` again. A scratch run from 20 to 40 steps tested the resume first (06:40). D19c
+(10-04 16:13) took both runs to 1.2M, because the F9n curve still rose at 800k. Unit ms7g-f9-chain
+read each checkpoint as it landed, from worktree 7g-r2 at 273fabf (PORT_BASE 28000). Every F9n
+payload carries `+ctxnorm` in its policy id.
+
+The screens on seed 20307000, draws 0 to 19 (the ledger and the mechanism tables):
+
+| read | correct of 3000 | share | Wilson 95 % | correct stows an hour | held-out row | `close_miss` | M_tray_open | wrong-box parts | passengers |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| F9n 200k | 2473 | 0.8243 | [0.810, 0.838] | 273.8 | 588 of 744, 0.790 | 583 | 187 | 307 | 56 |
+| F9n 400k | 2474 | 0.8247 | [0.811, 0.838] | 296.9 | 589 of 744, 0.792 | 451 | 127 | 302 | 71 |
+| F9n 600k | 2513 | 0.8377 | [0.824, 0.850] | 325.8 | 578 of 744, 0.777 | 453 | 105 | 294 | 53 |
+| F9n 800k | 2554 | 0.8513 | [0.838, 0.864] | 357.3 | 609 of 744, 0.8185 | 441 | 108 | 305 | 91 |
+| F9n 1.0M | 2490 | 0.8300 | [0.816, 0.843] | 363.7 | 579 of 744, 0.778 | 494 | 74 | 338 | 76 |
+| F9n 1.2M | 2444 | 0.8147 | [0.800, 0.828] | 371.6 | 573 of 744, 0.770 | 418 | 92 | 362 | 101 |
+| F9 800k, no fix | 2430 | 0.8100 | [0.796, 0.824] | 260.1 | 580 of 744, 0.780 | 526 | 186 | 373 | 108 |
+| S, g_Sf_scr | 2548 | 0.8493 | [0.836, 0.862] | 372.5 | 594 of 744, 0.798 | 456 | 104 | 298 | 61 |
+
+The reading of the ledger. From random init at 200k steps, F9n already reads within 75 of S. That is
+the level of the warm retrains (F8 2476, F8n 2493). The curve rises to 2554 at 800k and falls after
+it, to 2490 and 2444. At 800k it has 146 `wrong_box` cycles against S's 174, and M_late reads 17.
+Both F9n 400k and F9n 1.2M read M_stall 0. The D19 and D19c verdict (10-04 20:15): no F9 screen
+reaches 2578, so F5 200k stays in S.
+
+### 9.2 The context verdict from scratch: D19a
+
+F9 800k trained on the same corpus with the same init and batch order as F9n 800k, without the fix.
+Its screen ended at 10-04 17:07:
+
+| row | F9n 800k, with the fix | F9 800k, no fix |
+| --- | --- | --- |
+| correct of 3000 | 2554 | 2430 |
+| correct stows an hour | 357.3 | 260.1 |
+| held-out row | 609 of 744, 0.8185 | 580 of 744, 0.780 |
+| steps | 772,008 | 1,008,998 |
+| `close_miss` cycles | 441 | 526 |
+| M_tray_open | 108 | 186 |
+| riders | 159 | 190 |
+| passengers | 91 | 108 |
+| wrong-box parts | 305 | 373 |
+
+The CONTEXT VERDICT for the owner (D12, D19a). From scratch the fix is worth 124 correct stows at
+800k, about 4 pair SEs. It also gives 97 more correct stows an hour and 0.039 more on the held-out
+row. The warm starts F7n and F8n did not show it (section 6.5). F9 1.2M is not read, because the gap
+is over 30. Its run stopped to give F9n the GPU.
+
+### 9.3 The policy ensemble: D20
+
+D20 (10-04 19:49) went into the ledger before the F9n 1.2M number. The policy server runs two
+checkpoints on each request. Each member keeps its own pre- and postprocessor, so F9n applies its
+roll transform by its marker. The server serves the elementwise mean of the two unnormalized action
+chunks. The members are F5 200k and the F9n checkpoint with the most correct stows of its 600k to
+1.2M screens. When no F9 screen reaches 2578, g_Se_scr reads S with the ensemble on the screen seed.
+It replaces S's policy at 2578 or more.
+
+The build (10-04 20:14). `feat/ms7g-policy-ensemble` 769c2eb holds two commits on 273fabf:
+
+- 5e220d7 `policy_server --ensemble_with PATH`: each member keeps its own pre- and postprocessor,
+  and the served chunk is the mean of the unnormalized chunks.
+- 769c2eb `run_gate_eval` forwards the flag, and the cache key reads `inference.ensemble_with`.
+
+lerobot_stack 167 tests and the repo's 1679 tests pass. With the flag off, the server reproduces the
+payload blocks of g_Sf_scr. A K = 50 smoke of F5 200k with F9n 800k ends EVAL_OK at 39 of 50 on one
+heap. Without the ensemble, the smoke reads 44 of 50. F9n 800k and 1.2M were copied to Machine B with an
+md5 check. Tag `ms7g-read-Se` marks the read SHA. Unit ms7g-d20-chain (`g/bin/d20_chain.sh`) applied
+D19, D19c and D20 as written.
+
+The read g_Se_scr ran from 10-04 20:15 to 20:48 at 769c2eb (worktree 7g-r3, PORT_BASE 29100). Its
+member is F9n 800k. It stows 2545 of 3000, 0.8483 [0.835, 0.861], in 3119 cycles and 728,585 steps,
+at 377.3 an hour. Its held-out row reads 600 of 744, 0.8065. It has 364 `close_miss` cycles against
+S's 456, 308 wrong-box parts and 78 passengers. The D20 verdict: under 2578, not adopted. The branch
+is draft PR #183 in the stack, off by default.
+
+### 9.4 The low-rate finish: D21
+
+D21 (10-04 20:49) went into the ledger before any number. Every policy so far trained at a constant
+learning rate of 1e-5 with no scheduler, and the F9n screens fell after 800k (2554, 2490, 2444). D21
+trains two warm runs side by side on Machine A GPU (`g/tables/ctx/retrain_A.sh`, code 273fabf):
+
+| item | A5 | A9 |
+| --- | --- | --- |
+| start | F5 200k, no context fix | F9n 800k, the context fix kept with the same corpus stats |
+| steps, learning rate | 100k at a constant 2e-6 (backbone 2e-6) | the same |
+| corpus | `g/w1234567/dataset`, no mask | the same |
+| batch, seed, batch order | 8, 1000, paired | the same |
+| first logged loss | 0.1533 | 0.1464, against F9n's last 0.1498 |
+
+Every logged step reads a learning rate of 2.0e-06. The first logged losses come from
+`ctx/a9_loss_check.txt`. Each run made 27.1 steps a second. Unit ms7g-d21-chain read A9 and then A5
+from worktree 7g-r2 at 273fabf (PORT_BASE 29700 and 29800). The better run replaces F5 200k in S at
+2578 or more.
+
+| read | correct of 3000 | share | Wilson 95 % | cycles | steps | correct stows an hour | held-out row | `close_miss` | wrong-box parts |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| g_A9_100000_scr | 2544 | 0.8480 | [0.835, 0.860] | 3200 | 755,024 | 363.9 | 608 of 744, 0.817 | 444 | 303 |
+| g_A5_100000_scr | 2519 | 0.8397 | [0.826, 0.852] | 3264 | 766,613 | 354.9 | 591 of 744, 0.794 | 533 | 334 |
+
+The D21 verdict (10-04 23:04): the best, A9, reads 2544, under 2578. Not adopted.
+
+### 9.5 The plateau on the screen seed
+
+After D21 every pre-registered lever is spent (10-04 23:04). The policies and servings of the last
+day read close together:
+
+| read | policy and serving | correct of 3000 |
+| --- | --- | --- |
+| g_F9n_800000_scr | F9n 800k, from random init with the context fix | 2554 |
+| g_Sf_scr | S, F5 200k | 2548 |
+| g_Se_scr | the chunk mean of F5 200k and F9n 800k | 2545 |
+| g_A9_100000_scr | F9n 800k + 100k steps at 2e-6 | 2544 |
+| g_A5_100000_scr | F5 200k + 100k steps at 2e-6 | 2519 |
+| g_S_chk | S on the checked seed 20307100 | 2545 |
+
+Five reads of different policies and servings lie from 2544 to 2554 (10-04 22:29). With A5, the
+range on the screen seed is 2519 to 2554. The ledger names one quantified lever left: the emptying
+capacity, a scene change under rule G2 and the owner's call.
+
+### 9.6 The close: D22
+
+The owner decided D22 at 05:59 on 2026-10-05: MS7g closes as a near miss.
+
+| item | value |
+| --- | --- |
+| the final candidate | S: F5 200k, `--carry_guard --overhang_guard`, v10e3, `--cls_flip` and the final-only vote, at bfdffb2 |
+| the checked read g_S_chk | 2545 of 3000, 0.8483. The bar is 2550, so it misses by 5. |
+| held-out row | 629 of 785, 0.801. It passes. |
+| correct stows an hour | 378.8. It passes. |
+| the official read | did not run. Seed 20307200 stays unburned. |
+| against MS7f's final, candidate 6 (f_F6R_chk) | +23 correct stows, +9 held-out parts, +70.8 correct stows an hour |
+| the emptying capacity | stays as it is (rule G2) |
+
+The time box of rule G11 ends on 2026-10-06 23:59, and MS7g closes before it. The ledger left three
+tasks at the close: the two-tray video of S, this report and the ensemble branch in the stack.
+Section 12.1 gives the stack, and section 13 gives the video.
+
+## 10. Errata to the MS7f report
 
 Design section 3.8 carries three errata. They come from a second look at the payloads of f_F6R_chk
 and at the debug traces of the video diagnosis.
@@ -1123,56 +1394,84 @@ The MS7g ledger supports two additions:
    roll in it flips its sign between episodes (section 6.3). The served action of F5 200k changes by
    up to 0.0168 with the sign of the roll.
 
-## 10. Open items
+## 11. Open items
 
-1. The context normalization. Every policy so far receives an unnormalized context with a camera
-   roll that flips its sign. At 100k warm steps the fix moves no share that a read can measure
-   (section 6.5). The next training from scratch gets the fix at no cost: `feat/ms7g-context-norm`
-   for training and the marker gate of 84ecb70 for serving.
+1. The context fix for every future run from scratch. F5 200k and every warm retrain receive an
+   unnormalized context with a camera roll that flips its sign. From scratch the fix is worth 124
+   correct stows at 800k (F9n 2554 against F9 2430, section 9.2). The warm starts did not show it
+   (section 6.5). Every future training from random init takes the fix:
+   `train_masked.py --context_norm=roll_wrapped_norm` on `feat/ms7g-context-norm` for training, and
+   the marker gate of `policy_server.py` for serving.
 2. The emptying capacity. `BOX_VOLUME_PER_PART_VOLUME` = 2.0 is INITIAL, and the pile passes the rim
    at 0.3 to 0.4 of the capacity in the refill scene (section 7.6). About 25 parts a read slide off
-   an overfull pile. A change is a scene change under rule G2 and waits for the owner's answer to
-   the question of 05:33. The answer: TBD (controller fills).
-3. The grip slips. About half of the bounce-outs are slips of flat and odd parts in the carry
-   (section 7.7). The carry squeeze of D18: TBD (controller fills).
-4. The passengers. No detector from the jaw gap reaches the D17 bar. 61 of 80 passenger lifts leave
+   an overfull pile. The owner kept the scene (D22), so the capacity stays as it is. It is the one
+   quantified lever left (10-04 23:04). A change is a scene change under rule G2.
+3. The passengers. No detector from the jaw gap reaches the D17 bar. 61 of 80 passenger lifts leave
    the jaws on one part. The wrist head's `rider_read` is the better signal at 0.795 / 0.388
    (section 7.4). Under the guard, the passengers go into the box of the held part instead of back
-   to the tray.
-5. The held-out row. S reads 0.786 on its 40 screen heaps, under the bar of 0.80. The weakest
+   to the tray. S reads 61 passengers on the screen seed and 83 on the checked read.
+4. The grip slips. About half of the bounce-outs are slips of flat and odd parts in the carry
+   (section 7.7). The carry squeeze of D18 made the drops worse: 52 parts out of the jaws within 30
+   steps of the lift, against 5. A grip fix needs another mechanism than a tighter gap command.
+5. The plateau on the screen seed. S, Se, A9, A5 and F9n 800k read 2519 to 2554 on the screen seed
+   (section 9.5). The F9n curve peaks at 800k and falls after it at a constant rate of 1e-5. A
+   finish at 2e-6 did not lift it. A lever that reaches the staged bars has to move the share
+   beyond this band.
+6. The held-out row. S reads 0.786 on its 40 screen heaps and 0.801 on the checked read. The weakest
    families are ldraw 0.774, tile 0.776, slope 0.797 and plate 0.808 (section 7.2). The classifier
    v12 aimed at the held-out row with 39 more classifier-only kinds and read worse on the bank and
    on C1 (section 5.7).
-6. The wrong class on agreed views. 57 to 75 `wrong_box` cycles a read come from an overhead read
+7. The wrong class on agreed views. 57 to 75 `wrong_box` cycles a read come from an overhead read
    and a wrist read that agree on the wrong class (section 7.3). No vote rule reaches them.
-7. The vote and the loop. A rule can raise the right class on the bank and still lose correct stows
+8. The vote and the loop. A rule can raise the right class on the bank and still lose correct stows
    in the loop. g_Sv2_scr lost them because its bias moves the box at selection (section 5.4). A
    vote rule needs its in-loop read before it serves.
-8. The corpus. The REOPEN mask lost grasps (`close_miss` 841 and 922 against 498), and the unmasked
+9. The corpus. The REOPEN mask lost grasps (`close_miss` 841 and 922 against 498), and the warm
    retrain on waves 1 to 7 did not gain (section 6.4). The DAgger lever stays flat, as in MS7f.
 
-## 11. Reproduction
+## 12. Reproduction
 
-### 11.1 The branches
+### 12.1 The branches, the stack and the tags
 
-All MS7g branches start from main 56c42b6 or from 5beb717, which adds only documents. The interface
-file of the campaign orders the stack: census, carry-guard, selector, vote-weights, extra-kinds,
-reopen-mask, and this report on top. The stack and its PR numbers: TBD (controller fills).
+The MS7g branches form the GitHub stack #184 on main 5beb717, as draft PRs. The stack #182 of 06:35
+held #174 to #181. On 2026-10-05 the ensemble PR #183 went in between #180 and #181, and #184
+replaced #182. Each stack commit is patch-identical to its original commit (06:35). At 273fabf,
+1678 repo tests and 162 lerobot_stack tests pass. The reads ran at the original commits, and the
+tags `ms7g-read-*` keep those commits.
 
-| branch | tip | commits over main |
+| PR | branch | stack tip | stack commits | original commits |
+| --- | --- | --- | --- | --- |
+| #174 | `feat/ms7g-census` | 9611585 | 9611585 the L0 census fields and the air-stall detector | ab1deeb |
+| #175 | `feat/ms7g-carry-guard` | 127b5aa | 68ac0b4 the rig's perceived carry entry, b1c0e27 `--carry_guard` with the stalls and the handoff, 127b5aa the vote-window fix | 3064851, b8c35d6, 7a2562a |
+| #176 | `feat/ms7g-selector` | 190af5c | a7208e6 `--clear_first`, f6751c6 `--overhang_guard`, 6432384 the leaned wall's inner face, 190af5c a test that the switches combine | 5cbe184, 1adfe2c, f654d4f, fc2cccf. Before the 13:20 restack the tip was 81c1341. |
+| #177 | `feat/ms7g-vote-weights` | 325ccda | 952cd41 `--bank_views`. 40e503a `--vote_weights`. ed67b2e `vote_bank.py`. a2f995a the D7 forms. 801fbfd a refusal of a form that the loop does not serve. 2263021 a test of the pending fused vote. 888187b a test that the switches combine. 8ea2459 ensembles and the mirror on the bank. 289ea19 `--cls_flip`. f7a5005 the final-only vote. 325ccda `vote_bank.py --stage final`. | f5a1794, 9a75edb, c1467eb, 22ce29e, 0520e01, 2d8bf2a, 69e7126, 3717704, ecb14fd, 897cd22, bfdffb2 |
+| #178 | `feat/ms7g-extra-kinds` | de964dc | de964dc the 39 classifier-only kinds of v12 | 8802ece |
+| #179 | `feat/ms7g-reopen-mask` | 8c8d2df | 9428524 the REOPEN mask, 8c8d2df `train_masked.py --frame_mask` | 800a3a4, 8d5293d |
+| #180 | `feat/ms7g-context-norm` | 273fabf | ff8082d the roll transform of `policy_server.py`, 273fabf `train_masked.py --context_norm --context_proj` | e0a16d9, ba61811 |
+| #183 | `feat/ms7g-policy-ensemble` | 769c2eb | 5e220d7 `policy_server.py --ensemble_with`, 769c2eb `run_gate_eval.py --ensemble_with` | the same, built on 273fabf |
+| #181 | `docs/ms7g-report` | this report | this report | |
+
+`feat/ms7g-context-norm-serve` 84ecb70 is 69e7126 plus e0a16d9, the serving side of the context fix
+for the F7n and F8n reads. It is not in the stack. 81c1341 is on no pushed branch after the restack.
+21c77d6, the bank's recording SHA, is the vote branch before its rebase.
+
+The read tags:
+
+| tag | SHA | reads |
 | --- | --- | --- |
-| `feat/ms7g-census` | ab1deeb | ab1deeb the L0 census fields and the air-stall detector |
-| `feat/ms7g-carry-guard` | 7a2562a | 3064851 the rig's perceived carry entry, b8c35d6 `--carry_guard` with the stalls and the handoff, 7a2562a the vote-window fix |
-| `feat/ms7g-selector` | fc2cccf, 81c1341 before the 13:20 restack | 5cbe184 `--clear_first`, 1adfe2c `--overhang_guard`, f654d4f the leaned wall's inner face, fc2cccf a test that the switches combine |
-| `feat/ms7g-vote-weights` | bfdffb2 | f5a1794 `--bank_views`. 9a75edb `--vote_weights`. c1467eb `vote_bank.py`. 22ce29e the D7 forms. 0520e01 a refusal of a form that the loop does not serve. 2d8bf2a a test of the pending fused vote. 69e7126 a test that the switches combine. 3717704 ensembles and the mirror on the bank. ecb14fd `--cls_flip`. 897cd22 the final-only vote. bfdffb2 `vote_bank.py --stage final`. |
-| `feat/ms7g-extra-kinds` | 8802ece | the 39 classifier-only kinds of v12 |
-| `feat/ms7g-reopen-mask` | 8d5293d | 800a3a4 the REOPEN mask, 8d5293d `train_masked.py --frame_mask` |
-| `feat/ms7g-context-norm` | ba61811, on 8d5293d | e0a16d9 the roll transform of `policy_server`, ba61811 `train_masked.py --context_norm --context_proj` |
-| `feat/ms7g-context-norm-serve` | 84ecb70, on 69e7126 | e0a16d9 as 84ecb70, the serving side of the context fix |
-| `docs/ms7g-report` | this report, on 5beb717 | this report |
+| `ms7g-read-R0` | ab1deeb | g_R0_scr |
+| `ms7g-read-cg` | b8c35d6 | g_cg_scr |
+| `ms7g-read-cf` | 81c1341 | g_cf_scr |
+| `ms7g-read-cg2` | 7a2562a | g_cg2_scr |
+| `ms7g-read-S0` | fc2cccf | g_S0_scr, g_S0w10_scr, g_S02_scr |
+| `ms7g-read-Sv` | 69e7126 | g_Sv_scr, g_Sv2_scr, g_F7_100000_scr, g_F7_050000_scr, g_F8_100000_scr |
+| `ms7g-read-Sc` | ecb14fd | g_Sc0_scr |
+| `ms7g-read-Sf` | bfdffb2 | g_Sf_scr, g_Sfc_scr, g_Sf2_scr, g_S_chk |
+| `ms7g-read-F7n` | 84ecb70 | g_F7n_100000_scr, g_F7n_050000_scr, g_F8n_100000_scr |
+| `ms7g-read-F9` | 273fabf | the six F9n screens, g_F9_800000_scr, g_A9_100000_scr, g_A5_100000_scr |
+| `ms7g-read-Se` | 769c2eb | g_Se_scr |
 
-81c1341 is on no pushed branch after the restack. 21c77d6, the bank's recording SHA, is the vote
-branch before its rebase. The test counts in the ledger:
+The test counts in the ledger:
 
 | commit | repo tests | lerobot_stack tests |
 | --- | --- | --- |
@@ -1185,8 +1484,10 @@ branch before its rebase. The test counts in the ledger:
 | bfdffb2, the final-only vote | 1665 | |
 | 8d5293d, reopen mask | 1609 | 151 |
 | 8802ece, extra kinds | 1600 | |
+| 273fabf, the context fix in the stack | 1678 | 162 |
+| 769c2eb, the policy ensemble | 1679 | 167 |
 
-### 11.2 The reads
+### 12.2 The reads
 
 Every read uses `g/bin/read_g.sh` with the checkpoint F5 200k and the classifier v9e unless the
 table says otherwise. "S0 switches" is `--carry_guard --overhang_guard`. The vote JSONs are under
@@ -1213,11 +1514,23 @@ table says otherwise. "S0 switches" is `--carry_guard --overhang_guard`. The vot
 | g_Sfc_scr | bfdffb2 | F5 200k | v10e3 | g_Sf_scr's ADD + `--clear_first` | 0 to 19 | 3244 | 744,919 |
 | g_Sf2_scr | bfdffb2 | F5 200k | v10e3 | g_Sf_scr's ADD | 20 to 39 | 3230 | 746,663 |
 | g_S02_scr | fc2cccf | F5 200k | v9e | S0 switches | 20 to 39 | 3166 | 733,725 |
+| g_S_chk | bfdffb2 | F5 200k | v10e3 | g_Sf_scr's ADD | 0 to 19, seed 20307100 | 3219 | 725,567 |
+| g_F9n_200000_scr | 273fabf | `g/train_F9n/checkpoints/200000` | v10e3 | g_Sf_scr's ADD | 0 to 19 | 3595 | 975,343 |
+| g_F9n_400000_scr | 273fabf | `g/train_F9n/checkpoints/400000` | v10e3 | g_Sf_scr's ADD | 0 to 19 | 3391 | 899,921 |
+| g_F9n_600000_scr | 273fabf | `g/train_F9n/checkpoints/600000` | v10e3 | g_Sf_scr's ADD | 0 to 19 | 3292 | 833,000 |
+| g_F9n_800000_scr | 273fabf | `g/train_F9n/checkpoints/800000` | v10e3 | g_Sf_scr's ADD | 0 to 19 | 3166 | 772,008 |
+| g_F9_800000_scr | 273fabf | `g/train_F9/checkpoints/800000` | v10e3 | g_Sf_scr's ADD | 0 to 19 | 3323 | 1,008,998 |
+| g_F9n_1000000_scr | 273fabf | `g/train_F9n/checkpoints/1000000` | v10e3 | g_Sf_scr's ADD | 0 to 19 | 3195 | 739,374 |
+| g_F9n_1200000_scr | 273fabf | `g/train_F9n/checkpoints/1200000` | v10e3 | g_Sf_scr's ADD | 0 to 19 | 3140 | 710,242 |
+| g_Se_scr | 769c2eb | F5 200k | v10e3 | g_Sf_scr's ADD + `--ensemble_with g/train_F9n/checkpoints/800000/pretrained_model` | 0 to 19 | 3119 | 728,585 |
+| g_A9_100000_scr | 273fabf | `g/train_A9/checkpoints/100000` | v10e3 | g_Sf_scr's ADD | 0 to 19 | 3200 | 755,024 |
+| g_A5_100000_scr | 273fabf | `g/train_A5/checkpoints/100000` | v10e3 | g_Sf_scr's ADD | 0 to 19 | 3264 | 766,613 |
 
-Each checkpoint path ends in `/pretrained_model`. All screens use seed 20307000. Each read's
+Each checkpoint path ends in `/pretrained_model`. All screens use seed 20307000, and g_S_chk uses
+seed 20307100. Each read's
 `PORT_BASE` and worktree are in its ledger entry or in `reads/<TAG>.log`.
 
-### 11.3 The commands
+### 12.3 The commands
 
 One screen read of S, with the read worktree 7g-r1, as the ledger ran g_Sf_scr:
 
@@ -1250,8 +1563,46 @@ N=<n> SHA=<40-hex SHA> CLS=<classifier .pt> ADD='<switches>' TAG=<checked TAG> \
   bash $HOME/data/maker-arm-ms7/g/bin/chk_official.sh
 ```
 
-The values that the controller used: TBD (controller fills).
+The controller ran g_S_chk as the user unit ms7g-chk with these values:
+
+```bash
+M7=$HOME/data/maker-arm-ms7
+N=1 SHA=bfdffb29c8ea59a96c42aa73eed2919e034afe89 \
+  CLS=$M7/f/tables/cls/model_v10e3/part_classifier.pt \
+  ADD="--carry_guard --overhang_guard --cls_flip \
+       --vote_weights $M7/g/tables/vote/vote_v10e3_flip_final.json" \
+  TAG=g_S_chk PORT_BASE=26600 OFF_PORT=27000 \
+  bash $M7/g/bin/chk_official.sh > $M7/g/tables/g_S_chk.chain.log 2>&1
+```
+
+The log ends with `CHK_MISS g_S_chk`, so the official read on OFF_PORT did not start.
 
 The retrains: `g/bin/retrain_F7.sh` (F7), `g/tables/ctx/retrain_F7n.sh`, `retrain_F8.sh` and
 `retrain_F8n.sh`. The bank tables: `lerobot_stack/vote_bank.py` on `feat/ms7g-vote-weights`, and
 `g/tables/vote/bin/d10_read.sh` for the D10 table.
+
+The runs from random init and the low-rate finishes, from the worktree 7g-ctx at 273fabf:
+
+```bash
+C=$HOME/data/maker-arm-ms7/g/tables/ctx; G=$HOME/data/maker-arm-ms7/g
+CTX=1 OUT=$G/train_F9n bash $C/retrain_F9.sh            # F9n to 400k, the context fix from step 0
+CTX=0 OUT=$G/train_F9 bash $C/retrain_F9.sh             # F9, the paired control
+CTX=1 OUT=$G/train_F9n OUTFILE=$C/retrain_F9n.out WAIT_UNIT=none STEPS=800000 \
+  bash $C/resume_F9.sh                                  # D19b, and STEPS=1200000 for D19c
+INIT=$G/train_F9n/checkpoints/800000/pretrained_model CTX=1 OUT=$G/train_A9 bash $C/retrain_A.sh
+INIT=$HOME/data/maker-arm-ms7/f/train_F5/checkpoints/200000/pretrained_model CTX=0 \
+  OUT=$G/train_A5 bash $C/retrain_A.sh                  # D21, LR=2e-6 by default
+```
+
+Each launcher writes the marker `action_space.json` into each checkpoint as it lands. A context-fix
+checkpoint carries `"context": "roll_wrapped_norm"`, so the policy server applies the roll transform
+and adds `+ctxnorm` to the policy id. The chains `g/bin/f9_chain.sh`, `f9b_chain.sh`,
+`d20_chain.sh` and `d21_chain.sh` ran the screens and applied the rules of D19 to D21. Their logs
+are `g/tables/f9_chain.log`, `f9b_chain.log`, `d20_chain.log` and `d21_chain.log`.
+
+## 13. Video
+
+The two-tray video of S in the refill scene, from the owner's camera (design section 11), on draw
+14 of the checked seed:
+
+`~/data/maker-arm-ms7/g/video/ms7g_S_refill_d14_two_trays.mp4 (TBD: the controller confirms)`
