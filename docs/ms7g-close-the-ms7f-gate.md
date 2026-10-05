@@ -1605,4 +1605,19 @@ are `g/tables/f9_chain.log`, `f9b_chain.log`, `d20_chain.log` and `d21_chain.log
 The two-tray video of S in the refill scene, from the owner's camera (design section 11), on draw
 14 of the checked seed:
 
-`~/data/maker-arm-ms7/g/video/ms7g_S_refill_d14_two_trays.mp4 (TBD: the controller confirms)`
+`~/data/maker-arm-ms7/g/video/ms7g_S_refill_d14_two_trays.mp4`
+
+The video is H.264, 1280x720, 60 fps, at 4x speed, 161.8 s long. A full decode reads no errors.
+The heap is the one of MS7f's two-tray video: run seed 3127230830, layout seed 3127231330,
+permutation 2,0,3,1. The camera stands across the desk at a distance of 0.9 m. The run stops at
+the second refill, after the robot takes 80 parts from the tray. The kit is `cmds_S.py`,
+`cmds_S_d14.json` and `run_video_S.sh` in the same folder. It runs from a worktree at bfdffb2.
+
+| Run | Sim time at the cut | Correct | Wrong box | Cycles | Correct an hour |
+|---|---|---|---|---|---|
+| S (this video) | 10:19 | 73 | 5 | 83 | 424 |
+| MS7f candidate 6 | 13:45 | 68 | 10 | 99 | 297 |
+
+A gate episode does not replay exactly. A first render with the same commands reached the cut at
+11:39 with 69 correct, 10 wrong, 88 cycles and 355 an hour. It stays beside the final file as
+`ms7g_S_refill_d14_two_trays_run1.mp4`. One heap is a picture of the behavior, not a read.
