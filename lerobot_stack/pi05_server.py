@@ -56,6 +56,7 @@ from policy_server import (
 )
 
 CONTEXT_DIM = 16
+TOKENIZER = "tokenizer_processor"  # the registry name of lerobot's prompt tokenizer step
 IMAGE_KEYS = {"wrist": "observation.images.wrist", "overhead": "observation.images.overhead"}
 
 
@@ -226,10 +227,17 @@ def _error(error: str, message: str) -> dict:
 
 
 def load_pi05(checkpoint: str, device: str):
-    """(predict_chunk, n_action_steps, inference, gripper) of a pi05 pretrained_model directory."""
+    """(predict_chunk, n_action_steps, inference, gripper) of a pi05 pretrained_model directory.
+
+    The server reads only local files: the checkpoint and the tokenizer in the Hugging Face
+    cache (the gated google/paligemma-3b-pt-224 files). transformers 5.3's AutoTokenizer also
+    reads the repo's config.json, which an offline host does not cache, so the tokenizer step
+    gets the class that the cached tokenizer_config.json names, GemmaTokenizer, loaded here."""
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")  # before lerobot imports huggingface_hub
     import torch
     from lerobot.policies.factory import make_pre_post_processors
     from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+    from transformers import GemmaTokenizer
 
     marker = _read_action_space_marker(checkpoint)
     if marker is None or marker.get("action_space") != "absolute" or "gripper" not in marker:
@@ -247,10 +255,18 @@ def load_pi05(checkpoint: str, device: str):
         )
     policy.to(device)
     policy.eval()
+    with open(os.path.join(checkpoint, "policy_preprocessor.json")) as f:
+        steps = json.load(f)["steps"]
+    tokenizer = next(
+        s["config"]["tokenizer_name"] for s in steps if s["registry_name"] == TOKENIZER
+    )
     pre, post = make_pre_post_processors(
         policy_cfg=config,
         pretrained_path=checkpoint,
-        preprocessor_overrides={"device_processor": {"device": device}},
+        preprocessor_overrides={
+            "device_processor": {"device": device},
+            TOKENIZER: {"tokenizer": GemmaTokenizer.from_pretrained(tokenizer)},
+        },
     )
 
     def predict_chunk(obs: dict) -> np.ndarray:
