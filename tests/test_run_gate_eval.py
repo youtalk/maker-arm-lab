@@ -4,6 +4,8 @@ injected fakes; the real ones need a GPU."""
 
 import importlib.util
 import json
+import sys
+import threading
 import types
 from pathlib import Path
 
@@ -1617,3 +1619,157 @@ def test_the_bars_reach_the_gate_results_from_the_command_line(tmp_path):
     gate = results["gate"]
     assert gate["min_stows_per_hour"] == 300.0 and gate["heldout_threshold"] == 0.85
     assert not gate["passed"] and not gate["heldout_passed"]  # no held-out part in the read
+
+
+# --- MS7h design 7.3: the pi0.5 read ---------------------------------------------------------
+
+PI05_HEAP = ["--backend", "mujoco", "--heap_k", "50", "--context", "camera_box_target"]
+
+
+def test_an_act_read_keeps_its_commands_and_a_pi05_read_starts_one_shared_server(tmp_path):
+    read = _argv(tmp_path) + PI05_HEAP + ["--n_action_steps", "50", "--action_warp", "1.5"]
+    read += ["--port", "7100", "--processes", "2"]
+    act = ge._build_cfg(ge._parse_args(read))
+    pi05 = ge._build_cfg(ge._parse_args(read + ["--pi05", "--lanes", "2"]))
+    assert (act.pi05, act.lanes, pi05.pi05, pi05.lanes) == (False, 1, True, 2)
+    assert ge._server_command(act) == [
+        "lerobot_stack/.venv/bin/python",
+        "lerobot_stack/policy_server.py",
+        "--checkpoint",
+        "ck",
+        "--port",
+        "7100",
+        "--device",
+        "cuda",
+        "--n_action_steps",
+        "50",
+        "--action_warp",
+        "1.5",
+    ]
+    # The checkpoint's own chunk (50) and flow steps (10) serve open loop; the warp is a flag.
+    assert ge._pi05_server_command(pi05) == [
+        "lerobot_stack/.venv-pi/bin/python",
+        "lerobot_stack/pi05_server.py",
+        "--checkpoint",
+        "ck",
+        "--port",
+        "7100",
+        "--device",
+        "cuda",
+        "--action_warp",
+        "1.5",
+    ]
+    # Every lane's client is the unchanged one, pointed at the one server.
+    for draw in ge.make_eval_draws(2, 1):
+        assert ge._eval_command(pi05, draw) == ge._eval_command(act, draw)
+        assert "tcp://127.0.0.1:7100" in ge._eval_command(pi05, draw)
+
+
+def test_the_cache_never_mixes_a_pi05_payload_with_an_act_one(tmp_path):
+    ledger = _fake_ledger(tmp_path)
+    act = _cfg(tmp_path, ledger, processes=1)
+    pi05 = _cfg(tmp_path, ledger, processes=1, pi05=True)
+    act.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+
+    def cached(cfg, policy_id):
+        payload = _payload(draw, [_episode(6)], policy_id=policy_id)
+        (act.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    assert cached(act, "act:ck+te0.01") and not cached(act, "pi05:ck+warp1.5")
+    assert cached(pi05, "pi05:ck+warp1.5") and not cached(pi05, "act:ck+te0.01")
+
+
+def test_pi05_lanes_share_one_server_and_run_their_draws_at_once(tmp_path):
+    ledger = _fake_ledger(tmp_path)
+    cfg = _cfg(tmp_path, ledger, processes=4, pi05=True, lanes=2)
+    log, ran = [], []
+    both = threading.Barrier(2, timeout=10)  # breaks unless two draws run at the same time
+
+    def run_eval(draw):
+        both.wait()
+        ran.append(draw.process_index)
+        return _payload(draw, [_episode(1), _episode(0)])
+
+    results = ge.run_gate(cfg, run_eval, lambda: _FakeServer(log))
+    assert log == ["start", "stop"] and sorted(ran) == [0, 1, 2, 3]
+    assert results["gate"]["episodes"] == 8
+    assert all((cfg.out_dir / f"eval_{i:03d}.json").exists() for i in range(4))
+
+
+def test_a_failed_pi05_lane_starts_no_new_draw_and_still_stops_the_server(tmp_path):
+    ledger = _fake_ledger(tmp_path)
+    cfg = _cfg(tmp_path, ledger, processes=6, pi05=True, lanes=2, retries=0)
+    log, ran = [], set()
+    release = threading.Event()
+    threading.Timer(1.0, release.set).start()
+
+    def run_eval(draw):
+        if draw.process_index == 0:
+            raise ge.EvalProcessError("boom")
+        ran.add(draw.process_index)
+        release.wait(10)
+        return _payload(draw, [_episode(0)])
+
+    with pytest.raises(ge.GateRunError, match="process 0 failed 1 times"):
+        ge.run_gate(cfg, run_eval, lambda: _FakeServer(log))
+    assert log == ["start", "stop"]
+    assert 1 in ran and ran <= {1, 2}  # the lane that failed may have started one more draw
+
+
+def _fake_pi05_server(monkeypatch, code: str) -> None:
+    monkeypatch.setattr(ge, "_pi05_server_command", lambda cfg: [sys.executable, "-c", code])
+
+
+def test_the_pi05_server_logs_to_the_out_dir_and_the_supervisor_waits_for_ready(
+    tmp_path, monkeypatch
+):
+    cfg = _cfg(tmp_path, tmp_path / "l.json", pi05=True, n_action_steps=50)
+    cfg.out_dir.mkdir(parents=True)
+    ready = {"policy_id": "pi05:ck+warp1.5", "n_action_steps": 50}
+    _fake_pi05_server(
+        monkeypatch,
+        f"import time; print('SERVER_READY ' + {json.dumps(json.dumps(ready))}, flush=True); "
+        "print('FORWARD rows=2 ms=200.0', flush=True); time.sleep(120)",
+    )
+    server = ge._start_pi05_server(cfg)
+    assert server.ready == ready
+    server.stop()
+    assert server._proc.returncode is not None
+    assert "SERVER_READY" in (cfg.out_dir / "pi05_server.log").read_text()
+    _fake_pi05_server(
+        monkeypatch, "print('SERVER_FAIL ValueError: no marker'); raise SystemExit(1)"
+    )
+    with pytest.raises(ge.EvalProcessError, match="no marker"):
+        ge._start_pi05_server(cfg)
+    # A checkpoint whose chunk is not the read's 50 actions a forward never serves it.
+    ready["n_action_steps"] = 33
+    _fake_pi05_server(
+        monkeypatch,
+        f"import time; print('SERVER_READY ' + {json.dumps(json.dumps(ready))}, flush=True); "
+        "time.sleep(120)",
+    )
+    with pytest.raises(ge.EvalProcessError, match="serves 33 actions"):
+        ge._start_pi05_server(cfg)
+
+
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        (["--lanes", "2"], "with --pi05"),
+        (["--pi05", "--lanes", "0"], "--lanes 0"),
+        (["--pi05", "--heap_k", "0"], "--pi05 needs"),
+        (["--pi05", "--context", "camera_box"], "--pi05 needs"),
+        (["--pi05", "--temporal_ensemble_coeff", "0.01"], "no ensemble"),
+        (["--pi05", "--ensemble_with", "/m/b"], "no ensemble"),
+    ],
+)
+def test_the_pi05_mode_refuses_what_its_server_cannot_serve(
+    extra, message, monkeypatch, capsys, tmp_path
+):
+    monkeypatch.setattr(ge, "_start_pi05_server", lambda cfg: pytest.fail("no server"))
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server"))
+    assert ge.main(_argv(tmp_path) + PI05_HEAP + extra) == 2
+    out = capsys.readouterr()
+    assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and message in out.err

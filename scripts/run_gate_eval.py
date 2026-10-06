@@ -23,18 +23,27 @@ the harness-task-sweeps lesson). Delete the file to re-roll a draw.
 Prints GATE_OK or GATE_FAIL with the aggregate against --threshold; gate_results.json
 carries everything (per-brick rate with its Wilson 95% interval, the reported-not-gated
 secondaries, the draws, the served inference config).
+
+--pi05 reads a pi0.5 checkpoint (MS7h design 7.3): one lerobot_stack/pi05_server.py under
+lerobot_stack/.venv-pi serves the whole run, --lanes N eval clients run at once against it (the
+server batches the forwards of the lanes whose queues are empty), its log is
+<out_dir>/pi05_server.log, and a cached payload must carry a "pi05:" policy id.
 """
 
 import argparse
+import ctypes
 import itertools
 import json
 import math
 import os
 import random
 import shlex
+import signal
 import subprocess
 import sys
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -76,6 +85,9 @@ class GateCfg:
     action_warp: float = 1.0  # the server plays each chunk this many times faster (MS7f speed)
     # MS7g D20: a second pretrained_model dir; the server serves the mean of both checkpoints.
     ensemble_with: str | None = None
+    # MS7h design 7.3: a pi0.5 checkpoint, served by one shared pi05_server.py to `lanes` clients.
+    pi05: bool = False
+    lanes: int = 1
     only_processes: tuple | None = None
     eval_timeout_s: float = 4 * 3600
     backend: str = "isaac"  # "mujoco" spawns scripts/mj_eval_policy.py under .venv/bin/python
@@ -723,6 +735,69 @@ def _start_server(cfg: GateCfg) -> _ServerHandle:
     return _ServerHandle(proc, _extract_json_line("".join(lines), "SERVER_READY"))
 
 
+PI05_PYTHON = "lerobot_stack/.venv-pi/bin/python"
+PI05_READY_S = 900  # loading about 9 GB of pi0.5 weights on a busy host takes minutes
+
+
+def _pi05_server_command(cfg: GateCfg) -> list[str]:
+    """The shared server serves the checkpoint's chunk (50 actions) open loop with its flow steps
+    (10); only the warp is a flag (MS7h design 7.3)."""
+    return [
+        PI05_PYTHON,
+        "lerobot_stack/pi05_server.py",
+        "--checkpoint",
+        cfg.checkpoint,
+        "--port",
+        str(cfg.port),
+        "--device",
+        cfg.device,
+        "--action_warp",
+        str(cfg.action_warp),
+    ]
+
+
+def _die_with_parent() -> None:
+    """The server's preexec_fn: SIGTERM when the supervisor dies, even by SIGKILL, so no orphan
+    keeps about 10 GB of GPU memory (prctl PR_SET_PDEATHSIG, Linux)."""
+    ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM)
+
+
+def _start_pi05_server(cfg: GateCfg) -> _ServerHandle:
+    """Launch pi05_server.py with its output appended to <out_dir>/pi05_server.log (its
+    FORWARD lines run for the whole read, so no pipe), and block until it prints SERVER_READY."""
+    log_path = cfg.out_dir / "pi05_server.log"
+    with open(log_path, "a") as log:
+        offset = log.tell()
+        proc = subprocess.Popen(
+            _pi05_server_command(cfg),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            preexec_fn=_die_with_parent,  # noqa: PLW1509 -- before any lane thread starts
+        )
+    deadline = time.monotonic() + PI05_READY_S
+    while True:
+        with open(log_path) as log:
+            log.seek(offset)
+            text = log.read()
+        ready = _extract_json_line(text, "SERVER_READY")
+        if ready and cfg.n_action_steps not in (None, ready.get("n_action_steps")):
+            _ServerHandle(proc, ready).stop()
+            raise EvalProcessError(
+                f"pi05_server.py serves {ready.get('n_action_steps')} actions a forward, the read "
+                f"asks {cfg.n_action_steps}: the checkpoint's own chunk is what it serves"
+            )
+        if ready:
+            return _ServerHandle(proc, ready)
+        if proc.poll() is not None or time.monotonic() > deadline:
+            proc.kill()
+            proc.wait()
+            raise EvalProcessError(
+                f"pi05_server.py printed no SERVER_READY (exit {proc.returncode}):\n{text[-4000:]}"
+            )
+        time.sleep(1.0)
+
+
 MUJOCO_PYTHON = ".venv/bin/python"
 
 
@@ -854,7 +929,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
         and payload.get("layout_seed") == draw.layout_seed
         and list(payload.get("permutation", [])) == list(draw.permutation)
     )
-    same_policy = str(payload.get("policy_id", "")).startswith(f"act:{cfg.checkpoint}")
+    kind = "pi05" if cfg.pi05 else "act"  # a pi0.5 payload never stands in for an ACT one
+    same_policy = str(payload.get("policy_id", "")).startswith(f"{kind}:{cfg.checkpoint}")
     # A six-brick payload carries no heap keys, so it never matches a heap gate or back.
     same_task = payload.get("heap_k", 0) == cfg.heap_k
     if cfg.heap_k > 0:
@@ -915,36 +991,50 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
         else:
             todo.append(draw)
     server_ready: dict = {}
+    lock = threading.Lock()  # the lanes of a pi0.5 read finish their draws in parallel
+
+    def run_draw(draw: EvalDraw) -> None:
+        payload = None
+        for attempt in range(cfg.retries + 1):
+            try:
+                payload = run_eval(draw)
+                break
+            except EvalProcessError as err:
+                print(
+                    f"[gate] process {draw.process_index} attempt {attempt + 1} failed: {err}",
+                    flush=True,
+                )
+        if payload is None:
+            raise GateRunError(f"process {draw.process_index} failed {cfg.retries + 1} times")
+        with lock:
+            (cfg.out_dir / f"eval_{draw.process_index:03d}.json").write_text(
+                json.dumps(payload, indent=2)
+            )
+            payloads[draw.process_index] = payload
+            partial = aggregate_gate([payloads[k] for k in sorted(payloads)], cfg.threshold)
+            print(
+                f"[gate] process {draw.process_index}: per-brick so far "
+                f"{partial['gate']['bricks_stowed']}/{partial['gate']['bricks_total']} = "
+                f"{partial['gate']['per_brick_rate']:.3f} over {partial['gate']['episodes']} episodes",
+                flush=True,
+            )
+
     if todo:
         server = start_server()
         server_ready = dict(getattr(server, "ready", {}) or {})
         try:
-            for draw in todo:
-                payload = None
-                for attempt in range(cfg.retries + 1):
+            if cfg.lanes == 1:
+                for draw in todo:
+                    run_draw(draw)
+            else:
+                with ThreadPoolExecutor(cfg.lanes) as pool:
+                    futures = [pool.submit(run_draw, draw) for draw in todo]
                     try:
-                        payload = run_eval(draw)
-                        break
-                    except EvalProcessError as err:
-                        print(
-                            f"[gate] process {draw.process_index} attempt {attempt + 1} failed: {err}",
-                            flush=True,
-                        )
-                if payload is None:
-                    raise GateRunError(
-                        f"process {draw.process_index} failed {cfg.retries + 1} times"
-                    )
-                (cfg.out_dir / f"eval_{draw.process_index:03d}.json").write_text(
-                    json.dumps(payload, indent=2)
-                )
-                payloads[draw.process_index] = payload
-                partial = aggregate_gate([payloads[k] for k in sorted(payloads)], cfg.threshold)
-                print(
-                    f"[gate] process {draw.process_index}: per-brick so far "
-                    f"{partial['gate']['bricks_stowed']}/{partial['gate']['bricks_total']} = "
-                    f"{partial['gate']['per_brick_rate']:.3f} over {partial['gate']['episodes']} episodes",
-                    flush=True,
-                )
+                        for future in as_completed(futures):
+                            future.result()
+                    finally:  # on a failure no new draw starts; the running ones finish
+                        for future in futures:
+                            future.cancel()
         finally:
             server.stop()
     ordered = [payloads[k] for k in sorted(payloads)]
@@ -1060,6 +1150,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help="MS7g D20: a second pretrained_model dir at the same path on every host; the "
         "server serves the mean of both checkpoints' actions",
+    )
+    parser.add_argument(
+        "--pi05",
+        action="store_true",
+        help="MS7h design 7.3: --checkpoint is a pi0.5 pretrained_model dir; one shared "
+        "pi05_server.py under lerobot_stack/.venv-pi serves every lane of this run",
+    )
+    parser.add_argument(
+        "--lanes",
+        type=int,
+        default=1,
+        help="with --pi05: this many eval clients run at once against the one server",
     )
     parser.add_argument("--only_processes", type=_process_list, default=None)
     parser.add_argument("--eval_timeout_s", type=float, default=4 * 3600)
@@ -1415,6 +1517,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def _build_cfg(args: argparse.Namespace) -> GateCfg:
+    if args.lanes != 1 and (args.lanes < 1 or not args.pi05):
+        # The ACT server keeps one action queue, so its lanes are separate supervisors.
+        raise ValueError(f"--lanes {args.lanes}: 1, or more than 1 with --pi05")
+    if args.pi05:
+        if args.heap_k <= 0 or args.backend != "mujoco" or args.context != "camera_box_target":
+            # The pi0.5 state is 7 + the 16-wide context of the derived dataset (design 7.1).
+            raise ValueError(
+                "--pi05 needs --heap_k > 0, --backend mujoco, --context camera_box_target"
+            )
+        if args.temporal_ensemble_coeff is not None or args.ensemble_with:
+            raise ValueError("--pi05 serves one checkpoint open loop: no ensemble flags")
     if not 1.0 <= args.action_warp <= 3.0:  # the server's ACTION_WARP_MIN and ACTION_WARP_MAX
         raise ValueError(f"--action_warp must be in [1.0, 3.0], got {args.action_warp}")
     if args.gripper != "binary" and (args.heap_k <= 0 or args.backend != "mujoco"):
@@ -1536,6 +1649,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         temporal_ensemble_coeff=args.temporal_ensemble_coeff,
         action_warp=args.action_warp,
         ensemble_with=args.ensemble_with,
+        pi05=args.pi05,
+        lanes=args.lanes,
         only_processes=args.only_processes,
         eval_timeout_s=args.eval_timeout_s,
         backend=args.backend,
@@ -1594,7 +1709,7 @@ def main(argv: list[str] | None = None) -> int:
         results = run_gate(
             cfg,
             run_eval=lambda draw: _run_eval_subprocess(cfg, draw),
-            start_server=lambda: _start_server(cfg),
+            start_server=lambda: _start_pi05_server(cfg) if cfg.pi05 else _start_server(cfg),
         )
     except (GateRunError, EvalProcessError, ValueError, FileNotFoundError) as exc:
         print(f"GATE_ERROR: {exc}", file=sys.stderr, flush=True)
