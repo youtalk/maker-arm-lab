@@ -83,6 +83,24 @@ fi
 python3 -c 'import lerobot, sys; sys.exit(lerobot.__version__ != "0.5.1")' 2>/dev/null \
     || pip install -q "lerobot[pi]==0.5.1"
 [ -n "${HF_TOKEN:-}" ] || fail "HF_TOKEN is not set: export it from the Colab secret (cell 2)"
+# A secret pasted with a newline sends a bad header, which the hub answers 401 "Please log in".
+HF_TOKEN=$(printf %s "$HF_TOKEN" | tr -d '[:space:]')
+export HF_TOKEN
+# The owner's first smoke (2026-10-05) failed here on a 401 with HF_TOKEN set: tell a bad token
+# from an account or token without access to the gated repo before the tokenizer reads it.
+python3 -c 'import os, sys
+from huggingface_hub import auth_check, whoami
+try:
+    name = whoami(token=os.environ["HF_TOKEN"])["name"]
+except Exception as err:
+    sys.exit(f"HF_TOKEN is not a valid token ({type(err).__name__}): copy it again into the secret")
+try:
+    auth_check("google/paligemma-3b-pt-224", token=os.environ["HF_TOKEN"])
+except Exception as err:
+    sys.exit(f"account {name}: no access to google/paligemma-3b-pt-224 ({type(err).__name__}); "
+             "a fine-grained token needs read access to public gated repos")
+print(f"HF_TOKEN: account {name} has access to google/paligemma-3b-pt-224")' \
+    || fail "HF_TOKEN cannot read google/paligemma-3b-pt-224 (see the line above)"
 python3 -c 'from transformers import AutoTokenizer
 AutoTokenizer.from_pretrained("google/paligemma-3b-pt-224")' \
     || fail "no google/paligemma-3b-pt-224: HF_TOKEN of an account that accepted its licence"
