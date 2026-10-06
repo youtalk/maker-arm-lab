@@ -146,3 +146,62 @@ def test_run_and_status_on_the_local_host(tmp_path):
     assert "[status] here bad: JOB_EXIT rc=3" in result.stdout
     assert "[status] here live: RUNNING" in result.stdout
     assert "[status] here ok: JOB_EXIT rc=0" in result.stdout
+
+
+def _read_args(**kw) -> SimpleNamespace:
+    base = {
+        "ckpt": "/ck/pretrained_model",
+        "threshold": 0.85,
+        "seed": 20261700,
+        "draws": [0, 1, 2],
+        "split": "all",
+        "n_steps": 50,
+        "client_flags": "--select_at_release --square_wrist",
+        "tag": "t",
+        "extra": ["--num_envs", "1"],
+    }
+    return SimpleNamespace(**{**base, **kw})
+
+
+def test_an_act_read_keeps_its_supervisor_flags_and_a_pi05_read_adds_one():
+    act = fleet.supervisor_args(_read_args(), "/l.json")
+    assert act == fleet.PROTOCOL.split() + [
+        "--checkpoint",
+        "/ck/pretrained_model",
+        "--ledger",
+        "/l.json",
+        "--threshold",
+        "0.85",
+        "--seed",
+        "20261700",
+        "--processes",
+        "3",
+        "--parts_split",
+        "all",
+        "--n_action_steps",
+        "50",
+        "--client_flags",
+        "--select_at_release --square_wrist",
+    ]
+    assert fleet.supervisor_args(_read_args(pi05=False), "/l.json") == act
+    pi05 = fleet.supervisor_args(_read_args(pi05=True), "/l.json")
+    at = act.index("--checkpoint") + 2
+    assert pi05 == act[:at] + ["--pi05"] + act[at:]  # right after the checkpoint
+    cfg = ge._build_cfg(ge._parse_args(pi05 + ["--out_dir", "/o", "--lanes", "2"]))
+    assert (cfg.pi05, cfg.lanes, cfg.n_action_steps) == (True, 2, 50)
+
+
+def test_a_pi05_read_runs_one_supervisor_a_host_and_an_act_read_one_a_lane():
+    host = {"device": "cuda"}
+    lane = ["B", "--device", "cuda", "--num_envs", "1", "--out_dir", "/o", "--port"]
+    act = fleet.host_jobs(_read_args(), ["B"], host, "desk", [0, 1, 2], 2, 7100, "/o")
+    assert act == [
+        ("read-t-desk-0", lane + ["7100", "--only_processes", "0,2"]),
+        ("read-t-desk-1", lane + ["7101", "--only_processes", "1"]),
+    ]
+    pi05 = fleet.host_jobs(_read_args(pi05=True), ["B"], host, "desk", [0, 1, 2], 2, 7100, "/o")
+    assert pi05 == [("read-t-desk-0", lane + ["7100", "--only_processes", "0,1,2", "--lanes", "2"])]
+    one = fleet.host_jobs(_read_args(pi05=True), ["B"], host, "desk", [4], 10, 7100, "/o")
+    assert one[0][1][-2:] == ["--lanes", "1"]
+    for pi05 in (False, True):  # a host with no draw runs nothing
+        assert fleet.host_jobs(_read_args(pi05=pi05), ["B"], host, "desk", [], 2, 7100, "/o") == []
