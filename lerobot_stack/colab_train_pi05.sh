@@ -30,7 +30,10 @@
 #   --smoke        200 steps into a fresh local dir with one checkpoint at the end and no Drive
 #                  writes; prints seconds a step and the checkpoint size (MS7h design 5.4 step 5)
 #   --expert_only  the A100 40GB fallback, train_expert_only=true (the report must say so)
-# env: DATASET (dataset), STEPS (30000), BATCH (32), SAVE_FREQ (2000), NUM_WORKERS (8)
+# env: DATASET (dataset), STEPS (30000), BATCH (32), SAVE_FREQ (2000), NUM_WORKERS (8),
+#      OUT_ROOT (/content): where the local checkpoints go, e.g. the runtime's local-scratch disk
+#      (the owner's A100 runtime had 70 GB free on /content after the copy and 368 GB there).
+#      Keep it the same across sessions: a resumed train_config.json names the old output dir
 # -> one COLAB_TRAIN_OK / COLAB_TRAIN_FAIL line.
 set -euo pipefail
 
@@ -66,7 +69,7 @@ BATCH=${BATCH:-32}
 SAVE_FREQ=${SAVE_FREQ:-2000}
 NUM_WORKERS=${NUM_WORKERS:-8}
 LOCAL_DATA=/content/$DATA
-OUT=/content/pi05_out
+OUT=${OUT_ROOT:-/content}/pi05_out
 LOG_FREQ=100
 if [ "$SMOKE" -eq 1 ]; then
     STEPS=200 SAVE_FREQ=200 LOG_FREQ=10 OUT=/content/pi05_smoke
