@@ -15,6 +15,7 @@ its 10 flow steps, and --action_warp (1.5 for the reads). The policy id is
 ``pi05:<checkpoint>`` (plus ``+warp<X>``), so the read cache never mixes it with an ACT read.
 2026-10-05 on Machine A's RTX 5090, shared with ACT read servers, on a 50-step dry-run checkpoint:
 one forward of 1 row took 172-207 ms, 3 rows 245-291 ms and 6 rows 346 ms, at 9.4 GiB peak.
+Every forward prints "FORWARD rows=N ms=T", so a read's log holds its batch sizes and times.
 
 The checkpoint is a pretrained_model directory of a pi05 fine-tune on the derived dataset; its
 action_space.json marker (the same walk as policy_server's) must say "absolute" and name the
@@ -30,6 +31,7 @@ Runs in lerobot_stack/.venv-pi (load_pi05 imports lerobot's pi05, which needs tr
 import argparse
 import json
 import os
+import time
 import traceback
 from collections import deque
 
@@ -168,6 +170,7 @@ class SharedServer:
                 ),
                 **{k: np.stack([rows[lane][k][i] for lane, i in need]) for k in IMAGE_KEYS},
             }
+            start = time.perf_counter()
             try:
                 chunk = np.asarray(self._predict(obs), dtype=np.float32)
                 if chunk.shape != (len(need), self._n, *ACTION_SHAPE):
@@ -180,6 +183,8 @@ class SharedServer:
                     self._queues.pop(lane, None)
                 return [(lane, error, None) for lane, _ in steps]
             self.forward_sizes.append(len(need))
+            ms = 1000 * (time.perf_counter() - start)
+            print(f"FORWARD rows={len(need)} ms={ms:.1f}", flush=True)  # the read's batch log
             for (lane, i), actions in zip(need, warp_chunk(chunk, self._warp)):
                 self._queues[lane][i] = deque(actions)
         replies = []
