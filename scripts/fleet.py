@@ -417,6 +417,7 @@ def supervisor_args(args, ledger: str) -> list[str]:
         "pi05_still_noise_scale",
         "pi05_still_rad",
         "pi05_still_open",
+        "pi05_jaw_latch",
     ):
         value = getattr(args, name, None)
         if isinstance(value, bool):  # a store_true switch
@@ -607,6 +608,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p_read.add_argument("--pi05_still_noise_scale", type=float, help="with --pi05: still rule")
     p_read.add_argument("--pi05_still_rad", type=float, help="with --pi05_still_noise_scale")
     p_read.add_argument("--pi05_still_open", type=float, help="with --pi05_still_noise_scale")
+    p_read.add_argument(
+        "--pi05_jaw_latch", type=int, help="with --pi05: actions held after a close"
+    )
     p_read.add_argument("--tag", required=True, type=lambda s: re.fullmatch(r"[\w.-]+", s)[0])
     p_read.add_argument("--seed", type=int, required=True)
     p_read.add_argument("--draws", type=parse_draws, required=True, help="e.g. 0-11")

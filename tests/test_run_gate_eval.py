@@ -1794,6 +1794,31 @@ def test_the_pi05_still_rule_reaches_the_server_and_splits_the_cache(tmp_path):
     assert not cached(on, **(rule | {"still_open": 0.8}))
 
 
+def test_the_pi05_jaw_latch_reaches_the_server_and_splits_the_cache(tmp_path):
+    read = _argv(tmp_path) + PI05_HEAP + ["--pi05", "--pi05_still_noise_scale", "1"]
+    plain = ge._build_cfg(ge._parse_args(read))
+    zero = ge._build_cfg(ge._parse_args(read + ["--pi05_jaw_latch", "0"]))
+    latch = ge._build_cfg(ge._parse_args(read + ["--pi05_jaw_latch", "10"]))
+    assert (plain.pi05_jaw_latch, zero.pi05_jaw_latch, latch.pi05_jaw_latch) == (0, 0, 10)
+    assert ge._pi05_server_command(zero) == ge._pi05_server_command(plain)  # 0: the same bytes
+    assert ge._pi05_server_command(latch) == ge._pi05_server_command(plain) + ["--jaw_latch", "10"]
+    ledger = _fake_ledger(tmp_path)
+    off = _cfg(tmp_path, ledger, processes=1, pi05=True)
+    on = _cfg(tmp_path, ledger, processes=1, pi05=True, pi05_jaw_latch=10)
+    off.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    served = {"n_action_steps": 1, "temporal_ensemble_coeff": 0.01, "num_inference_steps": 10}
+
+    def cached(cfg, **inference):
+        payload = _payload(draw, [_episode(6)], policy_id="pi05:ck")
+        payload["inference"] = served | inference
+        (off.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    assert cached(off) and not cached(off, jaw_latch=10)
+    assert cached(on, jaw_latch=10) and not cached(on) and not cached(on, jaw_latch=5)
+
+
 def test_the_supervisor_copies_the_still_defaults_of_the_server():
     source = (Path(__file__).parents[1] / "lerobot_stack" / "pi05_server.py").read_text()
     assert f"\nSTILL_RAD = {ge.GateCfg.pi05_still_rad}\n" in source
@@ -1889,6 +1914,8 @@ def test_the_pi05_server_logs_to_the_out_dir_and_the_supervisor_waits_for_ready(
         (["--pi05", "--pi05_noise_scale", "inf"], "--pi05_noise_scale must be finite"),
         (["--pi05_jaw_noise_scale", "1.0"], "need --pi05"),
         (["--pi05_jaw_noise_shared"], "need --pi05"),
+        (["--pi05_jaw_latch", "10"], "need --pi05"),
+        (["--pi05", "--pi05_jaw_latch", "-1"], "--pi05_jaw_latch must be at least 0"),
         (["--pi05", "--pi05_jaw_noise_scale", "-1"], "--pi05_jaw_noise_scale must be finite"),
         (["--pi05", "--pi05_jaw_noise_scale", "nan"], "--pi05_jaw_noise_scale must be finite"),
         (["--pi05_still_noise_scale", "1.0"], "need --pi05"),

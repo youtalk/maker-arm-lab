@@ -225,6 +225,72 @@ def test_unchanged_clients_share_the_server_over_a_router_socket():
     assert not thread.is_alive()
 
 
+def latch_state(fractions, widths):
+    """A derived (n, 23) state with the jaw state's opening fraction and the target width."""
+    state = np.zeros((len(fractions), 23), np.float32)
+    state[:, 6], state[:, ps.TARGET_WIDTH] = fractions, widths
+    return state
+
+
+def jaw_chunk(*rows):
+    """An (n, N, 7) chunk with the arm at its time index and each row's jaw commands."""
+    chunk = np.zeros((len(rows), N, 7), np.float32)
+    chunk[:, :, :6] = np.arange(N)[:, None]
+    chunk[:, :, ps.JAW] = rows
+    return chunk
+
+
+def test_the_latch_holds_the_jaw_after_a_close_and_leaves_a_release_free():
+    inside = [0.05] * 10 + [0.01] + [0.05] * 39  # a close at t = 10, then a re-open
+    at_start = [0.01] + [0.08] * 49  # a close at t = 0 from an open jaw state
+    release = [0.01] * 5 + [0.08] * 45  # from a closed jaw state: no close
+    chunk = jaw_chunk(inside, at_start, release, inside)
+    state = latch_state([1.0, 1.0, 0.1, 1.0], [0.02, 0.02, 0.02, 0.0])  # row 3: no target
+    latched, changed = ps.latch_jaw(chunk, state, 5)
+    assert changed == 2 and ps.JAW_FULL_GAP * 0.1 < 0.02
+    np.testing.assert_array_equal(latched[:, :, :6], chunk[:, :, :6])  # the arm untouched
+    assert latched[0, :, ps.JAW].tolist() == pytest.approx([0.05] * 10 + [0.01] * 6 + [0.05] * 34)
+    assert latched[1, :, ps.JAW].tolist() == pytest.approx([0.01] * 6 + [0.08] * 44)
+    np.testing.assert_array_equal(latched[2:], chunk[2:])
+    assert ps.latch_jaw(chunk, state, 0)[1] == 0
+
+
+def test_the_full_gap_is_twice_the_converter_travel():
+    from convert_to_lerobot import GRIPPER_TRAVEL
+
+    assert ps.JAW_FULL_GAP == 2 * GRIPPER_TRAVEL
+
+
+class LatchModel:
+    """Every row closes at t = 10 and re-opens after it."""
+
+    def __call__(self, obs):
+        return jaw_chunk(*[[0.05] * 10 + [0.01] + [0.05] * 39] * len(obs["state"]))
+
+
+def test_the_server_latches_each_chunk_before_the_warp(capsys):
+    inference = {"n_action_steps": N, "chunk_size": N, "num_inference_steps": 10}
+    s = ps.SharedServer(LatchModel(), "pi05:/ckpt", N, inference, "continuous", 1.5, None, 10)
+    off = ps.SharedServer(LatchModel(), "pi05:/ckpt", N, inference, "continuous", 1.5)
+    assert s.ready(0)["inference"]["jaw_latch"] == 10
+    assert "jaw_latch" not in off.ready(0)["inference"]
+    header, arrays = step(0.5)
+    arrays["state"][:, 6], arrays["context"][:, 14] = 1.0, 0.02  # open jaws, a 2 cm target
+    served = [s.process([(b"a", header, arrays)])[0][0][2]["action"][0] for _ in range(34)]
+    unlatched = [off.process([(b"a", header, arrays)])[0][0][2]["action"][0] for _ in range(34)]
+    state = derived_state(arrays["state"], arrays["context"])
+    latched = ps.latch_jaw(LatchModel()({"state": state}), state, 10)[0]
+    want = ps.warp_chunk(latched, 1.5)[0]
+    np.testing.assert_array_equal(np.stack(served[:33]), want)
+    np.testing.assert_array_equal(
+        np.stack(unlatched[:33]), ps.warp_chunk(LatchModel()({"state": state}), 1.5)[0]
+    )
+    assert not np.array_equal(np.stack(unlatched[:33]), want)
+    forward = capsys.readouterr().out.strip().splitlines()
+    assert re.fullmatch(r"FORWARD rows=1 ms=\d+\.\d latched=1", forward[0])
+    assert re.fullmatch(r"FORWARD rows=1 ms=\d+\.\d", forward[2])  # off: as before
+
+
 class StandInPolicy:
     """PI05Policy's surface that load_pi05 uses; records what reaches predict_action_chunk."""
 
@@ -396,6 +462,8 @@ STILL_ON = ["--still_noise_scale", "0.7", "--still_rad", "0.1", "--still_open", 
             "+jawnoise0.0+jawshared+still0.7r0.1o0.8",
             [0.7, 0.1, 0.8],
         ),
+        (["--jaw_latch", "10", *STILL_ON], "+still0.7r0.1o0.8+latch10", [0.7, 0.1, 0.8]),
+        (["--jaw_latch", "0"], "", {}),
     ],
 )
 def test_the_policy_id_names_each_switch_off_its_default(
@@ -416,6 +484,7 @@ def test_the_policy_id_names_each_switch_off_its_default(
     assert ready["inference"]["noise_scale"] == 0.0
     assert ready["inference"].get("jaw_noise_scale") == (0.0 if "+jawnoise" in tail else None)
     assert ready["inference"].get("jaw_noise_shared") == (True if "+jawshared" in tail else None)
+    assert ready["inference"].get("jaw_latch") == (10 if "+latch" in tail else None)
     names = ("still_noise_scale", "still_rad", "still_open")
     assert {k: v for k, v in ready["inference"].items() if k in names} == dict(zip(names, block))
 
@@ -428,6 +497,7 @@ def test_the_policy_id_names_each_switch_off_its_default(
         ["--noise_scale", "nan"],
         ["--jaw_noise_scale", "-0.1"],
         ["--jaw_noise_scale", "inf"],
+        ["--jaw_latch", "-1"],
         ["--still_noise_scale", "-1"],
         ["--still_rad", "0"],
         ["--still_open", "1.5"],

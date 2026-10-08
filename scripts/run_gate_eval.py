@@ -35,6 +35,8 @@ and --pi05_jaw_noise_shared as --jaw_noise_shared (one jaw draw a chunk), and th
 both.
 --pi05_still_noise_scale S2 turns on the server's still rule with --still_rad and --still_open
 (--pi05_still_rad, --pi05_still_open, default the server's), and the cache matches all three.
+--pi05_jaw_latch L reaches the server as --jaw_latch (the jaw commands held after a close), and
+the cache matches it.
 """
 
 import argparse
@@ -102,6 +104,7 @@ class GateCfg:
     pi05_still_noise_scale: float | None = None  # None: the server's still rule is off
     pi05_still_rad: float = 0.15  # the server's STILL_RAD (tests pin the copy)
     pi05_still_open: float = 0.9  # the server's STILL_OPEN
+    pi05_jaw_latch: int = 0  # 0: the server's jaw latch is off
     only_processes: tuple | None = None
     eval_timeout_s: float = 4 * 3600
     backend: str = "isaac"  # "mujoco" spawns scripts/mj_eval_policy.py under .venv/bin/python
@@ -784,6 +787,7 @@ def _pi05_server_command(cfg: GateCfg) -> list[str]:
         ),
         *(["--jaw_noise_shared"] if cfg.pi05_jaw_noise_shared else []),
         *itertools.chain(*((f"--{key}", str(value)) for key, value in _pi05_still(cfg).items())),
+        *(["--jaw_latch", str(cfg.pi05_jaw_latch)] if cfg.pi05_jaw_latch else []),
     ]
 
 
@@ -1002,6 +1006,7 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     # A payload served without the still rule records none of its keys.
     still = {key: served[key] for key in PI05_STILL if key in served}
     same_inference = same_inference and still == _pi05_still(cfg)
+    same_inference = same_inference and served.get("jaw_latch", 0) == cfg.pi05_jaw_latch
     if cfg.pi05:
         named = str(payload.get("policy_id", "")).removeprefix(f"pi05:{cfg.checkpoint}")
         same_inference = same_inference and (
@@ -1243,6 +1248,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--pi05_still_rad", type=float, default=None, help="with the still rule")
     parser.add_argument("--pi05_still_open", type=float, default=None, help="with the still rule")
+    parser.add_argument(
+        "--pi05_jaw_latch",
+        type=int,
+        default=None,
+        help="with --pi05: hold the jaw command this many actions after a close in each chunk",
+    )
     parser.add_argument("--only_processes", type=_process_list, default=None)
     parser.add_argument("--eval_timeout_s", type=float, default=4 * 3600)
     parser.add_argument("--backend", choices=("isaac", "mujoco"), default="isaac")
@@ -1609,11 +1620,13 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         if args.temporal_ensemble_coeff is not None or args.ensemble_with:
             raise ValueError("--pi05 serves one checkpoint open loop: no ensemble flags")
     jaw = args.pi05_jaw_noise_scale
-    sampling = (args.pi05_num_steps, args.pi05_noise_scale, jaw) != (None, None, None)
-    if not args.pi05 and (sampling or args.pi05_jaw_noise_shared):
+    sampling = (args.pi05_num_steps, args.pi05_noise_scale, jaw, args.pi05_jaw_latch)
+    if not args.pi05 and (sampling != (None,) * 4 or args.pi05_jaw_noise_shared):
         raise ValueError(
-            "--pi05_num_steps, --pi05_noise_scale and the --pi05_jaw_noise_* flags need --pi05"
+            "--pi05_num_steps, --pi05_noise_scale and the --pi05_jaw_* flags need --pi05"
         )
+    if args.pi05_jaw_latch is not None and args.pi05_jaw_latch < 0:
+        raise ValueError(f"--pi05_jaw_latch must be at least 0, got {args.pi05_jaw_latch}")
     if args.pi05_num_steps is not None and args.pi05_num_steps < 1:  # the server's own refusals
         raise ValueError(f"--pi05_num_steps must be at least 1, got {args.pi05_num_steps}")
     if args.pi05_noise_scale is not None and not 0.0 <= args.pi05_noise_scale < math.inf:
@@ -1763,6 +1776,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         pi05_still_noise_scale=args.pi05_still_noise_scale,
         pi05_still_rad=GateCfg.pi05_still_rad if still[1] is None else still[1],
         pi05_still_open=GateCfg.pi05_still_open if still[2] is None else still[2],
+        pi05_jaw_latch=args.pi05_jaw_latch or 0,
         only_processes=args.only_processes,
         eval_timeout_s=args.eval_timeout_s,
         backend=args.backend,

@@ -25,11 +25,17 @@ close and each re-open, so --jaw_noise_shared draws that column once a row and h
 chunk. The policy id is ``pi05:<checkpoint>`` plus ``+warp<X>``, ``+steps<N>``, ``+noise<S>``
 and ``+jawnoise<J>`` for each value off its default, ``+jawshared`` with the shared jaw draw on,
 and ``+still<S2>r<E>o<F>`` with the rule on, so the read cache never mixes it with an ACT read or
-another sampling.
+another sampling. The shared draw misses closes (an offline test on M2k, 2026-10-08: 0.69 of the
+chunks close against 0.98), so --jaw_latch L filters each chunk instead (``latch_jaw``, before
+the warp): after a close, the next L jaw commands stay at most the close's. The teacher's labels
+never re-open within 10 frames of a close (0 of 46,669), and V's chunks sampled before a close
+re-open within 10 actions of their own close in 29 % (29-31 % in the loop). Its policy id part
+is ``+latch<L>``, last.
 2026-10-05 on Machine A's RTX 5090, shared with ACT read servers, on a 50-step dry-run checkpoint:
 one forward of 1 row took 172-207 ms, 3 rows 245-291 ms and 6 rows 346 ms, at 9.4 GiB peak.
 Every forward prints "FORWARD rows=N ms=T" (plus " still=K", the rows resampled, with the rule
-on), so a read's log holds its batch sizes and times.
+on, and " latched=K", the rows the latch changed, with it on), so a read's log holds its batch
+sizes and times.
 
 The checkpoint is a pretrained_model directory of a pi05 fine-tune on the derived dataset; its
 action_space.json marker (the same walk as policy_server's) must say "absolute" and name the
@@ -94,6 +100,34 @@ JAW = 6
 at the end to max_action_dim: the derived dataset's meta/info.json names the 6 URDF joints, then
 gripper_gap_m. The checkpoint config names no action column (lerobot 0.5.1's PolicyFeature holds
 a type and a shape), so load_pi05 checks only the 7-wide action."""
+TARGET_WIDTH = 21
+"""The derived state's target_width column (the 7 state columns, then the 16-wide
+camera_box_target context, as meta/info.json names them): the grasp width in metres along the
+closing axis, which the heap loop's close rule compares the jaw gap command with (a command under
+it is a close); 0 with no target."""
+JAW_FULL_GAP = 2 * 0.0524125
+"""m: the jaw gap at state column 6 = 1.0, that column being the left jaw's opening fraction of
+convert_to_lerobot's GRIPPER_TRAVEL (both jaws move alike; a test pins the copy)."""
+
+
+def latch_jaw(chunk: np.ndarray, state: np.ndarray, steps: int) -> tuple[np.ndarray, int]:
+    """(chunk, rows changed): each row of the (n, T, 7) ``chunk`` with its jaw command held at
+    most at a close's command for the ``steps`` actions after it, the arm columns untouched. A
+    close is an action t whose command is under the row's target width w (``TARGET_WIDTH`` of
+    the derived ``state``, w > 0) after a command at or above w at t - 1, or, at t = 0, after
+    a measured gap (``JAW_FULL_GAP`` times state[:, 6]) at or above w. A chunk that starts
+    under w from a gap under w has no close, so a release stays free. Pure."""
+    out = chunk.copy()
+    for row in range(len(out)):
+        w, prev, left, cap = state[row, TARGET_WIDTH], JAW_FULL_GAP * state[row, 6], 0, 0.0
+        jaw = out[row, :, JAW]  # a view
+        for t in range(len(jaw)):
+            if left:
+                jaw[t], left = min(jaw[t], cap), left - 1
+            elif w > 0 and prev >= w > jaw[t]:
+                cap, left = jaw[t], steps
+            prev = jaw[t]
+    return out, int((out != chunk).any(axis=(1, 2)).sum())
 
 
 def still_rows(chunk: np.ndarray, state: np.ndarray, rad: float, open_frac: float) -> np.ndarray:
@@ -109,7 +143,8 @@ class SharedServer:
     {"state": (n, 23), "wrist": (n, 224, 224, 3) uint8, "overhead": ...} and returns the
     unnormalized (n, n_action_steps, 7) chunk. ``process`` is socket-free for the tests. With
     ``still`` = (S2, E, F), the still rows of a forward (``still_rows`` at E and F) get
-    ``predict_chunk(obs of those rows, S2)``'s chunk."""
+    ``predict_chunk(obs of those rows, S2)``'s chunk. ``jaw_latch`` L > 0 passes every chunk
+    through ``latch_jaw`` before the warp."""
 
     def __init__(
         self,
@@ -120,6 +155,7 @@ class SharedServer:
         gripper: str,
         action_warp: float = 1.0,
         still: tuple[float, float, float] | None = None,
+        jaw_latch: int = 0,
     ):
         if not ACTION_WARP_MIN <= action_warp <= ACTION_WARP_MAX:
             raise ValueError(
@@ -132,7 +168,10 @@ class SharedServer:
         if still is not None:
             names = ("still_noise_scale", "still_rad", "still_open")
             self._inference |= dict(zip(names, still))
+        if jaw_latch:
+            self._inference["jaw_latch"] = jaw_latch
         self._still = still
+        self._latch = jaw_latch
         self._gripper = gripper
         self._warp = action_warp
         self._queues: dict[bytes, list[deque]] = {}  # lane identity -> one queue an env row
@@ -231,6 +270,8 @@ class SharedServer:
                     if len(still):
                         resample = {k: v[still] for k, v in obs.items()}
                         chunk[still] = self._predict(resample, self._still[0])
+                if self._latch:
+                    chunk, latched = latch_jaw(chunk, obs["state"], self._latch)
             except Exception:  # noqa: BLE001 -- every lane of the forward gets the error
                 error = _error("exception", traceback.format_exc())
                 for lane, _ in need:
@@ -239,7 +280,8 @@ class SharedServer:
             self.forward_sizes.append(len(need))
             ms = 1000 * (time.perf_counter() - start)
             log = f"FORWARD rows={len(need)} ms={ms:.1f}"  # the read's batch log
-            print(log + ("" if self._still is None else f" still={len(still)}"), flush=True)
+            log += "" if self._still is None else f" still={len(still)}"
+            print(log + (f" latched={latched}" if self._latch else ""), flush=True)
             for (lane, i), actions in zip(need, warp_chunk(chunk, self._warp)):
                 self._queues[lane][i] = deque(actions)
         replies = []
@@ -399,6 +441,7 @@ def main() -> int:
     parser.add_argument("--still_noise_scale", type=float, help="resample still rows at this")
     parser.add_argument("--still_rad", type=float, default=STILL_RAD)
     parser.add_argument("--still_open", type=float, default=STILL_OPEN)
+    parser.add_argument("--jaw_latch", type=int, default=0, help="actions held after a close")
     try:
         args = parser.parse_args()
         if args.num_steps is not None and args.num_steps < 1:
@@ -416,6 +459,8 @@ def main() -> int:
             parser.error(f"--still_rad must be finite and above 0, got {rad}")
         if not 0.0 <= open_frac <= 1.0:
             parser.error(f"--still_open must be in [0, 1], got {open_frac}")
+        if args.jaw_latch < 0:
+            parser.error(f"--jaw_latch must be at least 0, got {args.jaw_latch}")
         predict_chunk, n_action_steps, inference, gripper, sampling = load_pi05(
             args.checkpoint,
             args.device,
@@ -429,8 +474,16 @@ def main() -> int:
         )
         still = None if scale is None else (scale, rad, open_frac)
         policy_id += sampling + ("" if still is None else "+still{}r{}o{}".format(*still))
+        policy_id += f"+latch{args.jaw_latch}" if args.jaw_latch else ""
         server = SharedServer(
-            predict_chunk, policy_id, n_action_steps, inference, gripper, args.action_warp, still
+            predict_chunk,
+            policy_id,
+            n_action_steps,
+            inference,
+            gripper,
+            args.action_warp,
+            still,
+            args.jaw_latch,
         )
         socket = zmq.Context.instance().socket(zmq.ROUTER)
         socket.bind(f"tcp://127.0.0.1:{args.port}")
