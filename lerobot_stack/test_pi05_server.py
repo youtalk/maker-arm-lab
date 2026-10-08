@@ -231,6 +231,7 @@ class StandInPolicy:
     config = SimpleNamespace(
         image_features={v: None for v in ps.IMAGE_KEYS.values()},
         robot_state_feature=SimpleNamespace(shape=(23,)),
+        output_features={"action": SimpleNamespace(shape=(7,))},
         n_action_steps=N,
         chunk_size=N,
         max_action_dim=32,
@@ -325,6 +326,31 @@ def test_the_sampling_switches_reach_sample_actions_and_name_the_policy(stand_in
     assert policy.kwargs.pop() == {}
 
 
+def test_the_jaw_noise_scale_scales_only_the_jaw_column(stand_in):
+    policy, ckpt = stand_in
+    predict_chunk, _, inference, _, sampling = ps.load_pi05(ckpt, "cpu", None, 1.0, 1.0)
+    forward(predict_chunk)
+    assert policy.kwargs.pop() == {} and sampling == "" and "jaw_noise_scale" not in inference
+    predict_chunk, _, inference, _, sampling = ps.load_pi05(ckpt, "cpu", None, 0.5, 0.25)
+    assert sampling == "+noise0.5+jawnoise0.25" and inference["jaw_noise_scale"] == 0.25
+    _, arrays = step(0.5, batch=2)
+    obs = {"state": derived_state(arrays["state"], arrays["context"])}
+    obs |= {"wrist": arrays["wrist"], "overhead": arrays["overhead"]}
+    for scale in (None, 0.7, 1.0):  # the forward's own scale, then two still resamples
+        predict_chunk(obs) if scale is None else predict_chunk(obs, scale)
+        want = torch.full((2, N, 32), 0.5 if scale is None else scale)
+        want[..., ps.JAW] *= 0.25
+        assert torch.equal(policy.kwargs.pop()["noise"], want)
+
+
+def test_the_jaw_is_the_last_of_seven_actions(stand_in, monkeypatch):
+    policy, ckpt = stand_in
+    assert ps.JAW == 6
+    monkeypatch.setitem(policy.config.output_features, "action", SimpleNamespace(shape=(8,)))
+    with pytest.raises(ValueError, match=r"an action of \(8,\)"):
+        ps.load_pi05(ckpt, "cpu")
+
+
 STILL_ON = ["--still_noise_scale", "0.7", "--still_rad", "0.1", "--still_open", "0.8"]
 
 
@@ -335,6 +361,7 @@ STILL_ON = ["--still_noise_scale", "0.7", "--still_rad", "0.1", "--still_open", 
         (["--still_rad", "0.1"], "", {}),  # E alone: the rule stays off
         (["--still_noise_scale", "1"], "+still1.0r0.15o0.9", [1.0, 0.15, 0.9]),
         (STILL_ON, "+still0.7r0.1o0.8", [0.7, 0.1, 0.8]),
+        (["--jaw_noise_scale", "0", *STILL_ON], "+jawnoise0.0+still0.7r0.1o0.8", [0.7, 0.1, 0.8]),
     ],
 )
 def test_the_policy_id_names_each_switch_off_its_default(
@@ -353,6 +380,7 @@ def test_the_policy_id_names_each_switch_off_its_default(
     assert ready["policy_id"] == f"pi05:{ckpt}+warp1.5+steps50+noise0.0{tail}"
     assert ready["inference"]["num_inference_steps"] == 50
     assert ready["inference"]["noise_scale"] == 0.0
+    assert ready["inference"].get("jaw_noise_scale") == (0.0 if "+jawnoise" in tail else None)
     names = ("still_noise_scale", "still_rad", "still_open")
     assert {k: v for k, v in ready["inference"].items() if k in names} == dict(zip(names, block))
 
@@ -363,6 +391,8 @@ def test_the_policy_id_names_each_switch_off_its_default(
         ["--num_steps", "0"],
         ["--noise_scale", "-0.1"],
         ["--noise_scale", "nan"],
+        ["--jaw_noise_scale", "-0.1"],
+        ["--jaw_noise_scale", "inf"],
         ["--still_noise_scale", "-1"],
         ["--still_rad", "0"],
         ["--still_open", "1.5"],

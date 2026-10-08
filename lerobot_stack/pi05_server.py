@@ -17,9 +17,11 @@ starts the flow from S * N(0, I), so 0 gives deterministic chunks. At their defa
 checkpoint's steps, 1.0) sample_actions gets no extra argument and draws its own noise. Zero
 noise leaves V parked at a cycle start (h_V30kM2k_z0_a, 2026-10-08), so --still_noise_scale S2
 samples each still row of a forward once more, from S2 * N(0, I), in one forward over those
-rows, and serves that chunk instead (``still_rows``). The policy id is ``pi05:<checkpoint>`` plus
-``+warp<X>``, ``+steps<N>`` and ``+noise<S>`` for each value off its default, and
-``+still<S2>r<E>o<F>`` with the rule on, so the read cache never mixes it with an ACT read or
+rows, and serves that chunk instead (``still_rows``). Zero noise also removes V's re-open after
+its own close, so --jaw_noise_scale J multiplies the jaw column of every initial noise (a
+resample's too) by J and keeps the arm's noise. The policy id is ``pi05:<checkpoint>`` plus
+``+warp<X>``, ``+steps<N>``, ``+noise<S>`` and ``+jawnoise<J>`` for each value off its default,
+and ``+still<S2>r<E>o<F>`` with the rule on, so the read cache never mixes it with an ACT read or
 another sampling.
 2026-10-05 on Machine A's RTX 5090, shared with ACT read servers, on a 50-step dry-run checkpoint:
 one forward of 1 row took 172-207 ms, 3 rows 245-291 ms and 6 rows 346 ms, at 9.4 GiB peak.
@@ -84,6 +86,11 @@ STILL_OPEN = 0.9
 fraction, 1.0 fully open) is at least this, so a close, where the teacher holds the arm still,
 is never resampled. 2026-10-08: the parked frames above read 0.9615 at the least (the trace's
 measured gap 0.989), the jaw test's 400 frames at a close 0.548 at the most."""
+JAW = 6
+"""The jaw's column of the 7 actions, which the model samples normalized (per column) and padded
+at the end to max_action_dim: the derived dataset's meta/info.json names the 6 URDF joints, then
+gripper_gap_m. The checkpoint config names no action column (lerobot 0.5.1's PolicyFeature holds
+a type and a shape), so load_pi05 checks only the 7-wide action."""
 
 
 def still_rows(chunk: np.ndarray, state: np.ndarray, rad: float, open_frac: float) -> np.ndarray:
@@ -276,10 +283,16 @@ def _error(error: str, message: str) -> dict:
     return {"type": "error", "error": error, "message": message}
 
 
-def load_pi05(checkpoint: str, device: str, num_steps: int | None = None, noise_scale: float = 1.0):
+def load_pi05(
+    checkpoint: str,
+    device: str,
+    num_steps: int | None = None,
+    noise_scale: float = 1.0,
+    jaw_noise_scale: float = 1.0,
+):
     """(predict_chunk, n_action_steps, inference, gripper, sampling) of a pi05 pretrained_model
-    directory. ``sampling`` is the policy id's ``+steps<N>+noise<S>``, each part only when its
-    value is off its default (num_steps None means the checkpoint's own).
+    directory. ``sampling`` is the policy id's ``+steps<N>+noise<S>+jawnoise<J>``, each part only
+    when its value is off its default (num_steps None means the checkpoint's own).
 
     The server reads only local files: the checkpoint and the tokenizer in the Hugging Face
     cache (the gated google/paligemma-3b-pt-224 files). transformers 5.3's AutoTokenizer also
@@ -300,10 +313,11 @@ def load_pi05(checkpoint: str, device: str, num_steps: int | None = None, noise_
     policy = PI05Policy.from_pretrained(checkpoint)
     config = policy.config
     images = sorted(config.image_features)
-    if images != sorted(IMAGE_KEYS.values()) or config.robot_state_feature.shape != (23,):
+    state, action = config.robot_state_feature.shape, config.output_features["action"].shape
+    if images != sorted(IMAGE_KEYS.values()) or state != (23,) or action != (7,):
         raise ValueError(
-            f"{checkpoint} takes {images} and a state of {config.robot_state_feature.shape}, "
-            f"not the derived dataset's {sorted(IMAGE_KEYS.values())} and (23,)"
+            f"{checkpoint} takes {images} and a state of {state} to an action of {action}, "
+            f"not the derived dataset's {sorted(IMAGE_KEYS.values())}, (23,) and (7,)"
         )
     policy.to(device)
     policy.eval()
@@ -326,12 +340,15 @@ def load_pi05(checkpoint: str, device: str, num_steps: int | None = None, noise_
         kwargs["num_steps"], sampling = num_steps, f"+steps{num_steps}"
     if noise_scale != 1.0:
         sampling += f"+noise{noise_scale}"
+    if jaw_noise_scale != 1.0:
+        sampling += f"+jawnoise{jaw_noise_scale}"
 
     def predict_chunk(obs: dict, scale: float = noise_scale) -> np.ndarray:
         noise = {}
-        if scale != 1.0:  # sample_actions' own draw (float32 on the device), scaled
+        if scale != 1.0 or jaw_noise_scale != 1.0:  # sample_actions' own draw, scaled
             shape = (len(obs["state"]), config.chunk_size, config.max_action_dim)
             noise["noise"] = scale * policy.model.sample_noise(shape, device)
+            noise["noise"][..., JAW] *= jaw_noise_scale
         batch = {
             "observation.state": torch.from_numpy(obs["state"]),
             "task": [TASK] * len(obs["state"]),
@@ -349,6 +366,7 @@ def load_pi05(checkpoint: str, device: str, num_steps: int | None = None, noise_
         "chunk_size": int(config.chunk_size),
         "num_inference_steps": int(kwargs.get("num_steps", config.num_inference_steps)),
         **({"noise_scale": noise_scale} if noise_scale != 1.0 else {}),
+        **({"jaw_noise_scale": jaw_noise_scale} if jaw_noise_scale != 1.0 else {}),
     }
     return predict_chunk, int(config.n_action_steps), inference, marker["gripper"], sampling
 
@@ -367,6 +385,7 @@ def main() -> int:
     parser.add_argument("--action_warp", type=float, default=1.0)
     parser.add_argument("--num_steps", type=int, help="flow steps a forward (the checkpoint's)")
     parser.add_argument("--noise_scale", type=float, default=1.0, help="0: deterministic chunks")
+    parser.add_argument("--jaw_noise_scale", type=float, default=1.0, help="the jaw column's")
     parser.add_argument("--still_noise_scale", type=float, help="resample still rows at this")
     parser.add_argument("--still_rad", type=float, default=STILL_RAD)
     parser.add_argument("--still_open", type=float, default=STILL_OPEN)
@@ -376,6 +395,10 @@ def main() -> int:
             parser.error(f"--num_steps must be at least 1, got {args.num_steps}")
         if not 0.0 <= args.noise_scale < float("inf"):
             parser.error(f"--noise_scale must be finite and at least 0, got {args.noise_scale}")
+        if not 0.0 <= args.jaw_noise_scale < float("inf"):
+            parser.error(
+                f"--jaw_noise_scale must be finite and at least 0, got {args.jaw_noise_scale}"
+            )
         scale, rad, open_frac = args.still_noise_scale, args.still_rad, args.still_open
         if scale is not None and not 0.0 <= scale < float("inf"):
             parser.error(f"--still_noise_scale must be finite and at least 0, got {scale}")
@@ -384,7 +407,7 @@ def main() -> int:
         if not 0.0 <= open_frac <= 1.0:
             parser.error(f"--still_open must be in [0, 1], got {open_frac}")
         predict_chunk, n_action_steps, inference, gripper, sampling = load_pi05(
-            args.checkpoint, args.device, args.num_steps, args.noise_scale
+            args.checkpoint, args.device, args.num_steps, args.noise_scale, args.jaw_noise_scale
         )
         policy_id = f"pi05:{args.checkpoint}" + (
             f"+warp{args.action_warp}" if args.action_warp != 1.0 else ""
