@@ -14,14 +14,16 @@
 #
 # Drive layout under /content/drive/MyDrive/$DIR:
 #   colab_train_pi05.sh, pi05_preflight.py, train_pi05.py   this script and its two helpers
-#   $JAW_MASK             the jaw mask .npy (train_pi05.py --jaw_mask), optional
+#   $JAW_MASK             the jaw mask .npy (train_pi05.py --jaw_mask), optional, with the
+#                         .json sidecar of the same name that jaw_mask_list.py writes
 #   dataset/              the derived dataset (DATASET=dataset_third for the one-third copy)
 #   $START                the pretrained_model directory the run starts from, e.g.
 #                         checkpoints/030000/pretrained_model (run 1) or checkpoints_ab/<step>/...
 #   $RUN_NAME/<step>/     the run's last complete checkpoint; one folder a run, e.g.
 #                         checkpoints_ab, checkpoints_c1, checkpoints_c2
 #   $RUN_NAME/last.txt    its step directory name
-#   $RUN_NAME/jaw_mask.npy  the mask the run started with; a resume trains with it
+#   $RUN_NAME/jaw_mask.npy  the mask the run started with (and its jaw_mask.json); a resume
+#                         trains with it
 #   action_space.json     the dataset's gripper contract, found by policy_server's marker walk
 #
 # A fresh run copies START to the local disk, sets its saved tokenizer step to 128 tokens (a
@@ -203,6 +205,7 @@ JAW=()
 if [ "$SMOKE" -eq 0 ] && [ -f "$RUN_DIR/last.txt" ]; then
     RESUME=1
     if [ -f "$RUN_DIR/jaw_mask.npy" ]; then
+        [ -f "$RUN_DIR/jaw_mask.json" ] || fail "no $RUN_DIR/jaw_mask.json beside its jaw_mask.npy"
         if [ -n "${JAW_MASK:-}" ] && ! cmp -s "$DRIVE/$JAW_MASK" "$RUN_DIR/jaw_mask.npy"; then
             fail "JAW_MASK=$JAW_MASK is not the mask $RUN_NAME started with"
         fi
@@ -219,6 +222,8 @@ else
     [ -f "$src/model.safetensors" ] || fail "no model.safetensors in START $src"
     if [ -n "${JAW_MASK:-}" ]; then
         [ -f "$DRIVE/$JAW_MASK" ] || fail "no jaw mask $DRIVE/$JAW_MASK"
+        [ -f "$DRIVE/${JAW_MASK%.npy}.json" ] \
+            || fail "no $DRIVE/${JAW_MASK%.npy}.json: train_pi05.py reads the mask's sidecar"
         JAW=(--jaw_mask="$DRIVE/$JAW_MASK")
     fi
     if [ "$SMOKE" -eq 0 ]; then
@@ -288,13 +293,16 @@ if [ "$RESUME" -eq 1 ]; then
     STEPS=$(run_steps "$config")
     START_STEP=$((10#$last))
     echo "resuming $RUN_NAME from checkpoint $last toward step $STEPS ($FIT steps fit)"
-    # --output_dir: a resumed train_config.json names the first session's output dir
-    CMD=("${TRAIN[@]}" --config_path="$config" --resume=true --output_dir="$OUT" "${JAW[@]}")
+    # --output_dir: a resumed train_config.json names the first session's output dir;
+    # --dataset.root: train_pi05.py checks the jaw mask's sidecar against it
+    CMD=("${TRAIN[@]}" --config_path="$config" --resume=true --output_dir="$OUT"
+        --dataset.root="$LOCAL_DATA" "${JAW[@]}")
 else
     if [ "$SMOKE" -eq 0 ]; then
         mkdir -p "$RUN_DIR"
-        rm -f "$RUN_DIR/jaw_mask.npy"
+        rm -f "$RUN_DIR/jaw_mask.npy" "$RUN_DIR/jaw_mask.json"
         if [ -n "${JAW_MASK:-}" ]; then # the run keeps its own copy, so a resume trains with it
+            cp "$DRIVE/${JAW_MASK%.npy}.json" "$RUN_DIR/jaw_mask.json"
             cp "$DRIVE/$JAW_MASK" "$RUN_DIR/jaw_mask.npy"
             JAW=(--jaw_mask="$RUN_DIR/jaw_mask.npy")
         fi

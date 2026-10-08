@@ -217,6 +217,7 @@ def rig(tmp_path):
     (start / "model.safetensors").write_bytes(b"\0" * 1000)
     (start / "policy_preprocessor.json").write_text(json.dumps(_preprocessor_json(200)))
     np.save(drive / "jaw.npy", np.arange(5, dtype=np.int64))
+    (drive / "jaw.json").write_text("{}")  # the sidecar train_pi05.py checks
     for name, body in SHIMS.items():
         (tmp_path / "bin" / name).write_text("#!/usr/bin/env bash\n" + body)
         (tmp_path / "bin" / name).chmod(0o755)
@@ -323,7 +324,7 @@ def test_a_fresh_run_passes_every_recipe_flag_and_keeps_one_checkpoint(rig):
     }
     assert {k: call[k] for k in want} == want
     assert call["pretrained_path"] == str(rig.path / "content" / "start_model")
-    assert _held(rig) == ["000301", "jaw_mask.npy", "last.txt"]
+    assert _held(rig) == ["000301", "jaw_mask.json", "jaw_mask.npy", "last.txt"]
     assert sorted(p.name for p in (rig.run / "000301").iterdir()) == ["pretrained_model"]
     held = (rig.fake / "cp.log").read_text().splitlines()
     assert any(not line.endswith("held: ") for line in held)  # room: copy, then delete
@@ -344,8 +345,9 @@ def test_a_resumed_session_trains_masked_with_the_run_s_jaw_mask(rig):
     assert second["resume"] is True and second["start"] == 200 and second["steps"] == 300
     assert second["output_dir"] == str(rig.out) and second["max_length"] == 128
     assert second["jaw_mask"] == str(rig.run / "jaw_mask.npy")
+    assert second["dataset_root"] == str(rig.path / "content" / "dataset")
     assert second["warmup"] == first["warmup"] == 10 and second["decay"] == 300
-    assert _held(rig) == ["000300", "jaw_mask.npy", "last.txt"]
+    assert _held(rig) == ["000300", "jaw_mask.json", "jaw_mask.npy", "last.txt"]
     assert not (rig.run / "000300" / "training_state").exists()
 
 
@@ -388,7 +390,7 @@ def test_a_short_drive_never_holds_two_checkpoints(rig):
     assert r.token.startswith("COLAB_TRAIN_OK") and "Drive is short of room" in r.stdout
     held = (rig.fake / "cp.log").read_text().splitlines()
     assert len(held) >= 2 and all(line.endswith("held: ") for line in held), held
-    assert _held(rig) == ["000300", "jaw_mask.npy", "last.txt"]
+    assert _held(rig) == ["000300", "jaw_mask.json", "jaw_mask.npy", "last.txt"]
 
 
 def test_the_final_sync_retries_then_fails_after_its_window(rig):
@@ -419,6 +421,12 @@ def test_the_final_sync_retries_then_fails_after_its_window(rig):
 def test_each_usage_stop_prints_one_fail_token(rig, args, env, why):
     r = _run(rig, *args, **env)
     assert r.rc == 1 and r.token.startswith("COLAB_TRAIN_FAIL") and why in r.token
+
+
+def test_a_jaw_mask_without_its_sidecar_is_refused(rig):
+    (rig.drive / "jaw.json").unlink()
+    r = _run(rig)
+    assert "train_pi05.py reads the mask's sidecar" in r.token and not _calls(rig)
 
 
 def test_steps_past_the_session_end_are_refused(rig):
@@ -457,6 +465,11 @@ def standin(args: list[str]) -> int:
         return cfg
 
     jaw = next((a.split("=", 1)[1] for a in args if a.startswith("--jaw_mask=")), None)
+    if jaw is not None:  # train_pi05.py (f68e0c8) load_jaw_starts
+        if not Path(jaw).with_suffix(".json").is_file():
+            raise SystemExit(f"no sidecar beside {jaw}")
+        if not any(a.startswith("--dataset.root=") for a in args):
+            raise SystemExit("--jaw_mask needs --dataset.root")
     sys.argv = ["lerobot-train", *[a for a in args if not a.startswith("--jaw_mask=")]]
     cfg = parser.wrap()(parse)()
     model_dir = Path(cfg.policy.pretrained_path)
@@ -495,6 +508,7 @@ def standin(args: list[str]) -> int:
         "seed": cfg.seed,
         "pretrained_path": str(model_dir),
         "output_dir": str(cfg.output_dir),
+        "dataset_root": str(cfg.dataset.root),
         "jaw_mask": jaw,
     }
     with open(Path(os.environ["FAKE_DIR"]) / "cfg.jsonl", "a") as f:
