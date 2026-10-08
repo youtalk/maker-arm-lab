@@ -11,8 +11,12 @@ the camera roll wrapped exactly as the training data was, and writes derive_vla_
 the prompt's task, so the clients send what they send to an ACT server with context.
 
 Serving matches B's: the checkpoint's 50 actions a forward, open loop (no temporal ensembling),
-its 10 flow steps, and --action_warp (1.5 for the reads). The policy id is
-``pi05:<checkpoint>`` (plus ``+warp<X>``), so the read cache never mixes it with an ACT read.
+its 10 flow steps, and --action_warp (1.5 for the reads). Two sampling switches serve the jaw
+test of the MS7h pi0.5 recipe: --num_steps sets the flow steps a forward, and --noise_scale S
+starts the flow from S * N(0, I), so 0 gives deterministic chunks. At their defaults (the
+checkpoint's steps, 1.0) sample_actions gets no extra argument and draws its own noise. The
+policy id is ``pi05:<checkpoint>`` plus ``+warp<X>``, ``+steps<N>`` and ``+noise<S>`` for each
+value off its default, so the read cache never mixes it with an ACT read or another sampling.
 2026-10-05 on Machine A's RTX 5090, shared with ACT read servers, on a 50-step dry-run checkpoint:
 one forward of 1 row took 172-207 ms, 3 rows 245-291 ms and 6 rows 346 ms, at 9.4 GiB peak.
 Every forward prints "FORWARD rows=N ms=T", so a read's log holds its batch sizes and times.
@@ -231,8 +235,10 @@ def _error(error: str, message: str) -> dict:
     return {"type": "error", "error": error, "message": message}
 
 
-def load_pi05(checkpoint: str, device: str):
-    """(predict_chunk, n_action_steps, inference, gripper) of a pi05 pretrained_model directory.
+def load_pi05(checkpoint: str, device: str, num_steps: int | None = None, noise_scale: float = 1.0):
+    """(predict_chunk, n_action_steps, inference, gripper, sampling) of a pi05 pretrained_model
+    directory. ``sampling`` is the policy id's ``+steps<N>+noise<S>``, each part only when its
+    value is off its default (num_steps None means the checkpoint's own).
 
     The server reads only local files: the checkpoint and the tokenizer in the Hugging Face
     cache (the gated google/paligemma-3b-pt-224 files). transformers 5.3's AutoTokenizer also
@@ -274,7 +280,17 @@ def load_pi05(checkpoint: str, device: str):
         },
     )
 
+    kwargs, sampling = {}, ""  # what reaches sample_actions: nothing at the defaults
+    if num_steps not in (None, config.num_inference_steps):
+        kwargs["num_steps"], sampling = num_steps, f"+steps{num_steps}"
+    if noise_scale != 1.0:
+        sampling += f"+noise{noise_scale}"
+
     def predict_chunk(obs: dict) -> np.ndarray:
+        noise = {}
+        if noise_scale != 1.0:  # sample_actions' own draw (float32 on the device), scaled
+            shape = (len(obs["state"]), config.chunk_size, config.max_action_dim)
+            noise["noise"] = noise_scale * policy.model.sample_noise(shape, device)
         batch = {
             "observation.state": torch.from_numpy(obs["state"]),
             "task": [TASK] * len(obs["state"]),
@@ -282,16 +298,18 @@ def load_pi05(checkpoint: str, device: str):
         for key, name in IMAGE_KEYS.items():
             batch[name] = torch.from_numpy(obs[key]).permute(0, 3, 1, 2).to(torch.float32) / 255.0
         with torch.inference_mode():
-            chunk = policy.predict_action_chunk(pre(batch))[:, : config.n_action_steps]
+            chunk = policy.predict_action_chunk(pre(batch), **kwargs, **noise)
+            chunk = chunk[:, : config.n_action_steps]
             return np.asarray(post(chunk).to("cpu", torch.float32), dtype=np.float32)
 
     inference = {
         "n_action_steps": int(config.n_action_steps),
         "temporal_ensemble_coeff": None,
         "chunk_size": int(config.chunk_size),
-        "num_inference_steps": int(config.num_inference_steps),
+        "num_inference_steps": int(kwargs.get("num_steps", config.num_inference_steps)),
+        **({"noise_scale": noise_scale} if noise_scale != 1.0 else {}),
     }
-    return predict_chunk, int(config.n_action_steps), inference, marker["gripper"]
+    return predict_chunk, int(config.n_action_steps), inference, marker["gripper"], sampling
 
 
 class TokenArgumentParser(argparse.ArgumentParser):
@@ -306,12 +324,21 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=5555)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--action_warp", type=float, default=1.0)
+    parser.add_argument("--num_steps", type=int, help="flow steps a forward (the checkpoint's)")
+    parser.add_argument("--noise_scale", type=float, default=1.0, help="0: deterministic chunks")
     try:
         args = parser.parse_args()
-        predict_chunk, n_action_steps, inference, gripper = load_pi05(args.checkpoint, args.device)
+        if args.num_steps is not None and args.num_steps < 1:
+            parser.error(f"--num_steps must be at least 1, got {args.num_steps}")
+        if not 0.0 <= args.noise_scale < float("inf"):
+            parser.error(f"--noise_scale must be finite and at least 0, got {args.noise_scale}")
+        predict_chunk, n_action_steps, inference, gripper, sampling = load_pi05(
+            args.checkpoint, args.device, args.num_steps, args.noise_scale
+        )
         policy_id = f"pi05:{args.checkpoint}" + (
             f"+warp{args.action_warp}" if args.action_warp != 1.0 else ""
         )
+        policy_id += sampling
         server = SharedServer(
             predict_chunk, policy_id, n_action_steps, inference, gripper, args.action_warp
         )

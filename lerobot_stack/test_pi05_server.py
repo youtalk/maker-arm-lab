@@ -1,9 +1,16 @@
 """pi05_server.py (the shared pi0.5 server, MS7h design 7.3) with a fake model, CPU only."""
 
+import json
+import socket
+import subprocess
+import sys
 import threading
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 import zmq
 
 import pi05_server as ps
@@ -155,3 +162,128 @@ def test_unchanged_clients_share_the_server_over_a_router_socket():
     stop.recv_multipart()
     thread.join(timeout=10)
     assert not thread.is_alive()
+
+
+class StandInPolicy:
+    """PI05Policy's surface that load_pi05 uses; records what reaches predict_action_chunk."""
+
+    config = SimpleNamespace(
+        image_features={v: None for v in ps.IMAGE_KEYS.values()},
+        robot_state_feature=SimpleNamespace(shape=(23,)),
+        n_action_steps=N,
+        chunk_size=N,
+        max_action_dim=32,
+        num_inference_steps=10,
+    )
+
+    def __init__(self):
+        self.kwargs = []
+        self.model = SimpleNamespace(sample_noise=lambda shape, device: torch.ones(shape))
+
+    def to(self, device):
+        return self
+
+    def eval(self):
+        return self
+
+    def predict_action_chunk(self, batch, **kwargs):
+        self.kwargs.append(kwargs)
+        return torch.zeros(len(batch["task"]), N, 7)
+
+
+@pytest.fixture
+def stand_in(monkeypatch, tmp_path):
+    """load_pi05 on a checkpoint dir with its marker and tokenizer step, lerobot and
+    transformers replaced, so the sampling path runs on the CPU in this venv."""
+    policy = StandInPolicy()
+    modules = {
+        "lerobot.policies.pi05.modeling_pi05": SimpleNamespace(
+            PI05Policy=SimpleNamespace(from_pretrained=lambda path: policy)
+        ),
+        "lerobot.policies.factory": SimpleNamespace(
+            make_pre_post_processors=lambda **kw: (lambda b: b, lambda c: c)
+        ),
+        "transformers": SimpleNamespace(
+            GemmaTokenizer=SimpleNamespace(from_pretrained=lambda name: None)
+        ),
+    }
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    (tmp_path / "action_space.json").write_text(
+        json.dumps({"action_space": "absolute", "gripper": "continuous"})
+    )
+    steps = [{"registry_name": ps.TOKENIZER, "config": {"tokenizer_name": "paligemma"}}]
+    (tmp_path / "policy_preprocessor.json").write_text(json.dumps({"steps": steps}))
+    return policy, str(tmp_path)
+
+
+def forward(predict_chunk, rows=2):
+    _, arrays = step(0.5, batch=rows)
+    obs = {"state": derived_state(arrays["state"], arrays["context"])}
+    return predict_chunk({**obs, "wrist": arrays["wrist"], "overhead": arrays["overhead"]})
+
+
+def test_the_default_sampling_passes_nothing_to_the_model(stand_in):
+    policy, ckpt = stand_in
+    for num_steps in (None, 10):  # the checkpoint's own steps, named or not
+        predict_chunk, n, inference, gripper, sampling = ps.load_pi05(ckpt, "cpu", num_steps)
+        assert forward(predict_chunk).shape == (2, N, 7)
+        assert policy.kwargs.pop() == {} and sampling == ""
+        assert (n, gripper) == (N, "continuous")
+        assert inference == {  # the block every pi05 read recorded before the switches
+            "n_action_steps": N,
+            "temporal_ensemble_coeff": None,
+            "chunk_size": N,
+            "num_inference_steps": 10,
+        }
+
+
+def test_the_sampling_switches_reach_sample_actions_and_name_the_policy(stand_in):
+    policy, ckpt = stand_in
+    predict_chunk, _, inference, _, sampling = ps.load_pi05(ckpt, "cpu", 50, 0.0)
+    forward(predict_chunk, rows=3)
+    sent = policy.kwargs.pop()
+    assert sent.keys() == {"num_steps", "noise"} and sent["num_steps"] == 50
+    assert sent["noise"].shape == (3, N, 32) and not sent["noise"].any()  # zero noise
+    assert (inference["num_inference_steps"], inference["noise_scale"]) == (50, 0.0)
+    assert sampling == "+steps50+noise0.0"
+    predict_chunk, _, inference, _, sampling = ps.load_pi05(ckpt, "cpu", None, 0.5)
+    forward(predict_chunk)
+    noise = policy.kwargs.pop()["noise"]
+    assert noise.dtype == torch.float32 and torch.equal(noise, torch.full((2, N, 32), 0.5))
+    assert sampling == "+noise0.5" and inference["num_inference_steps"] == 10
+
+
+def test_the_policy_id_names_each_switch_off_its_default(stand_in, monkeypatch, capsys):
+    _, ckpt = stand_in
+    monkeypatch.setattr(ps.SharedServer, "serve", lambda self, socket: None)
+    with socket.socket() as probe:  # a free port for the bind
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    argv = ["pi05_server.py", "--checkpoint", ckpt, "--device", "cpu", "--port", str(port)]
+    argv += ["--action_warp", "1.5", "--num_steps", "50", "--noise_scale", "0"]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert ps.main() == 0
+    ready = json.loads(capsys.readouterr().out.split("SERVER_READY ", 1)[1].splitlines()[0])
+    assert ready["policy_id"] == f"pi05:{ckpt}+warp1.5+steps50+noise0.0"
+    assert ready["inference"]["num_inference_steps"] == 50
+    assert ready["inference"]["noise_scale"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [["--num_steps", "0"], ["--noise_scale", "-0.1"], ["--noise_scale", "nan"]],
+)
+def test_a_bad_sampling_value_fails_with_the_token(flags):
+    here = Path(ps.__file__).parent
+    result = subprocess.run(
+        [sys.executable, "pi05_server.py", "--checkpoint", "/none", *flags],
+        cwd=here,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert result.stdout.strip().splitlines()[-1].startswith(f"SERVER_FAIL usage: {flags[0]}")
