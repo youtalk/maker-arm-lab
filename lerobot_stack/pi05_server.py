@@ -14,12 +14,17 @@ Serving matches B's: the checkpoint's 50 actions a forward, open loop (no tempor
 its 10 flow steps, and --action_warp (1.5 for the reads). Two sampling switches serve the jaw
 test of the MS7h pi0.5 recipe: --num_steps sets the flow steps a forward, and --noise_scale S
 starts the flow from S * N(0, I), so 0 gives deterministic chunks. At their defaults (the
-checkpoint's steps, 1.0) sample_actions gets no extra argument and draws its own noise. The
-policy id is ``pi05:<checkpoint>`` plus ``+warp<X>``, ``+steps<N>`` and ``+noise<S>`` for each
-value off its default, so the read cache never mixes it with an ACT read or another sampling.
+checkpoint's steps, 1.0) sample_actions gets no extra argument and draws its own noise. Zero
+noise leaves V parked at a cycle start (h_V30kM2k_z0_a, 2026-10-08), so --still_noise_scale S2
+samples each still row of a forward once more, from S2 * N(0, I), in one forward over those
+rows, and serves that chunk instead (``still_rows``). The policy id is ``pi05:<checkpoint>`` plus
+``+warp<X>``, ``+steps<N>`` and ``+noise<S>`` for each value off its default, and
+``+still<S2>r<E>o<F>`` with the rule on, so the read cache never mixes it with an ACT read or
+another sampling.
 2026-10-05 on Machine A's RTX 5090, shared with ACT read servers, on a 50-step dry-run checkpoint:
 one forward of 1 row took 172-207 ms, 3 rows 245-291 ms and 6 rows 346 ms, at 9.4 GiB peak.
-Every forward prints "FORWARD rows=N ms=T", so a read's log holds its batch sizes and times.
+Every forward prints "FORWARD rows=N ms=T" (plus " still=K", the rows resampled, with the rule
+on), so a read's log holds its batch sizes and times.
 
 The checkpoint is a pretrained_model directory of a pi05 fine-tune on the derived dataset; its
 action_space.json marker (the same walk as policy_server's) must say "absolute" and name the
@@ -64,12 +69,37 @@ from policy_server import (
 CONTEXT_DIM = 16
 TOKENIZER = "tokenizer_processor"  # the registry name of lerobot's prompt tokenizer step
 IMAGE_KEYS = {"wrist": "observation.images.wrist", "overhead": "observation.images.overhead"}
+STILL_RAD = 0.15
+"""rad: a chunk is still when the max over its served actions (before the warp) and the 6 arm
+joints of |action - q_now| is under it, q_now the request's state[:, :6] (both URDF radians).
+2026-10-08, that max on recorded chunks: corpus label chunks (derived dataset files 000-001,
+1.79M frames, padded past the episode end as LeRobot pads) parked at the desk-box retreat point
+with open jaws p50 0.028, p92 0.15 (n 31,497), and the chunks that leave it (> 4 cm) 0.297 at the
+least (n 15,468); every other open-jaw frame under 0.15 (n 20,647) sits at retreat height (pick
+z >= 0.10). The in-loop V30k trace (default noise, q_now taken as the last command): parked p50
+0.087, p88 0.15 (n 647), leaving 0.211 at the least (n 9); the base yaw and the wrist roll make
+most of a parked chunk's motion. No zero-noise parked chunk was recorded."""
+STILL_OPEN = 0.9
+"""A still row also has its jaws open: the request's state[:, 6] (the left jaw's opening
+fraction, 1.0 fully open) is at least this, so a close, where the teacher holds the arm still,
+is never resampled. 2026-10-08: the parked frames above read 0.9615 at the least (the trace's
+measured gap 0.989), the jaw test's 400 frames at a close 0.548 at the most."""
+
+
+def still_rows(chunk: np.ndarray, state: np.ndarray, rad: float, open_frac: float) -> np.ndarray:
+    """Indices of the rows whose (n, n_action_steps, 7) chunk is still: every action's 6 arm
+    joints within ``rad`` of the row's state[:, :6] (the jaw column does not count), with the
+    jaws open (state[:, 6] >= ``open_frac``). Pure."""
+    moved = np.abs(chunk[:, :, :6] - state[:, None, :6]).max(axis=(1, 2))
+    return np.flatnonzero((moved < rad) & (state[:, 6] >= open_frac))
 
 
 class SharedServer:
     """The protocol and the queues, with the model injected: ``predict_chunk(obs)`` takes
     {"state": (n, 23), "wrist": (n, 224, 224, 3) uint8, "overhead": ...} and returns the
-    unnormalized (n, n_action_steps, 7) chunk. ``process`` is socket-free for the tests."""
+    unnormalized (n, n_action_steps, 7) chunk. ``process`` is socket-free for the tests. With
+    ``still`` = (S2, E, F), the still rows of a forward (``still_rows`` at E and F) get
+    ``predict_chunk(obs of those rows, S2)``'s chunk."""
 
     def __init__(
         self,
@@ -79,6 +109,7 @@ class SharedServer:
         inference: dict,
         gripper: str,
         action_warp: float = 1.0,
+        still: tuple[float, float, float] | None = None,
     ):
         if not ACTION_WARP_MIN <= action_warp <= ACTION_WARP_MAX:
             raise ValueError(
@@ -88,6 +119,10 @@ class SharedServer:
         self._policy_id = policy_id
         self._n = n_action_steps
         self._inference = {**inference, "action_warp": action_warp}
+        if still is not None:
+            names = ("still_noise_scale", "still_rad", "still_open")
+            self._inference |= dict(zip(names, still))
+        self._still = still
         self._gripper = gripper
         self._warp = action_warp
         self._queues: dict[bytes, list[deque]] = {}  # lane identity -> one queue an env row
@@ -181,6 +216,11 @@ class SharedServer:
                     raise ValueError(
                         f"predict_chunk returned {chunk.shape}, want ({len(need)}, {self._n}, 7)"
                     )
+                if self._still is not None:  # one more forward over the still rows only
+                    still = still_rows(chunk, obs["state"], *self._still[1:])
+                    if len(still):
+                        resample = {k: v[still] for k, v in obs.items()}
+                        chunk[still] = self._predict(resample, self._still[0])
             except Exception:  # noqa: BLE001 -- every lane of the forward gets the error
                 error = _error("exception", traceback.format_exc())
                 for lane, _ in need:
@@ -188,7 +228,8 @@ class SharedServer:
                 return [(lane, error, None) for lane, _ in steps]
             self.forward_sizes.append(len(need))
             ms = 1000 * (time.perf_counter() - start)
-            print(f"FORWARD rows={len(need)} ms={ms:.1f}", flush=True)  # the read's batch log
+            log = f"FORWARD rows={len(need)} ms={ms:.1f}"  # the read's batch log
+            print(log + ("" if self._still is None else f" still={len(still)}"), flush=True)
             for (lane, i), actions in zip(need, warp_chunk(chunk, self._warp)):
                 self._queues[lane][i] = deque(actions)
         replies = []
@@ -286,11 +327,11 @@ def load_pi05(checkpoint: str, device: str, num_steps: int | None = None, noise_
     if noise_scale != 1.0:
         sampling += f"+noise{noise_scale}"
 
-    def predict_chunk(obs: dict) -> np.ndarray:
+    def predict_chunk(obs: dict, scale: float = noise_scale) -> np.ndarray:
         noise = {}
-        if noise_scale != 1.0:  # sample_actions' own draw (float32 on the device), scaled
+        if scale != 1.0:  # sample_actions' own draw (float32 on the device), scaled
             shape = (len(obs["state"]), config.chunk_size, config.max_action_dim)
-            noise["noise"] = noise_scale * policy.model.sample_noise(shape, device)
+            noise["noise"] = scale * policy.model.sample_noise(shape, device)
         batch = {
             "observation.state": torch.from_numpy(obs["state"]),
             "task": [TASK] * len(obs["state"]),
@@ -326,21 +367,32 @@ def main() -> int:
     parser.add_argument("--action_warp", type=float, default=1.0)
     parser.add_argument("--num_steps", type=int, help="flow steps a forward (the checkpoint's)")
     parser.add_argument("--noise_scale", type=float, default=1.0, help="0: deterministic chunks")
+    parser.add_argument("--still_noise_scale", type=float, help="resample still rows at this")
+    parser.add_argument("--still_rad", type=float, default=STILL_RAD)
+    parser.add_argument("--still_open", type=float, default=STILL_OPEN)
     try:
         args = parser.parse_args()
         if args.num_steps is not None and args.num_steps < 1:
             parser.error(f"--num_steps must be at least 1, got {args.num_steps}")
         if not 0.0 <= args.noise_scale < float("inf"):
             parser.error(f"--noise_scale must be finite and at least 0, got {args.noise_scale}")
+        scale, rad, open_frac = args.still_noise_scale, args.still_rad, args.still_open
+        if scale is not None and not 0.0 <= scale < float("inf"):
+            parser.error(f"--still_noise_scale must be finite and at least 0, got {scale}")
+        if not 0.0 < rad < float("inf"):
+            parser.error(f"--still_rad must be finite and above 0, got {rad}")
+        if not 0.0 <= open_frac <= 1.0:
+            parser.error(f"--still_open must be in [0, 1], got {open_frac}")
         predict_chunk, n_action_steps, inference, gripper, sampling = load_pi05(
             args.checkpoint, args.device, args.num_steps, args.noise_scale
         )
         policy_id = f"pi05:{args.checkpoint}" + (
             f"+warp{args.action_warp}" if args.action_warp != 1.0 else ""
         )
-        policy_id += sampling
+        still = None if scale is None else (scale, rad, open_frac)
+        policy_id += sampling + ("" if still is None else "+still{}r{}o{}".format(*still))
         server = SharedServer(
-            predict_chunk, policy_id, n_action_steps, inference, gripper, args.action_warp
+            predict_chunk, policy_id, n_action_steps, inference, gripper, args.action_warp, still
         )
         socket = zmq.Context.instance().socket(zmq.ROUTER)
         socket.bind(f"tcp://127.0.0.1:{args.port}")
