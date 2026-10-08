@@ -189,18 +189,20 @@ def test_an_act_read_keeps_its_supervisor_flags_and_a_pi05_read_adds_one():
     assert pi05 == act[:at] + ["--pi05"] + act[at:]  # right after the checkpoint
     cfg = ge._build_cfg(ge._parse_args(pi05 + ["--out_dir", "/o", "--lanes", "2"]))
     assert (cfg.pi05, cfg.lanes, cfg.n_action_steps) == (True, 2, 50)
-    names = ("num_steps", "noise_scale", "still_noise_scale", "still_rad", "still_open")
+    names = ("num_steps", "noise_scale", "jaw_noise_scale", "still_noise_scale", "still_rad")
+    names += ("still_open",)
     unset = _read_args(pi05=True, **{f"pi05_{name}": None for name in names})
     assert fleet.supervisor_args(unset, "/l.json") == pi05
 
 
 def test_a_pi05_read_forwards_its_sampling_switches_and_an_act_read_refuses_them():
     sampling = {"pi05_num_steps": 50, "pi05_noise_scale": 0.0, "pi05_still_noise_scale": 1.0}
-    sampling |= {"pi05_still_rad": 0.1, "pi05_still_open": 0.8}
+    sampling |= {"pi05_still_rad": 0.1, "pi05_still_open": 0.8, "pi05_jaw_noise_scale": 0.25}
     pi05 = fleet.supervisor_args(_read_args(pi05=True, **sampling), "/l.json")
     at = pi05.index("--pi05") + 1
     assert pi05[at : at + 4] == ["--pi05_num_steps", "50", "--pi05_noise_scale", "0.0"]
-    assert pi05[at + 4 : at + 10] == [
+    assert pi05[at + 4 : at + 6] == ["--pi05_jaw_noise_scale", "0.25"]  # then the still rule
+    assert pi05[at + 6 : at + 12] == [
         "--pi05_still_noise_scale",
         "1.0",
         "--pi05_still_rad",
@@ -209,7 +211,7 @@ def test_a_pi05_read_forwards_its_sampling_switches_and_an_act_read_refuses_them
         "0.8",
     ]
     cfg = ge._build_cfg(ge._parse_args(pi05 + ["--out_dir", "/o"]))
-    assert (cfg.pi05_num_steps, cfg.pi05_noise_scale) == (50, 0.0)
+    assert (cfg.pi05_num_steps, cfg.pi05_noise_scale, cfg.pi05_jaw_noise_scale) == (50, 0.0, 0.25)
     assert (cfg.pi05_still_noise_scale, cfg.pi05_still_rad, cfg.pi05_still_open) == (1.0, 0.1, 0.8)
     for name, value in sampling.items():
         act = fleet.supervisor_args(_read_args(**{name: value}), "/l.json")

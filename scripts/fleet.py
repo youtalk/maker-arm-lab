@@ -412,6 +412,7 @@ def supervisor_args(args, ledger: str) -> list[str]:
     for name in (
         "pi05_num_steps",
         "pi05_noise_scale",
+        "pi05_jaw_noise_scale",
         "pi05_still_noise_scale",
         "pi05_still_rad",
         "pi05_still_open",
@@ -597,6 +598,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p_read.add_argument("--pi05_num_steps", type=int, help="with --pi05: flow steps a forward")
     p_read.add_argument("--pi05_noise_scale", type=float, help="with --pi05: 0 = zero noise")
+    p_read.add_argument("--pi05_jaw_noise_scale", type=float, help="with --pi05: the jaw's")
     p_read.add_argument("--pi05_still_noise_scale", type=float, help="with --pi05: still rule")
     p_read.add_argument("--pi05_still_rad", type=float, help="with --pi05_still_noise_scale")
     p_read.add_argument("--pi05_still_open", type=float, help="with --pi05_still_noise_scale")

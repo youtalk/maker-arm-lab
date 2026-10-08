@@ -1717,6 +1717,36 @@ def test_the_pi05_sampling_switches_reach_the_server_and_split_the_cache(tmp_pat
     assert not cached(steps_noise, "+steps50", num_inference_steps=50)
 
 
+def test_the_pi05_jaw_noise_scale_reaches_the_server_and_splits_the_cache(tmp_path):
+    read = _argv(tmp_path) + PI05_HEAP + ["--pi05", "--pi05_noise_scale", "0.5"]
+    plain = ge._build_cfg(ge._parse_args(read))
+    jaw = ge._build_cfg(ge._parse_args(read + ["--pi05_jaw_noise_scale", "0.25"]))
+    same = ge._build_cfg(ge._parse_args(read + ["--pi05_jaw_noise_scale", "1"]))
+    assert (plain.pi05_jaw_noise_scale, same.pi05_jaw_noise_scale) == (1.0, 1.0)
+    assert ge._pi05_server_command(same) == ge._pi05_server_command(plain)  # 1.0: the same bytes
+    command = ge._pi05_server_command(plain)
+    at = command.index("--noise_scale") + 2
+    assert (
+        ge._pi05_server_command(jaw) == command[:at] + ["--jaw_noise_scale", "0.25"] + command[at:]
+    )
+    ledger = _fake_ledger(tmp_path)
+    off = _cfg(tmp_path, ledger, processes=1, pi05=True)
+    on = _cfg(tmp_path, ledger, processes=1, pi05=True, pi05_jaw_noise_scale=0.25)
+    off.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    served = {"n_action_steps": 1, "temporal_ensemble_coeff": 0.01, "num_inference_steps": 10}
+
+    def cached(cfg, **inference):
+        payload = _payload(draw, [_episode(6)], policy_id="pi05:ck")
+        payload["inference"] = served | inference
+        (off.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    assert cached(off) and not cached(off, jaw_noise_scale=0.25)
+    assert cached(on, jaw_noise_scale=0.25) and not cached(on)
+    assert not cached(on, jaw_noise_scale=0.5)
+
+
 def test_the_pi05_still_rule_reaches_the_server_and_splits_the_cache(tmp_path):
     read = _argv(tmp_path) + PI05_HEAP + ["--pi05", "--pi05_noise_scale", "0"]
     plain = ge._build_cfg(ge._parse_args(read))
@@ -1850,6 +1880,9 @@ def test_the_pi05_server_logs_to_the_out_dir_and_the_supervisor_waits_for_ready(
         (["--pi05", "--pi05_num_steps", "0"], "--pi05_num_steps must be at least 1"),
         (["--pi05", "--pi05_noise_scale", "-1"], "--pi05_noise_scale must be finite"),
         (["--pi05", "--pi05_noise_scale", "inf"], "--pi05_noise_scale must be finite"),
+        (["--pi05_jaw_noise_scale", "1.0"], "need --pi05"),
+        (["--pi05", "--pi05_jaw_noise_scale", "-1"], "--pi05_jaw_noise_scale must be finite"),
+        (["--pi05", "--pi05_jaw_noise_scale", "nan"], "--pi05_jaw_noise_scale must be finite"),
         (["--pi05_still_noise_scale", "1.0"], "need --pi05"),
         (["--pi05_still_open", "0.9"], "need --pi05"),
         (["--pi05", "--pi05_still_rad", "0.1"], "need --pi05_still_noise_scale"),
