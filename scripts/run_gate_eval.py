@@ -30,8 +30,9 @@ server batches the forwards of the lanes whose queues are empty), its log is
 <out_dir>/pi05_server.log, and a cached payload must carry a "pi05:" policy id.
 --pi05_num_steps and --pi05_noise_scale reach the server as its --num_steps and --noise_scale
 (the flow steps a forward, the scale of the initial flow noise), and the cache matches on both.
---pi05_jaw_noise_scale J reaches it as --jaw_noise_scale (the jaw column's factor on that noise),
-and the cache matches it too.
+--pi05_jaw_noise_scale J reaches it as --jaw_noise_scale (the jaw column's factor on that noise)
+and --pi05_jaw_noise_shared as --jaw_noise_shared (one jaw draw a chunk), and the cache matches
+both.
 --pi05_still_noise_scale S2 turns on the server's still rule with --still_rad and --still_open
 (--pi05_still_rad, --pi05_still_open, default the server's), and the cache matches all three.
 """
@@ -97,6 +98,7 @@ class GateCfg:
     pi05_num_steps: int | None = None  # None: the checkpoint's flow steps
     pi05_noise_scale: float = 1.0
     pi05_jaw_noise_scale: float = 1.0
+    pi05_jaw_noise_shared: bool = False
     pi05_still_noise_scale: float | None = None  # None: the server's still rule is off
     pi05_still_rad: float = 0.15  # the server's STILL_RAD (tests pin the copy)
     pi05_still_open: float = 0.9  # the server's STILL_OPEN
@@ -780,6 +782,7 @@ def _pi05_server_command(cfg: GateCfg) -> list[str]:
             if cfg.pi05_jaw_noise_scale != 1.0
             else []
         ),
+        *(["--jaw_noise_shared"] if cfg.pi05_jaw_noise_shared else []),
         *itertools.chain(*((f"--{key}", str(value)) for key, value in _pi05_still(cfg).items())),
     ]
 
@@ -994,6 +997,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     same_inference = same_inference and served.get("noise_scale", 1.0) == cfg.pi05_noise_scale
     jaw = served.get("jaw_noise_scale", 1.0)  # recorded only off 1.0, as the noise scale
     same_inference = same_inference and jaw == cfg.pi05_jaw_noise_scale
+    shared = served.get("jaw_noise_shared", False)  # recorded only when on
+    same_inference = same_inference and shared == cfg.pi05_jaw_noise_shared
     # A payload served without the still rule records none of its keys.
     still = {key: served[key] for key in PI05_STILL if key in served}
     same_inference = same_inference and still == _pi05_still(cfg)
@@ -1224,6 +1229,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=float,
         default=None,
         help="with --pi05: the jaw column of that noise is also multiplied by this",
+    )
+    parser.add_argument(
+        "--pi05_jaw_noise_shared",
+        action="store_true",
+        help="with --pi05: the jaw column of that noise is one draw a row, held over the chunk",
     )
     parser.add_argument(
         "--pi05_still_noise_scale",
@@ -1599,9 +1609,10 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         if args.temporal_ensemble_coeff is not None or args.ensemble_with:
             raise ValueError("--pi05 serves one checkpoint open loop: no ensemble flags")
     jaw = args.pi05_jaw_noise_scale
-    if not args.pi05 and (args.pi05_num_steps, args.pi05_noise_scale, jaw) != (None, None, None):
+    sampling = (args.pi05_num_steps, args.pi05_noise_scale, jaw) != (None, None, None)
+    if not args.pi05 and (sampling or args.pi05_jaw_noise_shared):
         raise ValueError(
-            "--pi05_num_steps, --pi05_noise_scale and --pi05_jaw_noise_scale need --pi05"
+            "--pi05_num_steps, --pi05_noise_scale and the --pi05_jaw_noise_* flags need --pi05"
         )
     if args.pi05_num_steps is not None and args.pi05_num_steps < 1:  # the server's own refusals
         raise ValueError(f"--pi05_num_steps must be at least 1, got {args.pi05_num_steps}")
@@ -1748,6 +1759,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         pi05_num_steps=args.pi05_num_steps,
         pi05_noise_scale=1.0 if args.pi05_noise_scale is None else args.pi05_noise_scale,
         pi05_jaw_noise_scale=1.0 if jaw is None else jaw,
+        pi05_jaw_noise_shared=args.pi05_jaw_noise_shared,
         pi05_still_noise_scale=args.pi05_still_noise_scale,
         pi05_still_rad=GateCfg.pi05_still_rad if still[1] is None else still[1],
         pi05_still_open=GateCfg.pi05_still_open if still[2] is None else still[2],

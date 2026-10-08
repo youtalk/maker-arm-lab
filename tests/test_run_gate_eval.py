@@ -1729,6 +1729,10 @@ def test_the_pi05_jaw_noise_scale_reaches_the_server_and_splits_the_cache(tmp_pa
     assert (
         ge._pi05_server_command(jaw) == command[:at] + ["--jaw_noise_scale", "0.25"] + command[at:]
     )
+    shared = read + ["--pi05_jaw_noise_scale", "0.25", "--pi05_jaw_noise_shared"]
+    shared = ge._build_cfg(ge._parse_args(shared))
+    assert (plain.pi05_jaw_noise_shared, shared.pi05_jaw_noise_shared) == (False, True)
+    assert ge._pi05_server_command(shared) == ge._pi05_server_command(jaw) + ["--jaw_noise_shared"]
     ledger = _fake_ledger(tmp_path)
     off = _cfg(tmp_path, ledger, processes=1, pi05=True)
     on = _cfg(tmp_path, ledger, processes=1, pi05=True, pi05_jaw_noise_scale=0.25)
@@ -1745,6 +1749,9 @@ def test_the_pi05_jaw_noise_scale_reaches_the_server_and_splits_the_cache(tmp_pa
     assert cached(off) and not cached(off, jaw_noise_scale=0.25)
     assert cached(on, jaw_noise_scale=0.25) and not cached(on)
     assert not cached(on, jaw_noise_scale=0.5)
+    shared = _cfg(tmp_path, ledger, processes=1, pi05=True, pi05_jaw_noise_shared=True)
+    assert cached(shared, jaw_noise_shared=True) and not cached(shared)
+    assert not cached(off, jaw_noise_shared=True) and not cached(on, jaw_noise_shared=True)
 
 
 def test_the_pi05_still_rule_reaches_the_server_and_splits_the_cache(tmp_path):
@@ -1881,6 +1888,7 @@ def test_the_pi05_server_logs_to_the_out_dir_and_the_supervisor_waits_for_ready(
         (["--pi05", "--pi05_noise_scale", "-1"], "--pi05_noise_scale must be finite"),
         (["--pi05", "--pi05_noise_scale", "inf"], "--pi05_noise_scale must be finite"),
         (["--pi05_jaw_noise_scale", "1.0"], "need --pi05"),
+        (["--pi05_jaw_noise_shared"], "need --pi05"),
         (["--pi05", "--pi05_jaw_noise_scale", "-1"], "--pi05_jaw_noise_scale must be finite"),
         (["--pi05", "--pi05_jaw_noise_scale", "nan"], "--pi05_jaw_noise_scale must be finite"),
         (["--pi05_still_noise_scale", "1.0"], "need --pi05"),

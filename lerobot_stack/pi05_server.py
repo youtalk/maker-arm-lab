@@ -19,8 +19,11 @@ noise leaves V parked at a cycle start (h_V30kM2k_z0_a, 2026-10-08), so --still_
 samples each still row of a forward once more, from S2 * N(0, I), in one forward over those
 rows, and serves that chunk instead (``still_rows``). Zero noise also removes V's re-open after
 its own close, so --jaw_noise_scale J multiplies the jaw column of every initial noise (a
-resample's too) by J and keeps the arm's noise. The policy id is ``pi05:<checkpoint>`` plus
-``+warp<X>``, ``+steps<N>``, ``+noise<S>`` and ``+jawnoise<J>`` for each value off its default,
+resample's too) by J and keeps the arm's noise. J = 0 never closes the jaws in the loop (a read of
+2026-10-08): the jaw column's own noise, drawn anew at each of the 50 timesteps, decides each
+close and each re-open, so --jaw_noise_shared draws that column once a row and holds it over the
+chunk. The policy id is ``pi05:<checkpoint>`` plus ``+warp<X>``, ``+steps<N>``, ``+noise<S>``
+and ``+jawnoise<J>`` for each value off its default, ``+jawshared`` with the shared jaw draw on,
 and ``+still<S2>r<E>o<F>`` with the rule on, so the read cache never mixes it with an ACT read or
 another sampling.
 2026-10-05 on Machine A's RTX 5090, shared with ACT read servers, on a 50-step dry-run checkpoint:
@@ -289,10 +292,11 @@ def load_pi05(
     num_steps: int | None = None,
     noise_scale: float = 1.0,
     jaw_noise_scale: float = 1.0,
+    jaw_noise_shared: bool = False,
 ):
     """(predict_chunk, n_action_steps, inference, gripper, sampling) of a pi05 pretrained_model
-    directory. ``sampling`` is the policy id's ``+steps<N>+noise<S>+jawnoise<J>``, each part only
-    when its value is off its default (num_steps None means the checkpoint's own).
+    directory. ``sampling`` is the policy id's ``+steps<N>+noise<S>+jawnoise<J>+jawshared``, each
+    part only when its value is off its default (num_steps None means the checkpoint's own).
 
     The server reads only local files: the checkpoint and the tokenizer in the Hugging Face
     cache (the gated google/paligemma-3b-pt-224 files). transformers 5.3's AutoTokenizer also
@@ -342,12 +346,16 @@ def load_pi05(
         sampling += f"+noise{noise_scale}"
     if jaw_noise_scale != 1.0:
         sampling += f"+jawnoise{jaw_noise_scale}"
+    if jaw_noise_shared:
+        sampling += "+jawshared"
 
     def predict_chunk(obs: dict, scale: float = noise_scale) -> np.ndarray:
         noise = {}
-        if scale != 1.0 or jaw_noise_scale != 1.0:  # sample_actions' own draw, scaled
+        if scale != 1.0 or jaw_noise_scale != 1.0 or jaw_noise_shared:  # sample_actions' draw
             shape = (len(obs["state"]), config.chunk_size, config.max_action_dim)
             noise["noise"] = scale * policy.model.sample_noise(shape, device)
+            if jaw_noise_shared:  # one jaw draw a row, held over every timestep of the chunk
+                noise["noise"][..., JAW] = scale * policy.model.sample_noise((shape[0], 1), device)
             noise["noise"][..., JAW] *= jaw_noise_scale
         batch = {
             "observation.state": torch.from_numpy(obs["state"]),
@@ -367,6 +375,7 @@ def load_pi05(
         "num_inference_steps": int(kwargs.get("num_steps", config.num_inference_steps)),
         **({"noise_scale": noise_scale} if noise_scale != 1.0 else {}),
         **({"jaw_noise_scale": jaw_noise_scale} if jaw_noise_scale != 1.0 else {}),
+        **({"jaw_noise_shared": True} if jaw_noise_shared else {}),
     }
     return predict_chunk, int(config.n_action_steps), inference, marker["gripper"], sampling
 
@@ -386,6 +395,7 @@ def main() -> int:
     parser.add_argument("--num_steps", type=int, help="flow steps a forward (the checkpoint's)")
     parser.add_argument("--noise_scale", type=float, default=1.0, help="0: deterministic chunks")
     parser.add_argument("--jaw_noise_scale", type=float, default=1.0, help="the jaw column's")
+    parser.add_argument("--jaw_noise_shared", action="store_true", help="one jaw draw a chunk")
     parser.add_argument("--still_noise_scale", type=float, help="resample still rows at this")
     parser.add_argument("--still_rad", type=float, default=STILL_RAD)
     parser.add_argument("--still_open", type=float, default=STILL_OPEN)
@@ -407,7 +417,12 @@ def main() -> int:
         if not 0.0 <= open_frac <= 1.0:
             parser.error(f"--still_open must be in [0, 1], got {open_frac}")
         predict_chunk, n_action_steps, inference, gripper, sampling = load_pi05(
-            args.checkpoint, args.device, args.num_steps, args.noise_scale, args.jaw_noise_scale
+            args.checkpoint,
+            args.device,
+            args.num_steps,
+            args.noise_scale,
+            args.jaw_noise_scale,
+            args.jaw_noise_shared,
         )
         policy_id = f"pi05:{args.checkpoint}" + (
             f"+warp{args.action_warp}" if args.action_warp != 1.0 else ""
