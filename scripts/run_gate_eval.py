@@ -30,6 +30,8 @@ server batches the forwards of the lanes whose queues are empty), its log is
 <out_dir>/pi05_server.log, and a cached payload must carry a "pi05:" policy id.
 --pi05_num_steps and --pi05_noise_scale reach the server as its --num_steps and --noise_scale
 (the flow steps a forward, the scale of the initial flow noise), and the cache matches on both.
+--pi05_still_noise_scale S2 turns on the server's still rule with --still_rad and --still_open
+(--pi05_still_rad, --pi05_still_open, default the server's), and the cache matches all three.
 """
 
 import argparse
@@ -92,6 +94,9 @@ class GateCfg:
     lanes: int = 1
     pi05_num_steps: int | None = None  # None: the checkpoint's flow steps
     pi05_noise_scale: float = 1.0
+    pi05_still_noise_scale: float | None = None  # None: the server's still rule is off
+    pi05_still_rad: float = 0.15  # the server's STILL_RAD (tests pin the copy)
+    pi05_still_open: float = 0.9  # the server's STILL_OPEN
     only_processes: tuple | None = None
     eval_timeout_s: float = 4 * 3600
     backend: str = "isaac"  # "mujoco" spawns scripts/mj_eval_policy.py under .venv/bin/python
@@ -741,6 +746,13 @@ def _start_server(cfg: GateCfg) -> _ServerHandle:
 
 PI05_PYTHON = "lerobot_stack/.venv-pi/bin/python"
 PI05_READY_S = 900  # loading about 9 GB of pi0.5 weights on a busy host takes minutes
+PI05_STILL = ("still_noise_scale", "still_rad", "still_open")  # the server's flags and keys
+
+
+def _pi05_still(cfg: GateCfg) -> dict:
+    """The still rule's entries of the server's inference block, {} with the rule off."""
+    values = (cfg.pi05_still_noise_scale, cfg.pi05_still_rad, cfg.pi05_still_open)
+    return {} if values[0] is None else dict(zip(PI05_STILL, values))
 
 
 def _pi05_server_command(cfg: GateCfg) -> list[str]:
@@ -760,6 +772,7 @@ def _pi05_server_command(cfg: GateCfg) -> list[str]:
         str(cfg.action_warp),
         *(["--num_steps", str(cfg.pi05_num_steps)] if cfg.pi05_num_steps is not None else []),
         *(["--noise_scale", str(cfg.pi05_noise_scale)] if cfg.pi05_noise_scale != 1.0 else []),
+        *itertools.chain(*((f"--{key}", str(value)) for key, value in _pi05_still(cfg).items())),
     ]
 
 
@@ -971,6 +984,9 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     # names steps off the checkpoint's ("+steps<N>"), so a read at the checkpoint's own steps
     # reuses only a payload without that name.
     same_inference = same_inference and served.get("noise_scale", 1.0) == cfg.pi05_noise_scale
+    # A payload served without the still rule records none of its keys.
+    still = {key: served[key] for key in PI05_STILL if key in served}
+    same_inference = same_inference and still == _pi05_still(cfg)
     if cfg.pi05:
         named = str(payload.get("policy_id", "")).removeprefix(f"pi05:{cfg.checkpoint}")
         same_inference = same_inference and (
@@ -1193,6 +1209,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help="with --pi05: the initial flow noise is this times N(0, I); 0 is deterministic",
     )
+    parser.add_argument(
+        "--pi05_still_noise_scale",
+        type=float,
+        default=None,
+        help="with --pi05: resample each still chunk once from this times N(0, I)",
+    )
+    parser.add_argument("--pi05_still_rad", type=float, default=None, help="with the still rule")
+    parser.add_argument("--pi05_still_open", type=float, default=None, help="with the still rule")
     parser.add_argument("--only_processes", type=_process_list, default=None)
     parser.add_argument("--eval_timeout_s", type=float, default=4 * 3600)
     parser.add_argument("--backend", choices=("isaac", "mujoco"), default="isaac")
@@ -1566,6 +1590,17 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError(
             f"--pi05_noise_scale must be finite and at least 0, got {args.pi05_noise_scale}"
         )
+    still = (args.pi05_still_noise_scale, args.pi05_still_rad, args.pi05_still_open)
+    if not args.pi05 and still != (None, None, None):
+        raise ValueError("the --pi05_still_* flags need --pi05")
+    if still[0] is None and still != (None, None, None):  # a no-op read under a new tag
+        raise ValueError("--pi05_still_rad and --pi05_still_open need --pi05_still_noise_scale")
+    if still[0] is not None and not 0.0 <= still[0] < math.inf:  # the server's own refusals
+        raise ValueError(f"--pi05_still_noise_scale must be finite and at least 0, got {still[0]}")
+    if still[1] is not None and not 0.0 < still[1] < math.inf:
+        raise ValueError(f"--pi05_still_rad must be finite and above 0, got {still[1]}")
+    if still[2] is not None and not 0.0 <= still[2] <= 1.0:
+        raise ValueError(f"--pi05_still_open must be in [0, 1], got {still[2]}")
     if not 1.0 <= args.action_warp <= 3.0:  # the server's ACTION_WARP_MIN and ACTION_WARP_MAX
         raise ValueError(f"--action_warp must be in [1.0, 3.0], got {args.action_warp}")
     if args.gripper != "binary" and (args.heap_k <= 0 or args.backend != "mujoco"):
@@ -1691,6 +1726,9 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         lanes=args.lanes,
         pi05_num_steps=args.pi05_num_steps,
         pi05_noise_scale=1.0 if args.pi05_noise_scale is None else args.pi05_noise_scale,
+        pi05_still_noise_scale=args.pi05_still_noise_scale,
+        pi05_still_rad=GateCfg.pi05_still_rad if still[1] is None else still[1],
+        pi05_still_open=GateCfg.pi05_still_open if still[2] is None else still[2],
         only_processes=args.only_processes,
         eval_timeout_s=args.eval_timeout_s,
         backend=args.backend,

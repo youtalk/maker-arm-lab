@@ -1717,6 +1717,52 @@ def test_the_pi05_sampling_switches_reach_the_server_and_split_the_cache(tmp_pat
     assert not cached(steps_noise, "+steps50", num_inference_steps=50)
 
 
+def test_the_pi05_still_rule_reaches_the_server_and_splits_the_cache(tmp_path):
+    read = _argv(tmp_path) + PI05_HEAP + ["--pi05", "--pi05_noise_scale", "0"]
+    plain = ge._build_cfg(ge._parse_args(read))
+    on = ge._build_cfg(ge._parse_args(read + ["--pi05_still_noise_scale", "1"]))
+    tuned = read + ["--pi05_still_noise_scale", "0.7", "--pi05_still_rad", "0.1"]
+    tuned = ge._build_cfg(ge._parse_args(tuned + ["--pi05_still_open", "0.8"]))
+    assert plain.pi05_still_noise_scale is None and ge._pi05_still(plain) == {}
+    assert "--still_noise_scale" not in ge._pi05_server_command(plain)  # off: the same bytes
+    default = ["--still_noise_scale", "1.0", "--still_rad", "0.15", "--still_open", "0.9"]
+    assert ge._pi05_server_command(on) == ge._pi05_server_command(plain) + default
+    assert ge._pi05_server_command(tuned)[-6:] == [
+        "--still_noise_scale",
+        "0.7",
+        "--still_rad",
+        "0.1",
+        "--still_open",
+        "0.8",
+    ]
+    ledger = _fake_ledger(tmp_path)
+    off = _cfg(tmp_path, ledger, processes=1, pi05=True)
+    on = _cfg(tmp_path, ledger, processes=1, pi05=True, pi05_still_noise_scale=1.0)
+    tuned = _cfg(tmp_path, ledger, processes=1, pi05=True, pi05_still_noise_scale=0.7)
+    off.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    served = {"n_action_steps": 1, "temporal_ensemble_coeff": 0.01, "num_inference_steps": 10}
+
+    def cached(cfg, **still):
+        payload = _payload(draw, [_episode(6)], policy_id="pi05:ck")
+        payload["inference"] = served | still
+        (off.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    # A read reuses only a payload served with its own still rule, or none without one.
+    rule = {"still_noise_scale": 1.0, "still_rad": 0.15, "still_open": 0.9}
+    assert cached(off) and not cached(off, **rule)
+    assert cached(on, **rule) and not cached(on) and not cached(tuned, **rule)
+    assert not cached(on, **(rule | {"still_rad": 0.1}))
+    assert not cached(on, **(rule | {"still_open": 0.8}))
+
+
+def test_the_supervisor_copies_the_still_defaults_of_the_server():
+    source = (Path(__file__).parents[1] / "lerobot_stack" / "pi05_server.py").read_text()
+    assert f"\nSTILL_RAD = {ge.GateCfg.pi05_still_rad}\n" in source
+    assert f"\nSTILL_OPEN = {ge.GateCfg.pi05_still_open}\n" in source
+
+
 def test_pi05_lanes_share_one_server_and_run_their_draws_at_once(tmp_path):
     ledger = _fake_ledger(tmp_path)
     cfg = _cfg(tmp_path, ledger, processes=4, pi05=True, lanes=2)
@@ -1804,6 +1850,12 @@ def test_the_pi05_server_logs_to_the_out_dir_and_the_supervisor_waits_for_ready(
         (["--pi05", "--pi05_num_steps", "0"], "--pi05_num_steps must be at least 1"),
         (["--pi05", "--pi05_noise_scale", "-1"], "--pi05_noise_scale must be finite"),
         (["--pi05", "--pi05_noise_scale", "inf"], "--pi05_noise_scale must be finite"),
+        (["--pi05_still_noise_scale", "1.0"], "need --pi05"),
+        (["--pi05_still_open", "0.9"], "need --pi05"),
+        (["--pi05", "--pi05_still_rad", "0.1"], "need --pi05_still_noise_scale"),
+        (["--pi05", "--pi05_still_noise_scale", "-1"], "--pi05_still_noise_scale must be"),
+        (["--pi05", "--pi05_still_noise_scale", "1", "--pi05_still_rad", "0"], "_rad must be"),
+        (["--pi05", "--pi05_still_noise_scale", "1", "--pi05_still_open", "2"], "_open must be"),
     ],
 )
 def test_the_pi05_mode_refuses_what_its_server_cannot_serve(

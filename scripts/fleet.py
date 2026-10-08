@@ -408,8 +408,14 @@ PROTOCOL = (
 def supervisor_args(args, ledger: str) -> list[str]:
     """The supervisor flags every lane and the aggregate pass share, before the extra flags
     after --, which win on a repeat because argparse keeps the last value."""
-    sampling = []  # the pi05 server's flow steps and noise scale, only when a read sets them
-    for name in ("pi05_num_steps", "pi05_noise_scale"):
+    sampling = []  # the pi05 server's sampling switches, only when a read sets them
+    for name in (
+        "pi05_num_steps",
+        "pi05_noise_scale",
+        "pi05_still_noise_scale",
+        "pi05_still_rad",
+        "pi05_still_open",
+    ):
         if getattr(args, name, None) is not None:
             sampling += [f"--{name}", str(getattr(args, name))]
     return shlex.split(PROTOCOL) + [
@@ -591,6 +597,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p_read.add_argument("--pi05_num_steps", type=int, help="with --pi05: flow steps a forward")
     p_read.add_argument("--pi05_noise_scale", type=float, help="with --pi05: 0 = zero noise")
+    p_read.add_argument("--pi05_still_noise_scale", type=float, help="with --pi05: still rule")
+    p_read.add_argument("--pi05_still_rad", type=float, help="with --pi05_still_noise_scale")
+    p_read.add_argument("--pi05_still_open", type=float, help="with --pi05_still_noise_scale")
     p_read.add_argument("--tag", required=True, type=lambda s: re.fullmatch(r"[\w.-]+", s)[0])
     p_read.add_argument("--seed", type=int, required=True)
     p_read.add_argument("--draws", type=parse_draws, required=True, help="e.g. 0-11")
