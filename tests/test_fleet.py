@@ -189,6 +189,21 @@ def test_an_act_read_keeps_its_supervisor_flags_and_a_pi05_read_adds_one():
     assert pi05 == act[:at] + ["--pi05"] + act[at:]  # right after the checkpoint
     cfg = ge._build_cfg(ge._parse_args(pi05 + ["--out_dir", "/o", "--lanes", "2"]))
     assert (cfg.pi05, cfg.lanes, cfg.n_action_steps) == (True, 2, 50)
+    unset = _read_args(pi05=True, pi05_num_steps=None, pi05_noise_scale=None)
+    assert fleet.supervisor_args(unset, "/l.json") == pi05
+
+
+def test_a_pi05_read_forwards_its_sampling_switches_and_an_act_read_refuses_them():
+    sampling = {"pi05_num_steps": 50, "pi05_noise_scale": 0.0}
+    pi05 = fleet.supervisor_args(_read_args(pi05=True, **sampling), "/l.json")
+    at = pi05.index("--pi05") + 1
+    assert pi05[at : at + 4] == ["--pi05_num_steps", "50", "--pi05_noise_scale", "0.0"]
+    cfg = ge._build_cfg(ge._parse_args(pi05 + ["--out_dir", "/o"]))
+    assert (cfg.pi05_num_steps, cfg.pi05_noise_scale) == (50, 0.0)
+    for name, value in sampling.items():
+        act = fleet.supervisor_args(_read_args(**{name: value}), "/l.json")
+        with pytest.raises(ValueError, match="need --pi05"):
+            ge._build_cfg(ge._parse_args(act + ["--out_dir", "/o"]))
 
 
 def test_a_pi05_read_runs_one_supervisor_a_host_and_an_act_read_one_a_lane():

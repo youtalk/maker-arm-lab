@@ -1681,6 +1681,42 @@ def test_the_cache_never_mixes_a_pi05_payload_with_an_act_one(tmp_path):
     assert cached(pi05, "pi05:ck+warp1.5") and not cached(pi05, "act:ck+te0.01")
 
 
+def test_the_pi05_sampling_switches_reach_the_server_and_split_the_cache(tmp_path):
+    read = _argv(tmp_path) + PI05_HEAP + ["--pi05", "--action_warp", "1.5"]
+    plain = ge._build_cfg(ge._parse_args(read))
+    switched = ge._build_cfg(
+        ge._parse_args(read + ["--pi05_num_steps", "50", "--pi05_noise_scale", "0"])
+    )
+    assert (plain.pi05_num_steps, plain.pi05_noise_scale) == (None, 1.0)
+    assert ge._pi05_server_command(switched) == ge._pi05_server_command(plain) + [
+        "--num_steps",
+        "50",
+        "--noise_scale",
+        "0.0",
+    ]
+    ledger = _fake_ledger(tmp_path)
+    default = _cfg(tmp_path, ledger, processes=1, pi05=True)
+    steps_noise = _cfg(
+        tmp_path, ledger, processes=1, pi05=True, pi05_num_steps=50, pi05_noise_scale=0.0
+    )
+    default.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    served = {"n_action_steps": 1, "temporal_ensemble_coeff": 0.01, "num_inference_steps": 10}
+
+    def cached(cfg, tail, **inference):
+        payload = _payload(draw, [_episode(6)], policy_id=f"pi05:ck{tail}")
+        payload["inference"] = served | inference
+        (default.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    # A read reuses only a payload served with its own flow steps and noise scale.
+    assert cached(default, "") and not cached(default, "+noise0.0", noise_scale=0.0)
+    assert not cached(default, "+steps50", num_inference_steps=50)
+    assert cached(steps_noise, "+steps50+noise0.0", num_inference_steps=50, noise_scale=0.0)
+    assert not cached(steps_noise, "+noise0.0", noise_scale=0.0)  # the checkpoint's 10 steps
+    assert not cached(steps_noise, "+steps50", num_inference_steps=50)
+
+
 def test_pi05_lanes_share_one_server_and_run_their_draws_at_once(tmp_path):
     ledger = _fake_ledger(tmp_path)
     cfg = _cfg(tmp_path, ledger, processes=4, pi05=True, lanes=2)
@@ -1763,6 +1799,11 @@ def test_the_pi05_server_logs_to_the_out_dir_and_the_supervisor_waits_for_ready(
         (["--pi05", "--context", "camera_box"], "--pi05 needs"),
         (["--pi05", "--temporal_ensemble_coeff", "0.01"], "no ensemble"),
         (["--pi05", "--ensemble_with", "/m/b"], "no ensemble"),
+        (["--pi05_num_steps", "50"], "need --pi05"),
+        (["--pi05_noise_scale", "1.0"], "need --pi05"),
+        (["--pi05", "--pi05_num_steps", "0"], "--pi05_num_steps must be at least 1"),
+        (["--pi05", "--pi05_noise_scale", "-1"], "--pi05_noise_scale must be finite"),
+        (["--pi05", "--pi05_noise_scale", "inf"], "--pi05_noise_scale must be finite"),
     ],
 )
 def test_the_pi05_mode_refuses_what_its_server_cannot_serve(

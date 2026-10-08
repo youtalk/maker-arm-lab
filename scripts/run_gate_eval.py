@@ -28,6 +28,8 @@ secondaries, the draws, the served inference config).
 lerobot_stack/.venv-pi serves the whole run, --lanes N eval clients run at once against it (the
 server batches the forwards of the lanes whose queues are empty), its log is
 <out_dir>/pi05_server.log, and a cached payload must carry a "pi05:" policy id.
+--pi05_num_steps and --pi05_noise_scale reach the server as its --num_steps and --noise_scale
+(the flow steps a forward, the scale of the initial flow noise), and the cache matches on both.
 """
 
 import argparse
@@ -88,6 +90,8 @@ class GateCfg:
     # MS7h design 7.3: a pi0.5 checkpoint, served by one shared pi05_server.py to `lanes` clients.
     pi05: bool = False
     lanes: int = 1
+    pi05_num_steps: int | None = None  # None: the checkpoint's flow steps
+    pi05_noise_scale: float = 1.0
     only_processes: tuple | None = None
     eval_timeout_s: float = 4 * 3600
     backend: str = "isaac"  # "mujoco" spawns scripts/mj_eval_policy.py under .venv/bin/python
@@ -741,7 +745,8 @@ PI05_READY_S = 900  # loading about 9 GB of pi0.5 weights on a busy host takes m
 
 def _pi05_server_command(cfg: GateCfg) -> list[str]:
     """The shared server serves the checkpoint's chunk (50 actions) open loop with its flow steps
-    (10); only the warp is a flag (MS7h design 7.3)."""
+    (10); the warp is a flag (MS7h design 7.3), and so are the flow steps and the noise scale
+    when a read sets them (the MS7h pi0.5 recipe's jaw test)."""
     return [
         PI05_PYTHON,
         "lerobot_stack/pi05_server.py",
@@ -753,6 +758,8 @@ def _pi05_server_command(cfg: GateCfg) -> list[str]:
         cfg.device,
         "--action_warp",
         str(cfg.action_warp),
+        *(["--num_steps", str(cfg.pi05_num_steps)] if cfg.pi05_num_steps is not None else []),
+        *(["--noise_scale", str(cfg.pi05_noise_scale)] if cfg.pi05_noise_scale != 1.0 else []),
     ]
 
 
@@ -960,6 +967,17 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     same_inference = same_inference and served.get("action_warp", 1.0) == cfg.action_warp
     # A payload that predates the ensemble served one checkpoint.
     same_inference = same_inference and served.get("ensemble_with") == cfg.ensemble_with
+    # A pi05 payload records a noise scale off 1.0 and the flow steps it ran. Its policy id
+    # names steps off the checkpoint's ("+steps<N>"), so a read at the checkpoint's own steps
+    # reuses only a payload without that name.
+    same_inference = same_inference and served.get("noise_scale", 1.0) == cfg.pi05_noise_scale
+    if cfg.pi05:
+        named = str(payload.get("policy_id", "")).removeprefix(f"pi05:{cfg.checkpoint}")
+        same_inference = same_inference and (
+            "+steps" not in named
+            if cfg.pi05_num_steps is None
+            else served.get("num_inference_steps") == cfg.pi05_num_steps
+        )
     # The loop's protocol switches are part of what a draw measured; a payload that predates
     # them ran with every switch off.
     recorded = served.get("loop") or {}
@@ -1162,6 +1180,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=int,
         default=1,
         help="with --pi05: this many eval clients run at once against the one server",
+    )
+    parser.add_argument(
+        "--pi05_num_steps",
+        type=int,
+        default=None,
+        help="with --pi05: the server's flow steps a forward (default: the checkpoint's)",
+    )
+    parser.add_argument(
+        "--pi05_noise_scale",
+        type=float,
+        default=None,
+        help="with --pi05: the initial flow noise is this times N(0, I); 0 is deterministic",
     )
     parser.add_argument("--only_processes", type=_process_list, default=None)
     parser.add_argument("--eval_timeout_s", type=float, default=4 * 3600)
@@ -1528,6 +1558,14 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
             )
         if args.temporal_ensemble_coeff is not None or args.ensemble_with:
             raise ValueError("--pi05 serves one checkpoint open loop: no ensemble flags")
+    if not args.pi05 and (args.pi05_num_steps, args.pi05_noise_scale) != (None, None):
+        raise ValueError("--pi05_num_steps and --pi05_noise_scale need --pi05")
+    if args.pi05_num_steps is not None and args.pi05_num_steps < 1:  # the server's own refusals
+        raise ValueError(f"--pi05_num_steps must be at least 1, got {args.pi05_num_steps}")
+    if args.pi05_noise_scale is not None and not 0.0 <= args.pi05_noise_scale < math.inf:
+        raise ValueError(
+            f"--pi05_noise_scale must be finite and at least 0, got {args.pi05_noise_scale}"
+        )
     if not 1.0 <= args.action_warp <= 3.0:  # the server's ACTION_WARP_MIN and ACTION_WARP_MAX
         raise ValueError(f"--action_warp must be in [1.0, 3.0], got {args.action_warp}")
     if args.gripper != "binary" and (args.heap_k <= 0 or args.backend != "mujoco"):
@@ -1651,6 +1689,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         ensemble_with=args.ensemble_with,
         pi05=args.pi05,
         lanes=args.lanes,
+        pi05_num_steps=args.pi05_num_steps,
+        pi05_noise_scale=1.0 if args.pi05_noise_scale is None else args.pi05_noise_scale,
         only_processes=args.only_processes,
         eval_timeout_s=args.eval_timeout_s,
         backend=args.backend,

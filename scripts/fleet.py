@@ -408,10 +408,15 @@ PROTOCOL = (
 def supervisor_args(args, ledger: str) -> list[str]:
     """The supervisor flags every lane and the aggregate pass share, before the extra flags
     after --, which win on a repeat because argparse keeps the last value."""
+    sampling = []  # the pi05 server's flow steps and noise scale, only when a read sets them
+    for name in ("pi05_num_steps", "pi05_noise_scale"):
+        if getattr(args, name, None) is not None:
+            sampling += [f"--{name}", str(getattr(args, name))]
     return shlex.split(PROTOCOL) + [
         "--checkpoint",
         args.ckpt,
         *(["--pi05"] if getattr(args, "pi05", False) else []),
+        *sampling,
         "--ledger",
         ledger,
         "--threshold",
@@ -584,6 +589,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="MS7h design 7.3: --ckpt is a pi0.5 checkpoint, one shared server a host",
     )
+    p_read.add_argument("--pi05_num_steps", type=int, help="with --pi05: flow steps a forward")
+    p_read.add_argument("--pi05_noise_scale", type=float, help="with --pi05: 0 = zero noise")
     p_read.add_argument("--tag", required=True, type=lambda s: re.fullmatch(r"[\w.-]+", s)[0])
     p_read.add_argument("--seed", type=int, required=True)
     p_read.add_argument("--draws", type=parse_draws, required=True, help="e.g. 0-11")
