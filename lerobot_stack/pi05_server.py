@@ -30,7 +30,10 @@ chunks close against 0.98), so --jaw_latch L filters each chunk instead (``latch
 the warp): after a close, the next L jaw commands stay at most the close's. The teacher's labels
 never re-open within 10 frames of a close (0 of 46,669), and V's chunks sampled before a close
 re-open within 10 actions of their own close in 29 % (29-31 % in the loop). Its policy id part
-is ``+latch<L>``, last.
+is ``+latch<L>``, last. S * J ties the jaw's noise to the call's scale: at S = 0.01 and J = 100, a
+still resample at S2 = 1 draws the jaw at 100. So --jaw_noise_abs A draws the jaw column of every
+initial noise from A * N(0, 1), whatever the call's scale (the arm keeps its own), with J = 1 and
+no shared draw. Its policy id part is ``+jawabs<A>``, after ``+jawshared``.
 2026-10-05 on Machine A's RTX 5090, shared with ACT read servers, on a 50-step dry-run checkpoint:
 one forward of 1 row took 172-207 ms, 3 rows 245-291 ms and 6 rows 346 ms, at 9.4 GiB peak.
 Every forward prints "FORWARD rows=N ms=T" (plus " still=K", the rows resampled, with the rule
@@ -335,10 +338,12 @@ def load_pi05(
     noise_scale: float = 1.0,
     jaw_noise_scale: float = 1.0,
     jaw_noise_shared: bool = False,
+    jaw_noise_abs: float | None = None,
 ):
     """(predict_chunk, n_action_steps, inference, gripper, sampling) of a pi05 pretrained_model
-    directory. ``sampling`` is the policy id's ``+steps<N>+noise<S>+jawnoise<J>+jawshared``, each
-    part only when its value is off its default (num_steps None means the checkpoint's own).
+    directory. ``sampling`` is the policy id's ``+steps<N>+noise<S>+jawnoise<J>+jawshared`` and
+    ``+jawabs<A>``, each part only when its value is off its default (num_steps None means the
+    checkpoint's own).
 
     The server reads only local files: the checkpoint and the tokenizer in the Hugging Face
     cache (the gated google/paligemma-3b-pt-224 files). transformers 5.3's AutoTokenizer also
@@ -390,19 +395,27 @@ def load_pi05(
         sampling += f"+jawnoise{jaw_noise_scale}"
     if jaw_noise_shared:
         sampling += "+jawshared"
+    if jaw_noise_abs is not None:
+        sampling += f"+jawabs{jaw_noise_abs}"
+
+    def initial_noise(rows: int, scale: float):
+        shape = (rows, config.chunk_size, config.max_action_dim)
+        draw = policy.model.sample_noise(shape, device)
+        noise = scale * draw
+        if jaw_noise_shared:  # one jaw draw a row, held over every timestep of the chunk
+            noise[..., JAW] = scale * policy.model.sample_noise((rows, 1), device)
+        noise[..., JAW] *= jaw_noise_scale
+        if jaw_noise_abs is not None:  # the jaw's own std, whatever the call's scale
+            noise[..., JAW] = jaw_noise_abs * draw[..., JAW]
+        return noise
 
     def predict_chunk(obs: dict, scale: float = noise_scale) -> np.ndarray:
-        noise = {}
-        if scale != 1.0 or jaw_noise_scale != 1.0 or jaw_noise_shared:  # sample_actions' draw
-            shape = (len(obs["state"]), config.chunk_size, config.max_action_dim)
-            noise["noise"] = scale * policy.model.sample_noise(shape, device)
-            if jaw_noise_shared:  # one jaw draw a row, held over every timestep of the chunk
-                noise["noise"][..., JAW] = scale * policy.model.sample_noise((shape[0], 1), device)
-            noise["noise"][..., JAW] *= jaw_noise_scale
-        batch = {
-            "observation.state": torch.from_numpy(obs["state"]),
-            "task": [TASK] * len(obs["state"]),
-        }
+        rows, noise = len(obs["state"]), {}
+        sampled = scale != 1.0 or jaw_noise_scale != 1.0 or jaw_noise_shared
+        sampled = sampled or jaw_noise_abs is not None
+        if sampled:  # else sample_actions' own draw
+            noise["noise"] = initial_noise(rows, scale)
+        batch = {"observation.state": torch.from_numpy(obs["state"]), "task": [TASK] * rows}
         for key, name in IMAGE_KEYS.items():
             batch[name] = torch.from_numpy(obs[key]).permute(0, 3, 1, 2).to(torch.float32) / 255.0
         with torch.inference_mode():
@@ -418,6 +431,7 @@ def load_pi05(
         **({"noise_scale": noise_scale} if noise_scale != 1.0 else {}),
         **({"jaw_noise_scale": jaw_noise_scale} if jaw_noise_scale != 1.0 else {}),
         **({"jaw_noise_shared": True} if jaw_noise_shared else {}),
+        **({"jaw_noise_abs": jaw_noise_abs} if jaw_noise_abs is not None else {}),
     }
     return predict_chunk, int(config.n_action_steps), inference, marker["gripper"], sampling
 
@@ -438,6 +452,7 @@ def main() -> int:
     parser.add_argument("--noise_scale", type=float, default=1.0, help="0: deterministic chunks")
     parser.add_argument("--jaw_noise_scale", type=float, default=1.0, help="the jaw column's")
     parser.add_argument("--jaw_noise_shared", action="store_true", help="one jaw draw a chunk")
+    parser.add_argument("--jaw_noise_abs", type=float, help="the jaw's std at every scale")
     parser.add_argument("--still_noise_scale", type=float, help="resample still rows at this")
     parser.add_argument("--still_rad", type=float, default=STILL_RAD)
     parser.add_argument("--still_open", type=float, default=STILL_OPEN)
@@ -452,6 +467,11 @@ def main() -> int:
             parser.error(
                 f"--jaw_noise_scale must be finite and at least 0, got {args.jaw_noise_scale}"
             )
+        jaw_abs = args.jaw_noise_abs
+        if jaw_abs is not None and not 0.0 <= jaw_abs < float("inf"):
+            parser.error(f"--jaw_noise_abs must be finite and at least 0, got {jaw_abs}")
+        if jaw_abs is not None and (args.jaw_noise_scale != 1.0 or args.jaw_noise_shared):
+            parser.error("--jaw_noise_abs needs --jaw_noise_scale 1 and no --jaw_noise_shared")
         scale, rad, open_frac = args.still_noise_scale, args.still_rad, args.still_open
         if scale is not None and not 0.0 <= scale < float("inf"):
             parser.error(f"--still_noise_scale must be finite and at least 0, got {scale}")
@@ -468,6 +488,7 @@ def main() -> int:
             args.noise_scale,
             args.jaw_noise_scale,
             args.jaw_noise_shared,
+            jaw_abs,
         )
         policy_id = f"pi05:{args.checkpoint}" + (
             f"+warp{args.action_warp}" if args.action_warp != 1.0 else ""

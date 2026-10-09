@@ -409,6 +409,33 @@ def test_the_jaw_noise_scale_scales_only_the_jaw_column(stand_in):
         assert torch.equal(policy.kwargs.pop()["noise"], want)
 
 
+def test_the_absolute_jaw_noise_keeps_its_std_at_every_scale(stand_in):
+    policy, ckpt = stand_in
+    generator, draws = torch.Generator().manual_seed(0), []
+
+    def sample_noise(shape, device):
+        draws.append(torch.randn(shape, generator=generator))
+        return draws[-1]
+
+    policy.model.sample_noise = sample_noise
+    predict_chunk, _, inference, _, sampling = ps.load_pi05(ckpt, "cpu", None, 0.0, 1.0, False, 1.0)
+    assert sampling == "+noise0.0+jawabs1.0" and inference["jaw_noise_abs"] == 1.0
+    _, arrays = step(0.5, batch=2)
+    obs = {"state": derived_state(arrays["state"], arrays["context"])}
+    obs |= {"wrist": arrays["wrist"], "overhead": arrays["overhead"]}
+    arm = torch.ones(32, dtype=torch.bool)
+    arm[ps.JAW] = False
+    for scale in (None, 1.0):  # the forward's zero noise, then a still resample at 1.0
+        predict_chunk(obs) if scale is None else predict_chunk(obs, scale)
+        sent = policy.kwargs.pop()["noise"]  # the explicit noise, even at scale 1.0
+        assert torch.equal(sent[..., arm], (scale or 0.0) * draws[-1][..., arm])
+        assert torch.equal(sent[..., ps.JAW], draws[-1][..., ps.JAW]) and sent[..., ps.JAW].any()
+    predict_chunk, *_, sampling = ps.load_pi05(ckpt, "cpu", None, 1.0, 1.0, False, 0.5)
+    predict_chunk(obs)
+    sent = policy.kwargs.pop()["noise"]
+    assert sampling == "+jawabs0.5" and torch.equal(sent[..., ps.JAW], 0.5 * draws[-1][..., ps.JAW])
+
+
 def test_the_shared_jaw_draw_holds_one_value_a_row_over_the_chunk(stand_in):
     policy, ckpt = stand_in
     generator, draws = torch.Generator().manual_seed(0), []
@@ -464,6 +491,7 @@ STILL_ON = ["--still_noise_scale", "0.7", "--still_rad", "0.1", "--still_open", 
         ),
         (["--jaw_latch", "10", *STILL_ON], "+still0.7r0.1o0.8+latch10", [0.7, 0.1, 0.8]),
         (["--jaw_latch", "0"], "", {}),
+        (["--jaw_noise_abs", "1", *STILL_ON], "+jawabs1.0+still0.7r0.1o0.8", [0.7, 0.1, 0.8]),
     ],
 )
 def test_the_policy_id_names_each_switch_off_its_default(
@@ -484,6 +512,7 @@ def test_the_policy_id_names_each_switch_off_its_default(
     assert ready["inference"]["noise_scale"] == 0.0
     assert ready["inference"].get("jaw_noise_scale") == (0.0 if "+jawnoise" in tail else None)
     assert ready["inference"].get("jaw_noise_shared") == (True if "+jawshared" in tail else None)
+    assert ready["inference"].get("jaw_noise_abs") == (1.0 if "+jawabs" in tail else None)
     assert ready["inference"].get("jaw_latch") == (10 if "+latch" in tail else None)
     names = ("still_noise_scale", "still_rad", "still_open")
     assert {k: v for k, v in ready["inference"].items() if k in names} == dict(zip(names, block))
@@ -497,6 +526,10 @@ def test_the_policy_id_names_each_switch_off_its_default(
         ["--noise_scale", "nan"],
         ["--jaw_noise_scale", "-0.1"],
         ["--jaw_noise_scale", "inf"],
+        ["--jaw_noise_abs", "-1"],
+        ["--jaw_noise_abs", "nan"],
+        ["--jaw_noise_abs", "1", "--jaw_noise_scale", "0.5"],
+        ["--jaw_noise_abs", "1", "--jaw_noise_shared"],
         ["--jaw_latch", "-1"],
         ["--still_noise_scale", "-1"],
         ["--still_rad", "0"],

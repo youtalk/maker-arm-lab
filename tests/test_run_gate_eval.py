@@ -1752,6 +1752,12 @@ def test_the_pi05_jaw_noise_scale_reaches_the_server_and_splits_the_cache(tmp_pa
     shared = _cfg(tmp_path, ledger, processes=1, pi05=True, pi05_jaw_noise_shared=True)
     assert cached(shared, jaw_noise_shared=True) and not cached(shared)
     assert not cached(off, jaw_noise_shared=True) and not cached(on, jaw_noise_shared=True)
+    jaw_abs = ge._build_cfg(ge._parse_args(read + ["--pi05_jaw_noise_abs", "1"]))
+    assert (plain.pi05_jaw_noise_abs, jaw_abs.pi05_jaw_noise_abs) == (None, 1.0)
+    assert ge._pi05_server_command(jaw_abs) == command + ["--jaw_noise_abs", "1.0"]
+    jaw_abs = _cfg(tmp_path, ledger, processes=1, pi05=True, pi05_jaw_noise_abs=1.0)
+    assert cached(jaw_abs, jaw_noise_abs=1.0) and not cached(jaw_abs)
+    assert not cached(off, jaw_noise_abs=1.0) and not cached(jaw_abs, jaw_noise_abs=0.5)
 
 
 def test_the_pi05_still_rule_reaches_the_server_and_splits_the_cache(tmp_path):
@@ -1918,6 +1924,13 @@ def test_the_pi05_server_logs_to_the_out_dir_and_the_supervisor_waits_for_ready(
         (["--pi05", "--pi05_jaw_latch", "-1"], "--pi05_jaw_latch must be at least 0"),
         (["--pi05", "--pi05_jaw_noise_scale", "-1"], "--pi05_jaw_noise_scale must be finite"),
         (["--pi05", "--pi05_jaw_noise_scale", "nan"], "--pi05_jaw_noise_scale must be finite"),
+        (["--pi05_jaw_noise_abs", "1"], "need --pi05"),
+        (["--pi05", "--pi05_jaw_noise_abs", "-1"], "--pi05_jaw_noise_abs must be finite"),
+        (
+            ["--pi05", "--pi05_jaw_noise_abs", "1", "--pi05_jaw_noise_scale", "0.5"],
+            "needs --pi05_jaw",
+        ),
+        (["--pi05", "--pi05_jaw_noise_abs", "1", "--pi05_jaw_noise_shared"], "needs --pi05_jaw"),
         (["--pi05_still_noise_scale", "1.0"], "need --pi05"),
         (["--pi05_still_open", "0.9"], "need --pi05"),
         (["--pi05", "--pi05_still_rad", "0.1"], "need --pi05_still_noise_scale"),
