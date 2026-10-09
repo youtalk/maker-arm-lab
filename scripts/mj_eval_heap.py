@@ -57,6 +57,7 @@ from maker_arm_lab.core.eval_loop import EvalFailure
 from maker_arm_lab.core.heap_oracle import CELL_FAILURE_CAP, HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.core.loop import (
+    AIR_STALL_STEPS,
     CARRY_VIEW_STEPS,
     CYCLE_STEP_BUDGET,
     HELD_NO_RISE_STEPS,
@@ -356,6 +357,14 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "refuses --passenger_drop",
     )
     parser.add_argument(
+        "--retry_noise_at",
+        type=int,
+        default=0,
+        help="MS7h, with --carry_guard and --replan_on_switch: once an air stall with nothing "
+        "held has run N steps, flag the row for the server's retry noise to its cycle's end "
+        "(loop.retry_noise_due); 0 is off",
+    )
+    parser.add_argument(
         "--clear_first",
         action="store_true",
         help="MS7g, with --perceived: the selector ranks the grasps that sweep no standing "
@@ -420,6 +429,10 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
     check_teacher_waits(parser, args)
     if args.carry_guard and args.passenger_drop:
         parser.error("--carry_guard refuses --passenger_drop, which opens over the tray")
+    if not 0 <= args.retry_noise_at < AIR_STALL_STEPS:
+        parser.error(f"--retry_noise_at must be 0 (off) or more, under {AIR_STALL_STEPS}")
+    if args.retry_noise_at and not (args.carry_guard and args.replan_on_switch):
+        parser.error("--retry_noise_at needs --carry_guard and --replan_on_switch")
     if args.classifier and not (args.perceived and args.categories):
         parser.error(
             "--classifier reads the categories on the perceived views: it needs --perceived and "
@@ -690,6 +703,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             overhang_guard=args.overhang_guard,
             bank_views=args.bank_views,
             vote_weights=args.vote if args.vote_weights else None,
+            retry_noise_at=args.retry_noise_at,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

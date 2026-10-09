@@ -215,3 +215,34 @@ def test_an_error_reply_clears_the_last_policy_time():
         client.close()
     finally:
         shutdown()
+
+
+def test_client_sends_the_retry_flag_only_when_given(monkeypatch):
+    """The retry flag rides on the wire when given, and the ACT server ignores it."""
+    import policy_client
+    import policy_protocol
+
+    sent, real = [], policy_protocol.send_message
+
+    def send(socket, header, arrays=None):
+        if header["type"] == "step":
+            retry = (arrays or {}).get(policy_protocol.RETRY_KEY)
+            sent.append(None if retry is None else retry.tolist())
+        real(socket, header, arrays)
+
+    monkeypatch.setattr(policy_client.policy_protocol, "send_message", send)
+    seen = []
+
+    def fake_policy(state, wrist, overhead, context=None, replan=None):
+        seen.append(None if replan is None else replan.tolist())
+        return np.zeros((state.shape[0], *ACTION_SHAPE), dtype="float32")
+
+    endpoint, shutdown = _serve(policy_fn=fake_policy, reset_fn=lambda: None, policy_id="fake:r")
+    client = ServerPolicy(endpoint)
+    client.step(*_obs(2))
+    client.step(*_obs(2), retry=np.array([False, True]))
+    client.step(*_obs(2), replan=np.array([True, False]), retry=np.array([True, True]))
+    client.close()
+    shutdown()
+    assert sent == [None, [False, True], [True, True]]
+    assert seen == [None, None, [True, False]]

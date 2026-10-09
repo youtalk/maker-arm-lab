@@ -333,8 +333,10 @@ LOOP_SWITCHES = (
 """The heap loop's protocol switches (core.loop.rollout); the client records them in the
 payload's inference block under "loop", and the cache matches on them. ``carry_guard`` (MS7g)
 is recorded only when on, so a payload without it ran with it off."""
-LOOP_SETTINGS = ("rake_cap",)
-"""The heap loop's integer settings, recorded and matched like the switches; 0 is off."""
+LOOP_SETTINGS = ("rake_cap", "retry_noise_at")
+"""The heap loop's integer settings, recorded and matched like the switches; 0 is off.
+``retry_noise_at`` (MS7h) reaches the client through --client_flags, as --replan_on_switch does,
+and is recorded only when on."""
 PERCEPTION_KNOBS = (
     "pos",
     "heading",

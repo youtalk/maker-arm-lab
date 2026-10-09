@@ -245,6 +245,17 @@ the tray interior under a tray wall's top edge (``grasp.under_overhang``), as ne
 nor a rake, and keeps the carry grace for a cycle that read a lift (``grace_hold``). The
 ``perception`` block then carries ``OVERHANG_COUNTS``.
 
+``retry_noise_at`` N (MS7h, with ``carry_guard`` and ``replan_on_switch``; 0 is off, under
+``AIR_STALL_STEPS``) puts a policy-driven row into retry mode for the rest of its cycle once its
+air stall has run N steps with nothing held (``retry_noise_due``), and sets its replan flag on
+that step, so the server forwards a fresh chunk at once. Every step it sends the per-env retry
+flags, and the pi0.5 server's ``--retry_noise_scale`` draws a flagged row's arm noise at its
+retry scale. At zero arm noise the pi0.5 policy grasps cleanly on a first attempt but hovers
+still after a miss, deterministic, until the stall opens the jaws (``stall_open``); at noise 1 it
+does not hover and often recovers in the cycle. A one-chunk noisy redraw does not help, because
+the next zero-noise forward goes back to the hover. The census rows then carry ``retry_at``, the
+cycle step retry mode began (None when it never did).
+
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
 """
@@ -535,8 +546,8 @@ class AirStall:
     ``AIR_STALL_STEPS`` steps in a row had the point over the tray, at least ``AIR_STALL_MIN_Z``
     above the desk and a mean speed (path length over the last ``AIR_STALL_WINDOW`` steps)
     under ``AIR_STALL_SPEED``, until a step breaks one of them; ``entered`` marks the step it
-    began. The census counts it (``Cycle.air_stall_steps``), and only ``carry_guard`` acts on it.
-    Known geometry and the FK pick point only."""
+    began. The census counts it (``Cycle.air_stall_steps``), and only ``carry_guard`` and
+    ``retry_noise_at`` act on it. Known geometry and the FK pick point only."""
 
     def __init__(self):
         self.last: list[float] | None = None
@@ -555,6 +566,12 @@ class AirStall:
         was, self.stalled = self.stalled, self.run >= AIR_STALL_STEPS
         self.entered = self.stalled and not was
         return self.stalled
+
+
+def retry_noise_due(run: int, at: int, holding: bool) -> bool:
+    """``retry_noise_at``: does a row not yet in retry mode enter it now? Yes once the air stall's
+    ``run`` has reached ``at`` (0: off) and the hold detector holds nothing (``holding``). Pure."""
+    return 0 < at <= run and not holding
 
 
 CARRY_GRACE_STEPS = 400
@@ -1253,6 +1270,10 @@ class Cycle:
     handoff: str | None = None
     handoff_over: bool | None = None
     stall_open: bool = False
+    # MS7h ``retry_noise_at``: the switch is on (else ``retry_at`` is unexported), and the cycle
+    # step the row entered retry mode, None while it has not.
+    retry_noise: bool = False
+    retry_at: int | None = None
     scene: object = None
 
 
@@ -2117,7 +2138,8 @@ CARRY_GUARD_CENSUS = ("guard_steps", "guard_rim_steps", "guard_vote_steps", "han
 steps, those over the served box's rim band, those inside the served box while a class vote was
 pending (held by the vote rule alone), the rig carry's outcome (None: no handoff;
 "placed", "lifted_lost", "failed", "declined", or "carrying" when the episode ended during it)
-and whether an empty air stall opened the jaws and failed the cycle."""
+and whether an empty air stall opened the jaws and failed the cycle. ``retry_noise_at`` (MS7h)
+adds ``retry_at`` beside them, there only with that switch on: the cycle step retry mode began."""
 MISSED_LIFT_COUNTS = ("missed_lifts", "carried_releases", "carried_rechecks")
 """``missed_lift``'s ``perception`` counts, in the payload only with the switch on: the carries
 ``carry_started`` read, the cycles a release ``carry_lost`` started ended, and the selections
@@ -2291,6 +2313,7 @@ def rollout(
     overhang_guard: bool = False,
     bank_views: bool = False,
     vote_weights: dict | None = None,
+    retry_noise_at: int = 0,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -2355,6 +2378,9 @@ def rollout(
     ``vote_weights`` (MS7g) is the module docstring's, the vote's JSON as a dict (``weights`` per
     ``FUSED_VIEWS``, ``bias`` per class); it needs ``classifier`` and ``class_views`` and refuses
     ``carry_votes``.
+    ``retry_noise_at`` (MS7h) is the module docstring's; it lies in [0, ``AIR_STALL_STEPS``) and
+    needs ``carry_guard`` and ``replan_on_switch``; with it on the policy's ``step`` takes
+    ``retry``, the per-env retry flags.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -2458,6 +2484,10 @@ def rollout(
         raise EvalFailure("carry_guard", "reads the hold detector and the perceived boxes")
     if carry_guard and passenger_drop:
         raise EvalFailure("carry_guard", "refuses passenger_drop, which opens over the tray")
+    if not 0 <= retry_noise_at < AIR_STALL_STEPS:
+        raise EvalFailure("retry_noise_at", f"must be 0 (off) or more, under {AIR_STALL_STEPS}")
+    if retry_noise_at and not (carry_guard and replan_on_switch):
+        raise EvalFailure("retry_noise_at", "reads carry_guard's stall and asks by the replan flag")
     if perceived:
         if policy is None:
             raise EvalFailure("perceived", "serves a policy; the oracle driver reads the truth")
@@ -2657,6 +2687,8 @@ def rollout(
         switches["stall_end"] = True
     if carry_guard:
         switches["carry_guard"] = True
+    if retry_noise_at:
+        switches["retry_noise_at"] = int(retry_noise_at)
     if clear_first:
         switches["clear_first"] = True
     if overhang_guard:
@@ -2929,6 +2961,8 @@ def rollout(
                 st.opening = False  # ``passenger_drop`` and ``carry_guard``'s stall_open
                 if carry_guard:
                     st.cycle.guard_steps, st.cycle.scene = 0, scene
+                if retry_noise_at:  # each cycle starts out of retry mode (retry_at None)
+                    st.cycle.retry_noise = True
                 if classifier is not None:
                     # MS7f view 1: the narrow overhead view of the detection.
                     frame = env.narrow_overhead(i, seen.centre)
@@ -2987,6 +3021,9 @@ def rollout(
             ):
                 on_frame(c0.ordinal, step - c0.start_step, wrist[0], overhead[0])
             extra = {"replan": replan.numpy().copy()} if replan_on_switch else {}
+            if retry_noise_at:  # each env's retry mode, which lasts to its cycle's end
+                retrying = [st.cycle is not None and st.cycle.retry_at is not None for st in states]
+                extra["retry"] = torch.tensor(retrying, dtype=torch.bool).numpy()
             policy_action = torch.from_numpy(
                 policy.step(state, wrist, overhead, context=context, **extra)
             )
@@ -3021,6 +3058,11 @@ def rollout(
                     # guard held for GUARD_STALL_STEPS. A held part goes to the rig once a
                     # pending class vote has set its box; with none held the jaws open and the
                     # cycle fails at its target (F1).
+                    if c.retry_at is None and retry_noise_due(
+                        stalls[i].run, retry_noise_at, d.holding
+                    ):
+                        c.retry_at = step - c.start_step  # ``retry_noise_at``: to the cycle end
+                        replan[i] = True  # the next step forwards this row at the retry noise
                     air = stalls[i].stalled and step - c.start_step >= AIR_STALL_STEPS
                     voting = c.vote is not None or c.lift_view is not None
                     if d.holding and (air or c.guard_run >= GUARD_STALL_STEPS) and not voting:
@@ -3804,6 +3846,8 @@ def _book_census(st: EnvState, cycle: Cycle, reason: str) -> None:
         row |= {k: getattr(cycle, k) for k in CLASSIFIER_CENSUS}
     if cycle.guard_steps is not None:  # ``carry_guard``
         row |= {k: getattr(cycle, k) for k in CARRY_GUARD_CENSUS}
+    if cycle.retry_noise:  # ``retry_noise_at``, beside ``CARRY_GUARD_CENSUS``
+        row["retry_at"] = cycle.retry_at
     st.census.append({k: _rounded(v) for k, v in row.items()})
 
 

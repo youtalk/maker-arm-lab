@@ -1254,7 +1254,11 @@ def test_the_ms7d_switches_and_knobs_reach_the_heap_client_and_key_the_cache(tmp
     for name in ge.MS7D_LEVERS:
         cfg = ge._build_cfg(ge._parse_args(argv + heap + [f"--{name}"]))
         assert f"--{name}" in ge._eval_command(cfg, draw)
-        assert ge.loop_switches(cfg.client_flags) == base | {name: True, "rake_cap": 0}
+        assert ge.loop_switches(cfg.client_flags) == base | {
+            name: True,
+            "rake_cap": 0,
+            "retry_noise_at": 0,
+        }
         assert (
             hit(cfg, base | {name: True})
             and not hit(cfg, base)
