@@ -177,6 +177,50 @@ def test_the_still_rule_is_off_by_default(capsys):
     assert not [k for k in s.ready(0)["inference"] if k.startswith("still")]
 
 
+def test_a_retry_row_draws_its_arm_noise_at_the_retry_scale_in_a_forward_of_its_own(capsys):
+    inference = {"n_action_steps": N, "chunk_size": N, "num_inference_steps": 10}
+    still = (0.5, 0.15, 0.9)
+    # moving, still, moving and flagged, still and flagged; every queue is empty
+    header, arrays = still_step([0.3, 0.1, 0.3, 0.1], [1.0] * 4)
+    flagged = arrays | {"retry": np.array([False, False, True, True])}
+    for scale in (0.0, 1.0):
+        model, off_model = StillModel(), StillModel()
+        on = ps.SharedServer(
+            model, "pi05:/ckpt", N, inference, "continuous", 1.0, still, retry_noise_scale=scale
+        )
+        off = ps.SharedServer(off_model, "pi05:/ckpt", N, inference, "continuous", 1.0, still)
+        assert on.ready(0)["inference"]["retry_noise_scale"] == scale
+        assert "retry_noise_scale" not in off.ready(0)["inference"]
+        served = [s.process([(b"a", header, flagged)])[0][0][2]["action"] for s in (on, off)]
+        (retried, *at), (rest, *none), (resample, *again) = model.calls
+        full = off_model.calls[0][0]  # off: the old forward over all four rows
+        assert (at, none, again) == ([scale], [], [0.5])
+        for key in full:
+            np.testing.assert_array_equal(retried[key], full[key][[2, 3]])
+            np.testing.assert_array_equal(rest[key], full[key][[0, 1]])
+        np.testing.assert_array_equal(resample["state"], full["state"][[1]])  # still, unflagged
+        assert (served[0][[2, 3]] == 100 + scale).all() and (served[0][1] == 100.5).all()
+        np.testing.assert_allclose(served[0][0, :6], arrays["state"][0, :6] + 0.3)
+        assert [call[1:] for call in off_model.calls] == [(), (0.5,)]  # off: as before
+        assert len(off_model.calls[1][0]["state"]) == 2 and (served[1][[1, 3]] == 100.5).all()
+        assert (served[1][[0, 2]] < 100).all()
+        logs = capsys.readouterr().out.strip().splitlines()
+        assert [line.split(" ", 3)[3] for line in logs] == ["retry=2 still=1", "still=2"]
+    # On, a step without the key or with every flag False is the old forward; every row flagged
+    # runs no forward at the configured noise.
+    for extra in ({}, {"retry": np.zeros(4, bool)}):
+        model = StillModel()
+        s = ps.SharedServer(model, "pi05:/ckpt", N, inference, "continuous", retry_noise_scale=1.0)
+        s.process([(b"a", header, arrays | extra)])
+        assert [call[1:] for call in model.calls] == [()] and len(model.calls[0][0]["state"]) == 4
+        assert capsys.readouterr().out.strip().endswith(" retry=0")
+    model = StillModel()
+    s = ps.SharedServer(model, "pi05:/ckpt", N, inference, "continuous", retry_noise_scale=0.0)
+    s.process([(b"a", header, arrays | {"retry": np.ones(4, bool)})])
+    assert [(len(call[0]["state"]), *call[1:]) for call in model.calls] == [(4, 0.0)]
+    assert capsys.readouterr().out.strip().endswith(" retry=4")
+
+
 def test_hello_ack_and_shutdown():
     replies, keep = server(warp=1.5).process([(b"a", {"type": "hello", "protocol": 4}, {})])
     ack = replies[0][1]
@@ -492,6 +536,12 @@ STILL_ON = ["--still_noise_scale", "0.7", "--still_rad", "0.1", "--still_open", 
         (["--jaw_latch", "10", *STILL_ON], "+still0.7r0.1o0.8+latch10", [0.7, 0.1, 0.8]),
         (["--jaw_latch", "0"], "", {}),
         (["--jaw_noise_abs", "1", *STILL_ON], "+jawabs1.0+still0.7r0.1o0.8", [0.7, 0.1, 0.8]),
+        (["--retry_noise_scale", "1"], "+retry1.0", {}),
+        (
+            ["--jaw_noise_abs", "1", "--retry_noise_scale", "1", *STILL_ON, "--jaw_latch", "10"],
+            "+jawabs1.0+retry1.0+still0.7r0.1o0.8+latch10",
+            [0.7, 0.1, 0.8],
+        ),
     ],
 )
 def test_the_policy_id_names_each_switch_off_its_default(
@@ -514,6 +564,7 @@ def test_the_policy_id_names_each_switch_off_its_default(
     assert ready["inference"].get("jaw_noise_shared") == (True if "+jawshared" in tail else None)
     assert ready["inference"].get("jaw_noise_abs") == (1.0 if "+jawabs" in tail else None)
     assert ready["inference"].get("jaw_latch") == (10 if "+latch" in tail else None)
+    assert ready["inference"].get("retry_noise_scale") == (1.0 if "+retry" in tail else None)
     names = ("still_noise_scale", "still_rad", "still_open")
     assert {k: v for k, v in ready["inference"].items() if k in names} == dict(zip(names, block))
 
@@ -534,6 +585,8 @@ def test_the_policy_id_names_each_switch_off_its_default(
         ["--still_noise_scale", "-1"],
         ["--still_rad", "0"],
         ["--still_open", "1.5"],
+        ["--retry_noise_scale", "-1"],
+        ["--retry_noise_scale", "nan"],
     ],
 )
 def test_a_bad_sampling_value_fails_with_the_token(flags):

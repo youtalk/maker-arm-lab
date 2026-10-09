@@ -1829,6 +1829,33 @@ def test_the_pi05_jaw_latch_reaches_the_server_and_splits_the_cache(tmp_path):
     assert cached(on, jaw_latch=10) and not cached(on) and not cached(on, jaw_latch=5)
 
 
+def test_the_pi05_retry_noise_scale_reaches_the_server_and_splits_the_cache(tmp_path):
+    read = _argv(tmp_path) + PI05_HEAP + ["--pi05", "--pi05_noise_scale", "0"]
+    plain = ge._build_cfg(ge._parse_args(read))
+    retry = ge._build_cfg(ge._parse_args(read + ["--pi05_retry_noise_scale", "1"]))
+    assert (plain.pi05_retry_noise_scale, retry.pi05_retry_noise_scale) == (None, 1.0)
+    assert "--retry_noise_scale" not in ge._pi05_server_command(plain)  # off: the same bytes
+    tail = ["--retry_noise_scale", "1.0"]
+    assert ge._pi05_server_command(retry) == ge._pi05_server_command(plain) + tail
+    ledger = _fake_ledger(tmp_path)
+    off = _cfg(tmp_path, ledger, processes=1, pi05=True)
+    on = _cfg(tmp_path, ledger, processes=1, pi05=True, pi05_retry_noise_scale=1.0)
+    zero = _cfg(tmp_path, ledger, processes=1, pi05=True, pi05_retry_noise_scale=0.0)
+    off.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    served = {"n_action_steps": 1, "temporal_ensemble_coeff": 0.01, "num_inference_steps": 10}
+
+    def cached(cfg, **inference):
+        payload = _payload(draw, [_episode(6)], policy_id="pi05:ck")
+        payload["inference"] = served | inference
+        (off.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    assert cached(off) and not cached(off, retry_noise_scale=1.0)
+    assert cached(on, retry_noise_scale=1.0) and not cached(on)
+    assert not cached(on, retry_noise_scale=0.0) and cached(zero, retry_noise_scale=0.0)
+
+
 def test_the_supervisor_copies_the_still_defaults_of_the_server():
     source = (Path(__file__).parents[1] / "lerobot_stack" / "pi05_server.py").read_text()
     assert f"\nSTILL_RAD = {ge.GateCfg.pi05_still_rad}\n" in source
@@ -1941,6 +1968,9 @@ def test_the_pi05_server_logs_to_the_out_dir_and_the_supervisor_waits_for_ready(
         (["--pi05", "--pi05_still_noise_scale", "-1"], "--pi05_still_noise_scale must be"),
         (["--pi05", "--pi05_still_noise_scale", "1", "--pi05_still_rad", "0"], "_rad must be"),
         (["--pi05", "--pi05_still_noise_scale", "1", "--pi05_still_open", "2"], "_open must be"),
+        (["--pi05_retry_noise_scale", "1"], "need --pi05"),
+        (["--pi05", "--pi05_retry_noise_scale", "-1"], "--pi05_retry_noise_scale must be finite"),
+        (["--pi05", "--pi05_retry_noise_scale", "inf"], "--pi05_retry_noise_scale must be finite"),
     ],
 )
 def test_the_pi05_mode_refuses_what_its_server_cannot_serve(

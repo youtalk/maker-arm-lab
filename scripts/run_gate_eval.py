@@ -33,7 +33,8 @@ server batches the forwards of the lanes whose queues are empty), its log is
 --pi05_jaw_noise_scale J reaches it as --jaw_noise_scale (the jaw column's factor on that noise)
 and --pi05_jaw_noise_shared as --jaw_noise_shared (one jaw draw a chunk), and the cache matches
 both. --pi05_jaw_noise_abs A reaches it as --jaw_noise_abs (the jaw column's std at every scale),
-and the cache matches it.
+and the cache matches it. --pi05_retry_noise_scale S reaches it as --retry_noise_scale (a row the
+heap loop's --retry_noise_at flags draws its arm noise at S), and the cache matches it.
 --pi05_still_noise_scale S2 turns on the server's still rule with --still_rad and --still_open
 (--pi05_still_rad, --pi05_still_open, default the server's), and the cache matches all three.
 --pi05_jaw_latch L reaches the server as --jaw_latch (the jaw commands held after a close), and
@@ -103,6 +104,7 @@ class GateCfg:
     pi05_jaw_noise_scale: float = 1.0
     pi05_jaw_noise_shared: bool = False
     pi05_jaw_noise_abs: float | None = None  # None: the jaw's noise follows the call's scale
+    pi05_retry_noise_scale: float | None = None  # None: a retry row keeps the server's noise
     pi05_still_noise_scale: float | None = None  # None: the server's still rule is off
     pi05_still_rad: float = 0.15  # the server's STILL_RAD (tests pin the copy)
     pi05_still_open: float = 0.9  # the server's STILL_OPEN
@@ -797,6 +799,11 @@ def _pi05_server_command(cfg: GateCfg) -> list[str]:
         ),
         *itertools.chain(*((f"--{key}", str(value)) for key, value in _pi05_still(cfg).items())),
         *(["--jaw_latch", str(cfg.pi05_jaw_latch)] if cfg.pi05_jaw_latch else []),
+        *(
+            ["--retry_noise_scale", str(cfg.pi05_retry_noise_scale)]
+            if cfg.pi05_retry_noise_scale is not None
+            else []
+        ),
     ]
 
 
@@ -1014,6 +1021,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     same_inference = same_inference and shared == cfg.pi05_jaw_noise_shared
     jaw_abs = served.get("jaw_noise_abs")  # recorded only when on
     same_inference = same_inference and jaw_abs == cfg.pi05_jaw_noise_abs
+    retry = served.get("retry_noise_scale")  # recorded only when on
+    same_inference = same_inference and retry == cfg.pi05_retry_noise_scale
     # A payload served without the still rule records none of its keys.
     still = {key: served[key] for key in PI05_STILL if key in served}
     same_inference = same_inference and still == _pi05_still(cfg)
@@ -1256,6 +1265,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=float,
         default=None,
         help="with --pi05: the jaw column of that noise is this times N(0, 1) at every scale",
+    )
+    parser.add_argument(
+        "--pi05_retry_noise_scale",
+        type=float,
+        default=None,
+        help="with --pi05: a row the heap loop's --retry_noise_at flags draws its arm noise from"
+        " this times N(0, I)",
     )
     parser.add_argument(
         "--pi05_still_noise_scale",
@@ -1638,10 +1654,11 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
             raise ValueError("--pi05 serves one checkpoint open loop: no ensemble flags")
     jaw = args.pi05_jaw_noise_scale
     sampling = (args.pi05_num_steps, args.pi05_noise_scale, jaw, args.pi05_jaw_latch)
-    sampling += (args.pi05_jaw_noise_abs,)
-    if not args.pi05 and (sampling != (None,) * 5 or args.pi05_jaw_noise_shared):
+    sampling += (args.pi05_jaw_noise_abs, args.pi05_retry_noise_scale)
+    if not args.pi05 and (sampling != (None,) * 6 or args.pi05_jaw_noise_shared):
         raise ValueError(
-            "--pi05_num_steps, --pi05_noise_scale and the --pi05_jaw_* flags need --pi05"
+            "--pi05_num_steps, --pi05_noise_scale, --pi05_retry_noise_scale and the"
+            " --pi05_jaw_* flags need --pi05"
         )
     if args.pi05_jaw_latch is not None and args.pi05_jaw_latch < 0:
         raise ValueError(f"--pi05_jaw_latch must be at least 0, got {args.pi05_jaw_latch}")
@@ -1660,6 +1677,9 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError(
             "--pi05_jaw_noise_abs needs --pi05_jaw_noise_scale 1, no --pi05_jaw_noise_shared"
         )
+    retry = args.pi05_retry_noise_scale
+    if retry is not None and not 0.0 <= retry < math.inf:
+        raise ValueError(f"--pi05_retry_noise_scale must be finite and at least 0, got {retry}")
     still = (args.pi05_still_noise_scale, args.pi05_still_rad, args.pi05_still_open)
     if not args.pi05 and still != (None, None, None):
         raise ValueError("the --pi05_still_* flags need --pi05")
@@ -1799,6 +1819,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         pi05_jaw_noise_scale=1.0 if jaw is None else jaw,
         pi05_jaw_noise_shared=args.pi05_jaw_noise_shared,
         pi05_jaw_noise_abs=jaw_abs,
+        pi05_retry_noise_scale=retry,
         pi05_still_noise_scale=args.pi05_still_noise_scale,
         pi05_still_rad=GateCfg.pi05_still_rad if still[1] is None else still[1],
         pi05_still_open=GateCfg.pi05_still_open if still[2] is None else still[2],
