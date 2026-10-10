@@ -2,10 +2,11 @@
 
 The preflight checks run on stub policies and pipelines. The script runs in a temp dir that
 stands in for /content, with shims first on PATH: python3 (the HF checks pass, the trainer is
-the stand-in), nvidia-smi, pip, df (FAKE_DF_KB) and cp (it logs the Drive checkpoints at each
-copy to Drive, and fails the first FAKE_DIR/cp_fails copies). The stand-in trainer is this file
-run as a script: it parses the trainer's argv with lerobot's own parser, writes lerobot's
-checkpoint layout and log lines, and fakes the preflight's outcome (FAKE_PREFLIGHT).
+the stand-in, and the pi05_base download copies FAKE_BASE), nvidia-smi, pip, df (FAKE_DF_KB) and
+cp (it logs the Drive checkpoints at each copy to Drive, and fails the first FAKE_DIR/cp_fails
+copies). The stand-in trainer is this file run as a script: it parses the trainer's argv with
+lerobot's own parser, writes lerobot's checkpoint layout and log lines, and fakes the preflight's
+outcome (FAKE_PREFLIGHT).
 """
 
 import hashlib
@@ -176,6 +177,9 @@ def test_the_preflight_tokens(tmp_path, capsys):
 SHIMS = {
     "python3": """
 case "$1 $2" in *pi05_preflight.py\\ train) shift 2; exec "$FAKE_PY" "$FAKE_STANDIN" "$@" ;; esac
+case "$*" in *snapshot_download*)
+    echo "$3 $4" >> "$FAKE_DIR/download.log"; mkdir -p "$5"; exec cp -r "$FAKE_BASE"/. "$5" ;;
+esac
 case "$*" in *huggingface_hub*|*AutoTokenizer*|*"import lerobot"*) exit 0 ;; esac
 exec "$FAKE_PY" "$@"
 """,
@@ -207,15 +211,17 @@ def rig(tmp_path):
     drive = content / "drive" / "MyDrive" / "ms7h"
     meta = drive / "dataset" / "meta"
     start = drive / "checkpoints" / "030000" / "pretrained_model"
-    for d in (meta, start, tmp_path / "bin", tmp_path / "fake"):
+    base = tmp_path / "pi05_base"  # what the snapshot_download of lerobot/pi05_base writes
+    for d in (meta, start, base, tmp_path / "bin", tmp_path / "fake"):
         d.mkdir(parents=True)
     for name in ("colab_train_pi05.sh", "pi05_preflight.py", "train_pi05.py"):
         shutil.copy(HERE / name, drive / name)
     (meta / "info.json").write_text("{}")
     (meta / "stats.json").write_text(json.dumps(STATS))
     (meta / "action_space.json").write_text('{"action_space": "absolute", "gripper": "continuous"}')
-    (start / "model.safetensors").write_bytes(b"\0" * 1000)
-    (start / "policy_preprocessor.json").write_text(json.dumps(_preprocessor_json(200)))
+    for d in (start, base):
+        (d / "model.safetensors").write_bytes(b"\0" * 1000)
+        (d / "policy_preprocessor.json").write_text(json.dumps(_preprocessor_json(200)))
     np.save(drive / "jaw.npy", np.arange(5, dtype=np.int64))
     (drive / "jaw.json").write_text("{}")  # the sidecar train_pi05.py checks
     for name, body in SHIMS.items():
@@ -229,6 +235,7 @@ def rig(tmp_path):
         "FAKE_PY": sys.executable,
         "FAKE_STANDIN": __file__,
         "FAKE_DIR": str(tmp_path / "fake"),
+        "FAKE_BASE": str(base),
         "CONTENT": str(content),
         "UPTIME_FILE": str(tmp_path / "uptime"),
         "DIR": "ms7h",
@@ -295,6 +302,72 @@ def test_smoke_trains_200_steps_from_a_128_token_copy_and_writes_nothing_to_driv
     assert call["max_length"] == 128 and _max_length(rig.start) == 200
     assert call["jaw_mask"] == str(rig.drive / "jaw.npy")
     assert not rig.run.exists() and not (rig.drive / "action_space.json").exists()
+
+
+BASE = "lerobot/pi05_base"
+BASE_REV = "a538eb273274eb30f126a118f39dbc0ee212c883"
+
+
+def test_a_smoke_from_pi05_base_downloads_the_pinned_revision_and_reads_its_own_band(rig):
+    r = _run(rig, "--smoke", START=BASE, RUN_NAME=None, JAW_MASK=None, FAKE_LOSS="0.092")
+    assert r.token.startswith("COLAB_TRAIN_OK smoke") and "loss200=0.092" in r.token
+    assert "loss band: step 200 loss 0.092 in [0.046, 0.34]" in r.stdout
+    assert (rig.fake / "download.log").read_text() == f"{BASE} {BASE_REV}\n"
+    (call,) = _calls(rig)
+    assert call["pretrained_path"] == str(rig.path / "content" / "start_model")
+    assert call["max_length"] == 128 and call["jaw_mask"] is None
+    assert call["warmup"] == 6 and call["decay"] == 200
+    assert _max_length(rig.path / "pi05_base") == 200
+    r = _run(rig, "--smoke", START=BASE, RUN_NAME=None, JAW_MASK=None)  # a warm start's loss
+    assert "loss band: step 200 loss 0.032 outside [0.046, 0.34]" in r.token
+
+
+def test_a_span_run_on_a_shared_drive_keeps_its_reads_and_resumes_toward_the_same_steps(rig):
+    # the owner's 2026-10-09 run in small: DRIVE_ROOT on a Shared drive, pi05_base, SPAN=1,
+    # KEEP_EVERY, DRIVE_MIN_GB=0 (df reads the account's quota, here 51 GB)
+    shared = rig.path / "content" / "drive" / "Shareddrives" / "lab" / "ms7h"
+    shared.parent.mkdir(parents=True)
+    shutil.move(rig.drive, shared)
+    rig.drive.parent.rmdir()  # no MyDrive at all
+    rig.drive, rig.run = shared, shared / "checkpoints_ab"
+    env = {"START": BASE, "JAW_MASK": None, "STEPS": 600, "SAVE_FREQ": 100, "SPAN": 1}
+    env |= {"KEEP_EVERY": 200, "DRIVE_ROOT": shared.parent, "DRIVE_MIN_GB": 0}
+    env |= {"FAKE_DF_KB": 50_000_000, "FAKE_LOSS": "0.120", "FAKE_STEP_S": 0.02}
+    (rig.path / "uptime").write_text("83600.00 1.00\n")  # N = 1360 / 3.85 = 353: stop at 300
+    r = _run(rig, **env)
+    assert "SPAN=1: this session stops at checkpoint 300 of 600" in r.stdout
+    assert r.token.startswith("COLAB_TRAIN_OK run=checkpoints_ab steps=600 last=000300 session_end")
+    assert (rig.run / "last.txt").read_text().strip() == "000300"
+    assert (rig.run / "000300" / "training_state").is_dir()  # resumable
+    assert sorted(p.name for p in (rig.run / "keep").iterdir()) == ["000200"]
+    time.sleep(2.5)  # 125 more steps had the trainer lived on
+    assert not (rig.out / "checkpoints" / "000400").exists()
+
+    shutil.rmtree(rig.path / "content" / "dataset")  # a new VM: the local disk is gone
+    shutil.rmtree(rig.out)
+    (rig.path / "uptime").write_text("3600.00 1.00\n")
+    r = _run(rig, **env)
+    assert "resuming checkpoints_ab from checkpoint 000300 toward step 600" in r.stdout
+    assert r.token.startswith("COLAB_TRAIN_OK run=checkpoints_ab steps=600 last=000600")
+    first, second = _calls(rig)
+    assert first["pretrained_path"] == str(rig.path / "content" / "start_model")
+    assert first["max_length"] == 128 and first["jaw_mask"] is None and not first["resume"]
+    assert second["resume"] is True and second["start"] == 300
+    for call in (first, second):  # one schedule: warmup 1000 * 600 / 30000, decay STEPS
+        assert (call["steps"], call["warmup"], call["decay"]) == (600, 20, 600)
+    assert _held(rig) == ["000600", "keep", "last.txt"]
+    assert not (rig.run / "000600" / "training_state").exists()
+    keep = rig.run / "keep"
+    assert sorted(p.name for p in keep.iterdir()) == ["000200", "000400", "000600"]
+    for step in keep.iterdir():
+        assert [p.name for p in step.iterdir()] == ["pretrained_model"]
+        assert (step / "pretrained_model" / "model.safetensors").is_file()
+    assert (shared / "action_space.json").exists()
+    assert not (rig.path / "content" / "drive" / "MyDrive").exists()
+
+    r = _run(rig, **env)
+    assert r.token.startswith("COLAB_TRAIN_DONE run=checkpoints_ab last=000600")
+    assert len(_calls(rig)) == 2 and len(list(keep.iterdir())) == 3
 
 
 def test_a_fresh_run_passes_every_recipe_flag_and_keeps_one_checkpoint(rig):
@@ -416,6 +489,17 @@ def test_the_final_sync_retries_then_fails_after_its_window(rig):
         ([], {"STATS_MD5": "0" * 32}, "is not the corpus's 00000000"),
         ([], {"STEPS": 100}, "a run needs step 200 of the loss band"),
         ([], {"JAW_MASK": "missing.npy"}, "no jaw mask"),
+        ([], {"KEEP_EVERY": 150}, "KEEP_EVERY=150 is not a multiple of the save freq 100"),
+        (
+            [],
+            {"KEEP_EVERY": 100, "FAKE_DF_KB": 70_000_000},  # 71.7 GB: 60 + 3 copies of 10
+            "Drive has 71 GB free, a run that keeps 3 more copies needs 90",
+        ),
+        (
+            [],
+            {"SPAN": 1, "STEPS": 30000, "SAVE_FREQ": 30000},
+            "SPAN=1: no checkpoint past 0 fits this session: N=20000",
+        ),
     ],
 )
 def test_each_usage_stop_prints_one_fail_token(rig, args, env, why):

@@ -10,27 +10,47 @@
 #      secrets itself, so without this export the script sees no token.)
 #   3. !DIR=<folder> START=<weights> RUN_NAME=<run> JAW_MASK=<file> \
 #          bash /content/drive/MyDrive/<folder>/colab_train_pi05.sh --smoke
-#      then the same cell without --smoke. After a session ends, run the same cell again.
+#      then the same cell without --smoke. After a session ends, run the same cell again. On a
+#      Shared drive, set DRIVE_ROOT=/content/drive/Shareddrives/<drive name> and run the script
+#      from there. The fresh run from pi05_base (2026-10-09), 60000 steps over three sessions,
+#      kept for a read at every 10000 steps:
+#      !DRIVE_ROOT=/content/drive/Shareddrives/maker-arm-lab DIR=maker-arm-ms7h-pi05 \
+#          START=lerobot/pi05_base RUN_NAME=checkpoints_fresh STEPS=60000 SPAN=1 \
+#          KEEP_EVERY=10000 DRIVE_MIN_GB=0 OUT_ROOT=/mnt/local-scratch \
+#          bash /content/drive/Shareddrives/maker-arm-lab/maker-arm-ms7h-pi05/colab_train_pi05.sh \
+#          --smoke
 #
-# Drive layout under /content/drive/MyDrive/$DIR:
+# Drive layout under $DRIVE_ROOT/$DIR (DRIVE_ROOT /content/drive/MyDrive by default):
 #   colab_train_pi05.sh, pi05_preflight.py, train_pi05.py   this script and its two helpers
 #   $JAW_MASK             the jaw mask .npy (train_pi05.py --jaw_mask), optional, with the
 #                         .json sidecar of the same name that jaw_mask_list.py writes
 #   dataset/              the derived dataset (DATASET=dataset_third for the one-third copy)
 #   $START                the pretrained_model directory the run starts from, e.g.
 #                         checkpoints/030000/pretrained_model (run 1) or checkpoints_ab/<step>/...
+#                         START=lerobot/pi05_base is downloaded instead and is not on Drive
 #   $RUN_NAME/<step>/     the run's last complete checkpoint; one folder a run, e.g.
 #                         checkpoints_ab, checkpoints_c1, checkpoints_c2
 #   $RUN_NAME/last.txt    its step directory name
+#   $RUN_NAME/keep/<step>/pretrained_model  with KEEP_EVERY, the weights (no training_state,
+#                         9.35 GB) of each checkpoint whose step is a multiple of KEEP_EVERY, for
+#                         the reads; the sync never deletes them
 #   $RUN_NAME/jaw_mask.npy  the mask the run started with (and its jaw_mask.json); a resume
 #                         trains with it
 #   action_space.json     the dataset's gripper contract, found by policy_server's marker walk
 #
 # A fresh run copies START to the local disk, sets its saved tokenizer step to 128 tokens (a
 # warm start reads the saved policy_preprocessor.json and no config.json), and passes every
-# recipe flag again; lerobot builds a new optimizer and a new schedule. STEPS is the decay
-# length. Its default is N, the steps that fit this session: min(STEPS_MAX, (24 h - uptime -
-# 0.4 h) / SEC_PER_STEP), since the 24 hours count from the creation of the runtime (F11).
+# recipe flag again; lerobot builds a new optimizer and a new schedule. START=lerobot/pi05_base
+# downloads run 1's start instead (da1f27a), at the revision pinned below; its normalizer takes
+# the dataset's statistics as a warm start's does (run 1's 030000 holds the corpus stats). STEPS
+# is the decay length. Its default is N, the steps that fit this session: min(STEPS_MAX, (24 h -
+# uptime - 0.4 h) / SEC_PER_STEP), since the 24 hours count from the creation of the runtime
+# (F11). A fresh run stops if STEPS > N, unless SPAN=1: then a session trains to its last
+# checkpoint that fits (the largest multiple of the save freq <= its start step + N), stops the
+# trainer once that checkpoint is on Drive and prints COLAB_TRAIN_OK with session_end=1; the next
+# session resumes toward the same STEPS on the same schedule (lerobot restores the optimizer and
+# the scheduler). With KEEP_EVERY, each synced checkpoint whose step is a multiple of it also
+# copies its pretrained_model to $RUN_NAME/keep/<step>.
 # The dataset is copied to the local disk once a session (Drive is too slow for random frame
 # reads). lerobot checkpoints to the local disk every SAVE_FREQ steps; a loop copies each new
 # complete checkpoint (the one checkpoints/last points to) to Drive and then deletes the older
@@ -39,13 +59,18 @@
 # step does not resume: it deletes its training_state on Drive and prints COLAB_TRAIN_DONE.
 #
 # The run stops on (F3, recipe 5.6):
-#   - Drive under DRIVE_MIN_GB free at the start (files deleted through the Colab mount may wait
-#     in the Drive trash and still count, so look there if this fires)
+#   - Drive under DRIVE_MIN_GB free at the start, plus KEEP_GB for each copy that KEEP_EVERY
+#     keeps from here to STEPS (files deleted through the Colab mount may wait in the Drive trash
+#     and still count, so look there if this fires). The free space is what df reads on the Drive
+#     mount, the account's own quota; on a Shared drive that is most likely not the shared drive's
+#     room, so DRIVE_MIN_GB=0 skips these checks there
 #   - a corpus meta/stats.json whose md5 is not STATS_MD5
 #   - a preflight miss before the first update (pi05_preflight.py: the full weight load, the
 #     normalizer statistics against the corpus file, 128 tokens, action_is_pad at the masked
 #     forward), or a trainer that logs a step with no PREFLIGHT_OK line before it
-#   - a loss outside [LOSS_LO, LOSS_HI] at step 200
+#   - a loss outside [LOSS_LO, LOSS_HI] at step 200 (another default band from pi05_base)
+#   - SPAN=1 with no checkpoint past the start step that fits this session, or a KEEP_EVERY that
+#     is not a multiple of the save freq
 #   - a final Drive sync that still fails after SYNC_RETRY_S
 #
 # The pi05 tokenizer google/paligemma-3b-pt-224 is a gated repo: HF_TOKEN must belong to an
@@ -53,8 +78,8 @@
 # before it copies anything. transformers 5.3's AutoTokenizer reads the repo's config.json as
 # well as the tokenizer files, so an offline host needs config.json in its HF cache too.
 #
-# usage: DIR=<Drive folder> START=<dir> RUN_NAME=<name> bash colab_train_pi05.sh [--smoke]
-#            [--expert_only]
+# usage: DIR=<Drive folder> START=<dir | lerobot/pi05_base> RUN_NAME=<name> bash
+#            colab_train_pi05.sh [--smoke] [--expert_only]
 #   --smoke        200 steps from START into a local dir, with the preflight and the loss band,
 #                  one checkpoint at the end and no Drive writes; prints seconds a step and the
 #                  checkpoint size. RUN_NAME is not needed.
@@ -63,7 +88,8 @@
 #      the same seed draws the same sample order), DATASET (dataset), JAW_MASK (none),
 #      OUT_ROOT (/content): where the local checkpoints and the start copy go, e.g. the
 #      runtime's local-scratch disk (the owner's A100 runtime had 70 GB free on /content after
-#      the dataset copy and 368 GB there), LOSS_LO, LOSS_HI, DRIVE_MIN_GB (60), STATS_MD5.
+#      the dataset copy and 368 GB there), LOSS_LO, LOSS_HI, DRIVE_MIN_GB (60), STATS_MD5,
+#      SPAN (0), KEEP_EVERY (none), DRIVE_ROOT (/content/drive/MyDrive).
 #      CONTENT (/content), UPTIME_FILE (/proc/uptime), POLL_S (60) and SYNC_RETRY_S (1800) are
 #      for the dry-run test (lerobot_stack/test_colab_train_pi05.py).
 # -> one COLAB_TRAIN_OK / COLAB_TRAIN_DONE / COLAB_TRAIN_FAIL line.
@@ -95,13 +121,14 @@ for arg in "$@"; do
         *) fail "unknown argument $arg" ;;
     esac
 done
-[ -n "${DIR:-}" ] || fail "set DIR=<folder under /content/drive/MyDrive>"
+[ -n "${DIR:-}" ] || fail "set DIR=<folder under DRIVE_ROOT, /content/drive/MyDrive by default>"
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 for f in pi05_preflight.py train_pi05.py; do
     [ -f "$HERE/$f" ] || fail "no $HERE/$f: put it next to this script"
 done
 CONTENT=${CONTENT:-/content}
-DRIVE=$CONTENT/drive/MyDrive/$DIR
+DRIVE_ROOT=${DRIVE_ROOT:-$CONTENT/drive/MyDrive}
+DRIVE=$DRIVE_ROOT/$DIR
 DATA=${DATASET:-dataset}
 LOCAL=${OUT_ROOT:-$CONTENT}
 LOCAL_DATA=$CONTENT/$DATA
@@ -112,9 +139,26 @@ SEED=${SEED:-1000}
 POLL_S=${POLL_S:-60}
 SYNC_RETRY_S=${SYNC_RETRY_S:-1800}
 DRIVE_MIN_GB=${DRIVE_MIN_GB:-60}
+KEEP_GB=10 # a kept pretrained_model: run 1's model.safetensors is 9,354,050,752 bytes
 # md5 of h/vla/dataset/meta/stats.json on Machine A, the corpus uploaded to Drive (2026-10-08)
 STATS_MD5=${STATS_MD5:-c10e2a394888ad72532a83779febdc3c}
 MAX_LENGTH=128 # no prompt of the corpus reaches it: the longest is 114 tokens with BOS (review)
+BASE=lerobot/pi05_base
+# its revision before the 2026-06-03 commit "Add relative action processor steps", whose
+# preprocessor names relative_actions_processor, a step lerobot 0.5.1 registers as
+# delta_actions_processor, so it fails to load (run 1's pin, da1f27a)
+PI05_REV=a538eb273274eb30f126a118f39dbc0ee212c883
+if [ "${START:-}" = "$BASE" ]; then
+    # INITIAL: the band of a start from pi05_base, which this run's step 200 measures again.
+    # The Colab smoke from it (2026-10-05: full fine-tune, batch 32, the loss not masked, 200
+    # tokens, warmup 6) read loss 0.171 -> 0.092 over its 200 steps; the 5090 dry run from it
+    # (expert only, batch 32, h/tables/vla/dry_run_real_b32gc.log) read 0.144 to 0.217 over its
+    # first 10 steps. LOSS_LO is half of 0.092, as the warm band's is half of M2k's smallest;
+    # LOSS_HI is twice 0.171, above every read of the untrained base. A run's step 200 sits in its
+    # warmup (2000 steps for 60000), so its loss can stay near the untrained reads.
+    LOSS_LO=${LOSS_LO:-0.046}
+    LOSS_HI=${LOSS_HI:-0.34}
+fi
 # INITIAL: for a full fine-tune, which the A/B's step-200 loss measures again; set from the 5090
 # M2k run (the 30k weights + 2000 masked expert-only steps, h/tables/vla/mask_ft.train.log):
 # loss 0.033, 0.032, 0.031 at steps 150, 200, 250, and 0.029 to 0.033 over all its logged steps.
@@ -132,7 +176,7 @@ LOG=$CONTENT/pi05_${RUN_NAME:-smoke}_$(date +%Y%m%d_%H%M%S).log
 [ -f "$DRIVE/$DATA/meta/info.json" ] || fail "no $DRIVE/$DATA/meta/info.json (Drive mounted?)"
 
 drive_free_kb() { df -Pk "$DRIVE" | awk 'NR == 2 {print $4}'; }
-run_steps() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["steps"])' "$1"; }
+run_cfg() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$@"; }
 drop_older() { # delete the checkpoint directories older than $1 in each directory that follows
     local keep=$1 dir old
     shift
@@ -143,17 +187,30 @@ drop_older() { # delete the checkpoint directories older than $1 in each directo
     done
 }
 sync_last() { # copy a new complete local checkpoint to Drive, then drop the older ones
-    local last synced need
+    local last synced need keep= kb
     last=$(readlink "$OUT/checkpoints/last" 2>/dev/null) || return 0
     synced=$(cat "$RUN_DIR/last.txt" 2>/dev/null || true)
     [ "$last" != "$synced" ] || return 0
     # chained: set -e is off inside a function called from ||, and last.txt must never name
     # a checkpoint that is not complete on Drive
-    mkdir -p "$RUN_DIR" && rm -rf "$RUN_DIR"/.tmp_* || return 1
+    mkdir -p "$RUN_DIR" && rm -rf "$RUN_DIR"/.tmp_* "$RUN_DIR"/keep/.tmp_* || return 1
     need=$(du -sk "$OUT/checkpoints/$last" | cut -f1) || return 1
+    if [ -n "${KEEP_EVERY:-}" ] && [ $((10#$last % KEEP_EVERY)) -eq 0 ] \
+        && [ ! -d "$RUN_DIR/keep/$last" ]; then
+        keep=$RUN_DIR/keep/$last
+        kb=$(du -sk "$OUT/checkpoints/$last/pretrained_model" | cut -f1) || return 1
+        need=$((need + kb))
+    fi
     if [ "$(drive_free_kb)" -lt $((need + 1000000)) ]; then
         echo "Drive is short of room for a second checkpoint: the older goes before $last"
         rm -f "$RUN_DIR/last.txt" && drop_older "$last" "$RUN_DIR" || return 1
+    fi
+    # the read copy goes before last.txt names $last, so a failed copy is tried again
+    if [ -n "$keep" ]; then
+        mkdir -p "$RUN_DIR/keep/.tmp_$last" \
+            && cp -r "$OUT/checkpoints/$last/pretrained_model" "$RUN_DIR/keep/.tmp_$last/" \
+            && mv "$RUN_DIR/keep/.tmp_$last" "$keep" || return 1
+        echo "kept the pretrained_model of checkpoint $last in $keep"
     fi
     cp -r "$OUT/checkpoints/$last" "$RUN_DIR/.tmp_$last" \
         && mv "$RUN_DIR/.tmp_$last" "$RUN_DIR/$last" \
@@ -170,7 +227,7 @@ if [ "$SMOKE" -eq 0 ]; then
     sync_last || fail "cannot copy the local checkpoint to $RUN_DIR"
     if [ -f "$RUN_DIR/last.txt" ]; then
         last=$(cat "$RUN_DIR/last.txt")
-        target=$(run_steps "$RUN_DIR/$last/pretrained_model/train_config.json") \
+        target=$(run_cfg "$RUN_DIR/$last/pretrained_model/train_config.json" steps) \
             || fail "no steps in $RUN_DIR/$last/pretrained_model/train_config.json"
         if [ "$((10#$last))" -eq "$target" ]; then
             rm -rf "$RUN_DIR/$last/training_state"
@@ -183,7 +240,8 @@ fi
 
 free_gb=$(($(drive_free_kb) * 1024 / 1000000000))
 [ "$free_gb" -ge "$DRIVE_MIN_GB" ] || fail "Drive has $free_gb GB free, a run needs $DRIVE_MIN_GB"
-echo "Drive: $free_gb GB free"
+# the sync's room check reads the same df: under a checkpoint + 1 GB, the older one goes first
+echo "Drive: $free_gb GB free, as df reads $DRIVE"
 stats_md5=$(md5sum < "$DRIVE/$DATA/meta/stats.json" | cut -d' ' -f1)
 [ "$stats_md5" = "$STATS_MD5" ] \
     || fail "$DRIVE/$DATA/meta/stats.json md5 $stats_md5 is not the corpus's $STATS_MD5"
@@ -214,12 +272,13 @@ if [ "$SMOKE" -eq 0 ] && [ -f "$RUN_DIR/last.txt" ]; then
         fail "$RUN_NAME started without a jaw mask: unset JAW_MASK to resume it"
     fi
 else
-    [ "$STEPS" -le "$FIT" ] || fail "STEPS=$STEPS does not fit this session: N=$FIT"
+    [ "${SPAN:-0}" = 1 ] || [ "$STEPS" -le "$FIT" ] \
+        || fail "STEPS=$STEPS does not fit this session: N=$FIT"
     [ "$STEPS" -ge "$BAND_STEP" ] \
         || fail "STEPS=$STEPS: a run needs step $BAND_STEP of the loss band"
     [ -n "${START:-}" ] || fail "set START=<the pretrained_model directory to start from>"
-    case "$START" in /*) src=$START ;; *) src=$DRIVE/$START ;; esac
-    [ -f "$src/model.safetensors" ] || fail "no model.safetensors in START $src"
+    case "$START" in "$BASE") src= ;; /*) src=$START ;; *) src=$DRIVE/$START ;; esac
+    [ -z "$src" ] || [ -f "$src/model.safetensors" ] || fail "no model.safetensors in START $src"
     if [ -n "${JAW_MASK:-}" ]; then
         [ -f "$DRIVE/$JAW_MASK" ] || fail "no jaw mask $DRIVE/$JAW_MASK"
         [ -f "$DRIVE/${JAW_MASK%.npy}.json" ] \
@@ -227,11 +286,34 @@ else
         JAW=(--jaw_mask="$DRIVE/$JAW_MASK")
     fi
     if [ "$SMOKE" -eq 0 ]; then
-        for f in "$RUN_DIR"/[0-9]* "$RUN_DIR"/.tmp_*; do
+        for f in "$RUN_DIR"/[0-9]* "$RUN_DIR"/.tmp_* "$RUN_DIR"/keep; do
             if [ -e "$f" ]; then
                 fail "$RUN_DIR has $(basename "$f") but no last.txt: delete it to start over"
             fi
         done
+    fi
+fi
+STOP=
+if [ "$SMOKE" -eq 0 ] && { [ "${SPAN:-0}" = 1 ] || [ -n "${KEEP_EVERY:-}" ]; }; then
+    from=0 total=$STEPS
+    if [ "$RESUME" -eq 1 ]; then # a resume trains toward its own steps at its own save freq
+        from=$((10#$last)) total=$target
+        SAVE_FREQ=$(run_cfg "$RUN_DIR/$last/pretrained_model/train_config.json" save_freq) \
+            || fail "no save_freq in $RUN_DIR/$last/pretrained_model/train_config.json"
+    fi
+    if [ "${SPAN:-0}" = 1 ]; then
+        STOP=$(((from + FIT) / SAVE_FREQ * SAVE_FREQ))
+        [ $((from + FIT)) -lt "$total" ] || STOP=$total
+        [ "$STOP" -gt "$from" ] || fail "SPAN=1: no checkpoint past $from fits this session: N=$FIT"
+        [ "$STOP" -ge "$total" ] || echo "SPAN=1: this session stops at checkpoint $STOP of $total"
+    fi
+    if [ -n "${KEEP_EVERY:-}" ]; then
+        [ "$KEEP_EVERY" -gt 0 ] && [ $((KEEP_EVERY % SAVE_FREQ)) -eq 0 ] \
+            || fail "KEEP_EVERY=$KEEP_EVERY is not a multiple of the save freq $SAVE_FREQ"
+        kept=$((total / KEEP_EVERY - from / KEEP_EVERY))
+        need=$((DRIVE_MIN_GB + kept * KEEP_GB))
+        [ "$DRIVE_MIN_GB" -eq 0 ] || [ "$free_gb" -ge "$need" ] \
+            || fail "Drive has $free_gb GB free, a run that keeps $kept more copies needs $need"
     fi
 fi
 
@@ -290,7 +372,7 @@ if [ "$RESUME" -eq 1 ]; then
     fi
     ln -sfn "$last" "$OUT/checkpoints/last"
     config=$OUT/checkpoints/last/pretrained_model/train_config.json
-    STEPS=$(run_steps "$config")
+    STEPS=$(run_cfg "$config" steps)
     START_STEP=$((10#$last))
     echo "resuming $RUN_NAME from checkpoint $last toward step $STEPS ($FIT steps fit)"
     # --output_dir: a resumed train_config.json names the first session's output dir;
@@ -310,8 +392,16 @@ else
     START_COPY=$LOCAL/start_model
     # a fresh run: nothing local to keep, and a smoke checkpoint (22.8 GiB) would crowd /content
     rm -rf "$START_COPY" "$OUT" "$LOCAL/pi05_smoke"
-    echo "copying $src to $START_COPY"
-    cp -r "$src" "$START_COPY"
+    if [ -z "$src" ]; then
+        echo "downloading $BASE at $PI05_REV to $START_COPY"
+        python3 -c 'import sys; from huggingface_hub import snapshot_download
+snapshot_download(sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3])' \
+            "$BASE" "$PI05_REV" "$START_COPY" || fail "cannot download $BASE"
+        [ -f "$START_COPY/model.safetensors" ] || fail "no model.safetensors in $BASE"
+    else
+        echo "copying $src to $START_COPY"
+        cp -r "$src" "$START_COPY"
+    fi
     python3 "$HERE/pi05_preflight.py" patch "$START_COPY" "$MAX_LENGTH" \
         || fail "cannot set $MAX_LENGTH tokens in $START_COPY/policy_preprocessor.json"
     START_STEP=0
@@ -367,6 +457,14 @@ watch_log() { # the preflight before step 1 and the loss band at BAND_STEP
     BANDED=1
     echo "loss band: step $BAND_STEP loss $LOSS200 in [$LOSS_LO, $LOSS_HI]"
 }
+session_end() { # SPAN=1: stop once this session's last checkpoint that fits is on Drive
+    local synced
+    synced=$(cat "$RUN_DIR/last.txt" 2>/dev/null || echo 0)
+    [ -n "$STOP" ] && [ "$STOP" -lt "$STEPS" ] && [ "$((10#$synced))" -ge "$STOP" ] || return 0
+    RESULT="run=$RUN_NAME steps=$STEPS last=$synced session_end=1: run the same cell in a new"
+    RESULT+=" session to resume"
+    exit 0
+}
 
 echo "trainer log $LOG"
 "${CMD[@]}" > "$LOG" 2>&1 &
@@ -377,6 +475,7 @@ while kill -0 "$train_pid" 2>/dev/null; do
     watch_log
     if [ "$SMOKE" -eq 0 ]; then
         sync_last || echo "colab_train_pi05.sh: the Drive copy failed, next try in $POLL_S s" >&2
+        session_end
     fi
     sleep "$POLL_S"
 done
