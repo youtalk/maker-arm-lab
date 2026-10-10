@@ -193,6 +193,64 @@ def test_a_frame_stale_at_the_policy_call_holds_before_the_policy_reads_it():
     assert _same_images(env, before)
 
 
+class _RecoveringOverhead(FakeOverhead):
+    """Stale (0.5 s old) until ``clock`` reaches ``fresh_at``, then fresh, with a new view."""
+
+    def __init__(self, clock):
+        super().__init__()
+        self.clock, self.fresh_at = clock, -math.inf
+
+    @property
+    def age_s(self):
+        return 0.5 if self.clock() < self.fresh_at else 0.0
+
+    @age_s.setter
+    def age_s(self, value):
+        pass
+
+
+def test_a_stale_frame_pauses_the_run_and_resumes_on_a_fresh_one():
+    clock = FakeClock()
+    overhead = _RecoveringOverhead(clock)
+    env, arm, _ = make_env(clock=clock, overhead=overhead)
+    env.step(_action())
+    pushes = len(arm.pushes)
+    overhead.fresh_at = clock() + 0.4
+    overhead.view = np.full((224, 224, 3), 200, dtype=np.uint8)
+    env.stamp_markers()
+    assert len(arm.pushes) == pushes and arm.holds == 0 and not env.holding
+    assert len(env.stale_pauses) == 1 and 0.4 <= env.stale_pauses[0] <= 0.4 + 2 * 0.01
+    assert int(env.obs_buf["images"]["overhead_rgb"][0, 0, 0, 0]) == 200
+    env.step(_action())  # the pause is no tick's work: no watchdog_tick
+    assert len(arm.pushes) == pushes + 1
+
+
+def test_a_pause_longer_than_the_wait_trips():
+    from maker_arm_lab.real.env import STALE_WAIT_S
+
+    clock = FakeClock()
+    overhead = _RecoveringOverhead(clock)
+    env, arm, _ = make_env(clock=clock, overhead=overhead)
+    env.step(_action())
+    overhead.fresh_at = clock() + STALE_WAIT_S + 0.5
+    with pytest.raises(EvalFailure) as err:
+        env.stamp_markers()
+    assert err.value.reason == "watchdog_frame" and "pause" in err.value.detail
+    assert arm.holds == 1
+
+
+def test_an_arm_fault_during_a_pause_trips_the_arm_watchdog():
+    clock = FakeClock()
+    overhead = _RecoveringOverhead(clock)
+    env, arm, _ = make_env(clock=clock, overhead=overhead)
+    env.step(_action())
+    overhead.fresh_at = clock() + 1.0
+    arm.state = "fault"
+    with pytest.raises(EvalFailure) as err:
+        env.stamp_markers()
+    assert err.value.reason == "watchdog_arm" and arm.holds == 1
+
+
 def test_the_policy_call_reads_the_newest_fresh_frame():
     overhead = FakeOverhead()
     env, _, _ = make_env(overhead=overhead)

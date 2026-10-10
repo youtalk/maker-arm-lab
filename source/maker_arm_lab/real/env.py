@@ -36,8 +36,14 @@ faulted arm or a stopped SDK loop gets no row, and a push that raises holds the 
 Frame age is checked at every policy call. ``step`` observes both frames after its tick, and
 ``stamp_markers``, which ``core.loop`` calls right before every policy call, observes them
 again: a perception tick may run up to 1 s between the two, so only the second check bounds
-the age of the view the policy reads. A frame that fails either check trips before it is
-copied into ``obs_buf``, so the policy never reads a stale view. The perception backend reads
+the age of the view the policy reads. A frame that fails either check is never copied into
+``obs_buf``, so the policy never reads a stale view. A stale frame pauses the run instead of
+ending it: the env pushes nothing, so the arm holds its last row as it does through a
+perception tick, and it polls the sources (and the arm's state) until both frames are fresh
+again. A pause that outlasts ``STALE_WAIT_S`` trips. The pacer restarts after a pause, so the
+wait does not count toward a tick's cap; ``stale_pauses`` keeps each pause's length. The
+Conduit stream over the home Wi-Fi drops past 300 ms about once every few minutes (the full
+wrist pass of 2026-10-09), so a trip on the first stale frame ended nearly every episode. The perception backend reads
 the frames observed at the step (``overhead_frame``, ``wrist_frame``); the policy may read
 newer ones, which is harmless because the arm holds its last row during the perception tick.
 The one exception is ``class_views``' third wrist view (MS7d L5), a second look at the part
@@ -106,6 +112,9 @@ policy call."""
 PICK_FLOOR_MARGIN_M = 0.005  # INITIAL: A0 sets it on the real desk
 """m under the desk plane the FK pick point may reach before the floor watchdog holds."""
 FIRST_FRAME_TIMEOUT_S = 5.0
+STALE_WAIT_S = 2.0
+"""The longest pause a stale frame may hold the run for before it trips (owner, 2026-10-09)."""
+STALE_POLL_S = 0.01
 SLOT_PART = Part("rig_slot", "brick", 0, 0, (0.008, 0.008, 0.008), False, 0.0)
 """What every slot names: a rig knows no catalog part per slot. Only the blind metrics and the
 payload read it."""
@@ -280,6 +289,9 @@ class RealEnv:
         }
         self.ticks = pacing.TickLog()
         self.holding = False
+        self.stale_pauses: list[float] = []
+        self._clock, self._sleep = clock, sleep
+        self.pacer = None
         self._steps = 0
         self._targets: deque = deque(maxlen=3)
         self._gc_in_wrist = _grasp_center_in_wrist()
@@ -368,25 +380,49 @@ class RealEnv:
         self._overhead_latest, self._wrist_latest = self._observe_images()
 
     def _observe_images(self) -> tuple:
-        """Check both latest frames' ages, then copy their views into ``obs_buf``; return the
-        two ``Latest``. A frame that fails trips before anything is copied."""
-        now = time.monotonic_ns()
-        overhead = self._fresh("overhead", self.overhead_source, now)
-        wrist = self._fresh("wrist", self.wrist_source, now)
+        """Wait until both latest frames are fresh (``_await_fresh``), then copy their views
+        into ``obs_buf``; return the two ``Latest``. Nothing is copied before both pass."""
+        overhead, wrist = self._await_fresh(("overhead", "wrist"))
         self._overhead[0] = overhead.view
         self._wrist[0] = wrist.view
         return overhead, wrist
 
-    def _fresh(self, name: str, source, now: int):
-        """``source``'s latest frame, or a trip if it has none or it is older than
-        ``FRAME_AGE_CAP_S`` at ``now`` (monotonic ns)."""
-        latest = source.frames.get()
+    def _await_fresh(self, names) -> list:
+        """The named sources' latest frames once every one is fresh. A stale frame pauses: poll
+        the sources and the arm until they are, for at most ``STALE_WAIT_S``, then trip with
+        the stalest frame's age. A source with no frame at all trips at once."""
+        start = None
+        while True:
+            now = time.monotonic_ns()
+            frames = [self._latest(name) for name in names]
+            ages = [(now - f.arrival_mono_ns) / 1e9 for f in frames]
+            if max(ages) <= FRAME_AGE_CAP_S:
+                break
+            if start is None:
+                start = self._clock()
+            elif self._clock() - start > STALE_WAIT_S:
+                name, age = max(zip(names, ages), key=lambda pair: pair[1])
+                error = getattr(self._source(name), "error", None)
+                self.trip(
+                    "frame",
+                    f"the {name} frame is {1e3 * age:.0f} ms old after a "
+                    f"{STALE_WAIT_S:.1f} s pause ({error})",
+                )
+            self._check_arm(self.arm.read())
+            self._sleep(STALE_POLL_S)
+        if start is not None:
+            self.stale_pauses.append(self._clock() - start)
+            if self.pacer is not None:
+                self.pacer.restart()
+        return frames
+
+    def _source(self, name: str):
+        return self.overhead_source if name == "overhead" else self.wrist_source
+
+    def _latest(self, name: str):
+        latest = self._source(name).frames.get()
         if latest is None:
             self.trip("frame", f"no {name} frame")
-        age = (now - latest.arrival_mono_ns) / 1e9
-        if age > FRAME_AGE_CAP_S:
-            error = getattr(source, "error", None)
-            self.trip("frame", f"the {name} frame is {1e3 * age:.0f} ms old ({error})")
         return latest
 
     def stamp_markers(self) -> None:
@@ -431,10 +467,10 @@ class RealEnv:
 
     def wrist_frame(self, latest: bool = False) -> np.ndarray:
         """The wrist frame observed at the last step, the camera's own resolution. ``latest``
-        reads the newest frame instead (``class_views``' third view), which trips like the
-        step's check if it is older than ``FRAME_AGE_CAP_S``."""
+        reads the newest frame instead (``class_views``' third view), which pauses and trips
+        like the step's check if it is older than ``FRAME_AGE_CAP_S``."""
         if latest:
-            return self._fresh("wrist", self.wrist_source, time.monotonic_ns()).raw
+            return self._await_fresh(("wrist",))[0].raw
         return self._wrist_latest.raw
 
     def wrist_camera_header(self) -> dict:

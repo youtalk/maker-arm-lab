@@ -55,6 +55,11 @@ class Pacer:
         self.mark = now
         return duration
 
+    def restart(self) -> None:
+        """Start a new tick now, one period to its deadline: a pause is no tick's work."""
+        self.mark = self.clock()
+        self.deadline = self.mark + self.period
+
 
 class TickLog:
     """Every tick of a run, with the tags noted during it."""

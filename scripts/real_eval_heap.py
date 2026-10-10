@@ -230,6 +230,11 @@ def real_block(args, world: dict) -> dict:
         "rig": asdict(world["config"]),
         "worker_id": world.get("worker_id"),
         "ticks": tick_summary(env.ticks.ticks),
+        "stale_pauses": {
+            "n": len(env.stale_pauses),
+            "total_s": round(sum(env.stale_pauses), 3),
+            "max_ms": round(1e3 * max(env.stale_pauses), 1) if env.stale_pauses else None,
+        },
         "telemetry": arm.telemetry(),
         "overhead_coverage": env.overhead_coverage,
         "k_drift": getattr(world.get("overhead"), "k_drift", None),

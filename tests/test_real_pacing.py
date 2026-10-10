@@ -26,6 +26,15 @@ def test_a_late_tick_does_not_sleep_and_the_next_one_is_a_full_period():
     assert pacer.wait() == pytest.approx(PERIOD)
 
 
+def test_a_restart_starts_a_fresh_tick_after_a_pause():
+    clock = FakeClock()
+    pacer = pacing.Pacer(PERIOD, clock, clock.sleep)
+    clock.advance(1.5)
+    pacer.restart()
+    clock.advance(0.010)
+    assert pacer.wait() == pytest.approx(PERIOD)
+
+
 def test_the_tick_log_tags_one_tick_and_starts_the_next_clean():
     log = pacing.TickLog()
     log.note_perception()
