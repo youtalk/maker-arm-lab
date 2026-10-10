@@ -20,6 +20,7 @@ rather than a failure, which is the worse of the two outcomes.
 
 import argparse
 import json
+import time
 import traceback
 from collections import deque
 from types import SimpleNamespace
@@ -167,12 +168,14 @@ class PolicyServer:
                 # that predates it (every test fake) keeps its four-argument signature.
                 replan = arrays.get(REPLAN_KEY)
                 extra = {} if replan is None else {"replan": replan}
+                started = time.perf_counter()
                 action = np.asarray(
                     self._policy_fn(
                         arrays["state"], arrays["wrist"], arrays["overhead"], context, **extra
                     ),
                     dtype=np.float32,
                 )
+                policy_ms = round(1e3 * (time.perf_counter() - started), 3)
                 validate_action(action, batch)
                 if self._action_space == "delta_prev":
                     action = integrate_delta(action, anchor)
@@ -186,7 +189,11 @@ class PolicyServer:
                         },
                     )
                     return True
-                send_message(self._socket, {"type": "action"}, {"action": action})
+                # MS5 design P1: the server's time in the policy call. A queue pop is
+                # microseconds; a step that refilled a queue ran a forward.
+                send_message(
+                    self._socket, {"type": "action", "policy_ms": policy_ms}, {"action": action}
+                )
             elif kind == "shutdown":
                 send_message(self._socket, {"type": "shutdown_ack"})
                 return False

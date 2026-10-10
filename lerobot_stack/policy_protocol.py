@@ -32,6 +32,9 @@ env i's queue from a fresh forward when the flag is set, so a new target row rea
 on the step it is written and not 0 to n_action_steps - 1 steps later. Absent means all False
 and the queues drain in lockstep, which is the single-queue behaviour. A version-4 server that
 predates the key rejects it as bad_obs, so no version bump is needed to keep the mismatch loud.
+
+Still PROTOCOL_VERSION 4: `policy_ms` (the server's time in the policy call, ms) joined the
+action reply header without a bump; a client that predates it ignores the key.
 """
 
 import io
