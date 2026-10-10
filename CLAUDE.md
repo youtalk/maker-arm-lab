@@ -63,8 +63,9 @@ The Isaac Lab task lives in `source/maker_arm_lab/tasks/manager_based/lego_sort/
 - `core/stowed.py` and `core/checker.py` are the grader. Driver bookkeeping is never the metric.
 - `core/gate.py` and `core/trace.py` are the rollout tracker and per-step trace.
 - `core/dagger_loop.py` is the six-brick DAgger rollout: the policy drives, and the oracle rig takes over on a trigger for one brick cycle. It records only takeover frames. `scripts/mj_dagger_batch.py` is its thin client.
-- `core/parts.py`, `core/grasp.py` and `core/heap_oracle.py` are the heap teacher: the part catalog, grasp synthesis on part geometry, and an `EnvOracle` subclass with a failure memory per 5 cm cell. `core/desk_boxes.py` draws the MS7a desk boxes. With `parts`, `mj/env.py` builds a heap. `OracleRig` takes an `oracle_factory`, so the heap scripts install the subclass without a rig subclass. `mj/overlay.py` stamps the target marker and `mj/depth.py` is the noisy depth model. Heap runs export every episode and mark cycles through `obs/actor`.
+- `core/parts.py`, `core/grasp.py` and `core/heap_oracle.py` are the heap teacher: the part catalog, grasp synthesis on part geometry, and an `EnvOracle` subclass with a failure memory per 5 cm cell. `core/desk_boxes.py` draws the MS7a desk boxes. With `parts`, `mj/env.py` builds a heap. `OracleRig` takes an `oracle_factory`, so the heap scripts install the subclass without a rig subclass. `core/overlay.py` stamps the target marker and `mj/depth.py` is the noisy depth model. Heap runs export every episode and mark cycles through `obs/actor`.
 - The LDraw parts are committed as `assets/parts/<id>.json`. `scripts/ldraw_parts.py` generated them once in a throwaway venv with the `ldraw` dependency group. The runtime reads only the JSON, so CI never installs that group.
+- `real/` (MS5) is the rig behind the same env surface: `real/env.py` (`RealEnv`, a blind scene for the truth metrics), `real/arm.py` (`Tracking` through `maker_arm_rs.Arm`, one row per step), `real/perceive.py` (the perception worker's client, the loop's `perception_backend`), `real/sources.py`, `real/camera_model.py` (the homography warps to the simulator's views), `real/pacing.py` (ticks, caps) and `real/rig.py` (the rig JSON, box labels, the episode sheet). `core/loop.py` reaches perception only through `backend_of(env)`.
 
 ### The oracle is split into WHAT and HOW
 
@@ -92,7 +93,7 @@ Six-brick reads serve under the MS3 protocol, `--n_action_steps 1 --temporal_ens
 
 ### The `core/` package is isaaclab-free
 
-Every module under `core/` is torch and stdlib only. Thus the solver, the grader, the gate arithmetic, the loop and the oracle have CPU unit tests. `pytest` collects nothing that imports `isaaclab`. Tests that must inspect an Isaac-only script (for example the token contract of `scripted_grasp_check.py`) parse it as source with `ast` instead of importing it. Keep it that way.
+Every module under `core/` is torch and stdlib only. Thus the solver, the grader, the gate arithmetic, the loop and the oracle have CPU unit tests. `pytest` collects nothing that imports `isaaclab`. Tests that must inspect an Isaac-only script (for example the token contract of `scripted_grasp_check.py`) parse it as source with `ast` instead of importing it. Keep it that way. `real/ros.py` is the only module that imports rclpy; tests never import it, and scripts load it inside functions (`tests/test_real_ros_boundary.py`). `perception_stack/perception_protocol.py` is the worker's wire, numpy and the stdlib only.
 
 ### Gains and the clamp come from the Rust SDK, with no fallback
 

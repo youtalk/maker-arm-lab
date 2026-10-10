@@ -10,10 +10,9 @@ import numpy as np
 import pytest
 import torch
 
-from maker_arm_lab.core import dagger_loop, desk_boxes, hold, layout, loop, oracle
+from maker_arm_lab.core import dagger_loop, desk_boxes, hold, layout, loop, oracle, overlay
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
-from maker_arm_lab.mj import overlay
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 from test_mj_heap_env import _can_render

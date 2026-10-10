@@ -84,7 +84,7 @@ import numpy as np
 import torch
 
 from maker_arm_lab.assets.urdf_prep import gripper_velocity_limit
-from maker_arm_lab.core import cameras, layout
+from maker_arm_lab.core import cameras, layout, overlay
 from maker_arm_lab.core import desk_boxes as _boxes
 from maker_arm_lab.core import profile as _profile
 from maker_arm_lab.core.cameras import OVERHEAD_B2_BACK_M
@@ -94,7 +94,7 @@ from maker_arm_lab.core.parts import BASE_CLASSES, Part, part_category, part_cla
 from maker_arm_lab.core.quat import compose_offset_rot, quat_apply, quat_mul, rpy_from_quat
 from maker_arm_lab.core.stowed import parts_in_desk_boxes, parts_resting_box, per_brick_stowed
 from maker_arm_lab.core.target import target_brick
-from maker_arm_lab.mj import overlay, scene
+from maker_arm_lab.mj import scene
 from maker_arm_lab.mj.context_names import (
     CONTEXT_CAMERA_NAMES,  # noqa: F401 -- re-exported as mj_env.CONTEXT_CAMERA_NAMES
     CONTEXT_DIMS,

@@ -36,9 +36,11 @@ source/maker_arm_lab/
   core/              isaaclab-free logic: layout, oracle, global_ik, trajectory, grader (stowed,
                      checker), gate, trace, profile; heap teacher (parts, grasp, heap_oracle);
                      loops (batch_loop, eval_loop, dagger_loop, loop); desk_boxes, perception,
-                     hold, torque, dynamics_model
-  mj/                MuJoCo backend: env, scene, recorder, overlay, depth, context_names;
+                     hold, torque, dynamics_model, overlay
+  mj/                MuJoCo backend: env, scene, recorder, depth, context_names;
                      bench and bench_gate (the MA2 tracking bench)
+  real/              MS5 real rig: env (RealEnv), arm (maker_arm_rs Tracking), perceive, sources,
+                     camera_model, rig, pacing, frames, latency; ros.py is the only rclpy import
   tasks/manager_based/lego_sort/
                      Isaac env cfgs and the five task ids, mdp/, datagen, oracle_runtime
                      (OracleRig), vision
@@ -48,6 +50,7 @@ assets/housing_mass_model.json         housing mass model for maker_arm_rs.Dynam
 assets/usd/                            generated maker_arm.usd, NOT committed
 lerobot_stack/                         LeRobot venv: HDF5 conversion, policy protocol and server,
                                        ACT train wrapper, part classifier trainer
+perception_stack/                      perception worker wire format (numpy + stdlib only)
 scripts/                               setup, smokes, checks, generation, eval clients, supervisors
 tests/                                 CPU-only pytest (no isaaclab import at collection time)
 docs/                                  milestone reports
@@ -411,6 +414,43 @@ python3 scripts/track_soak.py --minutes 10 --rt 80:5  # Thor, T2: real 200 Hz lo
 ```
 
 `scripts/export_housing_mass_model.py` wrote `assets/housing_mass_model.json` once. It needs trimesh: `uv run --no-sync --with trimesh python scripts/export_housing_mass_model.py`.
+
+## Real arm (MS5)
+
+`source/maker_arm_lab/real/` puts a real Maker Arm and its cameras behind the same env surface the heap loop already reads (MS5 design section 4.3), so `core/loop.py` and the served switches run unchanged on `RealEnv`. The arm runs `Tracking`, the SDK's contact-aware rung A, through `maker_arm_rs.Arm` (`real/arm.py`); the SDK refuses rung F, and the other bench rungs need a Python command every tick, so a real motor only turns on rung A until the owner rules on the rest. Perception is a separate worker over ZMQ (`perception_stack/perception_protocol.py`, the wire; `real/perceive.py`, the client), and the two cameras' latest frames are warped to the simulator's trained views by `real/camera_model.py`.
+
+```bash
+uv sync --group dev --group real     # adds PyYAML (rclpy) and opencv-python-headless (the wrist camera)
+source /opt/ros/jazzy/setup.zsh      # zsh only; setup.bash silently drops PYTHONPATH there
+```
+
+The loop reads the overhead view and its depth from Conduit (MS5 design section 4.2, the Conduit design `2026-09-26-ar-aligned-depth` section 5): namespace `/conduit`, frame `camera_back_optical_frame`, and four topics, `camera/wide/image_raw/compressed` (JPEG), `camera/wide/camera_info`, `camera/wide/depth/image_raw` (16UC1 mm, 0 invalid) and `camera/wide/depth/camera_info`. `real/ros.py` is the only module that subscribes to them.
+
+```bash
+# The sheet: where the operator places the four desk boxes, and which class goes to which box.
+uv run python scripts/real_episode_sheet.py --seed 20265000 --episode 0 \
+    --out ~/data/maker-arm-ms5/sheets/e000.json   # SHEET_OK, then the sheet as JSON
+
+# The heap gate client: one process runs one real episode under the MS7d served switches.
+source /opt/ros/jazzy/setup.zsh
+uv run python scripts/real_eval_heap.py --rig ~/data/maker-arm-ms5/rig.json \
+    --sheet ~/data/maker-arm-ms5/sheets/e000.json --heap_k 10 --dilation 0.5 \
+    --run_seed 20265100 --out ~/data/maker-arm-ms5/reads/e000.json   # EVAL_OK or EVAL_FAIL
+
+# P7: the Conduit stream's stamp and photon latency methods.
+uv run python scripts/conduit_latency.py stamp --seconds 300 \
+    --out ~/data/maker-arm-ms5/p7/stamp.json
+uv run python scripts/conduit_latency.py photon --on_cmd '<light on>' --off_cmd '<light off>' \
+    --roi 900,600,1020,720 --cycles 30 --out ~/data/maker-arm-ms5/p7/photon.json   # LATENCY_OK
+```
+
+The rig's geometry and session settings are one JSON file, `real.rig.RigConfig` (`--rig`; the default is the nominal config). Five fields are placeholders a named step still measures: `overhead_pos`, `overhead_quat`, `wrist_rot` (the hand-eye rotation) and `wrist_device` wait on A2, and `tracking_params` waits on A1. `overhead_k` and `overhead_size` may stay unset, because Conduit's camera info supplies them. `wrist_k` and `wrist_size` are not calibrated yet: unset, the wrist source expects the simulated 224x224 view, so a real UVC camera needs both set, or every frame of another size is dropped and the frame-age watchdog holds the arm. `PICK_FLOOR_MARGIN_M` in `real/env.py` and the gripper motor's linear angle-to-opening map in `real/arm.py` are placeholders the same way, on A0 and A1 respectively.
+
+A frame older than 300 ms (counted from its arrival) pauses the episode instead of ending it: the arm holds its last row, and the loop resumes once both cameras deliver a fresh frame, or holds and ends with `EVAL_FAIL reason=watchdog_frame` after a 2 s pause (`STALE_WAIT_S` in `real/env.py`). The payload's `real.stale_pauses` counts the pauses. Over the home Wi-Fi the Conduit stream drops past 300 ms about once every few minutes.
+
+`real_eval_heap.py --release` controls what happens to the motors once the token is printed: `prompt` (the default) holds the arm until the operator types `RELEASE` or closes stdin, and a Ctrl-C at the prompt only re-asks — it never releases; `now` disables at once, for the SDK simulator and tests. A Ctrl-C during the episode itself ends it (`EVAL_FAIL reason=interrupted`) and holds the arm the same way a watchdog would, through the same prompt.
+
+`RealEnv` is a blind scene (MS5 design section 4.3): it has no simulator truth, so its stowed/cycle metrics never fire and a payload's `real.graded` is always `false`. The payload is ungraded until the operator counts the boxes against the episode sheet.
 
 ## Training smoke
 

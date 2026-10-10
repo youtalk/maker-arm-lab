@@ -24,12 +24,12 @@ from maker_arm_lab.core import (
     layout,
     loop,
     oracle,
+    overlay,
     parts,
     stowed,
 )
 from maker_arm_lab.core.grasp import polygon_distance
 from maker_arm_lab.core.quat import compose_offset_rot, quat_mul
-from maker_arm_lab.mj import overlay
 from test_mj_desk_boxes import FIXED
 
 

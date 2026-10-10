@@ -3,6 +3,8 @@
 Expects `project_point` to receive the camera position and rotation from MjData.cam_xpos and
 MjData.cam_xmat, read after `mj_camlight`. These fields propagate the camera state through the scene
 to the rendering pipeline.
+
+It lives in core/ so the real env (MS5 design P2) stamps the marker without the MuJoCo backend.
 """
 
 from __future__ import annotations

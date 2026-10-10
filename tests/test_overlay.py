@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from maker_arm_lab.mj import overlay
+from maker_arm_lab.core import overlay
 
 CAM_POS = np.array([0.0, 0.0, 1.0])
 LOOK_DOWN = np.eye(3).reshape(9)  # the camera's -z is the world -z
@@ -72,3 +72,10 @@ def test_projection_with_non_identity_rotation_pins_the_transpose_direction():
     u, v = overlay.project_point(CAM_POS, rotated_camera, 60.0, 224, 224, np.array([0.1, 0.0, 0.0]))
     assert u == pytest.approx(112.0 + focal * cos45 * 0.1)
     assert v == pytest.approx(112.0 - focal * sin45 * 0.1)
+
+
+def test_the_overlay_lives_in_core_so_the_real_env_needs_no_mj():
+    import importlib.util
+
+    assert importlib.util.find_spec("maker_arm_lab.core.overlay") is not None
+    assert importlib.util.find_spec("maker_arm_lab.mj.overlay") is None
