@@ -363,3 +363,59 @@ def test_a_shard_without_the_attribute_is_binary(tmp_path):
     c2l.convert([shard], tmp_path / "ds", "t/x", 30)
     info = json.loads((tmp_path / "ds" / "meta" / "info.json").read_text())
     assert info["features"]["action"]["names"][6] == "gripper"
+
+
+def test_reopen_lead_is_the_teacher_opening_jaws_the_policy_left_closed():
+    cmd = np.full(6, 0.016)
+    opening = np.array([0.0, 0.004, 0.010, 0.0145, 0.016, 0.016])
+    assert c2l.reopen_lead(opening, cmd, 0.002) == 3  # within 2 mm of the command at frame 3
+    assert c2l.reopen_lead(np.full(6, 0.016), cmd, 0.002) == 0  # starts open
+    assert c2l.reopen_lead(np.full(6, 0.006), np.full(6, 0.0036), 0.002) == 0  # holds a part
+    blocked = np.array([0.016, 0.016, 0.0, 0.0])  # the jaws never open: the first close ends it
+    assert c2l.reopen_lead(np.full(4, 0.002), blocked, 0.002) == 2
+    assert c2l.reopen_lead(np.zeros(3), cmd[:3], 0.002) == 3
+
+
+def _continuous(shard, per_jaw, command):
+    """Give a _shard both jaws at ``per_jaw`` and a continuous gap command."""
+    with h5py.File(shard, "a") as f:
+        f.attrs["gripper_mode"] = "continuous"
+        g = f["data/demo_0"]
+        state = g["obs/joint_pos_abs"][:]
+        state[:, 6] = state[:, 7] = per_jaw
+        g["obs/joint_pos_abs"][...] = state
+        actions = g["actions"][:]
+        actions[:, 6] = command
+        g["actions"][...] = actions
+    return shard
+
+
+def test_drop_reopen_lead_cuts_each_takeover_and_counts_it(tmp_path):
+    # takeover 1 opens closed jaws over its first 3 frames, takeover 2 starts open
+    shard = _shard(tmp_path / "s.hdf5", actor=[1] * 5 + [2] * 3, bricks=[0] * 5 + [1] * 3)
+    per_jaw = np.array([0.0, 0.002, 0.005, 0.00725, 0.008, 0.008, 0.008, 0.008])
+    _continuous(shard, per_jaw, 0.016)
+    kw = {"split_cycles": True, "dagger": True, "context": "camera", "gripper": "continuous"}
+    reopen = c2l.ReopenLead(0.002)
+    assert c2l.convert([shard], tmp_path / "ds", "t/x", 30, reopen=reopen, **kw) == (2, 2, 1, 0)
+    assert reopen == c2l.ReopenLead(0.002, frames=3, takeovers=1, emptied=0)
+    info = json.loads((tmp_path / "ds" / "meta" / "info.json").read_text())
+    assert info["total_frames"] == 5
+    assert c2l.convert([shard], tmp_path / "off", "t/x", 30, **kw) == (2, 2, 1, 0)
+    with pytest.raises(ValueError, match="dagger and gripper continuous"):
+        c2l.convert([shard], tmp_path / "b", "t/x", 30, split_cycles=True, reopen=reopen)
+
+
+def test_a_takeover_that_never_opens_is_not_written(tmp_path):
+    shard = _continuous(_shard(tmp_path / "s.hdf5", actor=[1] * 8), 0.0, 0.016)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--shards", str(shard), "--root", str(tmp_path / "ds")]
+        + ["--split_cycles", "--dagger", "--gripper", "continuous", "--drop_reopen_lead", "0.002"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.stdout.splitlines()[-1] == (
+        "CONVERT_OK episodes=0 total=0 read=1 skipped=0 reopen_tol=0.002 reopen_frames=8"
+        " reopen_takeovers=1 reopen_emptied=1"
+    ), result.stdout + result.stderr

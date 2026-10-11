@@ -42,12 +42,19 @@ On a segment's first frame, the anchor is the measured joint position. The polic
 adds the client's anchor back before sending an absolute command the clamp accepts.
 A ``meta/action_space.json`` marker records which space a dataset was created with, and
 resuming into it with the other space is refused.
+
+``--drop_reopen_lead TOL_M`` (MS7h DAgger round, HD59; recipe 3.4: closed jaws that the teacher
+opens at once teach the policy's re-open) drops, per takeover episode, the leading frames whose
+measured jaw gap (left + right jaw) lies more than TOL_M under the commanded gap (``reopen_lead``).
+It needs ``--dagger --gripper continuous`` and adds its counts to the CONVERT_OK line. Off by
+default.
 """
 
 import argparse
 import json
 import sys
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
@@ -123,6 +130,16 @@ class Counts(NamedTuple):
     total: int
     read: int
     skipped: int
+
+
+@dataclass
+class ReopenLead:
+    """--drop_reopen_lead: the tolerance, and what a conversion dropped with it."""
+
+    tol: float
+    frames: int = 0
+    takeovers: int = 0  # takeover episodes that lost a lead
+    emptied: int = 0  # takeovers that lost every frame, so were not written
 
 
 def write_action_space_marker(root: Path, action_space: str, gripper: str = "binary") -> None:
@@ -259,6 +276,16 @@ def cycle_segments(
     return [np.asarray(s) for s in segments]
 
 
+def reopen_lead(gap: np.ndarray, command: np.ndarray, tol: float) -> int:
+    """The leading frames of one takeover in which the teacher opens jaws the policy left closed:
+    the measured gap lies more than ``tol`` under the commanded gap. The lead ends at the first
+    frame where the jaws have opened to within ``tol``, or where the command falls under the gap
+    (the teacher's first close). A takeover that starts open, or holding a part, loses nothing.
+    The rule of the HD59 recorder's dag_mask.py, so the two drop the same frames."""
+    opening = gap < command - tol
+    return len(opening) if opening.all() else int(np.argmin(opening))
+
+
 def convert(
     shards: list[Path],
     root: Path,
@@ -273,6 +300,7 @@ def convert(
     action_space: str = "absolute",
     dagger: bool = False,
     gripper: str = "binary",
+    reopen: ReopenLead | None = None,
 ) -> Counts:
     """Convert `shards` into (or append them onto) the LeRobot dataset at `root`.
 
@@ -299,6 +327,8 @@ def convert(
         raise ValueError("dagger requires split_cycles")
     if dagger and lead_keep:
         raise ValueError("dagger refuses lead_keep: takeover frames have no SETTLE lead")
+    if reopen is not None and not (dagger and gripper == "continuous"):
+        raise ValueError("reopen reads a gap command: it needs dagger and gripper continuous")
     if context is not None and context not in CONTEXT_CHANNELS:
         raise ValueError(f"context must be one of {CONTEXT_CHANNELS}, got {context!r}")
     if not images and context is None:
@@ -411,6 +441,16 @@ def convert(
                 # segments, instead of after some of them already landed.
                 init_arrays = initial_state_arrays(grp) if sidecar_dir is not None else None
                 for seg in segments:
+                    if reopen is not None:
+                        cut = reopen_lead(
+                            state[seg, 6] + state[seg, 7], actions[seg, 6], reopen.tol
+                        )
+                        seg = seg[cut:]
+                        reopen.frames += cut
+                        reopen.takeovers += cut > 0
+                        if not len(seg):
+                            reopen.emptied += 1
+                            continue
                     # index of the episode about to be saved
                     episode_index = dataset.meta.total_episodes
                     previous = None
@@ -525,6 +565,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="binary",
         help="the shards' gripper contract; must match the recorder's gripper_mode attribute",
     )
+    parser.add_argument(
+        "--drop_reopen_lead",
+        type=float,
+        default=None,
+        metavar="TOL_M",
+        help="with --dagger --gripper continuous: drop each takeover's leading frames whose jaw "
+        "gap lies more than TOL_M under the commanded gap (the teacher opening closed jaws)",
+    )
     return parser
 
 
@@ -535,6 +583,8 @@ def main() -> int:
     parser = build_parser()
     try:
         args = parser.parse_args()
+        tol = args.drop_reopen_lead
+        reopen = None if tol is None else ReopenLead(tol)
         if args.sidecar_dir is not None and not args.split_cycles:
             parser.error("--sidecar_dir requires --split_cycles")
         counts = convert(
@@ -550,14 +600,21 @@ def main() -> int:
             action_space=args.action_space,
             dagger=args.dagger,
             gripper=args.gripper,
+            reopen=reopen,
         )
     except Exception as exc:  # noqa: BLE001 -- any failure must become CONVERT_FAIL, not a crash.
         print(f"CONVERT_FAIL {type(exc).__name__}: {exc}", flush=True)
         traceback.print_exc()
         return 1
+    dropped = ""
+    if reopen is not None:
+        dropped = (
+            f" reopen_tol={reopen.tol} reopen_frames={reopen.frames}"
+            f" reopen_takeovers={reopen.takeovers} reopen_emptied={reopen.emptied}"
+        )
     print(
         f"CONVERT_OK episodes={counts.episodes} total={counts.total} "
-        f"read={counts.read} skipped={counts.skipped}",
+        f"read={counts.read} skipped={counts.skipped}{dropped}",
         flush=True,
     )
     return 0
