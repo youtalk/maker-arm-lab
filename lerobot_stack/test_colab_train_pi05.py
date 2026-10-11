@@ -506,6 +506,140 @@ def test_steps_past_the_session_end_are_refused(rig):
     assert "STEPS=300 does not fit this session: N=93" in r.token
 
 
+# --- the DAgger mode (HD59) and colab_dagger.sh ---
+
+
+def _dagger_root(rig, path: Path) -> Path:
+    """A dagger_vla.py root as far as the scripts read it: the corpus's info and stats."""
+    (path / "meta").mkdir(parents=True)
+    for name in ("info.json", "stats.json"):
+        shutil.copy(rig.drive / "dataset" / "meta" / name, path / "meta" / name)
+    return path
+
+
+def test_a_dagger_smoke_trains_the_mix_at_its_own_recipe(rig):
+    dag = _dagger_root(rig, rig.path / "dag")
+    env = {"DAGGER": dag, "RUN_NAME": None, "FAKE_LOSS": "0.070"}
+    r = _run(rig, "--smoke", **env)
+    assert r.token.startswith("COLAB_TRAIN_OK smoke") and "loss200=0.070" in r.token
+    assert "loss band: step 200 loss 0.070 in [0.015, 0.10]" in r.stdout
+    (call,) = _calls(rig)
+    want = {"peak_lr": 1e-5, "decay_lr": 2.5e-6, "warmup": 200, "decay": 200, "batch_size": 32}
+    assert {k: call[k] for k in want} == want
+    assert (call["dagger_root"], call["dagger_share"]) == (str(dag), "0.3")
+
+
+def test_a_dagger_run_keeps_every_save_and_resumes_only_with_its_mix(rig):
+    dag = _dagger_root(rig, rig.path / "dag")
+    env = {"DAGGER": dag, "STEPS": 400, "SAVE_FREQ": 100}
+    r = _run(rig, **env, FAKE_DIE_AT=250)
+    assert r.token.startswith("COLAB_TRAIN_FAIL") and "the trainer exited 137" in r.token
+    assert (rig.run / "dagger_share.txt").read_text() == "0.3\n"
+    shutil.rmtree(rig.out)  # a new VM
+    r = _run(rig, **{**env, "DAGGER": None})
+    assert "trains on a DAgger mix: resume it with DAGGER and its share" in r.token
+    r = _run(rig, **env, DAGGER_SHARE=0.5)
+    assert "trains on a DAgger mix" in r.token
+    r = _run(rig, **env)
+    assert r.token.startswith("COLAB_TRAIN_OK run=checkpoints_ab steps=400 last=000400")
+    first, second = _calls(rig)
+    assert (first["warmup"], first["decay"], first["peak_lr"]) == (200, 400, 1e-5)
+    assert second["resume"] is True and second["start"] == 200
+    assert second["dagger_root"] == str(dag) and second["dagger_share"] == "0.3"
+    keep = sorted(p.name for p in (rig.run / "keep").iterdir())
+    assert keep == ["000100", "000200", "000300", "000400"]  # every save, for the reads
+
+
+@pytest.mark.parametrize(
+    "env, why",
+    [
+        ({"DAGGER": "/nowhere"}, "no /nowhere/meta/info.json"),
+        ({"BAD_STATS": 1}, "dag/meta/stats.json md5"),
+    ],
+)
+def test_each_dagger_stop_prints_one_fail_token(rig, env, why):
+    dag = _dagger_root(rig, rig.path / "dag")
+    if env.pop("BAD_STATS", None):
+        (dag / "meta" / "stats.json").write_text("{}")
+    r = _run(rig, **{"DAGGER": dag, **env})
+    assert r.token.startswith("COLAB_TRAIN_FAIL") and why in r.token and not _calls(rig)
+
+
+def test_prepare_copies_the_dataset_and_trains_nothing(rig):
+    local = rig.path / "scratch" / "dataset"
+    r = _run(rig, "--prepare", RUN_NAME=None, LOCAL_DATA=local)
+    assert r.token == f"COLAB_TRAIN_OK prepared data={local}"
+    assert (local / ".copied").exists() and (local / "meta" / "stats.json").exists()
+    assert not _calls(rig) and not (rig.path / "content" / "dataset").exists()
+
+
+def _runner(rig, *args, **env):
+    full = {**rig.env, **{k: str(v) for k, v in env.items()}}
+    full.pop("RUN_NAME")  # the runner's default, checkpoints_dagger
+    full.update(DRIVE_ROOT=str(rig.drive.parent), SCRATCH=str(rig.path / "scratch"))
+    full.update(PARTS=str(rig.path / "parts"), STEPS="400", SAVE_FREQ="100")
+    out = subprocess.run(
+        ["bash", str(rig.drive / "colab_dagger.sh"), *map(str, args)],
+        env=full,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    lines = out.stdout.splitlines()
+    assert len(lines) == 1 and lines[0].startswith("DAGGER_"), out.stdout + out.stderr
+    return lines[0]
+
+
+def _until(rig, step: str, want: str) -> str:
+    deadline = time.monotonic() + 120
+    while not (line := _runner(rig, step)).startswith(want):
+        assert "_FAIL" not in line and time.monotonic() < deadline, line
+        time.sleep(0.3)
+    return line
+
+
+def test_the_cli_runner_takes_a_dagger_tar_to_a_kept_run(rig):
+    shutil.copy(HERE / "colab_dagger.sh", rig.drive)
+    scratch, parts = rig.path / "scratch", rig.path / "parts"
+    assert _runner(rig, "status").startswith("DAGGER_STATUS setup=none smoke=none run=none")
+    assert "setup has not passed: none" in _runner(rig, "smoke")
+    assert _runner(rig, "setup").startswith("DAGGER_SETUP_STARTED")
+    assert _until(rig, "setup", "DAGGER_SETUP_OK") == (
+        f"DAGGER_SETUP_OK COLAB_TRAIN_OK prepared data={scratch / 'dataset'}"
+    )
+    # dagger_vla.py's tar of one root, in two parts
+    _dagger_root(rig, rig.path / "dagx" / "dag")
+    tar = rig.path / "dag.tar"
+    subprocess.run(["tar", "-cf", tar, "-C", rig.path / "dagx", "dag"], check=True)
+    blob = tar.read_bytes()
+    parts.mkdir(exist_ok=True)
+    (parts / "dag.tar.part000").write_bytes(blob[:1000])
+    (parts / "dag.tar.part001").write_bytes(blob[1000:])
+    sha = hashlib.sha256(blob).hexdigest()
+    assert "sha256 is" in _runner(rig, "receive", len(blob), "0" * 64)
+    line = _runner(rig, "receive", len(blob), sha)
+    assert line.startswith(f"DAGGER_RECEIVE_OK root={scratch / 'dagger_dataset'}"), line
+    assert not list(parts.iterdir()) and (scratch / "dagger_dataset" / "meta").is_dir()
+    assert "the smoke has not passed" in _runner(rig, "start")
+    assert _runner(rig, "smoke").startswith("DAGGER_SMOKE_STARTED")
+    assert "COLAB_TRAIN_OK smoke" in _until(rig, "smoke", "DAGGER_SMOKE_OK")
+    assert _runner(rig, "start").startswith("DAGGER_RUN_STARTED")
+    deadline = time.monotonic() + 120
+    while "run=ok" not in (status := _runner(rig, "status")):
+        assert "run=fail" not in status and time.monotonic() < deadline, status
+        time.sleep(0.3)
+    assert "last_save=000400 kept=000100,000200,000300,000400" in status
+    assert _runner(rig, "start").startswith(
+        "DAGGER_RUN_OK COLAB_TRAIN_OK run=checkpoints_dagger steps=400 last=000400"
+    )
+    smoke, run = _calls(rig)
+    for call in (smoke, run):
+        assert call["dagger_root"] == str(scratch / "dagger_dataset")
+        assert call["dataset_root"] == str(scratch / "dataset") and call["peak_lr"] == 1e-5
+    assert call["output_dir"] == str(scratch / "pi05_checkpoints_dagger")
+
+
 # --- the stand-in trainer ---
 
 
@@ -535,7 +669,9 @@ def standin(args: list[str]) -> int:
         cfg.validate()
         return cfg
 
-    sys.argv = ["lerobot-train", *args]
+    own = ("--dagger_root=", "--dagger_share=")  # train_pi05.py's flags
+    mix = {a[2:].split("=")[0]: a.split("=", 1)[1] for a in args if a.startswith(own)}
+    sys.argv = ["lerobot-train", *[a for a in args if not a.startswith(own)]]
     cfg = parser.wrap()(parse)()
     model_dir = Path(cfg.policy.pretrained_path)
     tokens = _max_length(model_dir)
@@ -572,6 +708,8 @@ def standin(args: list[str]) -> int:
         "pretrained_path": str(model_dir),
         "output_dir": str(cfg.output_dir),
         "dataset_root": str(cfg.dataset.root),
+        "dagger_root": mix.get("dagger_root"),
+        "dagger_share": mix.get("dagger_share"),
     }
     with open(Path(os.environ["FAKE_DIR"]) / "cfg.jsonl", "a") as f:
         f.write(json.dumps(record) + "\n")

@@ -10,6 +10,11 @@ same observation: V at step 30k parked there with open jaws in 28 % of its cycle
 
 Run it like lerobot-train, from the pi venv: ``python train_pi05.py --policy.type=pi05 ...``.
 It refuses another lerobot version, because ``forward`` is a copy of 0.5.1's.
+
+``--dagger_root=DIR [--dagger_share=0.3]`` (the MS7h DAgger round, HD59) trains on the corpus
+(``--dataset.root``) and the DAgger dataset at DIR in one mix (``Mixed``): a draw is a DAgger
+frame with probability ``share``, and the corpus's metadata, so its normalizer, serves both.
+Without the flags nothing changes.
 """
 
 import sys
@@ -17,6 +22,7 @@ import sys
 import torch
 
 LEROBOT = "0.5.1"
+MIX_FLAGS = ("--dagger_root=", "--dagger_share=")
 
 
 def masked_means(losses: torch.Tensor, is_pad: torch.Tensor) -> tuple:
@@ -43,6 +49,61 @@ def forward(self, batch: dict, reduction: str = "mean") -> tuple:
     return (per_sample, loss_dict) if reduction == "none" else (loss, loss_dict)
 
 
+class Mixed(torch.utils.data.Dataset):
+    """The corpus, then ``extra`` more indices that cycle through the DAgger frames. lerobot's
+    shuffled sampler draws every index once an epoch, so a draw is a DAgger frame with probability
+    ``share``. ``meta`` is the corpus's: the policy features and the normalizer statistics."""
+
+    def __init__(self, corpus, dagger, share: float):
+        if not 0 < share < 1:
+            raise ValueError(f"--dagger_share must be in (0, 1), got {share}")
+        self.corpus, self.dagger, self.meta = corpus, dagger, corpus.meta
+        self.extra = round(len(corpus) * share / (1 - share))
+        self.num_frames = len(self)
+        self.num_episodes = corpus.num_episodes + dagger.num_episodes
+
+    def __len__(self) -> int:
+        return len(self.corpus) + self.extra
+
+    def __getitem__(self, i: int) -> dict:
+        n = len(self.corpus)
+        return self.corpus[i] if i < n else self.dagger[(i - n) % len(self.dagger)]
+
+
+def mixed_maker(make, root: str, share: float):
+    """``make`` (lerobot's ``make_dataset``) for the corpus and for ``root``, as one ``Mixed``."""
+
+    def make_dataset(cfg):
+        corpus = make(cfg)
+        main_root = cfg.dataset.root
+        cfg.dataset.root = root
+        try:
+            dagger = make(cfg)
+        finally:
+            cfg.dataset.root = main_root
+        if dagger.meta.features != corpus.meta.features or dagger.fps != corpus.fps:
+            raise ValueError(f"the DAgger dataset {root} has other features or fps than the corpus")
+        mix = Mixed(corpus, dagger, share)
+        print(
+            f"DAGGER_MIX share={share} corpus_frames={len(corpus)} dagger_frames={len(dagger)}"
+            f" dagger_episodes={dagger.num_episodes} extra={mix.extra} root={root}",
+            flush=True,
+        )
+        return mix
+
+    return make_dataset
+
+
+def split_mix(argv: list[str]) -> tuple[str | None, float, list[str]]:
+    """(the DAgger root or None, its share, argv without the two flags)."""
+    found = {f: a[len(f) :] for a in argv for f in MIX_FLAGS if a.startswith(f)}
+    root, share = found.get(MIX_FLAGS[0]), found.get(MIX_FLAGS[1])
+    if share is not None and root is None:
+        raise SystemExit("--dagger_share needs --dagger_root")
+    rest = [a for a in argv if not a.startswith(MIX_FLAGS)]
+    return root, 0.3 if share is None else float(share), rest
+
+
 def main(argv: list[str]) -> None:
     import lerobot
 
@@ -53,6 +114,9 @@ def main(argv: list[str]) -> None:
     from lerobot.policies.pi05.modeling_pi05 import PI05Policy
     from lerobot.scripts import lerobot_train
 
+    root, share, argv = split_mix(argv)
+    if root is not None:
+        lerobot_train.make_dataset = mixed_maker(lerobot_train.make_dataset, root, share)
     PI05Policy.forward = forward
     sys.argv = [sys.argv[0], *argv]
     lerobot_train.main()

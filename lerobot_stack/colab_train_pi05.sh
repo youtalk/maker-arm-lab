@@ -68,23 +68,35 @@
 #     is not a multiple of the save freq
 #   - a final Drive sync that still fails after SYNC_RETRY_S
 #
+# The DAgger mode (MS7h HD59), with DAGGER=<a dagger_vla.py root on the local disk>: the run trains
+# on the corpus and that root in one mix (train_pi05.py --dagger_root, a draw is a DAgger frame
+# with probability DAGGER_SHARE, 0.3), a warm start from START at its own recipe: warmup 200 to a
+# peak lr of 1e-5, then cosine to 2.5e-6 over STEPS (8000 by default, not N), every checkpoint kept
+# (KEEP_EVERY defaults to the save freq), and its own step-200 loss band. The DAgger root must
+# carry the corpus's meta/stats.json (STATS_MD5): the corpus normalizer trains both. A run keeps
+# its share in $RUN_NAME/dagger_share.txt, and a resume needs DAGGER and the same share again.
+# colab_dagger.sh drives this mode on a CLI runtime.
+#
 # The pi05 tokenizer google/paligemma-3b-pt-224 is a gated repo: HF_TOKEN must belong to an
 # account that was granted access (the owner's was, 2026-10-05). The script checks that first,
 # before it copies anything. transformers 5.3's AutoTokenizer reads the repo's config.json as
 # well as the tokenizer files, so an offline host needs config.json in its HF cache too.
 #
 # usage: DIR=<Drive folder> START=<dir | lerobot/pi05_base> RUN_NAME=<name> bash
-#            colab_train_pi05.sh [--smoke] [--expert_only]
+#            colab_train_pi05.sh [--smoke | --prepare] [--expert_only]
 #   --smoke        200 steps from START into a local dir, with the preflight and the loss band,
 #                  one checkpoint at the end and no Drive writes; prints seconds a step and the
 #                  checkpoint size. RUN_NAME is not needed.
+#   --prepare      the smoke's checks, the lerobot install, the HF_TOKEN checks and the dataset
+#                  copy, then stop before the trainer: COLAB_TRAIN_OK prepared
 #   --expert_only  train_expert_only=true, the A100 40GB fallback (the report must say so)
 # env: STEPS (N), BATCH (32), SAVE_FREQ (2000), NUM_WORKERS (8), SEED (1000, run 1's and M2k's:
 #      the same seed draws the same sample order), DATASET (dataset),
 #      OUT_ROOT (/content): where the local checkpoints and the start copy go, e.g. the
 #      runtime's local-scratch disk (the owner's A100 runtime had 70 GB free on /content after
 #      the dataset copy and 368 GB there), LOSS_LO, LOSS_HI, DRIVE_MIN_GB (60), STATS_MD5,
-#      SPAN (0), KEEP_EVERY (none), DRIVE_ROOT (/content/drive/MyDrive).
+#      SPAN (0), KEEP_EVERY (none), DRIVE_ROOT (/content/drive/MyDrive), LOCAL_DATA
+#      ($CONTENT/$DATASET: where the dataset copy goes), DAGGER (none), DAGGER_SHARE (0.3).
 #      CONTENT (/content), UPTIME_FILE (/proc/uptime), POLL_S (60) and SYNC_RETRY_S (1800) are
 #      for the dry-run test (lerobot_stack/test_colab_train_pi05.py).
 # -> one COLAB_TRAIN_OK / COLAB_TRAIN_DONE / COLAB_TRAIN_FAIL line.
@@ -108,10 +120,12 @@ fail() {
 }
 
 SMOKE=0
+PREPARE=0
 EXPERT_ONLY=false
 for arg in "$@"; do
     case "$arg" in
         --smoke) SMOKE=1 ;;
+        --prepare) SMOKE=1 PREPARE=1 ;;
         --expert_only) EXPERT_ONLY=true ;;
         *) fail "unknown argument $arg" ;;
     esac
@@ -126,7 +140,7 @@ DRIVE_ROOT=${DRIVE_ROOT:-$CONTENT/drive/MyDrive}
 DRIVE=$DRIVE_ROOT/$DIR
 DATA=${DATASET:-dataset}
 LOCAL=${OUT_ROOT:-$CONTENT}
-LOCAL_DATA=$CONTENT/$DATA
+LOCAL_DATA=${LOCAL_DATA:-$CONTENT/$DATA}
 BATCH=${BATCH:-32}
 SAVE_FREQ=${SAVE_FREQ:-2000}
 NUM_WORKERS=${NUM_WORKERS:-8}
@@ -143,6 +157,25 @@ BASE=lerobot/pi05_base
 # preprocessor names relative_actions_processor, a step lerobot 0.5.1 registers as
 # delta_actions_processor, so it fails to load (run 1's pin, da1f27a)
 PI05_REV=a538eb273274eb30f126a118f39dbc0ee212c883
+PEAK_LR=2.5e-5 DAGGER_WARMUP=
+MIX=()
+if [ -n "${DAGGER:-}" ]; then
+    [ -f "$DAGGER/meta/info.json" ] || fail "no $DAGGER/meta/info.json: DAGGER=<the DAgger root>"
+    DAGGER_SHARE=${DAGGER_SHARE:-0.3}
+    MIX=(--dagger_root="$DAGGER" --dagger_share="$DAGGER_SHARE")
+    PEAK_LR=1e-5 DAGGER_WARMUP=200
+    STEPS=${STEPS:-8000}
+    KEEP_EVERY=${KEEP_EVERY:-$SAVE_FREQ}
+    # INITIAL: a warm start from a fresh save on the mix, which the DAgger smoke's step 200
+    # measures again. The fresh run read loss 0.033-0.035 at 20k (MS7h ledger 2026-10-10 20:38) on
+    # the corpus; the DAgger frames are states the corpus never showed, at worst as far off as
+    # the untrained base's 0.171 (the 2026-10-05 smoke), so 0.7 x 0.034 + 0.3 x 0.171 = 0.075 is
+    # the worst mix of a sound start, and LOSS_HI 0.10 sits above it. It is a coarse stop (the
+    # base itself reads 0.092 after 200 steps): the preflight's full-load check guards the
+    # weights. LOSS_LO stays the warm band's.
+    LOSS_LO=${LOSS_LO:-0.015}
+    LOSS_HI=${LOSS_HI:-0.10}
+fi
 if [ "${START:-}" = "$BASE" ]; then
     # INITIAL: the band of a start from pi05_base, which this run's step 200 measures again.
     # The Colab smoke from it (2026-10-05: full fine-tune, batch 32, the loss not masked, 200
@@ -240,6 +273,11 @@ echo "Drive: $free_gb GB free, as df reads $DRIVE"
 stats_md5=$(md5sum < "$DRIVE/$DATA/meta/stats.json" | cut -d' ' -f1)
 [ "$stats_md5" = "$STATS_MD5" ] \
     || fail "$DRIVE/$DATA/meta/stats.json md5 $stats_md5 is not the corpus's $STATS_MD5"
+if [ -n "${DAGGER:-}" ]; then
+    stats_md5=$(md5sum < "$DAGGER/meta/stats.json" | cut -d' ' -f1)
+    [ "$stats_md5" = "$STATS_MD5" ] \
+        || fail "$DAGGER/meta/stats.json md5 $stats_md5 is not the corpus's $STATS_MD5"
+fi
 
 uptime_s=$(cut -d' ' -f1 "${UPTIME_FILE:-/proc/uptime}")
 FIT=$(awk -v up="$uptime_s" -v sps="$SEC_PER_STEP" -v max="$STEPS_MAX" 'BEGIN {
@@ -256,6 +294,12 @@ fi
 RESUME=0
 if [ "$SMOKE" -eq 0 ] && [ -f "$RUN_DIR/last.txt" ]; then
     RESUME=1
+    if [ -f "$RUN_DIR/dagger_share.txt" ]; then
+        [ "$(cat "$RUN_DIR/dagger_share.txt")" = "${DAGGER:+$DAGGER_SHARE}" ] \
+            || fail "$RUN_NAME trains on a DAgger mix: resume it with DAGGER and its share"
+    elif [ -n "${DAGGER:-}" ]; then
+        fail "$RUN_NAME started without DAGGER: unset it to resume"
+    fi
 else
     [ "${SPAN:-0}" = 1 ] || [ "$STEPS" -le "$FIT" ] \
         || fail "STEPS=$STEPS does not fit this session: N=$FIT"
@@ -329,11 +373,16 @@ AutoTokenizer.from_pretrained("google/paligemma-3b-pt-224")' \
 
 if [ ! -e "$LOCAL_DATA/.copied" ]; then
     rm -rf "$LOCAL_DATA"
+    mkdir -p "$(dirname "$LOCAL_DATA")"
     echo "copying $DRIVE/$DATA to $LOCAL_DATA"
     cp -r "$DRIVE/$DATA" "$LOCAL_DATA"
     touch "$LOCAL_DATA/.copied"
 fi
 df -h "$CONTENT" | tail -1
+if [ "$PREPARE" -eq 1 ]; then
+    RESULT="prepared data=$LOCAL_DATA"
+    exit 0
+fi
 # 2026-10-05 on the RTX 5090 under a 19.44 GiB cap, train_expert_only at batch 32 with gradient
 # checkpointing: out of memory after step 1 with the default allocator, 18.45 GiB allocated and
 # 19.41 reserved at 3.0 s a step with expandable segments
@@ -357,8 +406,13 @@ if [ "$RESUME" -eq 1 ]; then
     # --output_dir: a resumed train_config.json names the first session's output dir;
     # --dataset.root: this session's local copy of the dataset, as a fresh run passes it
     CMD=("${TRAIN[@]}" --config_path="$config" --resume=true --output_dir="$OUT"
-        --dataset.root="$LOCAL_DATA")
+        --dataset.root="$LOCAL_DATA" "${MIX[@]}")
 else
+    if [ "$SMOKE" -eq 0 ]; then
+        mkdir -p "$RUN_DIR"
+        rm -f "$RUN_DIR/dagger_share.txt"
+        [ -z "${DAGGER:-}" ] || echo "$DAGGER_SHARE" > "$RUN_DIR/dagger_share.txt"
+    fi
     START_COPY=$LOCAL/start_model
     # a fresh run: nothing local to keep, and a smoke checkpoint (22.8 GiB) would crowd /content
     rm -rf "$START_COPY" "$OUT" "$LOCAL/pi05_smoke"
@@ -377,7 +431,7 @@ snapshot_download(sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3])' \
     START_STEP=0
     # The pi05 preset's schedule (warmup 1000, decay 30000) scaled into STEPS as lerobot scaled
     # it for M2k (2000 steps: warmup 66); equal steps and decay steps skip that rescale.
-    WARMUP=$((1000 * STEPS / 30000))
+    WARMUP=${DAGGER_WARMUP:-$((1000 * STEPS / 30000))}
     CMD=(
         "${TRAIN[@]}"
         --dataset.repo_id=youtalk/maker-arm-legosort
@@ -391,7 +445,7 @@ snapshot_download(sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3])' \
         --policy.chunk_size=50
         --policy.n_action_steps=50
         --policy.tokenizer_max_length="$MAX_LENGTH"
-        --policy.optimizer_lr=2.5e-5
+        --policy.optimizer_lr="$PEAK_LR"
         --policy.scheduler_warmup_steps="$WARMUP"
         --policy.scheduler_decay_steps="$STEPS"
         --policy.scheduler_decay_lr=2.5e-6
@@ -407,6 +461,7 @@ snapshot_download(sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3])' \
         --save_freq="$SAVE_FREQ"
         --log_freq="$LOG_FREQ"
         --wandb.enable=false
+        "${MIX[@]}"
     )
 fi
 if [ "$SMOKE" -eq 0 ]; then cp "$LOCAL_DATA/meta/action_space.json" "$DRIVE/action_space.json"; fi
