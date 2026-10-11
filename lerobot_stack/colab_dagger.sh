@@ -18,7 +18,8 @@
 #   status                DAGGER_STATUS setup= smoke= run= (none | running | ok | fail) step=
 #                         loss= lr= last_save= kept= gpu_mib=
 # <STATE> is STARTED, RUNNING, OK (with the job's COLAB_TRAIN line) or FAIL.
-# env: HF_TOKEN (setup, smoke, start: colab exec --env), START (the pretrained_model under
+# env: HF_TOKEN (setup, smoke, start: colab exec --env, or the file $HERE/.hf_token), START
+#      (the pretrained_model under
 #      $DRIVE_ROOT/$DIR: setup, smoke, start), DRIVE_ROOT (/content/drive/Shareddrives/
 #      maker-arm-lab), DIR (maker-arm-ms7h-pi05), RUN_NAME (checkpoints_dagger), DAGGER_SHARE
 #      (0.3), STEPS (8000), SAVE_FREQ (2000), SCRATCH (/mnt/local-scratch), PARTS
@@ -78,7 +79,14 @@ job() { # job <name> <colab_train_pi05.sh args...>: one token line; starts the j
     esac
 }
 need_token() {
-    [ -n "${HF_TOKEN:-}" ] || fail "HF_TOKEN is not set: pass it with colab exec --env HF_TOKEN=..."
+    # The owner can leave the token in $HERE/.hf_token from a terminal, so it never passes
+    # through the controller (read -s T; echo "open('/content/dag/.hf_token','w').write('$T')"
+    # | colab exec -s ms7h-dag; unset T).
+    if [ -z "${HF_TOKEN:-}" ] && [ -s "$HERE/.hf_token" ]; then
+        HF_TOKEN=$(< "$HERE/.hf_token")
+        export HF_TOKEN
+    fi
+    [ -n "${HF_TOKEN:-}" ] || fail "HF_TOKEN is not set: colab exec --env, or $HERE/.hf_token"
     [ -n "${START:-}" ] || fail "set START=<pretrained_model under $DRIVE_ROOT/$DIR>"
 }
 free_gb() { df -Pk "$1" | awk 'NR == 2 { printf "%d", $4 / 1000000 }'; }
