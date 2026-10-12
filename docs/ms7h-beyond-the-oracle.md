@@ -1,8 +1,9 @@
 # MS7h: beyond the oracle
 
-Date: 2026-10-06. Status: draft. This draft uses the ledger through its entry of 15:38 on
-2026-10-06. The campaign still runs. A placeholder of the form `<<NAME>>` marks each result that is
-not in yet. The controller fills them in.
+Date: 2026-10-06, Track V updated 2026-10-12. Status: draft. This draft uses the ledger through its
+entry of 15:38 on 2026-10-06. Section 7 and the Track V lines of section 1 use it through its entry
+of 00:23 on 2026-10-12. The campaign still runs. A placeholder of the form `<<NAME>>` or
+`TODO(result): ...` marks each result that is not in yet. The controller fills them in.
 
 The design of MS7h is the document of 2026-10-05 whose questions the owner answered in chat. This
 report cites it as "MS7h design section N" and restates every rule that it uses. The MS7g report,
@@ -15,7 +16,8 @@ into the ledger before its number. The mechanism tables are
 under `~/data/maker-arm-ms7/reads/<TAG>/`. Every MS7h TAG starts with `h_`.
 
 The names. The design names its decisions H1 to H7. The ledger names its rules HR1 to HR11 and its
-deviations HD1 to HD13. The owner decision of the run is D1. The policies and drivers:
+deviations HD1 to HD69. Section 3.4 lists HD1 to HD13, and section 7 cites the entries of Track V.
+The owner decision of the run is D1. The policies and drivers:
 
 - B is the base of the design: F9n 800k, the MS7g policy from random init with the context fix (MS7g
   report section 9.1). It serves with the switches and the classifier of S.
@@ -39,7 +41,8 @@ time without a date from 13:10 to 23:59 is on 2026-10-05. A time without a date 
 is on 2026-10-06. Some ledger entries stand out of time order. 18:50 stands before "about 17:35",
 and the ablation result of 01:46 stands after 01:53. The ledger lists HD10 before HD9, and HD11 to
 HD13 stand in its log. The "[V]" entries of the Track V session interleave with the others. This
-report keeps each stamp as the ledger writes it.
+report keeps each stamp as the ledger writes it. In section 7, a time with a date of the form MM-DD
+is in 2026. A time without a date follows the rule above.
 
 The numbers. Every number comes from the ledger or from a file that the ledger names. This report
 computes no new number.
@@ -60,7 +63,10 @@ and the held-out row keep their MS7f definitions (MS7f report section 1.3):
 - The rate is the correct stows per simulated hour.
 - The held-out row counts the parts of the kinds that no policy and no classifier saw in training.
 
-The verdict. `<<VERDICT>>`
+The verdict. Since HD14 the adoption bar is V1(b) against S, and HR2 against O is report-only
+(section 7.10).
+
+TODO(result): the verdict of MS7h from the R4 candidate, its checked read and, after a checked pass, the official read.
 
 What Phase 0 found. O is far stronger than the design expected. Design section 3.3 read the policy
 as faster than its teacher, from teacher reads in other scenes. In the gate scene and the perceived
@@ -105,12 +111,15 @@ The hybrid (section 6). SP stowed 2527 on the screen seed, 6 under S (paired SE 
 hour. It is not a candidate. The rig's carry removed the air stalls, but the losses moved from the
 carry to the hold.
 
-Track V so far (section 7). π0.5 trains on Colab Pro+, a full fine-tune on the full derived dataset
-(D1). The 30k-step run started at 20:19. It lands about 04:00 on 2026-10-07, plus the gap of one
-session resume ([V] 21:18). The report-only screen of step 10k finished one heap of 20 before its
-cut at 09:30. On that heap V stowed 28 of 150, and S stowed 133. The 30k screen decides V's week-2
-gate: at least h_S_scr - 30 = 2503 (HD9, and HD11 as HD12 P4 amends it). Section 7.9 gives its
-results.
+Track V so far (section 7). Run 1 of π0.5, a 30k full fine-tune on Colab (D1), failed the week-2
+gate of HD9 on 2026-10-07. It stowed 533 of 1050 parts on 7 heaps, against 890 for S. The π0.5 loss
+of LeRobot 0.5.1 ignored `action_is_pad`, so V learned to park. 2,000 masked steps (M2k) lifted V
+to 807. Recipe revision 2 then judged V by V1(b) against S, and HD36 set its rate bar at 200
+correct stows an hour. No serving of M2k qualified for the R4 screen. A fresh masked run from
+`pi05_base` (HD45) reads 838 at its 30k save. With the serving a0j1slR25g20 the same save reads 885
+at 228.20 an hour, with a held-out row of 0.7992. That is D = -5 against S on the same 7 heaps, at
+a paired SE of 15.1. A DAgger round, a weight average and the 20-heap screens are still open
+(sections 7.15 to 7.20).
 
 ## 2. What execution showed
 
@@ -225,7 +234,7 @@ it names. Its findings:
 - F1. O stows 137 more than S on the screen seed and 160 more on the checked seed, far over what a
   residual near S can add.
 - F2. The run 3 critic diagnostic (section 5.7).
-- F3. V at step 10k stows 28 of 150 on one heap, and one V heap takes 71 minutes (section 7.8).
+- F3. V at step 10k stows 28 of 150 on one heap, and one V heap takes 71 minutes (section 7.7).
 
 Its plan:
 
@@ -1153,8 +1162,19 @@ and run 4 stays on S.
 
 ## 7. Track V: π0.5
 
-The Track V session owns this track (section 3.5). The ledger lines marked "[V]" and the vla, vread
-and vres track reports hold its facts.
+The Track V session owned this track until 10-06 09:25 (section 3.5). From then on, a controller
+session owned it ([V] 10-06 09:25, HD15). The ledger lines marked "[V]" and the vla, vread and vres
+track reports hold its facts. The stage-1 score files are `h/tables/vla/s1/<TAG>.score.txt`.
+
+The names of Track V:
+
+- Run 1 is the first Colab run: a full fine-tune from `pi05_base`, 30k steps, with the unmasked
+  loss (sections 7.4 and 7.7).
+- M2k is the 30k weights of run 1 plus 2,000 masked expert-only steps on the 5090 (section 7.8).
+- The fresh run is a masked full fine-tune from `pi05_base` on a second Colab account (HD45). Vf10k
+  to Vf40k are its saves at 10k to 40k steps (section 7.14).
+- A serving is S's serving plus `--pi05` and the switches that its name lists (section 7.12). The
+  default serving adds no switch: 50 actions a forward, 10 flow steps and noise 1.
 
 ### 7.1 The data
 
@@ -1221,6 +1241,12 @@ The owner chose Colab Pro+ and a full fine-tune on the full dataset (D1, 16:35).
 - `colab download` from a CPU runtime moves 15.3 MB/s, so the 9.4 GB model reaches Machine A in
   about 10 minutes ([V] 23:07). `colab drivemount` needs a person at a terminal. The fetch test on
   the step-2000 checkpoint passed at 23:51: 7 files with equal sha256, in 17 minutes.
+- The run resumed from checkpoint 020000 after the 24 h limit, not near step 22,000 ([V] 10-06
+  20:14). At step 20,100 the loss read 0.034.
+- The run ended at 06:48 on 10-07 with COLAB_TRAIN_OK at step 30,000, a loss of 0.029 and a grad
+  norm of 0.396 ([V] 10-07 06:55).
+- The fetch of checkpoint 030000 passed at 07:31 on 10-07. All 7 files had equal sizes and sha256,
+  and `model.safetensors` holds 9,354,050,752 bytes.
 
 ### 7.5 Serving and reads (MS7h design section 7.3)
 
@@ -1260,18 +1286,45 @@ actor that was trained on B alone (1c637a5). 1724 repo tests pass.
   17.8 and 33.8 ms a loop iteration at 1, 2, 4, 8 and 15 lanes. That is about 2.2 ms a lane step
   from 8 lanes on.
 
-### 7.7 The week-2 rule: HR8, HD9, HD11 and HD12 P4
+### 7.7 The week-2 rule and the first reads
 
 Rule HR8 (MS7h design section 7.4). If V's screen reads at least h_B_scr - 30, residual RL on V runs
 in week 2. Otherwise V stops at its report. The report gives V's held-out row in both cases. The
-held-out row is the reason for Track V.
+held-out row is the reason for Track V. HR8 names h_B_scr - 30, which is 2450. HD3 made S the base
+of Track R, and the Track V session used h_S_scr - 30 = 2503 ([V] 20:31). HD9 (10-06 03:05) rules
+between the two numbers. The gate follows the incumbent, so V's 30k screen must read at least 2503.
+The report-only h_V10k_scr decides nothing.
 
-HR8 names h_B_scr - 30, which is 2450. It was written before HD3 made S the base. The Track V
-session used h_S_scr - 30 = 2503 from 20:31. HD9 (03:05) rules between the two numbers: the gate
-follows the incumbent, so V's 30k screen must read at least 2503. The report-only h_V10k_scr decides
-nothing.
+The early screen h_V10k_scr ([V] 23:55, pre-registered, report-only). It reads V at step 10k of the
+Colab run, on seed 20307000, draws 0 to 19. It uses `read_h.sh`'s serving with `ADD=--pi05` and
+`HOSTS=a_h2l:20`, one π0.5 server for 20 lanes. The worktree is 7h-r2 at `feat/ms7h-vla-read`
+b7c3ebd, PORT_BASE 33600. It decides nothing. It is placed against h_S_scr (2533) and h_O_scr
+(2670), with the held-out row. After HD8 the slot changed ([V] 02:18): the read starts at 06:45 or
+later, only while no h_R3 screen reads, and it is cut at 09:30. V's deciding screen stays the
+step-30k checkpoint.
 
-HD11 (09:31) fixes the 30k screen h_V30k_scr before any V number at step 30k:
+The step-10k checkpoint reached Drive at 07:04 on 10-06. The fetch gave equal sha256 on 7 files
+by 07:22. h_V10k_scr started at 07:22 on 10-06, and the 5090 held 1.0 GB at the start. Its
+pre-registered cut ended it at 09:30 (V10K_FAIL, rc 124). One heap of 20 finished ([V] 10-06
+09:31):
+
+| row | value |
+| --- | --- |
+| heap | draw 1 |
+| correct | 28 of 150, against 133 for S and 116 for B on the same draw |
+| correct stows an hour | 82.6 |
+| held-out row | 8 of 42 |
+| cycles | 72: 37 placed, 21 budget ends, 14 dropped |
+| wrong-box parts | 6 |
+| end | no_candidate |
+
+The 20 lanes on one π0.5 server ran about 8.6 steps a second a lane (4.6 forwards a second at 168
+ms, 1.12 rows). So a V heap took about 71 minutes of wall time, and most heaps did not finish in 2 h
+8 min. The report-only reading: V at step 10k is far under S, and one heap is not a screen. For the
+30k screen the ledger plans about 3 h of wall time on one server, or two servers. HD11 takes two
+servers.
+
+HD11 (10-06 09:31) fixes the 30k screen h_V30k_scr before any V number at step 30k:
 
 - The checkpoint is 030000 from Drive. If the Colab run stops early, it is the run's last
   checkpoint, named in the ledger before the read.
@@ -1286,42 +1339,777 @@ HD12 P4 (09:38) amends HD11. V's 30k screen reads draws 0 to 6 first, on 7 lanes
 stows plus 150 for each of the 13 other draws stay under 2503, V fails HD9 and stops at its report.
 Otherwise draws 7 to 19 follow.
 
-### 7.8 The early screen h_V10k_scr
+h_V30k_a read draws 0 to 6 from 07:29 to 09:20 on 10-07 ([V] 10-07 09:22):
 
-The pre-registration ([V] 23:55, report-only). The read takes V at step 10k of the Colab run, on
-seed 20307000, draws 0 to 19. It uses `read_h.sh`'s serving with `ADD=--pi05` and
-`HOSTS=a_h2l:20`, one π0.5 server for 20 lanes. The worktree is 7h-r2 at `feat/ms7h-vla-read`
-b7c3ebd, PORT_BASE 33600. It decides nothing. It is placed against h_S_scr (2533) and h_O_scr
-(2670), with the held-out row. After HD8 the slot changed ([V] 02:18): the read starts at 06:45 or
-later, only while no h_R3 screen reads, and it is cut at 09:30. V's deciding screen stays the
-step-30k checkpoint.
+| draw | 0 | 1 | 2 | 3 | 4 | 5 | 6 | sum |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| V, run 1 at 30k | 67 | 74 | 65 | 104 | 85 | 48 | 90 | 533 |
+| S | 129 | 133 | 124 | 132 | 128 | 120 | 124 | 890 |
 
-The run ([V] 07:22 and 09:31). The step-10k checkpoint reached Drive at 07:04. The fetch gave equal
-sha256 on 7 files by 07:22, and the read started then. The 5090 held 1.0 GB at the start. At 09:30
-the read was cut as pre-registered (V10K_FAIL, rc 124). One heap of 20 finished:
+O stows 915 on the same draws. The bound is 533 + 150 x 13 = 2483, under 2503. So V failed HD9 and
+stopped at its report. h_V30k_b and h_V30k_scr did not run, and residual RL on V did not run in
+week 2. Against S on the same draws:
 
-| row | V at step 10k, draw 1 |
+- V read 74.0 correct stows a simulated hour against 366.5. Its held-out row read 0.494 against
+  0.767.
+- Every V heap ended on the 195-cycle budget at about 600 steps a cycle. S used 155 to 172 cycles at
+  about 230 steps.
+- V used 2.9 to 4.1 cycles a stow, against 1.2 to 1.4 for S. About a third of the parts never left
+  the tray.
+- Of the parts that V released, 551 of 704 reached the right box. S put 921 of 1048 there.
+
+So V at 30k lost on pace and pick success, not on the sort. Track V ended at its report under HD12
+P4 ([V] 10-07 09:22). The V+R serving of section 7.6 never read.
+
+### 7.8 The masked loss
+
+The owner then asked for a second π0.5 run on the remaining Colab credit ([V] 10-07 09:25). A gate
+check came first. h_V10k_a reads the 10k checkpoint on the same draws 0 to 6 with the same serving.
+It stowed 597, so V30k - V10k = -64 at a paired SE of 45 ([V] 10-07 11:11):
+
+| row | V10k | V30k | S |
+| --- | --- | --- | --- |
+| stows a cycle | 0.437 | 0.395 | 0.786 |
+| steps a cycle | 521 | 577 | 231 |
+| cycles that end on the 800-step budget | 419 of 1365 | 655 of 1348 | 56 of 1133 |
+| of these, cycles whose jaws never closed | 72 | 371 | 1 |
+
+Tripling the steps did not raise the stows. So the ledger spent no credit until it found the
+cause of the never-close cycles. Four free checks followed ([V] 10-07 12:39 to 19:34):
+
+1. On 96 corpus close events, both checkpoints close through the serving code. At 30k the chunk's
+   jaw gap falls under the loop's close reading in 96 to 99 % of the queries.
+2. An in-loop trace of one V30k heap (draw 5) found the park. All 25 never-close cycles park the
+   arm at the desk-box retreat point (0.15, 0, 0.12) with open jaws until the 800-step budget ends.
+   The arm stays parked on 71 % of all cycle steps.
+3. h_V30k_n25_a replans every 25 actions. It stowed 724 against 533 on the same heaps, D = +191 at a
+   paired SE of 34.9. It has no score file.
+4. A masked fine-tune and its read h_V30kM2k_a (below).
+
+The root cause ([V] 10-07 13:26). 74.6 % of the episodes of the derived dataset end parked at the
+retreat point. LeRobot pads an action chunk past the episode end with the last action. ACT's loss
+masks `action_is_pad`, but the `PI05Policy.forward` of LeRobot 0.5.1 does not. So 146,194 frames at
+that pose carry a 50-step "stay" label. The next episode's head labels the same observation
+"leave". 12.1 % of all frames get padded labels.
+
+The fix is `feat/ms7h-pi05-mask` dc3f8f9. `lerobot_stack/train_pi05.py` averages the π0.5 loss over
+the actions that are not padding, as ACT does. A rule entered before the number. If the never-close
+budget cycles fall from 371 to under 100 on the 7 heaps, the mask works.
+
+M2k trained 2,000 masked expert-only steps from the 30k weights on the 5090. It ran at batch 32 and
+2.73 s a step, and its loss went from 0.033 to 0.028. Its reads ([V] 10-07 19:34 and 23:08):
+
+| read | actions a forward | correct of 1050 | never-close budget cycles | D against h_V30k_a | D against S, paired SE |
+| --- | --- | --- | --- | --- | --- |
+| h_V30kM2k_a | 50 | 807 | 5 | +274 | -83, 19.6 |
+| h_V30kM2k_n25_b | 25 | 815 | 5 | | -75, 18.9 |
+
+So the test passed, and the unmasked π0.5 loss was the main defect of V. M2k read 137.3 correct
+stows an hour and a held-out row of 0.707. Once the mask removes the park, a shorter replan adds
+little. h_V30kM2k_n25_b reads D = +8 against M2k, at a paired SE of 23.6. h_V30k_n10_b, at 10
+actions a forward, finished no heap in 3 h 47 min, so its TAG holds no number ([V] 10-07 23:23).
+
+The speed probes on Colab found no usable H100 or G4 runtime on this account ([V] 10-07 22:27 to
+23:08). The handoff of 10-07 23:29 left 346.82 CU on the account.
+
+### 7.9 The recipe, revision 2, and its review
+
+Revision 1 of the rebuilt plan (claude-memory 0995271) failed an adversarial review on 10-08
+(2dbc06b). Four reviewers read it, each with one lens: the chance of a pass, execution defects,
+noise and decision rules, and the causes of V's deficit. All four rejected it. Reviewer A put the
+chance of a checked pass by 10-17 at about 1 %. Five reasons carry the verdict:
+
+1. The rate bar binds. V had to read at least 366.0 correct stows an hour, against its best of
+   150.8.
+2. About 300 CU went out with no rule to stop them.
+3. The diagnosis missed the main failure of V: V re-opens the jaws right after its own close.
+4. The rules of revision 1 decided on noise. Its DAgger trigger opened the round with a chance of
+   0.92 to 1.00 at zero gain.
+5. Several code paths can lose a whole Colab run with no error.
+
+The jaw table of the review (finding F2, draws 0 to 6):
+
+| row | M2k at 25 / 50 actions | S | B | O |
+| --- | --- | --- | --- | --- |
+| re-open within 10 steps after a precise first close | 0.288 / 0.309 | 0.015 | 0.021 | 0 |
+| close edges a stowed cycle | 3.45 / 3.71 | 1.41 | 1.40 | 1.04 |
+| steps from the first close command to the hold | 137 / 133 | 45 | 39 | |
+| stowed cycles with an off-target first close | 0.25 | 0.07 | | 0.02 |
+
+A precise first close is within 3 mm in xy and within 15 mm in z. An off-target first close is more
+than 20 mm high or more than 2 cm off in xy. The corpus labels never re-open within 10 frames of a
+close (0 of 46,669).
+
+Revision 2 (claude-memory 41ef793 and 0881b02) answers the findings F1 to F11. Its decisions:
+
+| id | decision |
 | --- | --- |
-| correct | 28 of 150. On the same draw S stowed 133 and B 116. |
-| correct stows an hour | 82.6 |
-| held-out row | 8 of 42 |
-| cycles | 72: placed 37, budget 21, dropped 14 |
-| wrong-box parts | 6 |
-| end | no_candidate |
+| P1 | V passes V1(b) against S at the checked read by 2026-10-17. |
+| P2 | One Colab session at a time. The owner starts each one. |
+| P3 | The masked recipe plus a fix of the jaw re-open. The DAgger round and the test of relative actions leave the plan. |
+| P4 | Residual RL ends, on S and on V. |
+| P5 | Colab credit goes out only after a free read meets a go line written before its number. |
+| P6 | A V read can change its sampling and add existing loop switches. Each change enters the ledger first. S keeps its serving. |
 
-The 20 lanes on one π0.5 server ran about 8.6 steps a second a lane (4.6 forwards a second at 168
-ms, 1.12 rows). So a V heap took about 71 minutes of wall time, and most heaps did not finish in 2 h
-8 min. The report-only reading: V at step 10k is far under S, and one heap is not a screen. For the
-30k screen the ledger plans about 3 h of wall time on one server, or two servers. HD11 takes two
-servers.
+Phase 0 on 10-08 and 10-09 is free: the jaw test, the variant reads, line D and the host smokes. The
+Colab stages A/B, C1 and C2 each wait for a go line. The 20-heap screens run on 10-15, and the
+checked read starts by 10-16 08:00. Recipe section 11 puts two things out of scope until the owner
+approves them: a new loop switch and a fresh start from `pi05_base`.
 
-### 7.9 The results of Track V
+The owner started a /goal on 10-08 at 10:2x to reach the goals of revision 2 (HD15, [V] 10-08
+10:33).
 
-`<<V_RESULTS>>`
+### 7.10 The bars and the stage-1 score
 
-The rows to fill: V's 30k screen h_V30k_scr against h_S_scr (2533, held-out 0.7809), h_B_scr
-(2480, held-out 0.7903) and h_O_scr (2670, held-out 0.8602). Then the decision of HD9 under HD12
-P4.
+V1(b) is the owner's decision of 10-06 16:31 on the v2 plan of Track R (HD14). The adoption bar is
+against S, and HR2 against O is report-only. Recipe section 4 applies it to V:
+
+- The checked read runs seed 20307100, draws 0 to 19, paired with h_S_chk. It passes with D of at
+  least 2 paired SE, a rate of at least 366.0 and a held-out row of at least 0.7911.
+- The official read runs seed 20307200, draws 0 to 39, one shot, only after a checked pass. It reads
+  the candidate and S, and O for the report.
+- D is the sum over the heaps of the candidate's correct stows minus S's on the same draws.
+
+HD16 ([V] 10-08 10:33) sets the go lines on draws 0 to 6:
+
+| line | it is met if | latest start |
+| --- | --- | --- |
+| G1, for the A/B | a free checkpoint with its ledgered serving reads at least 831 correct stows and at least 200 an hour | 10-11 12:00 |
+| G2, for C1 | the A/B checkpoint reads at least 1 paired SE above its expert-only twin | 10-12 12:00 |
+| G3, for C2 | the last C1 checkpoint reads at least 1 paired SE above the best line D read and at least 250 an hour | 10-13 18:00 |
+
+HD16 also defines the stage-1 read and its score. A stage-1 read runs draws 0 to 6 of seed 20307000
+on 7 lanes of one π0.5 server on x86. Its score is the smaller of two ratios. One is D against
+h_S_scr over its paired SE. The other is the pooled rate gap to S over the paired SE of the rate.
+`h/tables/vla/bin/s1_score.py` computes it, and it reproduces the numbers of the review ([V] 10-08
+10:45).
+
+HD18 ([V] 10-08 10:42) writes the other rules of the recipe:
+
+- Line D starts from the free checkpoint with the best stage-1 score (section 7.11).
+- R4. On 10-15 08:00 the two checkpoints with the best stage-1 scores each get a 20-heap screen on
+  seed 20307000, draws 0 to 19.
+- A screen qualifies with a rate of at least 369.5 and a held-out row of at least 0.7809.
+- R5. The checked read starts by 10-16 08:00 with the bars of recipe section 4.
+- The caps: a heap 4 h, a 20-heap read 5 h, a 40-heap read 10 h.
+
+HD32 (4) ([V] 10-09 02:16) changes the ranking. A pick between V reads, here and at R4, ranks by the
+stage-1 correct total, then by the rate. The reason: at a fixed gap, the score rewards a noisier
+read (section 7.11).
+
+HD36 (10-09 08:32) is the owner's amendment of the bars, before any number that it decides:
+
+| bar | before HD36 | from HD36 |
+| --- | --- | --- |
+| checked read, D against h_S_chk | at least 2 paired SE | unchanged |
+| checked read, rate | at least 366.0 | at least 200.0 |
+| checked read, held-out row | at least 0.7911 | unchanged |
+| official read | the bars of recipe section 4 | the same bars as the checked read |
+| R4 screen, rate | at least 369.5 | at least 203.5, the old margin of +3.5 |
+| R4 screen, held-out row | at least 0.7809 | unchanged |
+
+G1 to G3 stay. With a strong chance of more correct stows, the owner accepts a slower V. The
+reason given to the owner: the rate is per simulated hour, so V's compute does not slow it. V's
+stowed cycle takes 350 steps against S's 186. With no failed cycles, V reaches only 345 an hour
+(section 7.12).
+
+### 7.11 The free phase: hosts, line D and the Colab safety work
+
+The hosts:
+
+- Machine A ran out of RAM twice on 10-08, at 11:14 and 11:20. Subagent loads of π0.5 took 33 GB
+  and 20 GB next to a 7-lane read. The rule from then on: at most one π0.5 load or training beside
+  the read servers, and only with at least 35 GB available.
+- Machine B passed its load test at 11:58 on 10-08. A 7-lane server took 10.6 GB of GPU memory, and a
+  7-row forward took 502 ms.
+- A π0.5 server's RAM peaks at 41.2 GB during its load, on both hosts. The rule: one π0.5 load at a
+  time a host.
+- `ship_ckpt.py` ships an expert-only checkpoint to Machine B as a delta on 030000. For M2k that is 208
+  of 813 tensors, 1.10 GB.
+- Machine C passed its smoke at 12:10 on 10-08. A 1-row forward took 665 ms, 3.2 to 3.9 times the
+  5090. Its pre-screens are aarch64 reads and only order the x86 reads (HD23).
+- `feat/ms7h-pi05-colab` db15a22 adds the preflight, the step-200 loss band and the Drive rules. 128
+  and 200 tokens are not bit-equal (mean 0.0022 rad, max 0.028 rad), a bf16 shape effect. 128 stays
+  for any Colab run.
+
+Line D. HD18 trains the action expert on the 5090 in segments of 12,000 steps, each with its own
+cosine and one save. HD20 drops the separate M2k-fix run, so line D carries the jaw mask from its
+first segment. The mask list holds 6,604 of 23,957 episodes. With K = 10 it masks 66,040 chunk
+starts of 9,676,460 frames (0.68 %).
+
+- Seg1 first died at step 1 on CUDA out-of-memory beside a read server (10-08 12:42). It started
+  again alone on the 5090 at 14:33.
+- HD28 (10-08 19:57) set quiet hours on Machine A, 22:00 to 06:00, at the owner's request. At a
+  cap of 400 W the owner then let line D train through the night (10-08 20:25).
+- Seg1 ended at 00:19 on 10-09 (LINED_SEG_OK, the jaw mask on 0.689 % of the samples).
+- Its read h_D1_dflt_a stowed 742 at 123.78 an hour ([V] 10-09 02:16). Against M2k it reads D = -65
+  at a paired SE of 17.7, and -13.5 an hour (SE 6.3).
+- Its stage-1 score, -17.72, beat M2k's -23.31 only because its rate SE was larger, 13.70 against
+  9.8. So HD32 (4) changed the ranking rule.
+- HD32 stopped line D at about step 2,300 of seg2, with no save. 12,000 more masked steps from M2k
+  lost 65 correct stows. The 5090 went to reads.
+
+The go lines. No M2k serving and no line D read met G1 (831 correct stows and 200 an hour). The best
+was a0j1slR25 at 828 and 150.04 an hour (section 7.12). The ledger records no A/B, C1 or C2 run.
+It also records no G1 ruling on the saves of the fresh run (section 7.14).
+
+### 7.12 The serving variants on M2k
+
+Each variant is S's serving plus `--pi05` and the switches below. Its HD entered the ledger before
+its read. Every read is a stage-1 read on M2k, paired with h_V30kM2k_a (807) on the same draws. Its
+D against M2k comes from the ledger. Section 7.19 gives every read with its numbers against S.
+
+The names of the servings:
+
+| serving | the switches beside S's serving and `--pi05` |
+| --- | --- |
+| default | none: 50 actions a forward, 10 flow steps, noise 1 |
+| cg | `--close_gate` |
+| z0 | `--pi05_noise_scale 0` |
+| w20 | `--action_warp 2.0` |
+| zs | `--pi05_noise_scale 0 --pi05_still_noise_scale 1.0`, the still rule at E 0.15 rad and F 0.9 |
+| l15 | `--pi05_jaw_latch 15` |
+| n05s | `--pi05_noise_scale 0.5 --pi05_still_noise_scale 1.0` |
+| zs0 | zs with `--pi05_still_open 0` |
+| med5 | `--pi05_medoid 5` |
+| a0j1s | zs with `--pi05_jaw_noise_abs 1` |
+| a0j1sl | a0j1s with `--pi05_jaw_latch 15` |
+| a0j1st | a0j1s with `--pi05_still_stuck 0.05` |
+| a0j1stl | a0j1st with `--pi05_jaw_latch 15` |
+| a0j1sgl | a0j1stl with `--pi05_still_stuck_gap 0.5` |
+| a0j1sk2l | a0j1stl with `--pi05_still_stuck_runs 2` |
+| a0j1srl | a0j1sl with `--pi05_still_replan` and the client's `--stall_replan 20` |
+| a0j1srl3 | a0j1srl with `--pi05_still_noise_scale 0.3` |
+| a0j1slR | a0j1sl with `--pi05_retry_noise_scale 1.0` and the client's `--retry_noise_at 20` |
+| a0j1slRb | a0j1slR with `--lift_budget 500` |
+| a0j1slR10, a0j1slR40 | a0j1slR with `--retry_noise_at` 10 or 40 |
+| a0j1slR25, a0j1slR15 | a0j1slR at 25 or 15 actions a forward |
+| a0j1slR25g20 | a0j1slR25 with the client's `--guard_margin 0.020` (section 7.15) |
+
+In a name, `a0` is arm noise 0 and `j1` a jaw noise of 1. `s` is the still rule, `l` the jaw latch
+and `R` retry noise. A trailing number is the actions a forward.
+
+The offline jaw test (10-08 11:24 and 11:27, V30k, corpus frames). The test samples a chunk 3 to 12
+frames before a label close. The event is a chunk that closes and then re-opens within 10 actions.
+That event reads 0.285 at the default noise, as in the loop (0.29 to 0.31). It reads 0.000 at zero
+noise, 0.010 at half noise and 0.245 at 50 flow steps. In the loop, the re-open command sits a
+median 0.5 mm above the part width w. The close before it sits only 0.6 mm under w. So the flow
+noise moves a jaw command near w across w. The jaw sweep on M2k (10-08 16:02 and 16:28) found no
+noise variant that both closes and stops the re-open.
+
+The close gate (HD17). h_V30kM2k_cg_b adds `--close_gate`. It stowed 690, D = -117 against M2k at a
+paired SE of 31.0. The gate holds the jaws open while V still descends, so V closes again and
+again. Its re-open read 0.335, and its close edges 5.54 a stowed cycle.
+
+The noise of the flow. `feat/ms7h-pi05-sampling` 2a03cec adds the server's noise scale and flow-step
+count. The reads:
+
+| serving | rule | correct | what happened |
+| --- | --- | --- | --- |
+| z0 | HD19 | 138 | The deterministic chunk at a cycle start is a still one, and the stall rule ends the cycle. The cycles that close re-open after a precise close in only 0.008. |
+| n05, noise x 0.5 | HD21 | stopped | Its first heap (draw 5) stowed 27 of 150, and 121 of 185 cycles ended no_close. |
+| n07, noise x 0.7, aarch64 | HD23 | 467 | A report-only pre-screen. It still parks. |
+| zs | HD24 | 481 | The no_close stalls fell to 2 to 11 a heap. The close misses rose to 55 to 89 a heap. |
+| jz, jaw noise 0 only | HD25 | stopped | Its first heap (draw 5) stowed 32, with 87 of 144 cycles no_close. The jaw's own noise decides the close. |
+| n05s | HD29 | 638 | Off-target first close 0.219, and 470 budget cycles. |
+| zs0 | HD30 | 753 | The rule redrew 8,429 of about 18,000 forwards, so the pick precision went back to M2k's. |
+
+The grasp census (10-08 20:26) explains the trade. On stowed cycles, M2k's pick offset at the close
+spans -13.1 to 16.5 mm along and -11.7 to 13.9 mm across (p10 to p90). S spans -3.4 to 3.3 mm and
+-4.6 to 4.0 mm. Under zs it spans about +-4 to 5 mm. So the flow noise drives most of V's pick
+spread. Zero noise picks precisely, but it parks and hovers.
+
+The action warp (HD22). h_V30kM2k_w20_a plays each chunk at warp 2.0. It stowed 715, D = -92 against
+M2k at a paired SE of 16.2. Its re-open rose to 0.451, so the warp stays 1.5.
+
+The jaw latch (HD26, HD27). Inside a predicted chunk, after the jaw command crosses under w, the
+next L actions cannot rise above that closed value. Recipe section 11 names such a rule as one that
+needs the owner first. So HD26 is a deviation under the /goal, flagged for the owner.
+h_V30kM2k_l15_a (L = 15) stowed 752, D = -55 at a paired SE of 13.7. The latch cut the re-open from
+0.309 to 0.112, but it lost stows. The aarch64 pre-screen at L = 30 hit its 5 h cap.
+
+The medoid (HD31, HD32). `--pi05_medoid K` serves the medoid of K flow draws by the distance over
+the 6 arm joints. h_V30kM2k_med5_a stowed 635, D = -172 at a paired SE of 45.5. Its never-close
+cycles rose to 108 from M2k's 5. The central chunk of a spread often does not commit to a close. The
+dose read med9 hit its 5 h cap with no heap.
+
+The phase census (10-09 06:01) splits the stowed cycles of S and M2k into phases (table in section
+7.14). M2k's whole stowed cycle takes 350.2 steps, against 186.4 for S. Close to hold holds 50.0 %
+of that gap. Before the hold, 61.9 % of M2k's stowed cycles re-open, against 17.9 % for S. The
+rate is the product of three factors:
+
+| factor | S | M2k |
+| --- | --- | --- |
+| share of the hour in stowed cycles | 0.586 | 0.398 |
+| stowed cycles an hour of that time | 560.5 | 304.0 |
+| correct stows a stowed cycle | 1.115 | 1.135 |
+| correct stows an hour | 366.47 | 137.31 |
+
+With no failed cycles, M2k reaches 345 an hour. So only faster stowed cycles reach the old rate bar
+of 366.0. This finding led to HD36.
+
+The jaw noise apart from the arm (HD33). `--pi05_jaw_noise_abs` (`feat/ms7h-pi05-jawabs` 078d204)
+draws the jaw column at a fixed noise of 1. a0j1s sets the arm noise to 0 and keeps the still rule.
+It stowed 590. Its grasp was near S's: from the first close to the hold took a median of 19 steps,
+against 76 for M2k and 16 for S. But 502 of its 1363 cycles ended stall_open, an air stall with
+nothing held. a0j1sl adds the latch and stowed 610.
+
+The stuck rules (HD34, HD35, HD37, HD38). Take a still chunk whose arm moved less than R since its
+last forward. Each rule draws such a chunk again at noise 1:
+
+| serving | rule | correct | what happened |
+| --- | --- | --- | --- |
+| a0j1st | HD34 | 747 | The hover is gone (stall_open 9), but the off-target first close reads 0.272. |
+| a0j1stl | HD35 | 771 | The hover is gone (stall_open 15). The off-target first close reads 0.266. |
+| a0j1sgl | HD37 | 629 | The grasp stays precise (0.168), but stall_open reads 435. |
+| a0j1sk2l | HD38 | 727 | stall_open reads 42, and the off-target first close 0.267. |
+
+So V at zero arm noise also stands still over its target before the first close. A new draw at noise
+1 there gives the approach M2k's spread again.
+
+The stall replan (HD39, HD40, HD41). The loop switch `--stall_replan N` asks the policy for a fresh
+chunk during an air stall. a0j1srl stowed 719 and a0j1srl3 696. At 15:26 on 10-09 the ledger records
+a scope correction. Recipe section 11 puts a new loop switch out of scope until the owner approves
+it. So HD39 to HD41 are report-only, and HD41's TAG burned with no heap.
+
+The census split of 15:26 on 10-09 also found a fault in the jaw table. Its row (e) counts a stowed
+cycle whose first close is at step 0 as off-target. Without those cycles, row (e) reads 0.017 for S,
+0.107 for M2k, 0.089 for a0j1sl and 0.106 for a0j1srl. So the swings of 0.157 to 0.278 in HD33 to
+HD39 are mostly cycles that start with closed jaws.
+
+HD42 (10-09 15:42) is the owner's answer. The owner approves new loop switches for V, as an
+exception to recipe section 11. S keeps its serving, and HD39 and HD40 stay report-only.
+
+Retry noise (HD43, HD44, HD47, HD49). `feat/ms7h-retry-noise` 989a6ec adds the loop switch
+`--retry_noise_at N` and the server's `--retry_noise_scale S`. At an empty air-stall run of N steps,
+the row enters retry mode to its cycle end. The server then draws that row's arm noise at S.
+
+| serving | rule | correct | note |
+| --- | --- | --- | --- |
+| a0j1slR | HD43 | 801 | stall_open 0, against 469 for a0j1sl. Its held-out row, 0.7349, was the best V row then. |
+| a0j1slRb | HD44 | 677 | The lift budget ends the noisy retries, and the stows fall. |
+| a0j1slR10 | HD47 | 770 | A trigger at 10 steps catches pauses that end on their own. |
+| a0j1slR40 | HD49 | 725 | |
+
+The trigger dose reads 770, 801 and 725 at 10, 20 and 40 steps, so 20 stays.
+
+Actions a forward (HD46, HD50). On the retry serving, 50, 25 and 15 actions a forward read 801, 828
+and 771. a0j1slR25 is the best M2k serving by HD32 (4): 828 at 150.04 an hour, held-out 0.7550.
+Against M2k it reads D = +21 (SE 21.1), and against S D = -62 (SE 24.8). It misses G1: 3 under
+831, and 150 against 200 an hour.
+
+The phase census of 10-09 21:25 shows that the retry serving adds stows, not pace. a0j1slR25's
+stowed cycle takes 343.0 steps, against 350.2 for M2k and 186.4 for S. Its rate is 0.415 x 307.9 x
+1.173 = 150.04. So M2k's serving tops out near 150 an hour, and 200 an hour needs a policy with
+faster stowed cycles.
+
+### 7.13 M2k's 20-heap screen
+
+HD51 ([V] 10-09 23:45) moves M2k's R4 screen before its date, while the GPUs wait for the fresh
+saves. h_V30kM2k_a0j1slR25_scr reads seed 20307000, draws 0 to 19, at a0j1slR25 on 10 Machine A and 10
+Machine B lanes. It ran from 23:46 on 10-09 to 02:49 on 10-10, with 20 of 20 heaps:
+
+| read | correct of 3000 | correct stows an hour | held-out row | D against h_S_scr, paired SE |
+| --- | --- | --- | --- | --- |
+| h_V30kM2k_a0j1slR25_scr | 2288 | 140.46 | 0.7083 (527 of 744) | -245, 60.9 |
+| h_S_scr | 2533 | 369.46 | 0.7809 (581 of 744) | |
+
+It misses both R4 bars, so it does not qualify. Its draws 0 to 6 sum to 818, against 828 in HD46's
+own read. So no M2k serving reaches the R4 screen.
+
+### 7.14 The fresh run
+
+HD45 (10-09 16:46) is the owner's decision. A second Colab account holds 600 CU this month. A Google
+shared drive lets it reuse the corpus, the uploads and the checkpoints. The owner chose a fresh
+masked fine-tune from `pi05_base`, an exception to recipe section 11:
+
+- It uses M2k's recipe: `action_is_pad` masked from step 0, and no jaw mask.
+- It trains 40k to 60k steps, keeps a save every 10k and reads each save from 30k on.
+- When the reads stop improving, it stops early.
+
+The reason given: run 1 learned the pad park for 30k steps. M2k's 2k masked steps lifted 533 to 807,
+and the zero-noise hover looks like a residue of the park. Line D's 12k more masked steps from M2k
+lost 65.
+
+The run as built (`feat/ms7h-pi05-fresh` d3fdff5, [V] 10-09 20:47):
+
+| item | value |
+| --- | --- |
+| start | `lerobot/pi05_base` at revision a538eb27, the pin of run 1 |
+| loss | pad-masked, full fine-tune, 4.14B learnable parameters |
+| schedule | 60,000 steps, batch 32, seed 1000, cosine warmup 2000, peak 2.5e-5, floor 2.5e-6 |
+| saves | every 2000 steps, and each 10k kept in `checkpoints_fresh/keep/<step>/` |
+| tokens and chunk | 128 tokens, chunk 50, bf16, gradient checkpointing |
+| speed | about 3.52 s a step on an A100 80GB |
+
+- The smoke passed at 18:48 on 10-09: 3.521 s a step and a step-200 loss of 0.092, inside the band
+  [0.046, 0.34].
+- The first start failed at 20:18, because the new account had no write access to the Shared
+  drive. The owner raised its role, and the run started at 20:40.
+- The runtime of session 2 rebooted on 10-10. The run resumed from checkpoint 20000 at 19:47, and
+  it lost the steps after 20000. The resume kept the cosine, with lr 1.94e-5 at 20k.
+- The 10k and 20k saves came by the owner's browser download (HD48, HD52). From 30k on, a Colab CPU
+  runtime fetches each save after the owner mounts Drive (HD56).
+- `bin/fresh_check.py` checks each save before its read: the file set, the safetensors header and
+  the statistics against run 1.
+
+HD48 (10-09 19:13, amended) sets the reads. Each save first reads with the default serving. The 10k
+and 20k reads are report-only (HD48, HD52). The reads of 30k, 40k, 50k and 60k decide. Serving
+variants follow on the best save, each with its own HD.
+
+The default reads:
+
+| read | save | correct of 1050 | correct stows an hour | held-out row | D against the save before, paired SE |
+| --- | --- | --- | --- | --- | --- |
+| h_Vf10k_a | 10k | 690 | 118.00 | 0.6185 | +93 against run 1's 10k (h_V10k_a), 26.0 |
+| h_Vf20k_a | 20k | 822 | 186.11 | 0.7510 | +132, 18.9 |
+| h_Vf30k_a | 30k | 838 | 194.83 | 0.7269 | +16, 21.8 |
+| h_Vf40k_a | 40k | 838 | 196.26 | 0.7550 | 0, 9.2 |
+
+So the pad mask helps from the start, and the gain from each 10k steps falls. The run is flat from
+30k to 40k at the default serving. Against M2k, the 30k save reads D = +31 at a paired SE of 10.1,
+and +57.53 an hour.
+
+The phase table (complete stowed cycles, mean steps, from the fresh-run report of 10-11 and
+`phase/phase_table*.txt`):
+
+| phase | S | M2k | 10k | 20k | 30k |
+| --- | --- | --- | --- | --- | --- |
+| selection to close | 68.8 | 101.5 | 69.9 | 77.2 | 76.9 |
+| close to hold | 41.5 | 123.3 | 145.5 | 99.1 | 95.0 |
+| hold to lift | 15.6 | 28.2 | 24.2 | 23.0 | 22.6 |
+| carry | 49.9 | 79.5 | 66.3 | 53.7 | 52.3 |
+| release to end | 10.6 | 17.7 | 20.8 | 13.7 | 18.6 |
+| whole stowed cycle | 186.4 | 350.2 | 326.6 | 266.8 | 265.4 |
+
+The jaw table of the default reads:
+
+| row | S | 10k | 20k | 30k |
+| --- | --- | --- | --- | --- |
+| re-open within 10 steps after a precise first close | 0.015 | 0.378 | 0.403 | 0.347 |
+| stowed cycles that re-open before the hold | 17.9 % | 71.5 % | 60.1 % | 58.9 % |
+| close edges a stowed cycle | 1.41 | 4.80 | 3.71 | 3.31 |
+| off-target first close | 0.069 | 0.355 | 0.203 | 0.142 |
+
+At 10k the fresh run already approaches at S's pace. Its loss is the new grasp after the first
+close. At 30k, close to hold is 68 % of the gap to S. Training fixes the off-target close fastest,
+and the re-open after a good close falls slowly.
+
+The serving variants on the fresh saves:
+
+| read | rule | save and serving | correct | D against the twin, paired SE |
+| --- | --- | --- | --- | --- |
+| h_Vf10k_a0j1slR25_a | HD53 (1) | 10k, a0j1slR25 | 557 | -133 against h_Vf10k_a, 19.4 |
+| h_Vf10k_a0j1slR_a | HD53 (2) | 10k, a0j1slR | 635 | -55 against h_Vf10k_a, 22.4 |
+| h_Vf10k_f20_a | HD54 | 10k, default with 20 flow steps | 654 | -36 against h_Vf10k_a, 15.2 |
+| h_Vf30k_n25_a | HD57 (1) | 30k, default at 25 actions | 841 | +3 against h_Vf30k_a, 21.4 |
+| h_Vf30k_a0j1slR_a | HD57 (2) | 30k, a0j1slR | 846 | +8 against h_Vf30k_a, 19.7 |
+| h_Vf30k_a0j1slR25_a | HD58 | 30k, a0j1slR25 | 854 | +8 against h_Vf30k_a0j1slR_a, 11.4 |
+| h_Vf40k_a0j1slR25_a | HD61 | 40k, a0j1slR25 | 837 | -17 against h_Vf30k_a0j1slR25_a, 17.7 |
+
+- At 10k the jaw serving cut the re-open from 0.378 to 0.166, but it lost stows on every heap. So
+  M2k's serving did not carry over at 10k.
+- 20 flow steps did not sharpen the first close: the off-target first close read 0.361 against
+  0.355. 10 flow steps stay.
+- At 30k the default re-opened like M2k (0.347 against 0.309), so HD57 read M2k's jaw serving again.
+- h_Vf30k_a0j1slR_a was the first V row over 200 an hour (240.71). It was also the first over S's
+  held-out row on these heaps, 0.7711 against 0.7671.
+- a0j1slR25 ranked first by HD32 (4). It became the serving of the later saves, of R4 and of the
+  DAgger collection. Its held-out row, 0.8072, was the first V row over 0.7911.
+- 40k did not beat 30k at either serving. The ledger puts the read-to-read spread of V at about 17
+  parts on these 7 heaps.
+
+The 20-heap screen of the 20k save (HD55, report-only). h_Vf20k_scr read 2292 of 3000 at 178.83 an
+hour, with a held-out row of 0.7191 (535 of 744). Against h_S_scr it reads D = -241 at a paired SE
+of 29.6. Against M2k's screen it reads D = +4 (SE 55.5). Its draws 0 to 6 sum to 799, against 822
+in h_Vf20k_a. So one save varies by about one paired SE from read to read. A V1(b)-type pass on 20
+heaps needs a D of about +60 against S.
+
+Where the parts go (10-11 08:57 and 09:07, `loss/loss_f30k.txt`, h_Vf30k_a against S on draws 0 to
+6):
+
+| place at the end of the parts that are not correct | V | S |
+| --- | --- | --- |
+| all | 212 | 160 |
+| wrong box | 121 | 113 |
+| desk | 42 | 26 |
+| box rim | 22 | 7 |
+| tray | 23 | 12 |
+
+- Time does not limit V's count. S ends 7 heaps on no_candidate, and V 6.
+- V has 131 lifted_lost cycles, S 60. In 47 of them (S 5), the detector read the hold but not the
+  lift. So the carry guard did not act.
+- In those 47 cycles, V's grip command closed a median of 7 times. So the hold began in the air, or
+  it ended in the lift and began again higher.
+- A switch that arms the guard on a held rise of 5 cm saves at most about 6 parts. It stays unbuilt.
+- The wrong-box excess comes from the delivery, not from the classifier: the box choice was wrong
+  in 60 cycles against 58.
+
+### 7.15 The carry-guard margin
+
+HD63 (10-11 17:36) aims at the release near the right box. Most of V's net loss sits in two
+places. Parts end against a box rim (22 against 7), or on the desk within 3 cm of a box (24 against
+16). The loop switch `--guard_margin` (`feat/ms7h-guard-margin` 4a3c55c) sets the box margin of the
+carry guard. Its default, 0.010 m, is `GUARD_BOX_MARGIN_M`. Box sides are 0.07 to 0.10 m, so a
+margin of 0.020 leaves a window of 0.03 m or more. HD63 adopts only a margin that beats its twin by
+HD32 (4).
+
+The ladder on the 30k save at a0j1slR25 (draws 0 to 6):
+
+| read | margin, m | correct of 1050 | correct stows an hour | held-out row | D against the margin before, paired SE | D against S, paired SE |
+| --- | --- | --- | --- | --- | --- | --- |
+| h_Vf30k_a0j1slR25_a | 0.010 | 854 | 229.92 | 0.8072 | | -36, 16.2 |
+| h_Vf30k_a0j1slR25gm20_a | 0.020 | 885 | 228.20 | 0.7992 | +31, 12.9 | -5, 15.1 |
+| h_Vf30k_a0j1slR25gm30_a | 0.030 | 853 | 220.40 | 0.7550 | -32, 9.0 | -37, 10.3 |
+
+- 0.020 beats its twin, so HD63 adopts it. a0j1slR25 plus `--guard_margin 0.020` is a0j1slR25g20.
+  Its read is the best V row so far, and the first within one SE of S on correct parts.
+- Against its twin, 0.020 moves the final places: correct +31, wrong box -14, desk -8, box rim -7.
+  The lifted_lost cycles fall from 131 to 99.
+- Against S, the paired loss of a0j1slR25g20 is now spread over many places, with a net of -5.
+- 0.030 raises the carry-guard steps to 19036 against 9059, and it stows 32 fewer than 0.020. HD64
+  keeps 0.020.
+- The ledger notes that part of the +31 of 0.020 can be noise. HD66 tests it on 13 new heaps.
+
+HD66 and HD68 (10-11 22:01 and 22:33) set the 20-heap screen of a0j1slR25g20. HD68 first pairs two
+saves at that serving on draws 0 to 6:
+
+- h_Vdag4k_a0j1slR25g20_a, the DAgger save at 4k (section 7.16), stowed 867 at 207.88 an hour, with
+  a held-out row of 0.7751.
+- Against h_Vf30k_a0j1slR25gm20_a it reads D = -18 at a paired SE of 7.3, and -20.32 an hour. So
+  the 30k save wins.
+- The chain reads h_Vf30k_g20_b, draws 7 to 19, from 00:17 on 10-12. h_Vf30k_g20_scr joins it to
+  draws 0 to 6 of h_Vf30k_a0j1slR25gm20_a.
+
+TODO(result): h_Vf30k_g20_scr, the 20-heap screen of the 30k save at a0j1slR25g20: correct of 3000, rate, held-out row, D against h_S_scr with its paired SE, and the R4 bars (rate at least 203.5, held-out at least 0.7809).
+
+### 7.16 The DAgger round
+
+HD59 (10-11 10:53) is the owner's decision: one DAgger round on V, from that day. Revision 2 dropped
+the round (P3, review F4). In the round, V drives and the loop records the teacher's takeovers. Then
+the best save fine-tunes on a mix of the corpus and the takeovers. The fine-tune runs on an A100
+runtime of the CLI account, with about 55 to 70 CU planned.
+
+HD60 (10-11 11:49) fixes the round before its numbers:
+
+1. Collection. V is the 30k save at HD58's serving, on 150-part heaps in the read's scene.
+   `mj_eval_heap.py --dagger_dir` records the teacher's takeovers on the six triggers of MS7f wave
+   3. The teacher keeps the trims of every MS7f and MS7g wave.
+2. Seeds (HR1, 10-11 11:49). Run 20370000 + p and layout 20370100 + p, with p = 0 to 49 on
+   Machine A and 50 to 99 on Machine B, on the train split.
+3. Filter. `OracleRig.resume` enters HOVER, which opens closed jaws at once. So `dag_mask.py` drops
+   each takeover's leading frames while the measured gap is more than 2 mm under the command.
+4. Conversion to the V format, with the corpus statistics byte for byte.
+5. Fine-tune. If Drive holds the fresh save `keep/040000` at the start, the fine-tune starts from
+   it. Otherwise it starts from 030000. The mix holds a DAgger sample share of 0.3. The run warms up
+   over 200 steps to 1e-5, then follows a cosine to 2.5e-6 over 8000 steps at batch 32. It keeps a
+   save every 2000 steps.
+6. Reads. Each kept save reads at HD58's serving, paired with its START and with the fresh
+   `keep/050000`. That save is the corpus-only control of review F4. The round adopts only a save
+   that beats both by HD32 (4).
+
+The collection ended at 14:51 on 10-11:
+
+| host | heaps | takeovers | stowed |
+| --- | --- | --- | --- |
+| Machine A | 13 | 600 | 560 |
+| Machine B | 11 | 520 | 487 |
+| both | 24 | 1,120 | 1,047 (0.935) |
+
+- Once a mean heap no longer fit before 15:15, the lanes stopped early.
+- The converted root holds 1,360 episodes and 515,685 frames (DAGGER_VLA_OK).
+- `colab upload` refused a part of 153 MB, so the root went up in 50 parts of 64 MiB.
+- The fine-tune started at 15:50 on 10-11 from keep/040000, for 8,000 steps (DAGGER_RUN_STARTED).
+  Its step-200 loss read 0.030, inside the band [0.015, 0.10].
+- The CLI account held 292.22 CU at 22:34 on 10-11.
+
+HD62 (10-11 16:21) names the reads h_Vdag<k>k_a0j1slR25_a. Each pairs with START,
+h_Vf40k_a0j1slR25_a (837 at 223.89):
+
+| read | save | correct of 1050 | correct stows an hour | held-out row | D against START, paired SE | D against S, paired SE |
+| --- | --- | --- | --- | --- | --- | --- |
+| h_Vdag2k_a0j1slR25_a | 2000 | 819 | 154.93 | 0.6827 | -18, 12.9 | -71, 15.9 |
+| h_Vdag4k_a0j1slR25_a | 4000 | 870 | 215.71 | 0.7992 | +33, 19.5 | -20, 19.5 |
+
+- At 2k, V became slower and less precise at the first close. Its first close came at a mean step
+  of 107, against 59 for START.
+- The ledger puts this on the takeovers. They start from V's failed states, and the teacher
+  approaches again through HOVER.
+- At 4k, the first close comes at a mean step of 63 again. The 4k save beats START by HD32 (4). Its
+  adoption also needs keep/050000 at this serving.
+- At a0j1slR25g20, the 4k save stows 867. The 20 mm margin is flat on it: -3 against its twin
+  without the margin.
+
+The dag6k read runs on Machine B from 23:38 on 10-11. The token of the colab CLI expired at 00:02 on
+10-12. So the 8k fetch, the stop of the A100 runtime and the 50k fetch wait for the owner's login.
+
+TODO(result): h_Vdag6k_a0j1slR25_a, the DAgger save at 6k, against START (837) and against S.
+
+TODO(result): h_Vdag8k_a0j1slR25_a, the DAgger save at 8k, against START (837) and against S.
+
+TODO(result): h_Vf50k_a0j1slR25_a, the corpus-only control at 50k, against h_Vf40k_a0j1slR25_a, and the HD60 (5) adoption ruling on the DAgger saves.
+
+### 7.17 The tremble study
+
+HD67 (10-11 21:11) answers a concern of the owner. The videos of the fresh saves show a constant
+fine trembling of the arm. It can hurt the grasp and the images of the hand camera. It also looks
+unsettling, and it can be worse on the real arm. A subagent traced the teacher, S, V at the default
+serving and V at the adopted serving on seed 20307000, draw 0. The result (10-11 22:36,
+`h/tables/vla/tremble/tremble.md`, report-only):
+
+- The trembling is the flow-sampling noise of the default serving. Each of the 50 actions of a chunk
+  keeps its own error: 19.3 mrad RMS on j1 and 26.4 mrad on j6.
+- The served command is white from 3 to 15 Hz. Inside a chunk, the j1 command jitter is 44.9 mrad,
+  against 7.3 for S.
+- The measured j1 motion from 6 to 15 Hz is 2.62 mrad, against 0.86 for S and 0.04 for the teacher.
+- The chunk seams carry only 13 % of the energy. No plant resonance causes it: only j2 and j3 show a
+  gain of 1.06 to 1.30 at 3.5 Hz, and every joint attenuates above 6 Hz.
+- bf16 does not cause it: at noise 0 a still chunk keeps only 1.6 mrad.
+
+The wrist camera from 6 to 15 Hz, within 8 cm of the target:
+
+| policy | position | angle in the 224 px image |
+| --- | --- | --- |
+| teacher | 0.03 mm | 0.02 px |
+| S | 0.31 mm | 0.40 px |
+| V, default serving | 0.62 mm | 0.73 px |
+| V, adopted serving (arm noise 0) | 0.24 to 0.35 mm | 0.27 to 0.37 px |
+
+So the adopted serving is already at S's level. Its seam steps come every 17 control steps, and the
+plant filters them. The retry rows bring the noise back, because they draw the arm at noise 1.0 to
+the cycle end. They fired on 2 of 136 traced cycles, with 45.2 mrad on j1 and 0.67 mm on the
+camera. The prototypes:
+
+- A client EMA with a lag of 62 ms cut the camera jitter to 0.24 mm. But V stowed 9 of 16 cycles
+  against 14, so the study rejects it.
+- A client seam blend did nothing useful.
+- A centered 5-action mean on the rows drawn at a noise above 0 took the j1 residual of a noisy
+  chunk from 19.3 to 4.3 mrad. It needs a read before any adoption.
+
+The earlier two-tray videos (10-11 11:43) show the motion that the owner saw. They use seed 20307000
+draw 0 and the default serving, and each video ends at the second refill:
+
+| video | correct | wrong box | correct stows an hour | cycles |
+| --- | --- | --- | --- | --- |
+| S | 70 | 9 | 368 | 91 |
+| V, fresh 10k | 59 | 8 | 99 | 129 |
+| V, fresh 20k | 59 | 13 | 187 | 104 |
+| V, fresh 30k | 66 | 10 | 221 | 99 |
+
+A render does not replay the episode of a read exactly.
+
+TODO(result): the video of the 30k save at a0j1slR25g20 on draw 0 (unit ms7h-video-va, `h/video/ms7h_Vf30k_a0j1slR25g20_d0_two_trays.mp4`).
+
+### 7.18 The weight average
+
+HD69 (10-12 00:21) is pre-registered, and it is report-only until it wins. No V read so far averaged
+weights. The loss table of a0j1slR25g20 against S shows a paired churn of 130 against 125 parts.
+Every place is near even. So the gap to D of at least 2 SE, about +51 parts on 20 heaps, needs a
+policy that is better everywhere. One more loop rule does not give that.
+
+- The lever is the uniform mean of the `model.safetensors` of the fresh 30k and 40k saves. They hold
+  813 tensors: 558 in F32 and 255 in BF16.
+- `bin/soup.py` takes the mean in F32 and casts it back to the dtype of each tensor. The other
+  files come from the 30k save. A tensor that is not a float must be equal in both.
+- `bin/soup.py` built `h/vla/fresh/s3040` on each host in 30 s at 00:22 on 10-12. Both sha256 are
+  equal (d6f543bd0186...).
+- h_Vs3040_g20_a reads it at a0j1slR25g20 on draws 0 to 6, on b_h11:7, after the dag6k read on
+  Machine B. It pairs with S and with h_Vf30k_a0j1slR25gm20_a (885).
+- If it wins by HD32 (4), it reads draws 7 to 19 as h_Vs3040_g20_b. That 20-heap screen is the
+  second screen of R4.
+
+TODO(result): h_Vs3040_g20_a against h_Vf30k_a0j1slR25gm20_a (885) and against S. If it wins, also h_Vs3040_g20_b on draws 7 to 19.
+
+### 7.19 The stage-1 reads
+
+Every stage-1 read runs seed 20307000, draws 0 to 6 (1050 parts), on 7 x86 lanes of one π0.5
+server. S on these draws is h_S_scr draws 0 to 6. The numbers come from the score files. D is
+against S, with its paired SE. The rate is the correct stows an hour.
+
+| TAG | rule | weights | serving | correct of 1050 | rate | held-out row | D against S, paired SE |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| h_S_scr, draws 0 to 6 | HD3 | S | S's serving | 890 | 366.47 | 0.7671 (191 of 249) | |
+| h_V10k_a | gate check, 10-07 | run 1, 10k | default | 597 | 90.74 | 0.5020 (125 of 249) | -293, 12.2 |
+| h_V30k_a | HD12 P4 | run 1, 30k | default | 533 | 73.98 | 0.4940 (123 of 249) | -357, 42.8 |
+| h_V30kM2k_a | free check 4 | M2k | default | 807 | 137.31 | 0.7068 (176 of 249) | -83, 19.6 |
+| h_V30kM2k_n25_b | report-only, 10-07 | M2k | default at 25 actions | 815 | 150.78 | 0.7430 (185 of 249) | -75, 18.9 |
+| h_V30kM2k_cg_b | HD17 | M2k | cg | 690 | 106.64 | 0.6064 (151 of 249) | -200, 25.0 |
+| h_V30kM2k_z0_a | HD19 | M2k | z0 | 138 | 92.22 | 0.0924 (23 of 249) | -752, 20.2 |
+| h_V30kM2k_w20_a | HD22 | M2k | w20 | 715 | 127.16 | 0.6747 (168 of 249) | -175, 26.5 |
+| h_V30kM2k_zs_a | HD24 | M2k | zs | 481 | 135.21 | 0.4418 (110 of 249) | -409, 42.6 |
+| h_V30kM2k_l15_a | HD27 | M2k | l15 | 752 | 125.12 | 0.6787 (169 of 249) | -138, 17.4 |
+| h_V30kM2k_n05s_a | HD29 | M2k | n05s | 638 | 99.99 | 0.5904 (147 of 249) | -252, 32.4 |
+| h_V30kM2k_zs0_a | HD30 | M2k | zs0 | 753 | 136.99 | 0.7068 (176 of 249) | -137, 18.3 |
+| h_D1_dflt_a | HD18, HD20 | line D seg1 | default | 742 | 123.78 | 0.6667 (166 of 249) | -148, 29.6 |
+| h_V30kM2k_med5_a | HD32 | M2k | med5 | 635 | 97.49 | 0.5703 (142 of 249) | -255, 43.9 |
+| h_V30kM2k_a0j1s_a | HD33 | M2k | a0j1s | 590 | 146.92 | 0.4618 (115 of 249) | -300, 37.6 |
+| h_V30kM2k_a0j1sl_a | HD33 | M2k | a0j1sl | 610 | 151.33 | 0.5904 (147 of 249) | -280, 13.4 |
+| h_V30kM2k_a0j1st_a | HD34 | M2k | a0j1st | 747 | 132.61 | 0.6747 (168 of 249) | -143, 23.8 |
+| h_V30kM2k_a0j1stl_a | HD35 | M2k | a0j1stl | 771 | 138.44 | 0.7269 (181 of 249) | -119, 9.5 |
+| h_V30kM2k_a0j1sgl_a | HD37 | M2k | a0j1sgl | 629 | 147.93 | 0.5382 (134 of 249) | -261, 17.0 |
+| h_V30kM2k_a0j1sk2l_a | HD38 | M2k | a0j1sk2l | 727 | 129.81 | 0.6426 (160 of 249) | -163, 27.9 |
+| h_V30kM2k_a0j1srl_a | HD39, report-only | M2k | a0j1srl | 719 | 127.42 | 0.6586 (164 of 249) | -171, 33.8 |
+| h_V30kM2k_a0j1srl3_a | HD40, report-only | M2k | a0j1srl3 | 696 | 120.58 | 0.6064 (151 of 249) | -194, 21.0 |
+| h_V30kM2k_a0j1slR_a | HD43 | M2k | a0j1slR | 801 | 145.98 | 0.7349 (183 of 249) | -89, 13.4 |
+| h_V30kM2k_a0j1slRb_a | HD44 | M2k | a0j1slRb | 677 | 147.11 | 0.5984 (149 of 249) | -213, 22.2 |
+| h_V30kM2k_a0j1slR25_a | HD46 | M2k | a0j1slR25 | 828 | 150.04 | 0.7550 (188 of 249) | -62, 24.8 |
+| h_V30kM2k_a0j1slR10_a | HD47 | M2k | a0j1slR10 | 770 | 133.27 | 0.7108 (177 of 249) | -120, 18.5 |
+| h_V30kM2k_a0j1slR40_a | HD49 | M2k | a0j1slR40 | 725 | 120.98 | 0.6546 (163 of 249) | -165, 18.2 |
+| h_V30kM2k_a0j1slR15_a | HD50 | M2k | a0j1slR15 | 771 | 109.73 | 0.7189 (179 of 249) | -119, 34.1 |
+| h_Vf10k_a | HD52, report-only | fresh 10k | default | 690 | 118.00 | 0.6185 (154 of 249) | -200, 22.5 |
+| h_Vf10k_a0j1slR25_a | HD53 (1), report-only | fresh 10k | a0j1slR25 | 557 | 81.41 | 0.4819 (120 of 249) | -333, 25.1 |
+| h_Vf10k_a0j1slR_a | HD53 (2), report-only | fresh 10k | a0j1slR | 635 | 102.28 | 0.5261 (131 of 249) | -255, 16.2 |
+| h_Vf10k_f20_a | HD54, report-only | fresh 10k | default with 20 flow steps | 654 | 107.21 | 0.5582 (139 of 249) | -236, 21.3 |
+| h_Vf20k_a | HD48, report-only | fresh 20k | default | 822 | 186.11 | 0.7510 (187 of 249) | -68, 20.4 |
+| h_Vf30k_a | HD48 | fresh 30k | default | 838 | 194.83 | 0.7269 (181 of 249) | -52, 20.6 |
+| h_Vf30k_n25_a | HD57 (1) | fresh 30k | default at 25 actions | 841 | 217.75 | 0.7590 (189 of 249) | -49, 14.2 |
+| h_Vf30k_a0j1slR_a | HD57 (2) | fresh 30k | a0j1slR | 846 | 240.71 | 0.7711 (192 of 249) | -44, 8.9 |
+| h_Vf30k_a0j1slR25_a | HD58 | fresh 30k | a0j1slR25 | 854 | 229.92 | 0.8072 (201 of 249) | -36, 16.2 |
+| h_Vf40k_a | HD48 | fresh 40k | default | 838 | 196.26 | 0.7550 (188 of 249) | -52, 16.4 |
+| h_Vf40k_a0j1slR25_a | HD61 | fresh 40k | a0j1slR25 | 837 | 223.89 | 0.7269 (181 of 249) | -53, 18.6 |
+| h_Vf30k_a0j1slR25gm20_a | HD63 | fresh 30k | a0j1slR25g20 | 885 | 228.20 | 0.7992 (199 of 249) | -5, 15.1 |
+| h_Vdag2k_a0j1slR25_a | HD62 | DAgger 2k | a0j1slR25 | 819 | 154.93 | 0.6827 (170 of 249) | -71, 15.9 |
+| h_Vf30k_a0j1slR25gm30_a | HD64 | fresh 30k | a0j1slR25 with a margin of 0.030 | 853 | 220.40 | 0.7550 (188 of 249) | -37, 10.3 |
+| h_Vdag4k_a0j1slR25_a | HD62 | DAgger 4k | a0j1slR25 | 870 | 215.71 | 0.7992 (199 of 249) | -20, 19.5 |
+| h_Vdag4k_a0j1slR25g20_a | HD68 | DAgger 4k | a0j1slR25g20 | 867 | 207.88 | 0.7751 (193 of 249) | -23, 15.7 |
+
+The reads that hold no stage-1 number:
+
+- h_V30k_n25_a (724) predates the score files (section 7.8).
+- The TAGs h_V30k_n10_a and h_V30kM2k_n25_a burned in an out-of-RAM kill on Machine A.
+  h_V30k_n10_b finished no heap ([V] 10-07 19:34 and 23:23).
+- h_V30kM2k_cg_a never started, because fleet.py refused `--close_gate` in ADD. It ran as
+  h_V30kM2k_cg_b.
+- h_V30kM2k_n05_a and h_V30kM2k_jz_a stopped after one heap (section 7.12).
+- h_V30kM2k_med9_a and h_c_V30kM2k_l30_a hit their 5 h caps with no gate_results.
+- h_D1_med5_a stopped before any heap ended (HD32). h_V30kM2k_a0j1srl40_a stopped the same way after
+  the scope correction.
+- h_c_V30kM2k_n07_a is an aarch64 pre-screen. It read 467 at 135.18 an hour, with a held-out row
+  of 0.4659, and it counts for nothing.
+- h_Vf30k_g20_b first stopped at 22:33 on 10-11 before any heap ended. The controller set its
+  directory aside as `h_Vf30k_g20_b.stopped`, and the read started again at 00:17 on 10-12.
+
+### 7.20 The 20-heap screens and the open reads
+
+Each screen reads seed 20307000, draws 0 to 19 (3000 parts), against h_S_scr:
+
+| read | rule | weights and serving | correct of 3000 | correct stows an hour | held-out row | D against h_S_scr, paired SE | R4 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| h_S_scr | HD3 | S | 2533 | 369.46 | 0.7809 (581 of 744) | | |
+| h_V30kM2k_a0j1slR25_scr | HD51 | M2k, a0j1slR25 | 2288 | 140.46 | 0.7083 (527 of 744) | -245, 60.9 | does not qualify |
+| h_Vf20k_scr | HD55 | fresh 20k, default | 2292 | 178.83 | 0.7191 (535 of 744) | -241, 29.6 | report-only |
+
+R4 runs on 10-15 at 08:00 (HD18, with HD32 (4) and HD36). Its two screens are the two best
+checkpoints by the stage-1 correct total, then the rate. HD51 already stands for M2k. If the weight
+average wins, HD69 names h_Vs3040_g20_b as the second screen of R4.
+
+TODO(result): the 60k save of the fresh run and its reads (HD48).
+
+TODO(result): R4: the two 20-heap screens, their rate against 203.5 and their held-out row against 0.7809, and the candidate.
+
+TODO(result): the checked read of the candidate on seed 20307100, draws 0 to 19, against h_S_chk (2525, 366.0, 0.7911): D with its paired SE, the rate against 200.0 and the held-out row against 0.7911.
+
+TODO(result): the official read on seed 20307200, draws 0 to 39, only after a checked pass.
 
 ## 8. The verdict reads
 
