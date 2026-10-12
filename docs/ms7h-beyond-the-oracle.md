@@ -2,8 +2,9 @@
 
 Date: 2026-10-06, Track V updated 2026-10-12. Status: draft. This draft uses the ledger through its
 entry of 15:38 on 2026-10-06. Section 7 and the Track V lines of section 1 use it through its entry
-of 00:23 on 2026-10-12. The campaign still runs. A placeholder of the form `<<NAME>>` or
-`TODO(result): ...` marks each result that is not in yet. The controller fills them in.
+of 12:26 on 2026-10-12. Track V ended at its checked read, and V failed V1(b). The 60k read of HD72
+is still open and report-only. A placeholder of the form `<<NAME>>` or `TODO(result): ...` marks
+each result that is not in yet.
 
 The design of MS7h is the document of 2026-10-05 whose questions the owner answered in chat. This
 report cites it as "MS7h design section N" and restates every rule that it uses. The MS7g report,
@@ -16,7 +17,7 @@ into the ledger before its number. The mechanism tables are
 under `~/data/maker-arm-ms7/reads/<TAG>/`. Every MS7h TAG starts with `h_`.
 
 The names. The design names its decisions H1 to H7. The ledger names its rules HR1 to HR11 and its
-deviations HD1 to HD69. Section 3.4 lists HD1 to HD13, and section 7 cites the entries of Track V.
+deviations HD1 to HD72. Section 3.4 lists HD1 to HD13, and section 7 cites the entries of Track V.
 The owner decision of the run is D1. The policies and drivers:
 
 - B is the base of the design: F9n 800k, the MS7g policy from random init with the context fix (MS7g
@@ -66,7 +67,16 @@ and the held-out row keep their MS7f definitions (MS7f report section 1.3):
 The verdict. Since HD14 the adoption bar is V1(b) against S, and HR2 against O is report-only
 (section 7.10).
 
-TODO(result): the verdict of MS7h from the R4 candidate, its checked read and, after a checked pass, the official read.
+MS7h fails its goal. The R4 candidate was the fresh 30k save of V at a0j1slR25g20. Its checked read
+ran on seed 20307100, 20 heaps, from 10:25 to 12:21 on 10-12. It stowed 2464 of 3000 correct at
+244.82 an hour, with a held-out row of 0.7529. S stowed 2525 at 365.97, with 0.7911. So D = -61 against S at a paired SE
+of 31.5 (-1.93 SE), and V1(b) needs D of at least 2 SE. The rate passes the bar of 200, and the
+held-out row fails its bar. The official read did not run, and seed 20307200 stays unburned.
+Against O (HR2, report-only) the candidate reads D = -221 at a paired SE of 30.9.
+
+V's loss to S sits in the grasp at the first close. On the checked read, V's first close is off the
+target in 0.134 of the stowed cycles, against 0.048 for S. V re-opens after a precise first close
+in 0.128 of them, against 0.013 for S.
 
 What Phase 0 found. O is far stronger than the design expected. Design section 3.3 read the policy
 as faster than its teacher, from teacher reads in other scenes. In the gate scene and the perceived
@@ -118,8 +128,10 @@ to 807. Recipe revision 2 then judged V by V1(b) against S, and HD36 set its rat
 correct stows an hour. No serving of M2k qualified for the R4 screen. A fresh masked run from
 `pi05_base` (HD45) reads 838 at its 30k save. With the serving a0j1slR25g20 the same save reads 885
 at 228.20 an hour, with a held-out row of 0.7992. That is D = -5 against S on the same 7 heaps, at
-a paired SE of 15.1. A DAgger round, a weight average and the 20-heap screens are still open
-(sections 7.15 to 7.20).
+a paired SE of 15.1. On its 20-heap screen it stowed 2495, 38 under S (paired SE 31.0). A DAgger
+round, a weight average and the 40k and 50k saves read 837 to 870 on the same 7 heaps. None of them
+beat the 30k save (sections 7.15 to 7.20), so it became the candidate. Its checked read failed
+V1(b) (section 7.20).
 
 ## 2. What execution showed
 
@@ -2248,9 +2260,36 @@ Neither the 8k save (864) nor the 50k save (852) beat 885 (section 7.16). So R4 
 Neither screen qualifies. So the candidate is the best screen by HD32 (4): h_Vf30k_g20_scr, the
 fresh 30k save at a0j1slR25g20.
 
-TODO(result): the checked read of the candidate on seed 20307100, draws 0 to 19, against h_S_chk (2525, 366.0, 0.7911): D with its paired SE, the rate against 200.0 and the held-out row against 0.7911.
+The checked read h_V_chk ran on a_h11l:10 and b_h11:10 from 10:25 to 12:21 on 10-12, inside
+its cap of 5 hours. All 20 heaps finished:
 
-TODO(result): the official read on seed 20307200, draws 0 to 39, only after a checked pass.
+| read | correct of 3000 | correct stows an hour | held-out row | cycles | budget ends | never-close |
+| --- | --- | --- | --- | --- | --- | --- |
+| h_V_chk | 2464 | 244.82 | 0.7529 (591 of 785) | 3404 | 378 | 4 |
+| h_S_chk | 2525 | 365.97 | 0.7911 (621 of 785) | 3220 | 141 | 0 |
+
+The bars of V1(b) (HD36):
+
+| bar | value | result |
+| --- | --- | --- |
+| D of at least 2 paired SE | D = -61, paired SE 31.5, -1.93 SE | fails |
+| rate of at least 200 an hour | 244.82 | passes |
+| held-out row of at least 0.7911 | 0.7529 | fails |
+
+So V fails V1(b). V wins 7 of the 20 heaps, and 1 heap is a tie. The checked D (-61) is 23 parts
+under the screen's D (-38), inside one SE. The jaw table of the read:
+
+| row | V | S |
+| --- | --- | --- |
+| re-open within 10 steps after a precise first close | 0.128 | 0.013 |
+| close edges a stowed cycle | 2.17 | 1.40 |
+| off-target first close, stowed | 0.134 | 0.048 |
+| lifted_lost cycles | 273 | 214 |
+| carry-guard steps | 25857 | 5598 |
+
+The official read runs only after a checked pass, so it did not run. Seed 20307200 stays unburned.
+
+TODO(result): HD72, the 60k save on draws 0 to 6 and its tremble trace, report-only.
 
 ## 8. The verdict reads
 
@@ -2276,7 +2315,11 @@ The bars of HR2 on the checked seed, against h_O_chk:
 
 The report also gives the measured paired SE of D.
 
-`<<CHECKED_READ>>`
+Since HD14 these bars are report-only (section 7.10). The candidate's checked read h_V_chk against
+h_O_chk (2685, 390.19, 0.8318) reads D = -221 at a paired SE of 30.9 (-7.16 SE). Its rate of 244.82
+is 145.37 an hour under O's, and its held-out row of 0.7529 is under 0.8318. So the candidate fails
+each bar of HR2. It also misses the MS7f staged row (0.8213 against 0.85). Section 7.20 gives the
+read against S.
 
 ### 8.3 The official read
 
@@ -2284,7 +2327,8 @@ The bars of HR2 on 40 heaps: D at least 86 against O's official read on the same
 the held-out row must be at least O's on that read. The official read is one shot. Both the
 candidate and O read seed 20307200, draws 0 to 39.
 
-`<<OFFICIAL_READ>>`
+The checked read failed, so the official read did not run. Seed 20307200 stays unburned from MS7f,
+MS7g and MS7h.
 
 ## 9. Lessons that carry over
 
