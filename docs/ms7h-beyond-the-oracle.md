@@ -2232,8 +2232,11 @@ noise on the screens. So three more days of the same levers buy no pass. The rul
    on a_h11l:10 and b_h11:10, with a cap of 5 hours. It pairs with h_S_chk.
 4. The official read on seed 20307200, draws 0 to 39, runs only after a checked pass.
 
-At 06:45 on 10-12 the Drive folder `checkpoints_fresh/keep` held only 050000, so the fresh run has
-no 60k save to read (HD48).
+At 06:45 on 10-12 the Drive folder `checkpoints_fresh/keep` held only 050000. HD71 read this as the
+end of the fresh run, but that was wrong. The run still trained: at 11:06 on 10-12 it was at step
+57k, with 60k due near 14:15. The checked read had already started on the R4 candidate, and its
+seed is not a second shot. So HD72 (11:10) reads the 60k save on draws 0 to 6 after the checked
+read, with a tremble trace. It decides nothing unless the checked read fails and 60k beats 885.
 
 Neither the 8k save (864) nor the 50k save (852) beat 885 (section 7.16). So R4 ran at 10:14 on
 10-12 with the two screens above:
