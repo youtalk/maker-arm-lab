@@ -2235,7 +2235,15 @@ noise on the screens. So three more days of the same levers buy no pass. The rul
 At 06:45 on 10-12 the Drive folder `checkpoints_fresh/keep` held only 050000, so the fresh run has
 no 60k save to read (HD48).
 
-TODO(result): R4: the two 20-heap screens, their rate against 203.5 and their held-out row against 0.7809, and the candidate.
+Neither the 8k save (864) nor the 50k save (852) beat 885 (section 7.16). So R4 ran at 10:14 on
+10-12 with the two screens above:
+
+- h_Vf30k_g20_scr: rate 230.83 against 203.5 passes, and the held-out row 0.7796 against 0.7809
+  fails by one part.
+- h_Vdag4k_scr: rate 211.17 passes, and the held-out row 0.7769 fails by four parts.
+
+Neither screen qualifies. So the candidate is the best screen by HD32 (4): h_Vf30k_g20_scr, the
+fresh 30k save at a0j1slR25g20.
 
 TODO(result): the checked read of the candidate on seed 20307100, draws 0 to 19, against h_S_chk (2525, 366.0, 0.7911): D with its paired SE, the rate against 200.0 and the held-out row against 0.7911.
 
