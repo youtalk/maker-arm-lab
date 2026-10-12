@@ -2076,6 +2076,25 @@ serving hides the attempts under the tremble, and it makes more of them. For the
 names two servings to test. The first is noise 0 at 50 actions, with 33 steps a chunk, 2.75 close
 edges and 305 steps a cycle. The second is noise 1 with the centered 5-action mean on the noisy rows.
 
+The owner also asked whether more training makes the vibration smaller. A trace ladder answers it
+(10-12 10:25, report-only, `h/tables/vla/tremble/run_ladder.sh`). Each save drives draw 0 at the
+default serving for 16 closed cycles:
+
+| save | chunk residual j1, mrad | chunk residual j6, mrad | wrist camera 6-15 Hz near the target, mm |
+| --- | --- | --- | --- |
+| fresh 10k | 23.22 | 31.11 | 0.836 |
+| fresh 20k | 22.59 | 29.57 | 0.864 |
+| fresh 30k | 19.29 | 26.40 | 0.623 |
+| fresh 40k | 17.78 | 23.88 | 0.641 |
+| fresh 50k | 15.63 | 21.28 | 0.561 |
+| DAgger 8k on 40k | 16.49 | 21.79 | 0.579 |
+
+The chunk residual is the RMS of each action about its centered 5-action mean. The flow noise
+shrinks by about a third from 10k to 50k, and the DAgger save stays at the level of 40k to 50k. At
+50k the camera shake is still 1.8 times that of S (0.31 mm). Each row is one draw with no SE, and
+30k and 40k differ by 0.02 mm. So more training reduces the vibration slowly, but it does not
+remove it within this run.
+
 ### 7.18 The weight average
 
 HD69 (10-12 00:21) is pre-registered, and it is report-only until it wins. No V read so far averaged
