@@ -1895,12 +1895,12 @@ The screen h_Vf30k_g20_scr ended at 02:56 on 10-12. Its draws 7 to 19 ran on a_h
 - On 20 heaps a pass of V1(b) needs D of at least 2 SE, about +62 at this SE. The screen is 100 parts
   short of it.
 
-The loss table of the screen against S (10-12 02:57, `h/tables/vla/loss/loss_tables_g20scr_vs_S.txt`)
-splits the -38 into 25 more wrong-box parts and 13 more parts not stowed, all 13 on the desk by a
-box. The wrong-box cycles are even (184 against 182), and the box choice is wrong in 161 cycles for
+The loss table of the screen against S is `h/tables/vla/loss/loss_tables_g20scr_vs_S.txt` (10-12
+02:57). It splits the -38 into 25 more wrong-box parts and 13 more parts not stowed. All 13 are on the desk by
+a box. The wrong-box cycles are even (184 against 182), and the box choice is wrong in 161 cycles for
 each. So the classifier is not the gap. The extra wrong-box parts come from cycles that closed off
-the target (20 against 8) or held a part without a lift (15 against 2), with neighbours that ride
-along. By category, V loses 25 flat parts and 22 bricks, and it gains 14 joints. Its first close is
+the target (20 against 8) or held a part without a lift (15 against 2). Neighbours ride along in
+these cycles. By category, V loses 25 flat parts and 22 bricks, and it gains 14 joints. Its first close is
 off the target in 0.126 of the stowed cycles, against 0.068 for S, and it has 254 lifted_lost
 cycles against 183. V's loss to S is the precision of the grasp at the first close.
 
@@ -1978,7 +1978,21 @@ the 8k save on Drive. A CPU runtime fetched the 8k save. The two later saves rea
 - The re-open share after a precise first close is 0.059 at 6k and 0.098 at 8k. The first close is
   off the target in 0.153 and 0.158 of the stowed cycles, against 0.069 for S.
 
-TODO(result): h_Vf50k_a0j1slR25_a, the corpus-only control at 50k, against h_Vf40k_a0j1slR25_a, and the HD60 (5) adoption ruling on the DAgger saves.
+The corpus-only control, keep/050000 at HD58's serving, read on Machine B from 08:41 to 10:12 on 10-12:
+
+| read | save | correct of 1050 | correct stows an hour | held-out row | D against START, paired SE | D against S, paired SE |
+| --- | --- | --- | --- | --- | --- | --- |
+| h_Vf50k_a0j1slR25_a | fresh 50k | 852 | 230.50 | 0.7831 | +15, 23.5 | -38, 16.9 |
+
+- Against h_Vf30k_a0j1slR25gm20_a (885), the 50k save reads D = -33 at a paired SE of 11.0. So it
+  does not join R4 either (HD71). Its read of draws 7 to 19 on Machine A stopped unfinished.
+- Ten thousand more corpus steps from 40k add 15 parts. The DAgger saves add 27 to 33 on the same
+  heaps.
+- HD60 (5) ranks by the correct total (HD32 (4)). Each DAgger save beats both START (837) and the
+  control (852): 4k by +18 (SE 26.7), 6k by +13 (SE 32.7) and 8k by +12 (SE 17.9) over the control.
+  So the DAgger round passes HD60 (5), and its best save is 4k.
+- The gain over the corpus-only control is 0.40 to 0.67 paired SE, so it is inside the noise of
+  seven heaps.
 
 ### 7.17 The tremble study
 
@@ -2029,7 +2043,38 @@ draw 0 and the default serving, and each video ends at the second refill:
 
 A render does not replay the episode of a read exactly.
 
-TODO(result): the video of the 30k save at a0j1slR25g20 on draw 0 (unit ms7h-video-va, `h/video/ms7h_Vf30k_a0j1slR25g20_d0_two_trays.mp4`).
+The video of the 30k save at a0j1slR25g20 (unit ms7h-video-va, written 03:17 on 10-12) uses the
+same heap and also ends at the second refill:
+
+| video | correct | wrong box | correct stows an hour | cycles |
+| --- | --- | --- | --- | --- |
+| V, fresh 30k at a0j1slR25g20 | 64 | 10 | 220 | 93 |
+
+The file is `h/video/ms7h_Vf30k_a0j1slR25g20_d0_two_trays.mp4`. The owner saw the trembling gone. But
+the arm made more pointless up-and-down pick moves, and the owner prefers a slight vibration to these
+moves. A subagent counted these moves in the traces and in the census of draws 0 to 6 (10-12 09:11,
+`h/tables/vla/tremble/bob/bob.md`, report-only):
+
+- The up-and-down moves are V's failed grasp attempts. A failed close lands 7.5 to 8.5 mm off the
+  center of the target, against 2.4 to 3.3 mm for a grasp. The arm then rises with closed, empty
+  jaws, opens at the top and comes down again.
+- The adopted serving makes fewer of them than the default serving. The close edges a cycle are 4.79
+  at the default serving, 2.95 at the adopted serving and 1.90 for S. The paired difference of the
+  adopted and the default serving is -1.84 at an SE of 0.15.
+- On the traces of draw 0, the failed attempts a cycle are 0.81 for V at the default serving, 0.38
+  for V at the adopted serving and 0.80 for S. V also makes fast dips that stop 24 to 29 mm over the
+  part with no close: 0.31, 0.12 and 0.03 a cycle.
+- What changed is how the attempts look. Without the tremble, the arcs are clean. At 25 actions, 69
+  to 74 % of the descents start in the first third of a 17-step chunk. The default serving reads 39 %
+  and S reads 33 %. So the arm bobs with a visible rhythm.
+- Noise 0 removes 2.03 close edges and 42.8 steps a cycle. The 25 actions at noise 0 add 0.15 edges
+  and 17.5 steps, and the 20 mm margin adds 0.04. The retry rows cover 7.2 % of the cycles, late in
+  the episode, and do not drive the count.
+
+So the cause of the attempts is the grasp precision of V, not the noise. The noise of the default
+serving hides the attempts under the tremble, and it makes more of them. For the real arm, the study
+names two servings to test. The first is noise 0 at 50 actions, with 33 steps a chunk, 2.75 close
+edges and 305 steps a cycle. The second is noise 1 with the centered 5-action mean on the noisy rows.
 
 ### 7.18 The weight average
 
@@ -2058,7 +2103,7 @@ held-out row of 0.7711 (192 of 249):
 - It has 85 lifted_lost cycles, against 99 for the 30k save and 60 for S.
 
 The weight average is not adopted. With it, the eight reads of the fresh and DAgger saves at the jaw
-rules span 837 to 885 on draws 0 to 6, with a mean near 865, against 890 for S.
+rules span 837 to 885 on draws 0 to 6. Their mean is near 865, against 890 for S.
 
 ### 7.19 The stage-1 reads
 
@@ -2158,7 +2203,7 @@ h_Vdag4k_scr (2483).
 
 HD71 (10-12 07:04) moved R4 from 10-15 08:00 to the end of the last two stage-1 reads. On 20 heaps V
 is 38 to 50 parts under S, and a pass needs about +62 over S. The loss table puts the whole gap in
-the grasp at the first close, and no serving rule, weight average or DAgger save moved V past the
+the grasp at the first close. No serving rule, weight average or DAgger save moved V past the
 noise on the screens. So three more days of the same levers buy no pass. The rule:
 
 1. The 8k and 50k saves read draws 0 to 6 at HD58's serving. A save that beats
