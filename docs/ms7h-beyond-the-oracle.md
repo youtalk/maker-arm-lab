@@ -1881,7 +1881,28 @@ saves at that serving on draws 0 to 6:
 - The chain reads h_Vf30k_g20_b, draws 7 to 19, from 00:17 on 10-12. h_Vf30k_g20_scr joins it to
   draws 0 to 6 of h_Vf30k_a0j1slR25gm20_a.
 
-TODO(result): h_Vf30k_g20_scr, the 20-heap screen of the 30k save at a0j1slR25g20: correct of 3000, rate, held-out row, D against h_S_scr with its paired SE, and the R4 bars (rate at least 203.5, held-out at least 0.7809).
+The screen h_Vf30k_g20_scr ended at 02:56 on 10-12. Its draws 7 to 19 ran on a_h11l:7 from
+00:17 to 02:54:
+
+- It stowed 2495 of 3000 parts correctly at 230.83 an hour, with a held-out row of 0.7796 (580 of
+  744). It had 3449 cycles, 447 budget ends and 6 never-close cycles.
+- Against S (2533, 369.46, 0.7809) it reads D = -38 at a paired SE of 31.0, and -138.63 an hour at
+  a paired SE of 9.79.
+- R4 bars: the rate passes 203.5. The held-out row is one part under 0.7809, so the screen does not
+  qualify.
+- Draws 7 to 19 read 123.8 a heap, against 126.4 on draws 0 to 6. So the 885 of draws 0 to 6 was
+  partly the luck of the pick.
+- On 20 heaps a pass of V1(b) needs D of at least 2 SE, about +62 at this SE. The screen is 100 parts
+  short of it.
+
+The loss table of the screen against S (10-12 02:57, `h/tables/vla/loss/loss_tables_g20scr_vs_S.txt`)
+splits the -38 into 25 more wrong-box parts and 13 more parts not stowed, all 13 on the desk by a
+box. The wrong-box cycles are even (184 against 182), and the box choice is wrong in 161 cycles for
+each. So the classifier is not the gap. The extra wrong-box parts come from cycles that closed off
+the target (20 against 8) or held a part without a lift (15 against 2), with neighbours that ride
+along. By category, V loses 25 flat parts and 22 bricks, and it gains 14 joints. Its first close is
+off the target in 0.126 of the stowed cycles, against 0.068 for S, and it has 254 lifted_lost
+cycles against 183. V's loss to S is the precision of the grasp at the first close.
 
 ### 7.16 The DAgger round
 
@@ -1943,9 +1964,19 @@ h_Vf40k_a0j1slR25_a (837 at 223.89):
 The dag6k read runs on Machine B from 23:38 on 10-11. The token of the colab CLI expired at 00:02 on
 10-12. So the 8k fetch, the stop of the A100 runtime and the 50k fetch wait for the owner's login.
 
-TODO(result): h_Vdag6k_a0j1slR25_a, the DAgger save at 6k, against START (837) and against S.
+The colab CLI login came back at 06:38 on 10-12, after the A100 runtime had ended near 00:20 with
+the 8k save on Drive. A CPU runtime fetched the 8k save. The two later saves read:
 
-TODO(result): h_Vdag8k_a0j1slR25_a, the DAgger save at 8k, against START (837) and against S.
+| read | save | correct of 1050 | correct stows an hour | held-out row | D against START, paired SE | D against S, paired SE |
+| --- | --- | --- | --- | --- | --- | --- |
+| h_Vdag6k_a0j1slR25_a | 6000 | 865 | 228.66 | 0.7269 | +28, 22.3 | -25, 23.5 |
+| h_Vdag8k_a0j1slR25_a | 8000 | 864 | 237.07 | 0.7831 | +27, 18.3 | -26, 14.8 |
+
+- The DAgger gain over START holds at about +30 from 4k to 8k, and it does not grow.
+- Against h_Vf30k_a0j1slR25gm20_a (885), the 8k save reads D = -21 at a paired SE of 12.3. So it
+  does not join R4 (HD71).
+- The re-open share after a precise first close is 0.059 at 6k and 0.098 at 8k. The first close is
+  off the target in 0.153 and 0.158 of the stowed cycles, against 0.069 for S.
 
 TODO(result): h_Vf50k_a0j1slR25_a, the corpus-only control at 50k, against h_Vf40k_a0j1slR25_a, and the HD60 (5) adoption ruling on the DAgger saves.
 
@@ -2018,7 +2049,16 @@ policy that is better everywhere. One more loop rule does not give that.
 - If it wins by HD32 (4), it reads draws 7 to 19 as h_Vs3040_g20_b. That 20-heap screen is the
   second screen of R4.
 
-TODO(result): h_Vs3040_g20_a against h_Vf30k_a0j1slR25gm20_a (885) and against S. If it wins, also h_Vs3040_g20_b on draws 7 to 19.
+h_Vs3040_g20_a ran on Machine B from 01:11 to 02:52 on 10-12. It stowed 862 at 235.32 an hour, with a
+held-out row of 0.7711 (192 of 249):
+
+- Against h_Vf30k_a0j1slR25gm20_a (885) it reads D = -23 at a paired SE of 14.8, and +7.11 an hour
+  at a paired SE of 9.31. So it loses by HD32 (4), and draws 7 to 19 did not run.
+- Against S it reads D = -28 at a paired SE of 19.3.
+- It has 85 lifted_lost cycles, against 99 for the 30k save and 60 for S.
+
+The weight average is not adopted. With it, the eight reads of the fresh and DAgger saves at the jaw
+rules span 837 to 885 on draws 0 to 6, with a mean near 865, against 890 for S.
 
 ### 7.19 The stage-1 reads
 
@@ -2072,6 +2112,9 @@ against S, with its paired SE. The rate is the correct stows an hour.
 | h_Vf30k_a0j1slR25gm30_a | HD64 | fresh 30k | a0j1slR25 with a margin of 0.030 | 853 | 220.40 | 0.7550 (188 of 249) | -37, 10.3 |
 | h_Vdag4k_a0j1slR25_a | HD62 | DAgger 4k | a0j1slR25 | 870 | 215.71 | 0.7992 (199 of 249) | -20, 19.5 |
 | h_Vdag4k_a0j1slR25g20_a | HD68 | DAgger 4k | a0j1slR25g20 | 867 | 207.88 | 0.7751 (193 of 249) | -23, 15.7 |
+| h_Vdag6k_a0j1slR25_a | HD62 | DAgger 6k | a0j1slR25 | 865 | 228.66 | 0.7269 (181 of 249) | -25, 23.5 |
+| h_Vs3040_g20_a | HD69 | mean of fresh 30k and 40k | a0j1slR25g20 | 862 | 235.32 | 0.7711 (192 of 249) | -28, 19.3 |
+| h_Vdag8k_a0j1slR25_a | HD62, HD71 (1) | DAgger 8k | a0j1slR25 | 864 | 237.07 | 0.7831 (195 of 249) | -26, 14.8 |
 
 The reads that hold no stage-1 number:
 
@@ -2098,12 +2141,35 @@ Each screen reads seed 20307000, draws 0 to 19 (3000 parts), against h_S_scr:
 | h_S_scr | HD3 | S | 2533 | 369.46 | 0.7809 (581 of 744) | | |
 | h_V30kM2k_a0j1slR25_scr | HD51 | M2k, a0j1slR25 | 2288 | 140.46 | 0.7083 (527 of 744) | -245, 60.9 | does not qualify |
 | h_Vf20k_scr | HD55 | fresh 20k, default | 2292 | 178.83 | 0.7191 (535 of 744) | -241, 29.6 | report-only |
+| h_Vf30k_g20_scr | HD66, HD68 | fresh 30k, a0j1slR25g20 | 2495 | 230.83 | 0.7796 (580 of 744) | -38, 31.0 | does not qualify (held-out) |
+| h_Vdag4k_scr | HD70 | DAgger 4k, a0j1slR25 | 2483 | 211.17 | 0.7769 (578 of 744) | -50, 30.2 | does not qualify (held-out) |
 
 R4 runs on 10-15 at 08:00 (HD18, with HD32 (4) and HD36). Its two screens are the two best
 checkpoints by the stage-1 correct total, then the rate. HD51 already stands for M2k. If the weight
 average wins, HD69 names h_Vs3040_g20_b as the second screen of R4.
 
-TODO(result): the 60k save of the fresh run and its reads (HD48).
+The weight average lost (section 7.18). So HD70 (10-12 02:53) gave the second screen to the DAgger
+4k save, the best other checkpoint by HD32 (4) (870 at a0j1slR25). Its draws 7 to 19 ran on
+b_h10:7 from 03:50 to 07:01 on 10-12, at HD58's serving. h_Vdag4k_scr joins them to draws 0 to 6
+of h_Vdag4k_a0j1slR25_a. It has 3536 cycles, 491 budget ends and 3 never-close cycles. Its first
+close is off the target in 0.164 of the stowed cycles, and it has 306 lifted_lost cycles, against
+0.068 and 183 for S. Neither screen qualifies, and by HD32 (4) h_Vf30k_g20_scr (2495) leads
+h_Vdag4k_scr (2483).
+
+HD71 (10-12 07:04) moved R4 from 10-15 08:00 to the end of the last two stage-1 reads. On 20 heaps V
+is 38 to 50 parts under S, and a pass needs about +62 over S. The loss table puts the whole gap in
+the grasp at the first close, and no serving rule, weight average or DAgger save moved V past the
+noise on the screens. So three more days of the same levers buy no pass. The rule:
+
+1. The 8k and 50k saves read draws 0 to 6 at HD58's serving. A save that beats
+   h_Vf30k_a0j1slR25gm20_a (885) by HD32 (4) reads draws 7 to 19, and its screen joins R4.
+2. R4: the best screen by HD32 (4) gives the candidate.
+3. R5: the checked read h_V_chk reads the candidate at its serving on seed 20307100, draws 0 to 19,
+   on a_h11l:10 and b_h11:10, with a cap of 5 hours. It pairs with h_S_chk.
+4. The official read on seed 20307200, draws 0 to 39, runs only after a checked pass.
+
+At 06:45 on 10-12 the Drive folder `checkpoints_fresh/keep` held only 050000, so the fresh run has
+no 60k save to read (HD48).
 
 TODO(result): R4: the two 20-heap screens, their rate against 203.5 and their held-out row against 0.7809, and the candidate.
 
