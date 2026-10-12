@@ -2,10 +2,10 @@
 
 Date: 2026-10-06, Track V updated 2026-10-12. Status: draft. This draft uses the ledger through its
 entry of 15:38 on 2026-10-06. Section 7 and the Track V lines of section 1 use it through its entry
-of 12:26 on 2026-10-12. The Track R lines of sections 1, 2, 5 and 11 use it through its entry of
-23:57 on 2026-10-06. Track V ended at its checked read, and V failed V1(b). The 60k read of HD72
-is still open and report-only. A placeholder of the form `<<NAME>>` or `TODO(result): ...` marks
-each result that is not in yet.
+of 16:29 on 2026-10-12. The Track R lines of sections 1, 2, 5 and 11 use it through its entry of
+23:57 on 2026-10-06. Track V ended at its checked read, and V failed V1(b). The report-only 60k read
+of HD72 is in section 7.20. A placeholder of the form `<<NAME>>` marks each item that the owner
+decides.
 
 The design of MS7h is the document of 2026-10-05 whose questions the owner answered in chat. This
 report cites it as "MS7h design section N" and restates every rule that it uses. The MS7g report,
@@ -137,7 +137,8 @@ at 228.20 an hour, with a held-out row of 0.7992. That is D = -5 against S on th
 a paired SE of 15.1. On its 20-heap screen it stowed 2495, 38 under S (paired SE 31.0). A DAgger
 round, a weight average and the 40k and 50k saves read 837 to 870 on the same 7 heaps. None of them
 beat the 30k save (sections 7.15 to 7.20), so it became the candidate. Its checked read failed
-V1(b) (section 7.20).
+V1(b) (section 7.20). The last save of the run, 60k, read 858 on the same 7 heaps after the checked
+read (HD72, report-only).
 
 ## 2. What execution showed
 
@@ -2181,13 +2182,15 @@ default serving for 16 closed cycles:
 | fresh 30k | 19.29 | 26.40 | 0.623 |
 | fresh 40k | 17.78 | 23.88 | 0.641 |
 | fresh 50k | 15.63 | 21.28 | 0.561 |
+| fresh 60k (HD72) | 15.46 | 20.55 | 0.588 |
 | DAgger 8k on 40k | 16.49 | 21.79 | 0.579 |
 
 The chunk residual is the RMS of each action about its centered 5-action mean. The flow noise
-shrinks by about a third from 10k to 50k, and the DAgger save stays at the level of 40k to 50k. At
-50k the camera shake is still 1.8 times that of S (0.31 mm). Each row is one draw with no SE, and
-30k and 40k differ by 0.02 mm. So more training reduces the vibration slowly, but it does not
-remove it within this run.
+shrinks by about a third from 10k to 50k, and the DAgger save stays at the level of 40k to 50k. The
+60k save, the last of the run, traced on 10-12 at 14:54. It is flat against 50k, and its camera
+shake is 1.9 times that of S (0.31 mm). Each row is one draw with no SE, and 30k and 40k differ by
+0.02 mm. So more training reduced the vibration slowly up to 50k, and it stopped there within this
+run.
 
 ### 7.18 The weight average
 
@@ -2290,7 +2293,7 @@ The reads that hold no stage-1 number:
 - h_Vf30k_g20_b first stopped at 22:33 on 10-11 before any heap ended. The controller set its
   directory aside as `h_Vf30k_g20_b.stopped`, and the read started again at 00:17 on 10-12.
 
-### 7.20 The 20-heap screens and the open reads
+### 7.20 The 20-heap screens and the checked read
 
 Each screen reads seed 20307000, draws 0 to 19 (3000 parts), against h_S_scr:
 
@@ -2371,7 +2374,21 @@ under the screen's D (-38), inside one SE. The jaw table of the read:
 
 The official read runs only after a checked pass, so it did not run. Seed 20307200 stays unburned.
 
-TODO(result): HD72, the 60k save on draws 0 to 6 and its tremble trace, report-only.
+The fresh run ended at 60000 steps (COLAB_TRAIN_OK, 10-12 14:18). HD72 read its last save
+h_Vf60k_a0j1slR25_a at HD58's serving on seed 20307000, draws 0 to 6. It ran on a_h10l:7 from
+14:57 to 16:27 on 10-12, after the trace L60k (section 7.17):
+
+| read | correct of 1050 | correct stows an hour | held-out row | cycles | budget ends | D against it, SE |
+| --- | --- | --- | --- | --- | --- | --- |
+| h_Vf60k_a0j1slR25_a | 858 | 221.59 | 0.7871 (196 of 249) | 1181 | 154 | |
+| h_Vf30k_a0j1slR25gm20_a | 885 | 228.20 | 0.7992 (199 of 249) | 1215 | 164 | -27, 18.4 |
+| h_Vf50k_a0j1slR25_a | 852 | 230.50 | 0.7831 (195 of 249) | 1194 | 133 | +6, 20.9 |
+| h_S_scr | 890 | 366.47 | 0.7671 (191 of 249) | 1133 | 56 | -32, 15.5 |
+
+The 60k save is inside the noise of the 50k save and does not beat 885 by HD32 (4). So by HD72 (3)
+it decides nothing, and Track V stays ended at the checked read. Its first close is off the target
+in 0.154 of the stowed cycles, against 0.069 for S. So the last 10k steps did not close the gap at
+the first close either.
 
 ## 8. The verdict reads
 
@@ -2604,4 +2621,17 @@ waits for any `h_` read to end first. `h/bin/col_start.sh` (BASE, TAG, WHAT, LOU
 
 ### 11.4 Video
 
-`<<VIDEO>>`
+The two-tray videos of Track V are in `~/data/maker-arm-ms7/h/video/`. They are report-only, and
+section 7.17 gives their numbers:
+
+- `ms7h_S_d0_two_trays.mp4`: S at its serving.
+- `ms7h_Vf10k_d0_two_trays.mp4`, `ms7h_Vf20k_d0_two_trays.mp4` and `ms7h_Vf30k_d0_two_trays.mp4`:
+  the fresh 10k, 20k and 30k saves at the default serving.
+- `ms7h_Vf30k_a0j1slR25g20_d0_two_trays.mp4`: the fresh 30k save at a0j1slR25g20, the serving of
+  the checked read.
+
+Each video is H.264, 1280x720, 60 fps, at 4x speed, and a full decode reads no errors. All five use
+seed 20307000 draw 0 from the owner's camera. Each run stops at the second refill, after the robot
+takes 80 parts from the tray. The kits are `run_video_V.sh` with `cmds_V.py`, and `run_video_Va.sh`
+with `cmds_Va.py` and `film_Va.sh`, in the same folder. A render does not replay the episode of a
+read, so one heap is a picture of the behavior, not a read.
