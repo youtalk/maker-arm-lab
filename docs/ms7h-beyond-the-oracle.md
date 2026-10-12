@@ -2,7 +2,8 @@
 
 Date: 2026-10-06, Track V updated 2026-10-12. Status: draft. This draft uses the ledger through its
 entry of 15:38 on 2026-10-06. Section 7 and the Track V lines of section 1 use it through its entry
-of 12:26 on 2026-10-12. Track V ended at its checked read, and V failed V1(b). The 60k read of HD72
+of 12:26 on 2026-10-12. The Track R lines of sections 1, 2, 5 and 11 use it through its entry of
+23:57 on 2026-10-06. Track V ended at its checked read, and V failed V1(b). The 60k read of HD72
 is still open and report-only. A placeholder of the form `<<NAME>>` or `TODO(result): ...` marks
 each result that is not in yet.
 
@@ -42,8 +43,8 @@ time without a date from 13:10 to 23:59 is on 2026-10-05. A time without a date 
 is on 2026-10-06. Some ledger entries stand out of time order. 18:50 stands before "about 17:35",
 and the ablation result of 01:46 stands after 01:53. The ledger lists HD10 before HD9, and HD11 to
 HD13 stand in its log. The "[V]" entries of the Track V session interleave with the others. This
-report keeps each stamp as the ledger writes it. In section 7, a time with a date of the form MM-DD
-is in 2026. A time without a date follows the rule above.
+report keeps each stamp as the ledger writes it. A time with a date of the form MM-DD is in 2026. A
+time without a date follows the rule above.
 
 The numbers. Every number comes from the ledger or from a file that the ledger names. This report
 computes no new number.
@@ -108,14 +109,19 @@ design assumed. The critic of runs 1 to 3 memorized the return of each replay ro
 no action signal. S's losses against O sit mostly in the pick. On 2026-10-06 at 09:32 the owner
 asked for fixes. HD12 (09:38) is the revised plan.
 
-Track R so far (section 5). No run has given a candidate yet. Run 1 (19:36 to 20:28) stopped after
+Track R (section 5). No residual RL run beat S. Run 1 (19:36 to 20:28) stopped after
 its critic diverged. Run 2 (20:29 to 01:47) read its screen at 3M collected steps. It stowed 2490,
 43 under S (paired SE 29.4), at 55.1 fewer correct stows an hour. An ablation put the share loss on
 the jaw-gap channel. Run 3 (02:16 to 11:41) held the residual for 10 steps and kept the base's jaw
 gap. Its 1M and 3M screens stowed 2536 and 2539, level with S (D = +3 and +6). Run 4 (from 11:41)
 changed the critic, the exploration noise and the reward (HD12 P2). Its 3M screen stowed 2432, 101
-under S, because its actor loss divided the critic's value by a mean near 0 (HD13). Section 5.10
-gives the screens that are not in yet.
+under S, because its actor loss divided the critic's value by a mean near 0 (HD13). Run 3 at 10M
+and run 4's final actor read 2487 and 2509, D = -46 and -24 against S (10-06 16:09, 10-06 18:19). On
+10-06 at 16:24 run 4 ended early at the owner's request, so its 10M and 30M screens did not run.
+HD14 (10-06 16:32) then set the bar against S and read truth-aided probes of the headroom. No probe
+reached D = +50 against S: P1 read +18, P1w -1 and P2 +27, and P3 was dropped at its smoke. So
+Track R ended at its report (10-06 23:57). Its best screen is R3_3M, D = +6 against S's 2533 at a
+paired SE of 19.6 (10-07 09:22).
 
 The hybrid (section 6). SP stowed 2527 on the screen seed, 6 under S (paired SE 29.2), at 351.8 an
 hour. It is not a candidate. The rig's carry removed the air stalls, but the losses moved from the
@@ -199,7 +205,9 @@ What the changes did:
 - Run 4's 3M screen stowed 2432, D = -101 against S. The ledger puts the cause on the scale of the
   actor loss. The loss divides the critic's value by mean|Q|, and run 4's returns sit near 0
   (q_mean 0.002 at 5.9M against run 3's 0.209). So alpha 10 acted about 100 times run 3's. HD13
-  floors the scale at 0.6 and sets alpha 4. `<<R4_10M_SCR>>` `<<R4_30M_SCR>>`
+  floors the scale at 0.6 and sets alpha 4. Run 4 ended early on 10-06 at 16:24, so its 10M and 30M
+  screens did not run. The report-only screen h_R4_7M_scr of its final actor stowed 2509, D = -24
+  against S at a paired SE of 31.9 (10-06 18:19).
 
 ### 2.3 S's losses sit in the pick
 
@@ -942,7 +950,12 @@ are backed up in `h/tables/h_R3_10M_scr.partial14.bak`. The first fill (unit ms7
 15:15, because `fleet.py` reads a TAG once and counts no cached payload as a read. Unit
 ms7h-r3-fill2 reads the six dead draws as h_R3_10M_fill with the same actor and serving on 6 Machine A
 lanes from 15:36. Then h_R3_10M_all (report-only) holds the 14 + 6 payloads for the pairing and the
-mechanism table (15:38). `<<R3_10M_SCR>>`
+mechanism table (15:38). h_R3_10M_fill read from 15:36 to 16:06 on 10-06. h_R3_10M_all stowed 2487
+at 391.6 an hour, with a held-out row of 592 of 744, 0.7957 (10-06 16:09). Against S, D = -46 at a
+paired SE of 21.8. Against O, D = -183 at a paired SE of 28.4. Close misses fell to 340 against
+457, and air stalls to 12 against 83. Passengers rose to 107 against 55, riders to 177 against 129
+and wrong-box parts to 369 against 311. The ledger reads this as the direction of h_R4_3M_scr:
+faster, fewer misses and more collateral parts.
 
 The stop (HD12 P3). Run 3 collected until run 4 started. At 11:41 its lanes stopped hard. The
 learner ended with LEARNER_OK at 12,452,976 collected steps, 54,344 cycles and version 110. Its
@@ -1083,9 +1096,25 @@ gain: its fitted shift on j2 is 0.4 to 0.8 of the bound. The learner resumes fro
 the critic, the replay and the counters kept. The lanes keep running. The 10M and 30M screens follow
 as planned.
 
-`<<R4_10M_SCR>>`
+The early end (10-06 16:24). On 10-06 at 16:09 the owner asked to end the training at a logical
+point, find why residual RL failed and write a better plan. On 10-06 at 16:24 run 4
+ended early. Units ms7h-stop4 and ms7h-screen-r4 were cancelled, and the lanes stopped hard. The
+learner ended with LEARNER_OK at 7,154,611 collected steps, 24,998 cycles, a replay of 649,653 rows
+and version 55. So h_R4_10M_scr and h_R4_30M_scr did not run. The ledger gives the reason: the
+reward audit of 10-06 16:24 shows an objective that does not match the bar. The run 3 and 4 reward ranks R3_10M above S by
++0.022 a cycle, but the bar puts it 46 below.
 
-`<<R4_30M_SCR>>`
+h_R4_7M_scr (10-06 18:19, report-only). It read run 4's final actor `R4_actor_final.pt` (sha256
+098dddbb3e73, under HD13 since 5.96M collected steps) at 7fd4f0e on 7h-r3, with 20 Machine A lanes:
+
+| read | correct of 3000 | correct stows an hour | held-out row | D against S, paired SE | D against O, paired SE |
+| --- | --- | --- | --- | --- | --- |
+| h_R4_7M_scr | 2509, 0.8363 | 394.1 | 597 of 744, 0.8024 | -24, 31.9 | -161, 28.1 |
+
+Against S, close misses fell to 350 against 457 and air stalls to 36 against 83. Passengers read 63
+against 55, riders 134 against 129 and wrong-box parts 321 against 311. The ledger concludes that
+the scale floor kept the speed and the fewer misses without the large rise in collateral parts. Its
+stows stay level with S within noise.
 
 ### 5.10 The Track R screens
 
@@ -1097,10 +1126,63 @@ All screens on seed 20307000, draws 0 to 19, against h_S_scr (the incumbent) and
 | h_R2_3M_scr | run 2, 3M | e88c7e3a1a57 | 2490, 0.8300 | 314.4 | 588 of 744, 0.7903 | -43 | -180 | not a candidate |
 | h_R3_1M_scr | run 3, 1M, alpha 2.5 | abe34f9370f1 | 2536, 0.8453 | 389.2 | 599 of 744, 0.8051 | +3 | -134 | not a candidate |
 | h_R3_3M_scr | run 3, 3M, alpha 2.5 | 5ffed88f2698 | 2539, 0.8463 | 378.2 | 597 of 744, 0.8024 | +6 | -131 | not a candidate |
-| h_R3_10M_scr | run 3, 10M, alpha 10 | dea8e329845e | `<<R3_10M_SCR>>` | | | | | |
+| h_R3_10M_scr | run 3, 10M, alpha 10 | dea8e329845e | 2487, 0.8290, as h_R3_10M_all | 391.6 | 592 of 744, 0.7957 | -46 | -183 | not a candidate |
 | h_R4_3M_scr | run 4, 3M, alpha 10 | a258f0dfdc99 | 2432, 0.8107 | 312.3 | 567 of 744, 0.7621 | -101 | -238 | not a candidate |
-| h_R4_10M_scr | run 4, 10M, HD13 | | `<<R4_10M_SCR>>` | | | | | |
-| h_R4_30M_scr | run 4, 30M, HD13 | | `<<R4_30M_SCR>>` | | | | | |
+| h_R4_7M_scr | run 4, final actor at 7,154,611, HD13 | 098dddbb3e73 | 2509, 0.8363 | 394.1 | 597 of 744, 0.8024 | -24 | -161 | report-only |
+| h_R4_10M_scr | run 4, 10M, HD13 | | did not run | | | | | run 4 ended at 7,154,611 collected steps (10-06 16:24) |
+| h_R4_30M_scr | run 4, 30M, HD13 | | did not run | | | | | run 4 ended at 7,154,611 collected steps (10-06 16:24) |
+
+No residual RL screen beat S. The best is h_R3_3M_scr, D = +6 against S's 2533 at a paired SE of
+19.6 (10-07 09:22).
+
+HD14 (10-06 16:32) came after the owner's decisions on the v2 plan (10-06 16:31). It ended HD12's
+run plan and HR7's schedule. A candidate now needs D of at least 2 paired SE against S on 40 heaps.
+Its rate and its held-out row must be at least S's. HR2 against O is report-only.
+
+Phase 0 of HD14 reads probes of the headroom. Each probe is S's serving plus one switch, read as a
+report-only screen on the screen seed. A probe with D of at least +50 against S makes its mechanism
+a Phase 1 target. If no probe reaches +50, Track R ends at its report. The probes read the truth,
+so they are not HR9 candidates:
+
+- P1, `--probe_center xy`: a truth-centred close inside the bound of 0.05 rad.
+- P1w, `--probe_center xy --probe_bound 0.10`: P1 at twice the bound. HD14 added it at 16:35 on
+  10-06, after the owner asked whether the bound is too narrow.
+- P2, `--probe_center xy_yaw`: P1 plus a roll turn to the nearest axis of the teacher's ranked
+  grasps.
+- P3, the no-carry-without-hold rule on S. It was built and dropped at its smoke (10-06 17:36). A
+  full recovery of its target class, 37 riders of S, stays under +50.
+
+The probe screens, on `feat/ms7h-probe-center` ebb8532 with 20 Machine A lanes each:
+
+| read | probe | correct of 3000 | correct stows an hour | held-out row | D against S, paired SE | D against O, paired SE |
+| --- | --- | --- | --- | --- | --- | --- |
+| h_P1_scr, 10-06 21:40 | P1, bound 0.05 rad | 2551, 0.8503 | 378.1 | 602 of 744, 0.8091 | +18, 23.4 | -119, 30.1 |
+| h_P1w_scr, 10-06 22:24 | P1w, bound 0.10 rad | 2532, 0.8440 | 370.0 | 584 of 744, 0.7849 | -1, 24.2 | -138, 20.2 |
+| h_P2r_scr, 10-06 23:57 | P2, bound 0.05 rad | 2560, 0.8533 | 409.8 | 607 of 744, 0.8159 | +27, 28.1 | -110, 25.9 |
+| h_S_scr | S | 2533, 0.8443 | 369.5 | 581 of 744, 0.7809 | | -137, 30.5 |
+
+P2's first screen h_P2_scr failed on Machine B (10-06 21:40). Its policy servers ran out of GPU memory,
+and 2 heaps finished. Its rerun h_P2b_scr failed on a port clash with h_P2r_scr and has no
+payloads (10-06 22:27). So h_P2r_scr is P2's screen.
+
+The mechanisms against S:
+
+- P1: riders 151 against 129, passengers 79 against 55, close misses 432 against 457 and wrong-box
+  parts 327 against 311.
+- P1w: passengers 90 against 55, riders 142 against 129 and close misses 454 against 457. Against
+  h_P1_scr it reads D = -19 at a paired SE of 26.1. So the wider bound does not beat 0.05 rad.
+- P2: close misses 349 against 457 and wrong-box parts 289 against 311. Passengers read 76 against
+  55, riders 132 against 129 and air stalls 106 against 83. The ledger says that the yaw turn removes
+  about a quarter of the close misses and adds 40 stows an hour, but few stows.
+
+The HD14 verdict (10-06 23:57). No probe reaches +50 against S. So Track R ends at its report, with
+no Phase 1 and no run 5. The ledger's reason comes from the mechanism tables. S loses 137 stows to
+O, and the wrong-box parts give 148 of them. 64 are targets in a wrong box, and 84 are collateral
+parts that ride to the target's box. Close misses cost time, not parts. An exact close inside the
+bound cuts the misses and raises the rate. It leaves the collateral parts and the class errors at
+S's level. These two classes depend on the grasp that the policy takes and on how the part sits in
+the jaws at the wrist view. A residual bounded around the base's grasp in the close window does not
+change them.
 
 ## 6. The hybrid: a learned pick and a scripted carry
 
@@ -2487,11 +2569,20 @@ the correct stows an hour.
 | 04:48 | h_R3_1M_scr | 6b10b74 | 7h-r3 | S + run 3 actor at 1M | screen | 2536 | 389.2 | 599 of 744, 0.8051 | 3134 | 703,799 | not a candidate |
 | 06:35 | h_R3_3M_scr | 6b10b74 | 7h-r3 | S + run 3 actor at 3M | screen | 2539 | 378.2 | 597 of 744, 0.8024 | 3231 | 725,132 | not a candidate |
 | [V] 09:31 | h_V10k_scr | b7c3ebd | 7h-r2 | V at step 10k | screen | 28 of 150, one heap | 82.6 | 8 of 42 | 72 | | report-only, cut at 09:30 |
-| 12:04 | h_R3_10M_scr | 6b10b74 | 7h-r3 | S + run 3 actor at 10M | screen | `<<R3_10M_SCR>>` | | | | | 14 of 20 heaps, then a fill |
+| 12:04 | h_R3_10M_scr | 6b10b74 | 7h-r3 | S + run 3 actor at 10M | screen | INCOMPLETE | | | | | 14 of 20 heaps, then a fill |
 | 15:32 | h_SP_scr | 0b91d7b | 7h-r1 | SP | screen | 2527 | 351.8 | 589 of 744, 0.7917 | 3330 | 775,854 | not a candidate |
 | 15:35 | h_R4_3M_scr | 7fd4f0e | 7h-r3 | S + run 4 actor at 3M | screen | 2432 | 312.3 | 567 of 744, 0.7621 | 3123 | 840,994 | not a candidate |
+| 10-06 16:09 | h_R3_10M_all | 6b10b74 | 7h-r3 | S + run 3 actor at 10M | screen | 2487 | 391.6 | 592 of 744, 0.7957 | | | report-only, the 14 heaps of h_R3_10M_scr and the 6 of h_R3_10M_fill |
+| 10-06 18:19 | h_R4_7M_scr | 7fd4f0e | 7h-r3 | S + run 4's final actor | screen | 2509 | 394.1 | 597 of 744, 0.8024 | 3123 | 687,580 | report-only |
+| 10-06 21:40 | h_P1_scr | ebb8532 | 7h-r0 | S + `--probe_center xy` | screen | 2551 | 378.1 | 602 of 744, 0.8091 | 3188 | 728,737 | report-only probe |
+| 10-06 21:40 | h_P2_scr | ebb8532 | 7h-r1 | S + `--probe_center xy_yaw` | screen | READ_FAIL | | | | | 2 heaps ran on Machine B |
+| 10-06 22:24 | h_P1w_scr | ebb8532 | 7h-r2 | S + `--probe_center xy --probe_bound 0.10` | screen | 2532 | 370.0 | 584 of 744, 0.7849 | 3208 | 738,999 | report-only probe |
+| 10-06 22:27 | h_P2b_scr | ebb8532 | 7h-r1 | S + `--probe_center xy_yaw` | screen | READ_FAIL | | | | | a port clash, no payloads |
+| 10-06 23:57 | h_P2r_scr | ebb8532 | 7h-r1 | S + `--probe_center xy_yaw` | screen | 2560 | 409.8 | 607 of 744, 0.8159 | 3138 | 674,675 | report-only probe |
 
-The cycles and steps come from the chain logs and the supervisor logs. `<<READS_AFTER_1538>>`
+The cycles and steps come from the chain logs and the supervisor logs. h_R3_10M_all has no
+supervisor total, so its cycles and steps stay blank. h_R4_10M_scr, h_R4_30M_scr and h_P3_scr did
+not run (10-06 16:24, 10-06 17:36).
 
 ### 11.3 The commands
 
