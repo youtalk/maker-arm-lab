@@ -339,6 +339,10 @@ LOOP_SETTINGS = ("rake_cap", "retry_noise_at")
 """The heap loop's integer settings, recorded and matched like the switches; 0 is off.
 ``retry_noise_at`` (MS7h) reaches the client through --client_flags, as --replan_on_switch does,
 and is recorded only when on."""
+LOOP_MARGINS = {"guard_margin": 0.010}
+"""The heap loop's float settings and their defaults, recorded only off the default and matched
+like the switches. ``guard_margin`` (MS7h) reaches the client through --client_flags; its default
+is ``core.loop.GUARD_BOX_MARGIN_M``, copied and pinned by the test."""
 PERCEPTION_KNOBS = (
     "pos",
     "heading",
@@ -386,13 +390,17 @@ def noise_scales_key(text: str) -> str:
 
 def loop_switches(client_flags) -> dict:
     """Which of ``LOOP_SWITCHES`` the client flags turn on, each of ``LOOP_SETTINGS``'s values
-    (``--rake_cap 4`` reads 4), and the ``noise_scales`` the client records: the canonical
-    scales under ``--perceived``, else empty."""
+    (``--rake_cap 4`` reads 4), each of ``LOOP_MARGINS``'s values (its default when absent), and
+    the ``noise_scales`` the client records: the canonical scales under ``--perceived``, else
+    empty."""
     flags = list(client_flags)
     found = {name: f"--{name}" in flags for name in LOOP_SWITCHES}
     for name in LOOP_SETTINGS:
         key = f"--{name}"
         found[name] = int(flags[flags.index(key) + 1]) if key in flags else 0
+    for name, default in LOOP_MARGINS.items():
+        key = f"--{name}"
+        found[name] = float(flags[flags.index(key) + 1]) if key in flags else default
     text = flags[flags.index("--noise_scales") + 1] if "--noise_scales" in flags else ""
     found["noise_scales"] = noise_scales_key(text) if found["perceived"] else ""
     return found
@@ -1040,6 +1048,7 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     same_inference = same_inference and loop_switches(cfg.client_flags) == {
         **{name: bool(recorded.get(name, False)) for name in LOOP_SWITCHES},
         **{name: int(recorded.get(name, 0)) for name in LOOP_SETTINGS},
+        **{name: float(recorded.get(name, d)) for name, d in LOOP_MARGINS.items()},
         "noise_scales": str(recorded.get("noise_scales", "")),
     }
     return payload if same_draw and same_policy and same_task and same_inference else None

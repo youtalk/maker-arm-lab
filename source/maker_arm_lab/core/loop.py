@@ -256,6 +256,13 @@ does not hover and often recovers in the cycle. A one-chunk noisy redraw does no
 the next zero-noise forward goes back to the hover. The census rows then carry ``retry_at``, the
 cycle step retry mode began (None when it never did).
 
+``guard_margin`` M (MS7h, with ``carry_guard``; default ``GUARD_BOX_MARGIN_M``) is the margin in
+meters the guard reads: it lets the jaws open on a lifted part only with the FK pick point M
+inside the served box's interior, and ``guard_rim_steps`` counts its steps inside the interior
+but within M. The pi0.5 policy's releases over the right box end on its rim (22 against the ACT
+policy's 7) or on the desk within 3 cm of a box (24 against 16) more often, and a wider margin
+holds the jaws until the point is deeper. The ``inference`` block records M only off its default.
+
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
 """
@@ -1256,7 +1263,7 @@ class Cycle:
     air_stall_empty_steps: int = 0  # and while it holds nothing
     air_stalls: int = 0  # stall entries while it holds a part
     # MS7g ``carry_guard`` (None and unexported without it): the steps the guard held an open
-    # command closed, those inside the served box's interior but within GUARD_BOX_MARGIN_M of
+    # command closed, those inside the served box's interior but within the guard margin of
     # its walls, those inside it while a class vote was pending, the current run of them and
     # the run's fixed gap (``guarded_gap``); the rig carry's outcome ("carrying" while it runs,
     # ``_end_handoff``) and whether the hold ended over a perceived box during it; whether an
@@ -1555,7 +1562,8 @@ def release_place(xy, boxes, right, lean_deg: float | None, height=layout.TRAY_W
 GUARD_BOX_MARGIN_M = 0.010  # INITIAL: the g_cg_scr read's guard_rim_steps say whether it holds
 """m: ``carry_guard`` (MS7g design 5.2) lets the jaws open on a lifted part only with the FK pick
 point this far inside the served box's interior walls (``in_box_interior``). A guard step with
-the point inside the interior but within the margin counts as one of ``guard_rim_steps``."""
+the point inside the interior but within the margin counts as one of ``guard_rim_steps``. The
+default of the MS7h ``guard_margin`` switch."""
 GUARD_STALL_STEPS = 15
 """``carry_guard``: steps in a row the guard holds an open command closed before the loop hands
 the carry to the rig (MS7g design 5.2), half a second."""
@@ -1587,7 +1595,7 @@ def guarded_gap(
     gap: float, measured: float, last: float, held: float | None
 ) -> tuple[float, float | None]:
     """``carry_guard``, on a step it guards (the hold detector holds a part its hold lifted, and
-    the FK pick point is not ``GUARD_BOX_MARGIN_M`` inside the served box): the gap command
+    the FK pick point is not ``guard_margin`` inside the served box): the gap command
     served, and the gap the guard run holds. A command that would end the hold, wider than the
     ``measured`` jaw gap less ``hold.MIN_EXCESS``, is served as the run's gap ``held``; the
     run's first such step sets it to the tighter of the ``last`` served command and
@@ -2314,6 +2322,7 @@ def rollout(
     bank_views: bool = False,
     vote_weights: dict | None = None,
     retry_noise_at: int = 0,
+    guard_margin: float = GUARD_BOX_MARGIN_M,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -2381,6 +2390,8 @@ def rollout(
     ``retry_noise_at`` (MS7h) is the module docstring's; it lies in [0, ``AIR_STALL_STEPS``) and
     needs ``carry_guard`` and ``replan_on_switch``; with it on the policy's ``step`` takes
     ``retry``, the per-env retry flags.
+    ``guard_margin`` (MS7h) is the module docstring's, in meters; it is finite and 0 or more, and
+    off ``GUARD_BOX_MARGIN_M`` it needs ``carry_guard``.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -2488,6 +2499,10 @@ def rollout(
         raise EvalFailure("retry_noise_at", f"must be 0 (off) or more, under {AIR_STALL_STEPS}")
     if retry_noise_at and not (carry_guard and replan_on_switch):
         raise EvalFailure("retry_noise_at", "reads carry_guard's stall and asks by the replan flag")
+    if not 0.0 <= guard_margin < math.inf:
+        raise EvalFailure("guard_margin", "must be a finite margin of 0 m or more")
+    if guard_margin != GUARD_BOX_MARGIN_M and not carry_guard:
+        raise EvalFailure("guard_margin", "is carry_guard's margin: it needs carry_guard")
     if perceived:
         if policy is None:
             raise EvalFailure("perceived", "serves a policy; the oracle driver reads the truth")
@@ -2689,6 +2704,8 @@ def rollout(
         switches["carry_guard"] = True
     if retry_noise_at:
         switches["retry_noise_at"] = int(retry_noise_at)
+    if guard_margin != GUARD_BOX_MARGIN_M:
+        switches["guard_margin"] = float(guard_margin)
     if clear_first:
         switches["clear_first"] = True
     if overhang_guard:
@@ -3200,7 +3217,7 @@ def rollout(
                 lifted = d.lifted or (c.carried and not c.carry_released)
                 # A pending class vote can still move the box: no box is served until it decides.
                 voting = c.vote is not None or c.lift_view is not None
-                deep = in_box_interior(picks[i][:2], pose, size, GUARD_BOX_MARGIN_M)
+                deep = in_box_interior(picks[i][:2], pose, size, guard_margin)
                 inside = deep and not voting
                 guarding = d.holding and lifted and not inside and c.handoff != "declined"
                 gap, kept = float(action_cpu[i, 6]), None

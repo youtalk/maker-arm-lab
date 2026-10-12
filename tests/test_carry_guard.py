@@ -322,6 +322,30 @@ def test_the_rollout_refuses_a_retry_noise_at_without_its_guard_or_its_flag(monk
         assert err.value.reason == "retry_noise_at", kwargs
 
 
+def test_a_margin_past_the_boxs_half_width_guards_the_teachers_centre_release(monkeypatch):
+    """At zero noise the teacher opens over its box centre, so the default margin, passed or not,
+    guards nothing and changes no payload byte. A 0.2 m margin leaves no point deep enough: the
+    guard holds each open, its steps over the box count as rim steps, and the payload records
+    the margin."""
+    switches = {"noise_scales": ZERO, "carry_guard": True}
+    off, off_served = _run(_teacher_scene, monkeypatch, **switches)
+    same, same_served = _run(
+        _teacher_scene, monkeypatch, **switches, guard_margin=loop.GUARD_BOX_MARGIN_M
+    )
+    assert same == off and _same(same_served, off_served)
+    wide, _ = _run(_teacher_scene, monkeypatch, **switches, guard_margin=0.2)
+    assert wide["inference"]["loop"]["guard_margin"] == 0.2
+    assert "guard_margin" not in off["inference"]["loop"]
+    rows = wide["episodes"][0]["cycle_census"]
+    assert any(row["guard_rim_steps"] for row in rows), rows
+    for kwargs in ({"guard_margin": 0.02}, {"guard_margin": -0.01, "carry_guard": True}):
+        env, rig, policy, budget, _ = _teacher_scene(monkeypatch)
+        with pytest.raises(loop.EvalFailure) as err:
+            _rollout(env, rig, policy, budget=budget, perceived=True, **kwargs)
+        env.close()
+        assert err.value.reason == "guard_margin", kwargs
+
+
 def test_a_pending_vote_serves_no_box_so_the_part_goes_where_the_vote_moves_it(
     tmp_path, monkeypatch
 ):
@@ -465,6 +489,57 @@ def test_the_supervisor_forwards_the_retry_noise_at_and_splits_the_cache_on_it(t
     assert not hit(cfg, recorded | {"retry_noise_at": 30})
 
 
+def test_the_client_hands_the_guard_margin_to_the_rollout(monkeypatch, capsys):
+    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    with pytest.raises(SystemExit):
+        module.main(HEAP + ["--perceived", "--guard_margin", "0.02"])
+    assert "--guard_margin needs --carry_guard" in capsys.readouterr().out
+    monkeypatch.setattr(module.policy_client, "ServerPolicy", lambda server: _Policy())
+    real_env = module.MjLegoSortEnv
+    monkeypatch.setattr(
+        module, "MjLegoSortEnv", lambda *a, **k: real_env(*a, **{**k, "cameras": False})
+    )
+    seen = []
+
+    def run(env, rig, policy, **kwargs):
+        seen.append(kwargs)
+        return {}
+
+    guard = ["--perceived", "--carry_guard"]
+    for argv, margin in ((guard + ["--guard_margin", "0.02"], 0.02), (guard, 0.010)):
+        assert module.main(HEAP + argv, run=run) == 0
+        assert capsys.readouterr().out.strip().splitlines()[-1].startswith("EVAL_OK ")
+        assert seen.pop()["guard_margin"] == margin
+
+
+def test_the_supervisor_forwards_the_guard_margin_and_splits_the_cache_on_it(tmp_path):
+    assert ge.LOOP_MARGINS == {"guard_margin": loop.GUARD_BOX_MARGIN_M}
+    draw = ge.make_eval_draws(1, 1)[0]
+    argv = _gate_argv(tmp_path) + ["--gripper", "continuous", "--perceived", "--carry_guard"]
+    plain = ge._build_cfg(ge._parse_args(argv))
+    cfg = ge._build_cfg(ge._parse_args(argv + ["--client_flags=--guard_margin 0.02"]))
+    same = ge._build_cfg(ge._parse_args(argv + ["--client_flags=--guard_margin 0.01"]))
+    cmd = ge._eval_command(cfg, draw)
+    assert cmd[cmd.index("--guard_margin") + 1] == "0.02"
+    assert "--guard_margin" not in ge._eval_command(plain, draw)
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    path = tmp_path / "eval_000.json"
+
+    def hit(gate, loop_block):
+        inference = {**served, "loop": loop_block}
+        payload = _heap_payload(draw, desk_boxes=4, gripper="continuous", inference=inference)
+        path.write_text(json.dumps(payload))
+        return ge._cached_payload(gate, draw) is not None
+
+    # The client records the margin only off its default, so a default read leaves it out.
+    recorded = ge.loop_switches(plain.client_flags)
+    del recorded["guard_margin"]
+    assert hit(plain, recorded) and hit(same, recorded) and not hit(cfg, recorded)
+    on = recorded | {"guard_margin": 0.02}
+    assert hit(cfg, on) and not hit(plain, on)
+    assert not hit(cfg, recorded | {"guard_margin": 0.03})
+
+
 def test_the_supervisor_forwards_the_switch_and_its_cache_key_records_it(tmp_path):
     draw = ge.make_eval_draws(1, 1)[0]
     argv = _gate_argv(tmp_path) + ["--gripper", "continuous", "--perceived"]
@@ -478,6 +553,7 @@ def test_the_supervisor_forwards_the_switch_and_its_cache_key_records_it(tmp_pat
         "carry_guard": True,
         "rake_cap": 0,
         "retry_noise_at": 0,
+        "guard_margin": 0.010,
     }
     served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
     path = tmp_path / "eval_000.json"

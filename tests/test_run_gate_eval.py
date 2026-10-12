@@ -1258,6 +1258,7 @@ def test_the_ms7d_switches_and_knobs_reach_the_heap_client_and_key_the_cache(tmp
             name: True,
             "rake_cap": 0,
             "retry_noise_at": 0,
+            "guard_margin": 0.010,
         }
         assert (
             hit(cfg, base | {name: True})
