@@ -69,9 +69,11 @@ def forward(self, batch: dict, reduction: str = "mean") -> tuple:
 
 
 class Mixed(torch.utils.data.Dataset):
-    """The corpus, then for each (dataset, share) of ``extras`` the indices that spread over its
-    frames: lerobot's shuffled sampler draws every index once an epoch, so a draw is that
-    source's frame with probability share. ``meta`` is the corpus's: the policy features and the
+    """The corpus, then for each (dataset, share) of ``extras`` a slot of indices for its frames:
+    lerobot's shuffled sampler draws every index once an epoch, so a draw is that source's frame
+    with probability share. A slot cycles through a source that fits it, so every frame is drawn;
+    a source larger than its slot fills it with a fixed random subset of its frames (numpy
+    default_rng(0), so a resume and every loader worker map alike), never only its first ones. ``meta`` is the corpus's: the policy features and the
     normalizer statistics. With ``codes`` (one array a source, corpus first) each frame's task is
     ``prompt(code)``, and a tagged frame drops its advantage sentence with probability DROP, drawn
     per sample in the loader worker (torch seeds each worker from lerobot's --seed)."""
@@ -85,6 +87,10 @@ class Mixed(torch.utils.data.Dataset):
         self.meta, self.codes = corpus.meta, codes
         self.sources = [corpus, *(d for d, _ in extras)]
         self.sizes = [len(corpus), *(round(len(corpus) * s / rest) for _, s in extras)]
+        self.maps = [
+            None if size >= len(d) else np.random.default_rng(0).permutation(len(d))[:size]
+            for d, size in zip(self.sources, self.sizes)
+        ]
         self.num_frames = len(self)
         self.num_episodes = sum(d.num_episodes for d in self.sources)
 
@@ -95,8 +101,8 @@ class Mixed(torch.utils.data.Dataset):
         k = 0
         while i >= self.sizes[k]:
             i, k = i - self.sizes[k], k + 1
-        source = self.sources[k]
-        item = source[i * len(source) // self.sizes[k]]  # spread: no tail left undrawn
+        source, subset = self.sources[k], self.maps[k]
+        item = source[i % len(source) if subset is None else int(subset[i])]
         if self.codes is not None:
             code = int(self.codes[k][int(item["index"])])
             item["task"] = prompt(code, code % 3 != 0 and float(torch.rand(())) < DROP)

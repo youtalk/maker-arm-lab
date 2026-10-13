@@ -85,9 +85,11 @@ def test_three_sources_draw_their_exact_shares_and_keep_the_corpus_meta():
     )
     assert mix.meta.stats == "corpus"
     assert mix[499]["from"] == "corpus" and int(mix[499]["index"]) == 499
-    assert int(mix[500]["index"]) == 0 and int(mix[507]["index"]) == 0  # 40 own frames spread
-    assert int(mix[508]["index"]) == 1 and int(mix[799]["index"]) == 39
-    assert [int(mix[800 + i]["index"]) for i in (0, 1, 199)] == [0, 20, 3980]  # every 20th
+    own_slot = [int(mix[500 + j]["index"]) for j in range(300)]
+    assert own_slot[:41] == [*range(40), 0] and set(own_slot) == set(range(40))  # all, cycled
+    take_slot = [int(mix[800 + j]["index"]) for j in range(200)]  # 200 of 4000 frames
+    assert take_slot == np.random.default_rng(0).permutation(4000)[:200].tolist()
+    assert len(set(take_slot)) == 200 and min(take_slot) < 400 and max(take_slot) > 3600
     torch.manual_seed(0)
     draws = [mix[int(i)]["from"] for i in torch.utils.data.RandomSampler(mix)]
     assert [draws.count(s) for s in ("corpus", "own", "take")] == [500, 300, 200]  # one epoch
