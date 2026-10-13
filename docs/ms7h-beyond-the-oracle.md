@@ -2,7 +2,7 @@
 
 Date: 2026-10-06, Track V updated 2026-10-12. Status: draft. This draft uses the ledger through its
 entry of 15:38 on 2026-10-06. Section 7 and the Track V lines of section 1 use it through its entry
-of 17:02 on 2026-10-12. The Track R lines of sections 1, 2, 5 and 11 use it through its entry of
+of 19:05 on 2026-10-12. The Track R lines of sections 1, 2, 5 and 11 use it through its entry of
 23:57 on 2026-10-06. Track V ended at its checked read, and V failed V1(b). The report-only 60k read
 of HD72 and the paused round of HD73 are in section 7.20.
 
@@ -2403,7 +2403,10 @@ on the 60k save. Its rules, set before any of its numbers:
 4. The owner allows up to two Colab fine-tunes on the CLI account for the round.
 
 The base read started on a_h11l:7 at 16:55 on 10-12. The owner paused the round at 17:02,
-before any change ran. Seed 20307600 is unburned.
+before any change ran. Seed 20307600 is unburned. The base read ran to its end at 18:37
+(report-only). It stowed 852 at 206.27 an hour, with a held-out row of 0.7470 (186 of 249). Against
+its twin at the old margin, h_Vf60k_a0j1slR25_a (858), it reads D = -6 at a paired SE of 19.9. So
+the margin of section 7.15 adds nothing on the 60k save, and 885 stays the best screen.
 
 ## 8. The verdict reads
 
@@ -2561,10 +2564,22 @@ residual layer differs from `feat/ms7h-residual-chunk` only in the guard and ora
 branches are not stacked yet: `feat/ms7h-rig-place`, `feat/ms7h-pick-reward`, `feat/ms7h-learner4`
 and `feat/ms7h-run4`.
 
-This report goes up alone as a draft PR onto main. The six layers above stay as pushed, and no
-code PR is open. The Track V branches of sections 7.12 to 7.15 (`feat/ms7h-pi05-*`,
-`feat/ms7h-retry-noise`, `feat/ms7h-stall-replan` and `feat/ms7h-guard-margin`) are not in the stack
-either. The owner decides the restack and the code PRs.
+This report goes up alone as a draft PR onto main. The six layers above stay as pushed. The owner
+then asked for PRs of π0.5 and of the features that worked (ledger 17:24). Stack #193 holds them as
+six draft PRs on main c6d4981:
+
+| PR | branch | what it adds |
+| --- | --- | --- |
+| #187 | `feat/ms7h-v-dataset` | the π0.5 dataset, its venv and the Colab script (sections 7.1 to 7.4) |
+| #188 | `feat/ms7h-v-masked-train` | the pad-masked loss, the preflight and the fresh run from `pi05_base` (sections 7.8 and 7.14) |
+| #189 | `feat/ms7h-v-shared-server` | one π0.5 server a host for the reads (section 7.5) |
+| #190 | `feat/ms7h-v-serving` | the noise, still-rule, jaw-noise and latch switches (section 7.12) |
+| #191 | `feat/ms7h-v-retry-noise` | retry noise (section 7.12) |
+| #192 | `feat/ms7h-v-guard-margin` | `--guard_margin` (section 7.15) |
+
+The stack leaves out the levers that were not adopted: the medoid, the stuck rules, the stall
+replan and the jaw-label mask f68e0c8. With them off, the adopted serving runs the same on the
+stack as on `feat/ms7h-guard-margin` 4a3c55c. The Track R code has no PR.
 
 ## 11. Records
 
