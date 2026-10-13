@@ -384,6 +384,12 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         f"{GUARD_BOX_MARGIN_M}",
     )
     parser.add_argument(
+        "--pi05_prompt",
+        action="store_true",
+        help="MS7i Run A, with a pi0.5 server: send each env's subtask id with every request "
+        "(the wire's prompt key); the server reads it at a refill only, never a replan",
+    )
+    parser.add_argument(
         "--clear_first",
         action="store_true",
         help="MS7g, with --perceived: the selector ranks the grasps that sweep no standing "
@@ -514,6 +520,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         parser.error("--dagger_dir takes cycles over from a policy: it needs the server")
     if args.record_all and not args.dagger_dir:
         parser.error("--record_all records to the --dagger_dir shard: it needs --dagger_dir")
+    if args.pi05_prompt and args.oracle_driver:
+        parser.error("--pi05_prompt sends a pi0.5 server the subtask ids: it needs the server")
     if args.perceived:
         if not args.desk_boxes:
             parser.error("--perceived needs --desk_boxes: a perceived box ends each cycle")
@@ -732,6 +740,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             retry_noise_at=args.retry_noise_at,
             guard_margin=args.guard_margin,
             record_all=args.record_all,
+            pi05_prompt=args.pi05_prompt,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

@@ -273,6 +273,12 @@ The census rows then carry ``OWN_FRAMES_CENSUS`` and each episode its ``final_bo
 and changes no served step, like the recorder itself (``--dagger_dir``), so it is not in the
 ``inference`` block.
 
+``pi05_prompt`` (MS7i Run A, with a policy and a served target row) sends each env's subtask id,
+``record_all``'s own computation, with every request under the wire's ``prompt`` key. The pi0.5
+server reads a row's id only when it refills that row's queue, so the switch never sets a replan
+flag and the chunk in play keeps its latched jaw (MS7i review C6). A policy that ignores the key
+is served the same steps; the ``inference`` block records the switch only when on.
+
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
 """
@@ -2349,6 +2355,7 @@ def rollout(
     retry_noise_at: int = 0,
     guard_margin: float = GUARD_BOX_MARGIN_M,
     record_all: bool = False,
+    pi05_prompt: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -2420,6 +2427,8 @@ def rollout(
     off ``GUARD_BOX_MARGIN_M`` it needs ``carry_guard``.
     ``record_all`` (MS7i) is the module docstring's; it needs a policy, desk boxes, the
     continuous gripper, a served target row and the env's recorder with ``record_all``.
+    ``pi05_prompt`` (MS7i) is the module docstring's; it needs a policy and a served target row,
+    and with it on the policy's ``step`` takes ``prompt``, the (num_envs,) int16 subtask ids.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -2626,6 +2635,8 @@ def rollout(
             "needs a policy, desk boxes, the continuous gripper, a served target row and the "
             "env's recorder with record_all",
         )
+    if pi05_prompt and (policy is None or ctx_target is None):
+        raise EvalFailure("pi05_prompt", "sends a policy each env's subtask: needs a served row")
     limits = robot.data.joint_pos_limits[:, arm_ids, :].to("cpu")
     tracker = RolloutTracker(num_envs, k)
     recorder = getattr(env, "recorder", None)
@@ -2745,6 +2756,8 @@ def rollout(
         switches["carry_guard"] = True
     if retry_noise_at:
         switches["retry_noise_at"] = int(retry_noise_at)
+    if pi05_prompt:
+        switches["pi05_prompt"] = True
     if guard_margin != GUARD_BOX_MARGIN_M:
         switches["guard_margin"] = float(guard_margin)
     if clear_first:
@@ -2773,11 +2786,13 @@ def rollout(
     # cycle close and the cycles closed since they last grew (rule 3).
     interventions = [Counter(strays=0, miss_streak=0) for _ in range(num_envs)]
     streaks = [(0, 0)] * num_envs
-    # ``record_all``: each env's subtask state (lifted, low), the cycle it belongs to, and the
-    # served width its last frame recorded (None before the first), the one its command answered.
+    # ``record_all`` and ``pi05_prompt``: each env's subtask state (lifted, low), the cycle it
+    # belongs to, the served width its last frame recorded (None before the first), the one its
+    # command answered, and its last subtask id.
     sub_state = [(False, None)] * num_envs
     sub_cycle = [0] * num_envs
     sub_width = [None] * num_envs
+    subtasks = [0] * num_envs
 
     started = time.monotonic()
     max_steps = int(env.max_episode_length)
@@ -3074,7 +3089,7 @@ def rollout(
             if stamp is not None:
                 stamp()
             state = policy_state(robot.data.joint_pos).to("cpu").numpy()
-            if record_all:
+            if record_all or pi05_prompt:
                 # MS7i: each live env's subtask on this frame, from what the frames record: the
                 # served state, the last served gap command and the width the last frame
                 # recorded. The state starts over at a new cycle and carries over the steps
@@ -3089,7 +3104,9 @@ def rollout(
                     width = float(ctx_target[i][5]) if sub_width[i] is None else sub_width[i]
                     sid, lifted, low = subtask_step(*sub_state[i], gap, gap_cmd[i], pick_z, width)
                     sub_state[i] = (lifted, low)
-                    env.loop_subtask[i] = sid
+                    subtasks[i] = sid
+                    if record_all:
+                        env.loop_subtask[i] = sid
             wrist = env.obs_buf["images"]["wrist_rgb"].to("cpu").numpy()
             overhead = env.obs_buf["images"]["overhead_rgb"].to("cpu").numpy()
             context = env.obs_buf["context"].to("cpu").numpy() if served_width else None
@@ -3104,6 +3121,8 @@ def rollout(
             if retry_noise_at:  # each env's retry mode, which lasts to its cycle's end
                 retrying = [st.cycle is not None and st.cycle.retry_at is not None for st in states]
                 extra["retry"] = torch.tensor(retrying, dtype=torch.bool).numpy()
+            if pi05_prompt:  # the server reads a row's id only at its refill: no replan here
+                extra["prompt"] = torch.tensor(subtasks, dtype=torch.int16).numpy()
             policy_action = torch.from_numpy(
                 policy.step(state, wrist, overhead, context=context, **extra)
             )
@@ -3569,7 +3588,7 @@ def rollout(
                     states[i].takeovers_failed += 1
                     env.oracle_actor[i] = 0
         _, _, terminated, truncated, _ = env.step(clamped.to(env.device))
-        if record_all:  # the width each frame recorded (a takeover's is the rig's row)
+        if record_all or pi05_prompt:  # the width each frame recorded (a takeover's: the rig's)
             sub_width = [float(w) for w in ctx_target[:, 5]]
         dones = (terminated | truncated).cpu()
         rig.observe(dones)

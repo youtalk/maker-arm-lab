@@ -38,7 +38,8 @@ heap loop's --retry_noise_at flags draws its arm noise at S), and the cache matc
 --pi05_still_noise_scale S2 turns on the server's still rule with --still_rad and --still_open
 (--pi05_still_rad, --pi05_still_open, default the server's), and the cache matches all three.
 --pi05_jaw_latch L reaches the server as --jaw_latch (the jaw commands held after a close), and
-the cache matches it.
+the cache matches it. The heap loop's --pi05_prompt (MS7i Run A: each env's subtask id on the
+wire) goes in --client_flags, needs --pi05, and the cache matches it as a loop switch.
 """
 
 import argparse
@@ -331,10 +332,12 @@ LOOP_SWITCHES = (
     *MS7D_LEVERS,
     "carry_guard",
     *MS7G_SWITCHES,
+    "pi05_prompt",
 )
 """The heap loop's protocol switches (core.loop.rollout); the client records them in the
 payload's inference block under "loop", and the cache matches on them. ``carry_guard`` (MS7g)
-is recorded only when on, so a payload without it ran with it off."""
+and ``pi05_prompt`` (MS7i) are recorded only when on, so a payload without one ran with it
+off."""
 LOOP_SETTINGS = ("rake_cap", "retry_noise_at")
 """The heap loop's integer settings, recorded and matched like the switches; 0 is off.
 ``retry_noise_at`` (MS7h) reaches the client through --client_flags, as --replan_on_switch does,
@@ -1664,6 +1667,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
     jaw = args.pi05_jaw_noise_scale
     sampling = (args.pi05_num_steps, args.pi05_noise_scale, jaw, args.pi05_jaw_latch)
     sampling += (args.pi05_jaw_noise_abs, args.pi05_retry_noise_scale)
+    if "--pi05_prompt" in shlex.split(args.client_flags) and not args.pi05:
+        raise ValueError("--client_flags --pi05_prompt sends a pi0.5 server's prompt: needs --pi05")
     if not args.pi05 and (sampling != (None,) * 6 or args.pi05_jaw_noise_shared):
         raise ValueError(
             "--pi05_num_steps, --pi05_noise_scale, --pi05_retry_noise_scale and the"
