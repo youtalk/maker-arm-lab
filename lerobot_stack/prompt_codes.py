@@ -9,8 +9,11 @@ The codes go to ``--out``, by default ``<root>/meta/prompt_codes.npy`` (train_pi
 
 Run in the lerobot venv:
     lerobot_stack/.venv/bin/python lerobot_stack/prompt_codes.py \\
-        --root ~/data/maker-arm-ms7/h/vla/dataset --out ~/data/maker-arm-ms7/i/vla/corpus_prompt_codes.npy
+        --root ~/data/maker-arm-ms7/h/vla/dataset \\
+        --out ~/data/maker-arm-ms7/i/vla/corpus_prompt_codes.npy
 -> one CODES_OK {json} / CODES_FAIL line; the json gives each subtask's share of the frames.
+2026-10-13, the corpus (9,676,460 frames, 23,957 episodes) on Machine A CPU: 22.7 s, shares
+reach 0.3865, grasp 0.2754, carry 0.1958, release 0.1423.
 """
 
 import argparse

@@ -73,10 +73,11 @@ class Mixed(torch.utils.data.Dataset):
     lerobot's shuffled sampler draws every index once an epoch, so a draw is that source's frame
     with probability share. A slot cycles through a source that fits it, so every frame is drawn;
     a source larger than its slot fills it with a fixed random subset of its frames (numpy
-    default_rng(0), so a resume and every loader worker map alike), never only its first ones. ``meta`` is the corpus's: the policy features and the
-    normalizer statistics. With ``codes`` (one array a source, corpus first) each frame's task is
-    ``prompt(code)``, and a tagged frame drops its advantage sentence with probability DROP, drawn
-    per sample in the loader worker (torch seeds each worker from lerobot's --seed)."""
+    default_rng(0), so a resume and every loader worker map alike), never only its first ones.
+    ``meta`` is the corpus's: the policy features and the normalizer statistics. With ``codes``
+    (one array a source, corpus first) each frame's task is ``prompt(code)``, and a tagged frame
+    drops its advantage sentence with probability DROP, drawn per sample in the loader worker
+    (torch seeds each worker from lerobot's --seed)."""
 
     def __init__(self, corpus, extras: list, codes: list | None = None):
         rest = 1 - sum(s for _, s in extras)
