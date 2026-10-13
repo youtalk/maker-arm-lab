@@ -88,11 +88,14 @@ class UnnormalizerProcessorStep(NormalizerProcessorStep):
 
 
 class TokenizerProcessorStep:
+    """A tokenizer of one token a word, plus BOS."""
+
     def __init__(self, max_length):
         self.max_length = max_length
+        self.input_tokenizer = lambda text: {"input_ids": ["<bos>", *text.split()]}
 
 
-def _preflight_rig(**bad):
+def _preflight_rig(tasks=("a task",), **bad):
     """(policy class, train module, batch) after install(), with one defect from ``bad``."""
     flat = {
         f"{k}.{n}": np.asarray(v, np.float32) for k, sub in STATS.items() for n, v in sub.items()
@@ -117,7 +120,7 @@ def _preflight_rig(**bad):
     )
     post = SimpleNamespace(steps=[UnnormalizerProcessorStep(unnorm)])
     module = SimpleNamespace(make_pre_post_processors=lambda *a, **k: (pre, post))
-    install(module, Policy, flat, 128)
+    install(module, Policy, flat, 128, list(tasks))
     if "stock" not in bad:  # train_pi05.py swaps the forward before lerobot builds anything
         Policy.forward = lambda self, batch, reduction="mean": "masked"
     import torch
@@ -139,6 +142,37 @@ def test_a_full_load_with_the_corpus_stats_reaches_the_masked_forward(capsys):
     out = capsys.readouterr().out
     assert FULL in out and "PREFLIGHT_OK full_load=1" in out and "max_length=128" in out
     assert "action_is_pad=(4, 50) pad_share=0.0000" in out
+    # BOS + "Task: a task, State:" + 23 bins (the last "255;") + "Action:" = 1 + 4 + 23 + 1
+    assert "max_length=128 longest=29 action_is_pad" in out
+
+
+def test_the_longest_prompt_must_stay_under_the_padded_length(capsys):
+    fits = ("a", " ".join(["w"] * 98))  # 29 - 2 + 98 = 125 tokens
+    assert _train_once(*_preflight_rig(tasks=fits)) == "masked"
+    assert "longest=125 " in capsys.readouterr().out
+    with pytest.raises(PreflightError, match="the longest prompt takes 128 of 128 tokens"):
+        _train_once(*_preflight_rig(tasks=("a", " ".join(["w"] * 101))))
+
+
+def test_the_preflight_reads_run_a_s_prompts_with_the_codes_flag(monkeypatch):
+    from train_pi05 import TASK, prompt
+
+    seen = []
+    lerobot = {
+        "lerobot.policies.pi05.modeling_pi05": SimpleNamespace(PI05Policy=None),
+        "lerobot.scripts": SimpleNamespace(lerobot_train=None),
+    }
+    for name, module in lerobot.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(sys, "argv", list(sys.argv))  # train() sets it for the trainer
+    monkeypatch.setattr(pi05_preflight, "install", lambda *a: seen.append(a[-1]))
+    monkeypatch.setattr(pi05_preflight.runpy, "run_path", lambda *a, **k: None)
+    monkeypatch.setattr(pi05_preflight, "file_stats", lambda path: {})
+    monkeypatch.setenv("PREFLIGHT_STATS", "x")
+    monkeypatch.setenv("PREFLIGHT_MAX_LENGTH", "200")
+    pi05_preflight.train(["--steps=8"])
+    pi05_preflight.train(["--mix=/d:0.3", "--prompt_codes"])
+    assert seen == [[TASK], [prompt(c) for c in range(12)]]
 
 
 @pytest.mark.parametrize(
