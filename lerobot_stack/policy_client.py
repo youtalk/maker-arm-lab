@@ -63,10 +63,12 @@ class ServerPolicy:
         anchor: np.ndarray | None = None,
         replan: np.ndarray | None = None,
         retry: np.ndarray | None = None,
+        prompt: np.ndarray | None = None,
     ) -> np.ndarray:
-        """``replan`` is the (batch,) bool per-env replan flag of ``--replan_on_switch``, and
-        ``retry`` the per-env retry flag of ``--retry_noise_at``; None leaves either off the
-        wire, which an older server needs."""
+        """``replan`` is the (batch,) bool per-env replan flag of ``--replan_on_switch``,
+        ``retry`` the per-env retry flag of ``--retry_noise_at`` and ``prompt`` the per-env
+        subtask id of ``--pi05_prompt``; None leaves each off the wire, which an older server
+        needs."""
         arrays = {"state": state, "wrist": wrist, "overhead": overhead}
         if context is not None:
             arrays[policy_protocol.CONTEXT_KEY] = context
@@ -76,6 +78,8 @@ class ServerPolicy:
             arrays[policy_protocol.REPLAN_KEY] = np.asarray(replan, dtype=bool)
         if retry is not None:
             arrays[policy_protocol.RETRY_KEY] = np.asarray(retry, dtype=bool)
+        if prompt is not None:
+            arrays[policy_protocol.PROMPT_KEY] = np.asarray(prompt, dtype=np.int16)
         started = time.perf_counter()
         policy_protocol.send_message(
             self._socket, {"type": "step", "batch": int(state.shape[0])}, arrays

@@ -40,6 +40,12 @@ Still PROTOCOL_VERSION 4: an optional `retry` array (batch,) bool rides beside t
 (MS7h `--retry_noise_at`). The heap loop sets env i's flag while its cycle is in retry mode, and a
 pi0.5 server with `--retry_noise_scale` forwards that row at its retry noise. Absent means all
 False. The ACT server validates it and ignores it.
+
+Still PROTOCOL_VERSION 4: an optional `prompt` array (batch,) int16 rides beside the observation
+(MS7i `--pi05_prompt`). It holds env i's subtask id (core.hold.SUBTASKS order), and a pi0.5 server
+reads it only when it refills that row's queue, to build Run A's prompt. Absent means the original
+task string. A version-4 server that predates the key rejects it as bad_obs, as for replan and
+retry. The ACT server validates it and ignores it.
 """
 
 import io
@@ -95,6 +101,9 @@ REPLAN_DTYPE = "bool"
 
 RETRY_KEY = "retry"
 RETRY_DTYPE = "bool"
+
+PROMPT_KEY = "prompt"
+PROMPT_DTYPE = "int16"
 
 
 def _pack(array: np.ndarray) -> bytes:
@@ -182,12 +191,17 @@ def validate_retry(array: np.ndarray, batch_size: int) -> None:
     _check(RETRY_KEY, array, (), RETRY_DTYPE, batch_size)
 
 
+def validate_prompt(array: np.ndarray, batch_size: int) -> None:
+    """A (batch,) int16 array: each env's subtask id."""
+    _check(PROMPT_KEY, array, (), PROMPT_DTYPE, batch_size)
+
+
 def validate_obs(arrays: dict, batch_size: int) -> None:
-    keys = set(arrays) - {CONTEXT_KEY, ANCHOR_KEY, REPLAN_KEY, RETRY_KEY}
+    keys = set(arrays) - {CONTEXT_KEY, ANCHOR_KEY, REPLAN_KEY, RETRY_KEY, PROMPT_KEY}
     if keys != set(OBS_SCHEMA):
         raise ValueError(
             f"obs keys {sorted(arrays)}, want {sorted(OBS_SCHEMA)} "
-            "(+ optional context, anchor, replan, retry)"
+            "(+ optional context, anchor, replan, retry, prompt)"
         )
     for name, (sample_shape, dtype) in OBS_SCHEMA.items():
         _check(name, arrays[name], sample_shape, dtype, batch_size)
@@ -200,6 +214,8 @@ def validate_obs(arrays: dict, batch_size: int) -> None:
         validate_replan(arrays[REPLAN_KEY], batch_size)
     if RETRY_KEY in arrays:
         validate_retry(arrays[RETRY_KEY], batch_size)
+    if PROMPT_KEY in arrays:
+        validate_prompt(arrays[PROMPT_KEY], batch_size)
 
 
 def validate_action(array: np.ndarray, batch_size: int) -> None:

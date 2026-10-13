@@ -211,3 +211,32 @@ def test_optional_retry_is_validated_when_present():
         validate_obs({**arrays, RETRY_KEY: np.zeros(3, dtype=bool)}, 2)
     with pytest.raises(ValueError, match="retry"):
         validate_obs({**arrays, RETRY_KEY: np.zeros(2, dtype=np.uint8)}, 2)
+
+
+def test_optional_prompt_is_validated_when_present_and_round_trips():
+    from policy_protocol import PROMPT_KEY, RETRY_KEY
+
+    assert PROMPT_KEY == "prompt"
+    validate_obs({**_obs(), PROMPT_KEY: np.array([0, 3], np.int16)}, 2)
+    validate_obs({**_obs(), PROMPT_KEY: np.ones(2, np.int16), RETRY_KEY: np.ones(2, bool)}, 2)
+    for bad in (np.zeros(3, np.int16), np.zeros((2, 1), np.int16), np.zeros(2, np.int32)):
+        with pytest.raises(ValueError, match="prompt"):
+            validate_obs({**_obs(), PROMPT_KEY: bad}, 2)
+    ctx = zmq.Context.instance()
+    rep = ctx.socket(zmq.REP)
+    port = rep.bind_to_random_port("tcp://127.0.0.1")
+    req = ctx.socket(zmq.REQ)
+    req.connect(f"tcp://127.0.0.1:{port}")
+    for sent in (_obs(), {**_obs(), PROMPT_KEY: np.array([2, 1], np.int16)}):
+        t = threading.Thread(target=lambda: send_message(rep, *recv_message(rep)))
+        t.start()
+        send_message(req, {"type": "step", "batch": 2}, sent)
+        _, arrays = recv_message(req)
+        t.join(timeout=5)
+        assert arrays.keys() == sent.keys()
+        validate_obs(arrays, 2)
+        for key, value in sent.items():
+            np.testing.assert_array_equal(arrays[key], value)
+            assert arrays[key].dtype == value.dtype
+    req.close(0)
+    rep.close(0)
