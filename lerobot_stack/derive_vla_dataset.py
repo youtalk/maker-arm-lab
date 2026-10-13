@@ -24,6 +24,11 @@ wave ``w<N>``. A contiguous block, not every third episode, because one video fi
 consecutive episodes, so a spread subset would still need every file. The subset is renumbered;
 the stats of the index columns (``index``, ``episode_index``) stay the source's.
 
+A source with the int8 ``label`` and ``subtask`` columns (MS7i: ``convert_to_lerobot.py
+--own_frames labeled``) loses both, and their codes ``3 * subtask + label`` go to the sidecar
+``meta/prompt_codes.npy`` in the derived frame order (``train_pi05.CODES``, which Run A's
+``--prompt_codes`` reads), so the root keeps the corpus's features.
+
 Run in the lerobot venv:
     lerobot_stack/.venv/bin/python lerobot_stack/derive_vla_dataset.py \\
         --src ~/data/maker-arm-ms7/g/w1234567/dataset --out ~/data/maker-arm-ms7/h/vla/dataset
@@ -45,11 +50,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from policy_server import CONTEXT_ROLL, wrap_context_roll
+from train_pi05 import CODES
 
 STATE = "observation.state"
 ENV = "observation.environment_state"
 TASK = "pick up the marked part and place it in its box"
 ROLL_NAME = "overhead_cam_roll"
+LABELS = ("label", "subtask")  # convert_to_lerobot --own_frames labeled: int8, one a frame
 
 
 def read_tables(directory: Path, names: list[str] | None = None) -> pa.Table:
@@ -120,7 +127,8 @@ def derive(src: Path, out: Path, fraction: Fraction = Fraction(1)) -> dict:
     renumber = np.cumsum(keep) - 1  # source episode -> derived episode, where kept
 
     out.mkdir(parents=True)
-    states, actions, offset = [], [], 0
+    states, actions, codes, offset = [], [], [], 0
+    labeled = all(name in info["features"] for name in LABELS)
     for path in sorted((src / "data").glob("*/*.parquet")):
         table = pq.read_table(path)
         index = table["index"].to_numpy()
@@ -140,6 +148,10 @@ def derive(src: Path, out: Path, fraction: Fraction = Fraction(1)) -> dict:
         table = put(table, STATE, pa.ListArray.from_arrays(offsets, flat, table[STATE].type))
         table = put(table, "episode_index", renumber[table["episode_index"].to_numpy()])
         table = put(table, "index", np.arange(done, done + n)).drop_columns([ENV])
+        if labeled:
+            label, subtask = (table[name].to_numpy() for name in LABELS)  # shape (1,): scalar
+            codes.append((3 * subtask + label).astype(np.int8))
+            table = table.drop_columns(list(LABELS))
         target = out / path.relative_to(src)
         target.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(table.replace_schema_metadata(None), target)
@@ -151,7 +163,8 @@ def derive(src: Path, out: Path, fraction: Fraction = Fraction(1)) -> dict:
     if ends[-1] != len(state):
         raise ValueError(f"{len(state)} frames written, the kept episodes hold {ends[-1]}")
     per_episode = [feature_stats(state[b - n : b]) for n, b in zip(lengths, ends)]
-    stale = [c for c in kept.column_names if c.startswith((f"stats/{STATE}/", f"stats/{ENV}/"))]
+    gone = (STATE, ENV, *(LABELS if labeled else ()))
+    stale = [c for c in kept.column_names if c.startswith(tuple(f"stats/{k}/" for k in gone))]
     kept = kept.drop_columns(stale)
     for key in per_episode[0]:
         kept = put(kept, f"stats/{STATE}/{key}", [s[key].tolist() for s in per_episode])
@@ -172,6 +185,11 @@ def derive(src: Path, out: Path, fraction: Fraction = Fraction(1)) -> dict:
 
     stats = json.loads((src / "meta/stats.json").read_text())
     stats.pop(ENV)
+    if labeled:
+        for name in LABELS:
+            stats.pop(name, None)
+            info["features"].pop(name)
+        np.save(out / CODES, np.concatenate(codes))
     for key, values in ((STATE, state), ("action", np.concatenate(actions))):
         stats[key] = {k: v.tolist() for k, v in feature_stats(values).items()}
     (out / "meta/stats.json").write_text(json.dumps(stats, indent=4))
