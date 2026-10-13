@@ -60,7 +60,8 @@ policy frame with the int8 columns ``label`` and ``subtask``, which no policy re
 starts with ``observation`` or ``action``); ``positive`` writes only the positive frames in the
 stock schema, so the root merges with a corpus. Takeover, handoff and rake frames are dropped and
 counted: the takeovers come from the stock ``--split_cycles --dagger --drop_reopen_lead`` pass on
-the same shards. ``meta/own_frames.json`` keeps one row per cycle for the audit sampler. It
+the same shards. ``meta/own_frames.json`` keeps one row per cycle for the audit sampler. Any
+conversion of record_all shards also writes ``meta/subtask.npy`` (``SUBTASK_META``). It
 refuses a shard that ``dag_mask.py`` rewrote (``obs/actor_raw``).
 """
 
@@ -175,6 +176,11 @@ REOPEN_WITHIN = 10  # steps from a close to the open that makes it a failing re-
 OFF_TARGET_M = 0.020  # m, the MS7h jaw table's off-target first close: off_z or the xy distance
 EVENTS = ("off_target", "reopen", "no_lift", "takeover", "lost", "release")
 OWN_META = "own_frames.json"
+SUBTASK_META = "subtask.npy"
+"""``meta/subtask.npy``: the recorded obs/subtask of every frame of a root, by frame index, kept
+while every frame of the root has one (record_all shards), for Run A's prompt codes. A takeover
+that starts after a lift keeps the loop's carry, which an offline pass over the takeover alone
+would read as grasp."""
 
 
 @dataclass
@@ -197,7 +203,8 @@ def own_labels(rows, classes, reasons, final_box, cycle, actor, phase, subtask):
     j are the frames with loop_cycle j + 1, contiguous and as many as its census steps, and no
     frame names a cycle without a row; anything else raises. A frame reads closed in the grasp
     and carry subtasks; a close is an open-to-closed edge (or a cycle that starts closed), a
-    re-open a closed-to-open edge. The events (frame e), in the cycle: ``off_target`` the first
+    re-open a closed-to-open edge. The events (frame e, a policy frame of the cycle: one on a
+    takeover's or a handoff's frame is the teacher's, and dropped): ``off_target`` the first
     close with off_z or the xy offset over ``OFF_TARGET_M``; ``reopen`` each re-open within
     ``REOPEN_WITHIN`` steps of its close; ``no_lift`` the last close of a cycle that lifted
     nothing (max_rise under ``LIFT_MIN_RISE``) and did not stow; ``takeover`` the last frame
@@ -230,7 +237,7 @@ def own_labels(rows, classes, reasons, final_box, cycle, actor, phase, subtask):
         span = range(s, last + 1)
         shut = [t for t in span if closed[t] and (t == s or not closed[t - 1])]
         opened = [t for t in span if t > s and closed[t - 1] and not closed[t]]
-        hits = []  # (event, frame), kept when the frame lies in the cycle
+        hits = []  # (event, frame), kept when the frame is a policy frame of the cycle
         if row["first_close_at"] is not None and row["off_z"] is not None:
             off_xy = math.hypot(row["off_x"], row["off_y"])
             if row["off_z"] > OFF_TARGET_M or off_xy > OFF_TARGET_M:
@@ -254,7 +261,7 @@ def own_labels(rows, classes, reasons, final_box, cycle, actor, phase, subtask):
         if row["release_place"] in FAILING_PLACES and row["release_at"] is not None:
             hits.append(("release", s + row["release_at"]))
         for name, e in hits:
-            if s <= e <= last:
+            if s <= e <= last and policy[e]:
                 info["events"][name].append(int(e))
                 window = slice(max(s, e - NEG_WINDOW + 1), e + 1)
                 label[window][policy[window]] = TAG_NEGATIVE
@@ -543,6 +550,10 @@ def convert(
         )
         write_action_space_marker(root, action_space, gripper)
     converted = read = skipped = 0
+    sidecar = root / "meta" / SUBTASK_META
+    frames_before, subtasks, lacking = dataset.meta.total_frames, [], False
+    if sidecar.exists() and not all(recorded_subtasks(shard) for shard in shards):
+        raise RuntimeError(f"{sidecar}: a shard without obs/subtask would join a root that has it")
     for shard in shards:
         with h5py.File(shard, "r") as f:
             recorded_gripper = str(f.attrs.get("gripper_mode", "binary"))
@@ -571,6 +582,7 @@ def convert(
                     skipped += 1
                     continue
                 actions = grp["actions"][:]  # (T, 7) raw pre-clamp oracle command
+                recorded = grp["obs/subtask"][:] if "obs/subtask" in grp else None
                 targets = grp["joint_targets"][:]  # (T, 8)
                 state = grp["obs/joint_pos_abs"][:]  # (T, 8): 6 arm + left/right jaw (m)
                 wrist = grp["obs/images/wrist_rgb"] if images else None  # (T, 224, 224, 3) uint8
@@ -655,6 +667,10 @@ def convert(
                                 frame[name] = column[t : t + 1]
                         dataset.add_frame(frame)
                     dataset.save_episode()
+                    if recorded is None:
+                        lacking = True
+                    else:
+                        subtasks.append(recorded[seg])
                     if own is not None and cycle[seg[0]] > 0:  # the audit's frame map
                         infos[cycle[seg[0]] - 1]["written"].append(
                             [episode_index, int(seg[0]), len(seg)]
@@ -669,11 +685,21 @@ def convert(
                         )
                     converted += 1
     dataset.finalize()
+    # The sidecar exists only while every frame of the root has its recorded subtask.
+    if subtasks and not lacking and (sidecar.exists() or frames_before == 0):
+        before = np.load(sidecar) if sidecar.exists() else np.zeros(0, np.int8)
+        np.save(sidecar, np.concatenate([before, *subtasks]).astype(np.int8))
     if own is not None:
         meta = root / "meta" / OWN_META
         before = json.loads(meta.read_text())["cycles"] if meta.exists() else []
         meta.write_text(json.dumps({"cycles": before + own.rows}))
     return Counts(converted, dataset.meta.total_episodes, read, skipped)
+
+
+def recorded_subtasks(shard: Path) -> bool:
+    """Every demo of ``shard`` records obs/subtask (a record_all shard)."""
+    with h5py.File(shard, "r") as f:
+        return all("obs/subtask" in demo for demo in f["data"].values())
 
 
 def own_segments(own, shard, demo, grp, payload, steps):

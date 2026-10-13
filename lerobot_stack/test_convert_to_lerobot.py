@@ -861,3 +861,30 @@ def test_the_positive_and_takeover_roots_have_the_corpus_schema_and_marker(tmp_p
         assert info["features"] == CORPUS_FEATURES and info["fps"] == 30, root
         marker = json.loads((tmp_path / root / "meta" / "action_space.json").read_text())
         assert marker == {"action_space": "absolute", "gripper": "continuous"}, root
+    # The recorded subtasks ride along by frame index (the prompt codes' sidecar).
+    with h5py.File(shard, "r") as f:
+        recorded = f["data/demo_0/obs/subtask"][:]
+    assert np.array_equal(np.load(tmp_path / "pos/meta/subtask.npy"), recorded[5:55])
+    assert np.array_equal(np.load(tmp_path / "dag/meta/subtask.npy"), recorded[60:80])
+    stock = _shard(tmp_path / "stock.hdf5", box=True, target=True)
+    with h5py.File(stock, "a") as f:
+        f.attrs["gripper_mode"] = "continuous"
+    with pytest.raises(RuntimeError, match="without obs/subtask would join"):
+        c2l.convert([stock], tmp_path / "dag", "t/y", 30, **kw)
+    c2l.convert([stock], tmp_path / "plain", "t/z", 30, **kw)
+    assert not (tmp_path / "plain/meta/subtask.npy").exists()
+
+
+def test_an_event_on_a_teacher_frame_is_dropped():
+    """The still scene's cycle 2 (2026-10-13 audit): the census's first close was the takeover's
+    first frame, so off_target landed on a teacher frame. Events come from policy frames only;
+    the takeover's own event still ends on the last policy frame."""
+    cycle, actor, phase, subtask = _episode()
+    actor[30:55], phase[30:55] = 1, 2
+    row = _row(50, first_close_at=25, off_x=0.0, off_y=0.0, off_z=0.03)
+    label, (info,) = _labels(row, cycle, actor, phase, subtask, cls="stowed")
+    assert info["events"]["off_target"] == [] and info["events"]["takeover"] == [29]
+    assert _window(label, 5, 29)
+    phase[30:55], actor[30:55] = 4, 0  # a handoff's rig frames: the teacher's too
+    _, (info,) = _labels(row, cycle, actor, phase, subtask, cls="stowed")
+    assert info["events"]["off_target"] == []
