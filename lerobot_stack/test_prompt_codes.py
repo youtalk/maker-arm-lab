@@ -78,9 +78,10 @@ def test_a_root_out_of_index_order_fails_and_the_real_bridge_runs(tmp_path):
     )
     last = out.stdout.strip().splitlines()[-1]
     assert last.startswith("CODES_OK "), out.stdout + out.stderr
-    # each episode starts at reach; then the previous command (0.1048 m at most) is under the
-    # fixture's width (1.02 m and up), so the jaws read closed with no lift: grasp
-    assert np.load(tmp_path / "c.npy").tolist() == [1, 4, 4, 1, 4]
+    # each episode starts at reach; a command reads against the width its frame answered, the
+    # last frame's (hold.subtask_ids): 0.1048 m at most over 0.02 m reads open (reach), over the
+    # fixture's 1.02 m and up closed with no lift (grasp)
+    assert np.load(tmp_path / "c.npy").tolist() == [1, 1, 4, 1, 4]
 
 
 def test_a_usage_error_prints_the_fail_token():
