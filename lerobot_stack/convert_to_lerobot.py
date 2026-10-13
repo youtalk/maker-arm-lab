@@ -48,13 +48,29 @@ opens at once teach the policy's re-open) drops, per takeover episode, the leadi
 measured jaw gap (left + right jaw) lies more than TOL_M under the commanded gap (``reopen_lead``).
 It needs ``--dagger --gripper continuous`` and adds its counts to the CONVERT_OK line. Off by
 default.
+
+``--own_frames {labeled,positive}`` (MS7i rev3 design 5.3) converts the policy's own frames of a
+``mj_eval_heap.py --dagger_dir --record_all`` shard. It reads the shard's payload
+(``<shard>.meta.json``, the client's ``--out``), joins each census row to the frames of its
+``obs/loop_cycle`` value (the frame count must equal the row's ``open_steps + closed_steps``, or
+the conversion fails) and labels every policy frame (``own_labels``): ``TAG_NEGATIVE`` on the
+``NEG_WINDOW`` frames that end at a failing event, ``TAG_POSITIVE`` on a clean grasp segment and
+on a carry the policy ends in its served box, ``TAG_UNTAGGED`` otherwise. ``labeled`` writes every
+policy frame with the int8 columns ``label`` and ``subtask``, which no policy reads (neither name
+starts with ``observation`` or ``action``); ``positive`` writes only the positive frames in the
+stock schema, so the root merges with a corpus. Takeover, handoff and rake frames are dropped and
+counted: the takeovers come from the stock ``--split_cycles --dagger --drop_reopen_lead`` pass on
+the same shards. ``meta/own_frames.json`` keeps one row per cycle for the audit sampler. It
+refuses a shard that ``dag_mask.py`` rewrote (``obs/actor_raw``).
 """
 
 import argparse
 import json
+import math
 import sys
 import traceback
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
@@ -140,6 +156,138 @@ class ReopenLead:
     frames: int = 0
     takeovers: int = 0  # takeover episodes that lost a lead
     emptied: int = 0  # takeovers that lost every frame, so were not written
+
+
+# MS7i --own_frames. The label codes are the interface's TAG_* values; the rest are copies of
+# core (this venv has no maker_arm_lab): hold.SUBTASKS, oracle.LIFT_MIN_RISE,
+# loop.CENSUS_MIN_HELD_STEPS and the loop.RELEASE_PLACES a release fails or ends in a box on,
+# pinned by tests/test_lerobot_schema_pin.py.
+OWN_MODES = ("labeled", "positive")
+TAG_UNTAGGED, TAG_POSITIVE, TAG_NEGATIVE = 0, 1, 2
+SUBTASKS = ("reach", "grasp", "carry", "release")
+CARRY = SUBTASKS.index("carry")
+LIFT_MIN_RISE = 0.05
+CENSUS_MIN_HELD_STEPS = 10
+FAILING_PLACES = ("tray", "desk", "rim")
+BOX_PLACES = ("right_box", "wrong_box")
+NEG_WINDOW = 30  # frames that end at a failing event, the event's included (rev3 design 5.3)
+REOPEN_WITHIN = 10  # steps from a close to the open that makes it a failing re-open
+OFF_TARGET_M = 0.020  # m, the MS7h jaw table's off-target first close: off_z or the xy distance
+EVENTS = ("off_target", "reopen", "no_lift", "takeover", "lost", "release")
+OWN_META = "own_frames.json"
+
+
+@dataclass
+class OwnFrames:
+    """--own_frames: the mode, the host override, and what a conversion counted and joined."""
+
+    mode: str
+    host: str | None = None
+    counts: Counter = field(default_factory=Counter)
+    rows: list = field(default_factory=list)  # one per census row, for meta/own_frames.json
+
+
+def own_labels(rows, classes, reasons, final_box, cycle, actor, phase, subtask):
+    """One episode's per-frame labels (int8 ``TAG_*``) and one dict per census row.
+
+    ``rows``, ``classes`` and ``reasons`` are the episode's ``cycle_census``, ``cycle_classes``
+    and ``cycle_reasons``, ``final_box`` its box per part; the rest are the shard's per-frame
+    obs/loop_cycle, obs/actor, obs/cycle_phase and obs/subtask. A policy frame has phase -1 and
+    actor 0; only policy frames get a label other than untagged. The join: the frames of row
+    j are the frames with loop_cycle j + 1, contiguous and as many as its census steps, and no
+    frame names a cycle without a row; anything else raises. A frame reads closed in the grasp
+    and carry subtasks; a close is an open-to-closed edge (or a cycle that starts closed), a
+    re-open a closed-to-open edge. The events (frame e), in the cycle: ``off_target`` the first
+    close with off_z or the xy offset over ``OFF_TARGET_M``; ``reopen`` each re-open within
+    ``REOPEN_WITHIN`` steps of its close; ``no_lift`` the last close of a cycle that lifted
+    nothing (max_rise under ``LIFT_MIN_RISE``) and did not stow; ``takeover`` the last frame
+    before the teacher's first, or the last frame of a ``takeover_declined`` cycle; ``lost`` the
+    frame after the last contact-held step of a lifted cycle, if it reads closed (a slip);
+    ``release`` the open after the lift onto ``FAILING_PLACES``. The positives: the grasp
+    segment (cycle start to the first carry frame) of a cycle with a hold and a lift, no re-open
+    before the carry and no rig frame; the carry segment (the first carry frame to the cycle
+    end) when the policy ends it alone (no handoff, no rig frame) with a release over a box and
+    its part, held by no later cycle, at rest in the served box. A negative window wins."""
+    n = len(cycle)
+    policy = (phase == -1) & (actor == 0)
+    closed = np.isin(subtask, (SUBTASKS.index("grasp"), CARRY))
+    label = np.full(n, TAG_UNTAGGED, np.int8)
+    if n and int(cycle.max()) > len(rows):
+        raise RuntimeError(f"obs/loop_cycle reaches {int(cycle.max())} with {len(rows)} rows")
+    out = []
+    for j, row in enumerate(rows):
+        frames = np.flatnonzero(cycle == j + 1)
+        steps = row["open_steps"] + row["closed_steps"]
+        if len(frames) != steps or (len(frames) and frames[-1] - frames[0] + 1 != len(frames)):
+            raise RuntimeError(f"cycle {j + 1}: {len(frames)} frames against {steps} census steps")
+        info = {"ordinal": j + 1, "first": None, "last": None, "carry_start": None}
+        info["events"] = {name: [] for name in EVENTS}
+        out.append(info)
+        if not len(frames):
+            continue
+        s, last = int(frames[0]), int(frames[-1])
+        info["first"], info["last"] = s, last
+        span = range(s, last + 1)
+        shut = [t for t in span if closed[t] and (t == s or not closed[t - 1])]
+        opened = [t for t in span if t > s and closed[t - 1] and not closed[t]]
+        hits = []  # (event, frame), kept when the frame lies in the cycle
+        if row["first_close_at"] is not None and row["off_z"] is not None:
+            off_xy = math.hypot(row["off_x"], row["off_y"])
+            if row["off_z"] > OFF_TARGET_M or off_xy > OFF_TARGET_M:
+                hits.append(("off_target", s + row["first_close_at"]))
+        for r in opened:
+            c = max((t for t in shut if t < r), default=None)
+            if c is not None and r - c <= REOPEN_WITHIN:
+                hits.append(("reopen", r))
+        lifted = row["max_rise"] >= LIFT_MIN_RISE
+        if not lifted and classes[j] != "stowed" and shut:
+            hits.append(("no_lift", shut[-1]))
+        teacher = np.flatnonzero(actor[s : last + 1] != 0)
+        if len(teacher):
+            hits.append(("takeover", s + int(teacher[0]) - 1))
+        elif reasons[j] == "takeover_declined":
+            hits.append(("takeover", last))
+        if lifted and row["last_held_at"] is not None:
+            e = s + row["last_held_at"] + 1
+            if e <= last and closed[e]:
+                hits.append(("lost", e))
+        if row["release_place"] in FAILING_PLACES and row["release_at"] is not None:
+            hits.append(("release", s + row["release_at"]))
+        for name, e in hits:
+            if s <= e <= last:
+                info["events"][name].append(int(e))
+                window = slice(max(s, e - NEG_WINDOW + 1), e + 1)
+                label[window][policy[window]] = TAG_NEGATIVE
+        carry = [t for t in span if subtask[t] == CARRY]
+        if not carry:
+            continue
+        start = info["carry_start"] = carry[0]
+        grasp, rest = slice(s, start), slice(start, last + 1)
+        held = row["held_steps"] >= CENSUS_MIN_HELD_STEPS and lifted
+        if held and not any(r < start for r in opened) and policy[grasp].all():
+            label[grasp][label[grasp] != TAG_NEGATIVE] = TAG_POSITIVE
+        part = row["last_held"]
+        again = any(part in (later["first_held"], later["last_held"]) for later in rows[j + 1 :])
+        if (
+            row.get("handoff") is None
+            and policy[rest].all()
+            and row["release_at"] is not None
+            and row["release_place"] in BOX_PLACES
+            and part >= 0
+            and not again
+            and final_box[part] == row["box"]
+        ):
+            label[rest][label[rest] != TAG_NEGATIVE] = TAG_POSITIVE
+    return label, out
+
+
+def own_runs(keep: np.ndarray, cycle: np.ndarray) -> list[np.ndarray]:
+    """Maximal runs of kept frames, consecutive in time and of one loop_cycle value."""
+    idx = np.flatnonzero(keep)
+    if not len(idx):
+        return []
+    cuts = np.flatnonzero((np.diff(idx) != 1) | (np.diff(cycle[idx]) != 0)) + 1
+    return np.split(idx, cuts)
 
 
 def write_action_space_marker(root: Path, action_space: str, gripper: str = "binary") -> None:
@@ -301,6 +449,7 @@ def convert(
     dagger: bool = False,
     gripper: str = "binary",
     reopen: ReopenLead | None = None,
+    own: OwnFrames | None = None,
 ) -> Counts:
     """Convert `shards` into (or append them onto) the LeRobot dataset at `root`.
 
@@ -333,6 +482,16 @@ def convert(
         raise ValueError(f"context must be one of {CONTEXT_CHANNELS}, got {context!r}")
     if not images and context is None:
         raise ValueError("a dataset without images needs a context channel (--context)")
+    if own is not None:
+        if own.mode not in OWN_MODES:
+            raise ValueError(f"own_frames must be one of {OWN_MODES}, got {own.mode!r}")
+        if split_cycles or dagger or lead_keep or sidecar_dir is not None or reopen is not None:
+            raise ValueError(
+                "own_frames refuses split_cycles, dagger, lead_keep, sidecar_dir and reopen: "
+                "the stock --dagger pass converts the takeovers"
+            )
+        if gripper != "continuous" or context != "camera_box_target":
+            raise ValueError("own_frames needs gripper continuous and context camera_box_target")
     context_names = read_context_names(shards[0], context) if context is not None else None
     keys = context_keys(context)
     # Resume iff root/meta/info.json (the local LeRobot dataset marker) exists. A bare
@@ -370,10 +529,14 @@ def convert(
                 "one; use a fresh --sidecar_dir for a new dataset root, or resume into the "
                 "existing --root that produced them"
             )
+        features = build_features(context_names, images, gripper)
+        if own is not None and own.mode == "labeled":
+            for name in ("label", "subtask"):
+                features[name] = {"dtype": "int8", "shape": (1,), "names": [name]}
         dataset = LeRobotDataset.create(
             repo_id,
             fps=fps,
-            features=build_features(context_names, images, gripper),
+            features=features,
             root=root,
             robot_type="maker_arm",
             use_videos=True,
@@ -389,6 +552,14 @@ def convert(
                     f"--gripper is {gripper}"
                 )
             data = f["data"]
+            payload = None
+            if own is not None:
+                meta = shard.with_name(shard.name.removesuffix(".hdf5") + ".meta.json")
+                payload = json.loads(meta.read_text())
+                if Path(payload.get("shard", "")).name != shard.name or not payload.get(
+                    "record_all"
+                ):
+                    raise RuntimeError(f"{meta} is not the record_all payload of {shard.name}")
             for demo in sorted(data.keys(), key=lambda k: int(k.split("_")[1])):
                 grp = data[demo]
                 read += 1
@@ -396,7 +567,7 @@ def convert(
                 # A heap shard is not: it records every episode and its `success` means "every
                 # part stowed", so under --dagger the positive-actor cut is the filter and this
                 # one would throw nearly the whole corpus away before it ran (module docstring).
-                if not dagger and not bool(grp.attrs.get("success", False)):
+                if not dagger and own is None and not bool(grp.attrs.get("success", False)):
                     skipped += 1
                     continue
                 actions = grp["actions"][:]  # (T, 7) raw pre-clamp oracle command
@@ -433,6 +604,10 @@ def convert(
                             raise RuntimeError(f"{shard}:{demo} has no obs/actor dataset")
                         actor = grp["obs/actor"][:steps]
                     segments = cycle_segments(phase, brick, lead_keep, actor)
+                elif own is not None:
+                    segments, columns, cycle, infos = own_segments(
+                        own, shard, demo, grp, payload, steps
+                    )
                 else:
                     segments = [np.arange(steps)]
                 # Hoisted out of the segment loop: read+stack once per demo instead of once
@@ -475,8 +650,15 @@ def convert(
                             frame["observation.images.overhead"] = overhead[t]
                         if keys:
                             frame["observation.environment_state"] = ctx[t].astype(np.float32)
+                        if own is not None and own.mode == "labeled":
+                            for name, column in columns.items():
+                                frame[name] = column[t : t + 1]
                         dataset.add_frame(frame)
                     dataset.save_episode()
+                    if own is not None and cycle[seg[0]] > 0:  # the audit's frame map
+                        infos[cycle[seg[0]] - 1]["written"].append(
+                            [episode_index, int(seg[0]), len(seg)]
+                        )
                     if sidecar_dir is not None:
                         sidecar_dir.mkdir(parents=True, exist_ok=True)
                         np.savez(
@@ -487,7 +669,66 @@ def convert(
                         )
                     converted += 1
     dataset.finalize()
+    if own is not None:
+        meta = root / "meta" / OWN_META
+        before = json.loads(meta.read_text())["cycles"] if meta.exists() else []
+        meta.write_text(json.dumps({"cycles": before + own.rows}))
     return Counts(converted, dataset.meta.total_episodes, read, skipped)
+
+
+def own_segments(own, shard, demo, grp, payload, steps):
+    """--own_frames on one demo: the runs to write, the per-frame columns of ``labeled`` (label,
+    subtask), obs/loop_cycle and the joined cycle rows, which also go to ``own.rows``; adds the
+    demo's counts to ``own.counts``."""
+    if "obs/actor_raw" in grp:
+        raise RuntimeError(f"{shard}:{demo} has obs/actor_raw: dag_mask.py rewrote its actors")
+    if "obs/loop_cycle" not in grp or "env_index" not in grp.attrs:
+        raise RuntimeError(f"{shard}:{demo} was not recorded with --record_all")
+    env_index = int(grp.attrs["env_index"])
+    ep = next(e for e in payload["episodes"] if e["env_index"] == env_index)
+    if steps != ep["steps"]:
+        raise RuntimeError(f"{shard}:{demo} has {steps} frames, its episode {ep['steps']} steps")
+    cycle = grp["obs/loop_cycle"][:steps]
+    actor = grp["obs/actor"][:steps]
+    phase = grp["obs/cycle_phase"][:steps]
+    subtask = grp["obs/subtask"][:steps]
+    rows = ep["cycle_census"]
+    label, cycles = own_labels(
+        rows,
+        ep["cycle_classes"],
+        ep["cycle_reasons"],
+        ep["final_box"],
+        cycle,
+        actor,
+        phase,
+        subtask,
+    )
+    policy = (phase == -1) & (actor == 0)
+    host = own.host or shard.parent.name
+    for info in cycles:
+        tags = label[cycle == info["ordinal"]][policy[cycle == info["ordinal"]]]
+        info["labels"] = {
+            "positive": int((tags == TAG_POSITIVE).sum()),
+            "negative": int((tags == TAG_NEGATIVE).sum()),
+            "untagged": int((tags == TAG_UNTAGGED).sum()),
+        }
+        info |= {"host": host, "shard": str(shard), "demo": demo, "written": []}
+        for name, hits in info["events"].items():
+            own.counts[f"ev_{name}"] += len(hits)
+    own.rows.extend(cycles)
+    c = own.counts
+    c["cycles"] += len(rows)
+    c["joined"] += sum(info["first"] is not None for info in cycles)
+    lifted = [r["max_rise"] >= LIFT_MIN_RISE for r in rows]
+    c["lift_no_carry"] += sum(up and i["carry_start"] is None for up, i in zip(lifted, cycles))
+    c["own_pos"] += int((label[policy] == TAG_POSITIVE).sum())
+    c["own_neg"] += int((label[policy] == TAG_NEGATIVE).sum())
+    c["own_untagged"] += int((label[policy] == TAG_UNTAGGED).sum())
+    c["rig_frames"] += int(((actor == 0) & (phase >= 0)).sum())
+    c["takeover_frames"] += int((actor != 0).sum())
+    keep = policy if own.mode == "labeled" else label == TAG_POSITIVE
+    columns = {"label": label, "subtask": subtask.astype(np.int8)}
+    return own_runs(keep, cycle), columns, cycle, cycles
 
 
 class TokenArgumentParser(argparse.ArgumentParser):
@@ -573,6 +814,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --dagger --gripper continuous: drop each takeover's leading frames whose jaw "
         "gap lies more than TOL_M under the commanded gap (the teacher opening closed jaws)",
     )
+    parser.add_argument(
+        "--own_frames",
+        choices=OWN_MODES,
+        default=None,
+        help="MS7i: the policy frames of record_all shards, joined to <shard>.meta.json's census; "
+        "labeled adds the int8 label and subtask columns, positive writes only positive frames",
+    )
+    parser.add_argument(
+        "--host",
+        default=None,
+        help="with --own_frames: the host each cycle row of meta/own_frames.json names "
+        "(default: the shard's directory name)",
+    )
     return parser
 
 
@@ -587,6 +841,9 @@ def main() -> int:
         reopen = None if tol is None else ReopenLead(tol)
         if args.sidecar_dir is not None and not args.split_cycles:
             parser.error("--sidecar_dir requires --split_cycles")
+        if args.host is not None and args.own_frames is None:
+            parser.error("--host names the host of --own_frames rows")
+        own = None if args.own_frames is None else OwnFrames(args.own_frames, args.host)
         counts = convert(
             args.shards,
             args.root,
@@ -601,6 +858,7 @@ def main() -> int:
             dagger=args.dagger,
             gripper=args.gripper,
             reopen=reopen,
+            own=own,
         )
     except Exception as exc:  # noqa: BLE001 -- any failure must become CONVERT_FAIL, not a crash.
         print(f"CONVERT_FAIL {type(exc).__name__}: {exc}", flush=True)
@@ -612,6 +870,10 @@ def main() -> int:
             f" reopen_tol={reopen.tol} reopen_frames={reopen.frames}"
             f" reopen_takeovers={reopen.takeovers} reopen_emptied={reopen.emptied}"
         )
+    if own is not None:
+        keys = ["own_pos", "own_neg", "own_untagged", "cycles", "joined", "lift_no_carry"]
+        keys += ["rig_frames", "takeover_frames"] + [f"ev_{name}" for name in EVENTS]
+        dropped += f" own_frames={own.mode}" + "".join(f" {k}={own.counts[k]}" for k in keys)
     print(
         f"CONVERT_OK episodes={counts.episodes} total={counts.total} "
         f"read={counts.read} skipped={counts.skipped}{dropped}",

@@ -77,3 +77,22 @@ def test_the_served_context_roll_index_is_the_camera_roll():
     text = (CONVERT.parent / "policy_server.py").read_text()
     index = int(re.search(r"^CONTEXT_ROLL = (\d+)", text, re.MULTILINE).group(1))
     assert CONTEXT_CAMERA_NAMES.index("overhead_cam_roll") == index
+
+
+def test_the_own_frames_labels_copy_the_subtasks_and_the_census_rules():
+    import ast
+
+    from maker_arm_lab.core import hold, loop, oracle
+
+    text = CONVERT.read_text()
+
+    def pinned(name):
+        found = re.search(rf"^{name} = (.+)$", text, re.MULTILINE).group(1)
+        return ast.literal_eval(found.split("  #")[0])
+
+    assert pinned("SUBTASKS") == hold.SUBTASKS
+    assert pinned("LIFT_MIN_RISE") == oracle.LIFT_MIN_RISE
+    assert pinned("CENSUS_MIN_HELD_STEPS") == loop.CENSUS_MIN_HELD_STEPS
+    failing, boxes = pinned("FAILING_PLACES"), pinned("BOX_PLACES")
+    assert sorted(failing + boxes) == sorted(loop.RELEASE_PLACES)
+    assert set(boxes) == {"right_box", "wrong_box"}
