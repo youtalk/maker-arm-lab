@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # pi0.5 fine-tune on Google Colab (MS7h design 7.2, recipe 5.6 and 9): train_pi05.py (the loss
-# masked on padded actions, and on the jaw mask with JAW_MASK) under pi05_preflight.py, a warm
-# start from START with a fresh optimizer, on an A100 80GB. The notebook stays outside the
-# repository. Its cells, in order:
+# masked on padded actions) under pi05_preflight.py, a warm start from START with a fresh
+# optimizer, on an A100 80GB. The notebook stays outside the repository. Its cells, in order:
 #   1. from google.colab import drive; drive.mount("/content/drive")
 #   2. import os; from google.colab import userdata
 #      os.environ["HF_TOKEN"] = userdata.get("HF_TOKEN")
 #      (a Colab secret named HF_TOKEN with notebook access on. A subprocess cannot read Colab
 #      secrets itself, so without this export the script sees no token.)
-#   3. !DIR=<folder> START=<weights> RUN_NAME=<run> JAW_MASK=<file> \
+#   3. !DIR=<folder> START=<weights> RUN_NAME=<run> \
 #          bash /content/drive/MyDrive/<folder>/colab_train_pi05.sh --smoke
 #      then the same cell without --smoke. After a session ends, run the same cell again. On a
 #      Shared drive, set DRIVE_ROOT=/content/drive/Shareddrives/<drive name> and run the script
@@ -22,8 +21,6 @@
 #
 # Drive layout under $DRIVE_ROOT/$DIR (DRIVE_ROOT /content/drive/MyDrive by default):
 #   colab_train_pi05.sh, pi05_preflight.py, train_pi05.py   this script and its two helpers
-#   $JAW_MASK             the jaw mask .npy (train_pi05.py --jaw_mask), optional, with the
-#                         .json sidecar of the same name that jaw_mask_list.py writes
 #   dataset/              the derived dataset (DATASET=dataset_third for the one-third copy)
 #   $START                the pretrained_model directory the run starts from, e.g.
 #                         checkpoints/030000/pretrained_model (run 1) or checkpoints_ab/<step>/...
@@ -34,8 +31,6 @@
 #   $RUN_NAME/keep/<step>/pretrained_model  with KEEP_EVERY, the weights (no training_state,
 #                         9.35 GB) of each checkpoint whose step is a multiple of KEEP_EVERY, for
 #                         the reads; the sync never deletes them
-#   $RUN_NAME/jaw_mask.npy  the mask the run started with (and its jaw_mask.json); a resume
-#                         trains with it
 #   action_space.json     the dataset's gripper contract, found by policy_server's marker walk
 #
 # A fresh run copies START to the local disk, sets its saved tokenizer step to 128 tokens (a
@@ -85,7 +80,7 @@
 #                  checkpoint size. RUN_NAME is not needed.
 #   --expert_only  train_expert_only=true, the A100 40GB fallback (the report must say so)
 # env: STEPS (N), BATCH (32), SAVE_FREQ (2000), NUM_WORKERS (8), SEED (1000, run 1's and M2k's:
-#      the same seed draws the same sample order), DATASET (dataset), JAW_MASK (none),
+#      the same seed draws the same sample order), DATASET (dataset),
 #      OUT_ROOT (/content): where the local checkpoints and the start copy go, e.g. the
 #      runtime's local-scratch disk (the owner's A100 runtime had 70 GB free on /content after
 #      the dataset copy and 368 GB there), LOSS_LO, LOSS_HI, DRIVE_MIN_GB (60), STATS_MD5,
@@ -259,18 +254,8 @@ fi
 
 # the plan of this session, checked before anything is copied
 RESUME=0
-JAW=()
 if [ "$SMOKE" -eq 0 ] && [ -f "$RUN_DIR/last.txt" ]; then
     RESUME=1
-    if [ -f "$RUN_DIR/jaw_mask.npy" ]; then
-        [ -f "$RUN_DIR/jaw_mask.json" ] || fail "no $RUN_DIR/jaw_mask.json beside its jaw_mask.npy"
-        if [ -n "${JAW_MASK:-}" ] && ! cmp -s "$DRIVE/$JAW_MASK" "$RUN_DIR/jaw_mask.npy"; then
-            fail "JAW_MASK=$JAW_MASK is not the mask $RUN_NAME started with"
-        fi
-        JAW=(--jaw_mask="$RUN_DIR/jaw_mask.npy")
-    elif [ -n "${JAW_MASK:-}" ]; then
-        fail "$RUN_NAME started without a jaw mask: unset JAW_MASK to resume it"
-    fi
 else
     [ "${SPAN:-0}" = 1 ] || [ "$STEPS" -le "$FIT" ] \
         || fail "STEPS=$STEPS does not fit this session: N=$FIT"
@@ -279,12 +264,6 @@ else
     [ -n "${START:-}" ] || fail "set START=<the pretrained_model directory to start from>"
     case "$START" in "$BASE") src= ;; /*) src=$START ;; *) src=$DRIVE/$START ;; esac
     [ -z "$src" ] || [ -f "$src/model.safetensors" ] || fail "no model.safetensors in START $src"
-    if [ -n "${JAW_MASK:-}" ]; then
-        [ -f "$DRIVE/$JAW_MASK" ] || fail "no jaw mask $DRIVE/$JAW_MASK"
-        [ -f "$DRIVE/${JAW_MASK%.npy}.json" ] \
-            || fail "no $DRIVE/${JAW_MASK%.npy}.json: train_pi05.py reads the mask's sidecar"
-        JAW=(--jaw_mask="$DRIVE/$JAW_MASK")
-    fi
     if [ "$SMOKE" -eq 0 ]; then
         for f in "$RUN_DIR"/[0-9]* "$RUN_DIR"/.tmp_* "$RUN_DIR"/keep; do
             if [ -e "$f" ]; then
@@ -376,19 +355,10 @@ if [ "$RESUME" -eq 1 ]; then
     START_STEP=$((10#$last))
     echo "resuming $RUN_NAME from checkpoint $last toward step $STEPS ($FIT steps fit)"
     # --output_dir: a resumed train_config.json names the first session's output dir;
-    # --dataset.root: train_pi05.py checks the jaw mask's sidecar against it
+    # --dataset.root: this session's local copy of the dataset, as a fresh run passes it
     CMD=("${TRAIN[@]}" --config_path="$config" --resume=true --output_dir="$OUT"
-        --dataset.root="$LOCAL_DATA" "${JAW[@]}")
+        --dataset.root="$LOCAL_DATA")
 else
-    if [ "$SMOKE" -eq 0 ]; then
-        mkdir -p "$RUN_DIR"
-        rm -f "$RUN_DIR/jaw_mask.npy" "$RUN_DIR/jaw_mask.json"
-        if [ -n "${JAW_MASK:-}" ]; then # the run keeps its own copy, so a resume trains with it
-            cp "$DRIVE/${JAW_MASK%.npy}.json" "$RUN_DIR/jaw_mask.json"
-            cp "$DRIVE/$JAW_MASK" "$RUN_DIR/jaw_mask.npy"
-            JAW=(--jaw_mask="$RUN_DIR/jaw_mask.npy")
-        fi
-    fi
     START_COPY=$LOCAL/start_model
     # a fresh run: nothing local to keep, and a smoke checkpoint (22.8 GiB) would crowd /content
     rm -rf "$START_COPY" "$OUT" "$LOCAL/pi05_smoke"
@@ -437,7 +407,6 @@ snapshot_download(sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3])' \
         --save_freq="$SAVE_FREQ"
         --log_freq="$LOG_FREQ"
         --wandb.enable=false
-        "${JAW[@]}"
     )
 fi
 if [ "$SMOKE" -eq 0 ]; then cp "$LOCAL_DATA/meta/action_space.json" "$DRIVE/action_space.json"; fi

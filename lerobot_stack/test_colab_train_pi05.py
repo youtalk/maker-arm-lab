@@ -117,16 +117,14 @@ def _preflight_rig(**bad):
     )
     post = SimpleNamespace(steps=[UnnormalizerProcessorStep(unnorm)])
     module = SimpleNamespace(make_pre_post_processors=lambda *a, **k: (pre, post))
-    install(module, Policy, flat, 128, bad.get("jaw"))
+    install(module, Policy, flat, 128)
     if "stock" not in bad:  # train_pi05.py swaps the forward before lerobot builds anything
         Policy.forward = lambda self, batch, reduction="mean": "masked"
     import torch
 
-    batch = {"action": torch.zeros(4, 50, 7), "index": torch.arange(4)}
+    batch = {"action": torch.zeros(4, 50, 7)}
     if "nopad" not in bad:
         batch["action_is_pad"] = torch.zeros(4, 50, dtype=torch.bool)
-    if "noindex" in bad:
-        del batch["index"]
     return Policy, module, batch
 
 
@@ -141,7 +139,6 @@ def test_a_full_load_with_the_corpus_stats_reaches_the_masked_forward(capsys):
     out = capsys.readouterr().out
     assert FULL in out and "PREFLIGHT_OK full_load=1" in out and "max_length=128" in out
     assert "action_is_pad=(4, 50) pad_share=0.0000" in out
-    assert _train_once(*_preflight_rig(jaw="m.npy", tokens=128)) == "masked"
 
 
 @pytest.mark.parametrize(
@@ -153,7 +150,6 @@ def test_a_full_load_with_the_corpus_stats_reaches_the_masked_forward(capsys):
         ({"tokens": 200}, "the tokenizer pads to 200, want 128"),
         ({"stock": 1}, "stock forward"),
         ({"nopad": 1}, "action_is_pad None at the forward"),
-        ({"jaw": "m.npy", "noindex": 1}, "index None at the forward"),
     ],
 )
 def test_each_preflight_miss_raises_before_the_first_update(bad, why):
@@ -161,15 +157,19 @@ def test_each_preflight_miss_raises_before_the_first_update(bad, why):
         _train_once(*_preflight_rig(**bad))
 
 
-def test_the_preflight_tokens(tmp_path, capsys):
+def test_the_preflight_tokens(tmp_path, capsys, monkeypatch):
     assert pi05_preflight.main([]) == 2
     assert "TRAIN_FAIL usage" in capsys.readouterr().out
     (tmp_path / "policy_preprocessor.json").write_text(json.dumps(_preprocessor_json(200)))
     assert pi05_preflight.main(["patch", str(tmp_path), "128"]) == 0
     assert f"PATCH_OK {tmp_path} max_length 200 -> 128" in capsys.readouterr().out
-    np.save(tmp_path / "m.npy", np.arange(3, dtype=np.int32))
-    assert pi05_preflight.main(["train", f"--jaw_mask={tmp_path / 'm.npy'}"]) == 3
-    assert "PREFLIGHT_FAIL --jaw_mask" in capsys.readouterr().out
+
+    def miss(argv):
+        raise PreflightError("a miss")
+
+    monkeypatch.setattr(pi05_preflight, "train", miss)
+    assert pi05_preflight.main(["train"]) == 3
+    assert "PREFLIGHT_FAIL a miss" in capsys.readouterr().out
 
 
 # --- colab_train_pi05.sh dry runs with the stand-in trainer ---
@@ -222,8 +222,6 @@ def rig(tmp_path):
     for d in (start, base):
         (d / "model.safetensors").write_bytes(b"\0" * 1000)
         (d / "policy_preprocessor.json").write_text(json.dumps(_preprocessor_json(200)))
-    np.save(drive / "jaw.npy", np.arange(5, dtype=np.int64))
-    (drive / "jaw.json").write_text("{}")  # the sidecar train_pi05.py checks
     for name, body in SHIMS.items():
         (tmp_path / "bin" / name).write_text("#!/usr/bin/env bash\n" + body)
         (tmp_path / "bin" / name).chmod(0o755)
@@ -241,7 +239,6 @@ def rig(tmp_path):
         "DIR": "ms7h",
         "START": "checkpoints/030000/pretrained_model",
         "RUN_NAME": "checkpoints_ab",
-        "JAW_MASK": "jaw.npy",
         "STEPS": "300",
         "SAVE_FREQ": "100",
         "NUM_WORKERS": "0",
@@ -300,7 +297,6 @@ def test_smoke_trains_200_steps_from_a_128_token_copy_and_writes_nothing_to_driv
     (call,) = _calls(rig)
     assert call["steps"] == 200 and call["warmup"] == 6 and call["decay"] == 200
     assert call["max_length"] == 128 and _max_length(rig.start) == 200
-    assert call["jaw_mask"] == str(rig.drive / "jaw.npy")
     assert not rig.run.exists() and not (rig.drive / "action_space.json").exists()
 
 
@@ -309,16 +305,16 @@ BASE_REV = "a538eb273274eb30f126a118f39dbc0ee212c883"
 
 
 def test_a_smoke_from_pi05_base_downloads_the_pinned_revision_and_reads_its_own_band(rig):
-    r = _run(rig, "--smoke", START=BASE, RUN_NAME=None, JAW_MASK=None, FAKE_LOSS="0.092")
+    r = _run(rig, "--smoke", START=BASE, RUN_NAME=None, FAKE_LOSS="0.092")
     assert r.token.startswith("COLAB_TRAIN_OK smoke") and "loss200=0.092" in r.token
     assert "loss band: step 200 loss 0.092 in [0.046, 0.34]" in r.stdout
     assert (rig.fake / "download.log").read_text() == f"{BASE} {BASE_REV}\n"
     (call,) = _calls(rig)
     assert call["pretrained_path"] == str(rig.path / "content" / "start_model")
-    assert call["max_length"] == 128 and call["jaw_mask"] is None
+    assert call["max_length"] == 128
     assert call["warmup"] == 6 and call["decay"] == 200
     assert _max_length(rig.path / "pi05_base") == 200
-    r = _run(rig, "--smoke", START=BASE, RUN_NAME=None, JAW_MASK=None)  # a warm start's loss
+    r = _run(rig, "--smoke", START=BASE, RUN_NAME=None)  # a warm start's loss
     assert "loss band: step 200 loss 0.032 outside [0.046, 0.34]" in r.token
 
 
@@ -330,7 +326,7 @@ def test_a_span_run_on_a_shared_drive_keeps_its_reads_and_resumes_toward_the_sam
     shutil.move(rig.drive, shared)
     rig.drive.parent.rmdir()  # no MyDrive at all
     rig.drive, rig.run = shared, shared / "checkpoints_ab"
-    env = {"START": BASE, "JAW_MASK": None, "STEPS": 600, "SAVE_FREQ": 100, "SPAN": 1}
+    env = {"START": BASE, "STEPS": 600, "SAVE_FREQ": 100, "SPAN": 1}
     env |= {"KEEP_EVERY": 200, "DRIVE_ROOT": shared.parent, "DRIVE_MIN_GB": 0}
     env |= {"FAKE_DF_KB": 50_000_000, "FAKE_LOSS": "0.120", "FAKE_STEP_S": 0.02}
     (rig.path / "uptime").write_text("83600.00 1.00\n")  # N = 1360 / 3.85 = 353: stop at 300
@@ -351,7 +347,7 @@ def test_a_span_run_on_a_shared_drive_keeps_its_reads_and_resumes_toward_the_sam
     assert r.token.startswith("COLAB_TRAIN_OK run=checkpoints_ab steps=600 last=000600")
     first, second = _calls(rig)
     assert first["pretrained_path"] == str(rig.path / "content" / "start_model")
-    assert first["max_length"] == 128 and first["jaw_mask"] is None and not first["resume"]
+    assert first["max_length"] == 128 and not first["resume"]
     assert second["resume"] is True and second["start"] == 300
     for call in (first, second):  # one schedule: warmup 1000 * 600 / 30000, decay STEPS
         assert (call["steps"], call["warmup"], call["decay"]) == (600, 20, 600)
@@ -393,34 +389,32 @@ def test_a_fresh_run_passes_every_recipe_flag_and_keeps_one_checkpoint(rig):
         "max_length": 128,
         "batch_size": 32,
         "seed": 1000,
-        "jaw_mask": str(rig.run / "jaw_mask.npy"),
     }
     assert {k: call[k] for k in want} == want
     assert call["pretrained_path"] == str(rig.path / "content" / "start_model")
-    assert _held(rig) == ["000301", "jaw_mask.json", "jaw_mask.npy", "last.txt"]
+    assert _held(rig) == ["000301", "last.txt"]
     assert sorted(p.name for p in (rig.run / "000301").iterdir()) == ["pretrained_model"]
     held = (rig.fake / "cp.log").read_text().splitlines()
     assert any(not line.endswith("held: ") for line in held)  # room: copy, then delete
     assert (rig.drive / "action_space.json").exists()
 
 
-def test_a_resumed_session_trains_masked_with_the_run_s_jaw_mask(rig):
+def test_a_resumed_session_trains_toward_the_run_s_steps(rig):
     r = _run(rig, FAKE_DIE_AT=250)
     assert r.token.startswith("COLAB_TRAIN_FAIL") and "the trainer exited 137" in r.token
     assert (rig.run / "last.txt").read_text().strip() == "000200"
     assert (rig.run / "000200" / "training_state").is_dir()
     shutil.rmtree(rig.path / "content" / "dataset")  # a new VM: the local disk is gone
     shutil.rmtree(rig.out)
-    r = _run(rig, JAW_MASK=None, STEPS=None)
+    r = _run(rig, STEPS=None)
     assert "resuming checkpoints_ab from checkpoint 000200 toward step 300" in r.stdout
     assert r.token.startswith("COLAB_TRAIN_OK run=checkpoints_ab steps=300 last=000300")
     first, second = _calls(rig)
     assert second["resume"] is True and second["start"] == 200 and second["steps"] == 300
     assert second["output_dir"] == str(rig.out) and second["max_length"] == 128
-    assert second["jaw_mask"] == str(rig.run / "jaw_mask.npy")
     assert second["dataset_root"] == str(rig.path / "content" / "dataset")
     assert second["warmup"] == first["warmup"] == 10 and second["decay"] == 300
-    assert _held(rig) == ["000300", "jaw_mask.json", "jaw_mask.npy", "last.txt"]
+    assert _held(rig) == ["000300", "last.txt"]
     assert not (rig.run / "000300" / "training_state").exists()
 
 
@@ -463,7 +457,7 @@ def test_a_short_drive_never_holds_two_checkpoints(rig):
     assert r.token.startswith("COLAB_TRAIN_OK") and "Drive is short of room" in r.stdout
     held = (rig.fake / "cp.log").read_text().splitlines()
     assert len(held) >= 2 and all(line.endswith("held: ") for line in held), held
-    assert _held(rig) == ["000300", "jaw_mask.json", "jaw_mask.npy", "last.txt"]
+    assert _held(rig) == ["000300", "last.txt"]
 
 
 def test_the_final_sync_retries_then_fails_after_its_window(rig):
@@ -488,7 +482,6 @@ def test_the_final_sync_retries_then_fails_after_its_window(rig):
         ([], {"START": None}, "set START="),
         ([], {"STATS_MD5": "0" * 32}, "is not the corpus's 00000000"),
         ([], {"STEPS": 100}, "a run needs step 200 of the loss band"),
-        ([], {"JAW_MASK": "missing.npy"}, "no jaw mask"),
         ([], {"KEEP_EVERY": 150}, "KEEP_EVERY=150 is not a multiple of the save freq 100"),
         (
             [],
@@ -505,12 +498,6 @@ def test_the_final_sync_retries_then_fails_after_its_window(rig):
 def test_each_usage_stop_prints_one_fail_token(rig, args, env, why):
     r = _run(rig, *args, **env)
     assert r.rc == 1 and r.token.startswith("COLAB_TRAIN_FAIL") and why in r.token
-
-
-def test_a_jaw_mask_without_its_sidecar_is_refused(rig):
-    (rig.drive / "jaw.json").unlink()
-    r = _run(rig)
-    assert "train_pi05.py reads the mask's sidecar" in r.token and not _calls(rig)
 
 
 def test_steps_past_the_session_end_are_refused(rig):
@@ -548,13 +535,7 @@ def standin(args: list[str]) -> int:
         cfg.validate()
         return cfg
 
-    jaw = next((a.split("=", 1)[1] for a in args if a.startswith("--jaw_mask=")), None)
-    if jaw is not None:  # train_pi05.py (f68e0c8) load_jaw_starts
-        if not Path(jaw).with_suffix(".json").is_file():
-            raise SystemExit(f"no sidecar beside {jaw}")
-        if not any(a.startswith("--dataset.root=") for a in args):
-            raise SystemExit("--jaw_mask needs --dataset.root")
-    sys.argv = ["lerobot-train", *[a for a in args if not a.startswith("--jaw_mask=")]]
+    sys.argv = ["lerobot-train", *args]
     cfg = parser.wrap()(parse)()
     model_dir = Path(cfg.policy.pretrained_path)
     tokens = _max_length(model_dir)
@@ -568,10 +549,8 @@ def standin(args: list[str]) -> int:
     ):
         print(f"PREFLIGHT_FAIL the tokenizer pads to {tokens}", flush=True)
         return 3
-    if jaw is not None:
-        pi05_preflight.check_jaw_mask(jaw)
     if mode == "ok":
-        print(f"PREFLIGHT_OK full_load=1 max_length={tokens} jaw_mask={jaw}", flush=True)
+        print(f"PREFLIGHT_OK full_load=1 max_length={tokens}", flush=True)
     start = int((cfg.checkpoint_path / "training_state" / "step").read_text()) if cfg.resume else 0
     record = {
         "resume": cfg.resume,
@@ -593,7 +572,6 @@ def standin(args: list[str]) -> int:
         "pretrained_path": str(model_dir),
         "output_dir": str(cfg.output_dir),
         "dataset_root": str(cfg.dataset.root),
-        "jaw_mask": jaw,
     }
     with open(Path(os.environ["FAKE_DIR"]) / "cfg.jsonl", "a") as f:
         f.write(json.dumps(record) + "\n")

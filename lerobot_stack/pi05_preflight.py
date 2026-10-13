@@ -9,8 +9,8 @@ leaves the start's 200. The file is replaced, never written through, so a symlin
 keeps the file it names.
 
 ``train`` runs ``train_pi05.py`` from this file's folder as its ``__main__`` with the arguments
-unchanged (``--jaw_mask`` included). Before the first optimizer step it stops the run with
-``PREFLIGHT_FAIL <what>`` (exit 3) unless:
+unchanged. Before the first optimizer step it stops the run with ``PREFLIGHT_FAIL <what>``
+(exit 3) unless:
 
 - the weights loaded in full: lerobot 0.5.1 only prints a warning on a failed or partial load
   and trains on (modeling_pi05.py:1001-1004 and 1050-1053), and prints
@@ -21,8 +21,7 @@ unchanged (``--jaw_mask`` included). Before the first optimizer step it stops th
   images are not normalized, and ``use_imagenet_stats`` replaces them;
 - the tokenizer step pads to ``PREFLIGHT_MAX_LENGTH``;
 - the forward that trains is not lerobot's stock one, and its first batch carries
-  ``action_is_pad`` of shape (batch, chunk), and with ``--jaw_mask`` the global ``index``;
-- a ``--jaw_mask`` file is a non-empty 1-D int64 .npy.
+  ``action_is_pad`` of shape (batch, chunk).
 
 It prints one ``PREFLIGHT_OK ...`` line at the first forward. The terminal token is
 TRAIN_OK, TRAIN_FAIL or PREFLIGHT_FAIL (PATCH_OK or PATCH_FAIL for ``patch``).
@@ -83,7 +82,7 @@ def patch_max_length(model_dir: str, max_length: int) -> int:
     return old
 
 
-def install(train_module, policy_cls, stats: dict, max_length: int, jaw: str | None) -> None:
+def install(train_module, policy_cls, stats: dict, max_length: int) -> None:
     """Wrap ``policy_cls.from_pretrained`` and ``train_module.make_pre_post_processors``; ``stats``
     is the flat {"feature.stat": values} of the corpus file (``file_stats``). The
     checks run when the processors are built, and the forward check at the first forward."""
@@ -128,14 +127,9 @@ def install(train_module, policy_cls, stats: dict, max_length: int, jaw: str | N
                 if pad is None or str(pad.dtype) != "torch.bool" or tuple(pad.shape) != want_shape:
                     got = None if pad is None else (str(pad.dtype), tuple(pad.shape))
                     raise PreflightError(f"action_is_pad {got} at the forward, want {want_shape}")
-                index = batch.get("index")  # the jaw mask matches chunk starts by global index
-                if jaw is not None and (index is None or tuple(index.shape) != want_shape[:1]):
-                    got = None if index is None else tuple(index.shape)
-                    raise PreflightError(f"index {got} at the forward, want {want_shape[:1]}")
                 print(
                     f"PREFLIGHT_OK full_load=1 stats_sha={want[:12]} max_length={tokens}"
-                    f" action_is_pad={want_shape} pad_share={float(pad.float().mean()):.4f}"
-                    f" jaw_mask={jaw}",
+                    f" action_is_pad={want_shape} pad_share={float(pad.float().mean()):.4f}",
                     flush=True,
                 )
             return masked(self, batch, *a, **k)
@@ -154,22 +148,12 @@ def _step(pipeline, name: str):
     return found[0]
 
 
-def check_jaw_mask(path: str) -> int:
-    mask = np.load(path)
-    if mask.ndim != 1 or mask.dtype != np.int64 or mask.size == 0:
-        raise PreflightError(f"--jaw_mask {path}: {mask.dtype} {mask.shape}, want 1-D int64")
-    return int(mask.size)
-
-
 def train(argv: list[str]) -> None:
     from lerobot.policies.pi05.modeling_pi05 import PI05Policy
     from lerobot.scripts import lerobot_train
 
-    jaw = next((a.split("=", 1)[1] for a in argv if a.startswith("--jaw_mask=")), None)
-    if jaw is not None:
-        print(f"PREFLIGHT jaw_mask {jaw}: {check_jaw_mask(jaw)} chunk starts", flush=True)
     stats = file_stats(os.environ["PREFLIGHT_STATS"])
-    install(lerobot_train, PI05Policy, stats, int(os.environ["PREFLIGHT_MAX_LENGTH"]), jaw)
+    install(lerobot_train, PI05Policy, stats, int(os.environ["PREFLIGHT_MAX_LENGTH"]))
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train_pi05.py")
     sys.argv = [script, *argv]
     runpy.run_path(script, run_name="__main__")
