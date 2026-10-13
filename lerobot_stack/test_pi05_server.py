@@ -43,7 +43,7 @@ def server(model=None, warp=1.0):
     return ps.SharedServer(model or FakeModel(), "pi05:/ckpt", N, inference, "continuous", warp)
 
 
-def step(marker, batch=1, context=True, replan=None, rng=RNG):
+def step(marker, batch=1, context=True, replan=None, rng=RNG, prompt=None):
     state = rng.uniform(0, 1, (batch, 7)).astype(np.float32)
     state[:, 0] = marker
     arrays = {
@@ -57,6 +57,8 @@ def step(marker, batch=1, context=True, replan=None, rng=RNG):
         arrays["context"] = ctx
     if replan is not None:
         arrays["replan"] = np.asarray(replan, dtype=bool)
+    if prompt is not None:
+        arrays["prompt"] = np.asarray(prompt, dtype=np.int16)
     return {"type": "step", "batch": batch}, arrays
 
 
@@ -95,6 +97,53 @@ def test_replan_refills_only_the_flagged_row():
     reply = s.process([(b"a", *step(0.4, batch=2, replan=[False, True]))])[0][0]
     assert s.forward_sizes == [2, 1]
     assert reply[2]["action"][:, 1].tolist() == [1.0, 0.0]
+
+
+def test_the_task_of_a_row_is_run_a_s_serving_prompt_of_its_id():
+    from train_pi05 import TASK
+
+    assert ps.tasks(None, 2) == [TASK] * 2
+    assert ps.tasks(np.array([0, 3], np.int16), 2) == [
+        f"{TASK}. reach the marked part. Advantage: positive",
+        f"{TASK}. release it. Advantage: positive",
+    ]
+    assert ps.tasks(np.array([-1, 2], np.int16), 2)[0] == TASK  # a lane without the key
+
+
+def test_the_prompt_ids_reach_the_forward_only_at_a_refill():
+    model = FakeModel()
+    s = server(model)
+    s.process([(b"a", *step(0.4, batch=2, prompt=[0, 1]))])
+    assert (
+        model.calls[0]["prompt"].tolist() == [0, 1] and model.calls[0]["prompt"].dtype == np.int16
+    )
+    s.process([(b"a", *step(0.4, batch=2, prompt=[1, 2]))])  # a new id: no forward
+    assert s.forward_sizes == [2]
+    reply = s.process([(b"a", *step(0.4, batch=2, replan=[False, True], prompt=[1, 3]))])[0][0]
+    assert s.forward_sizes == [2, 1] and model.calls[1]["prompt"].tolist() == [3]
+    assert reply[2]["action"][:, 1].tolist() == [2.0, 0.0]  # row 0 plays on, row 1 refilled
+    s.process([(b"b", *step(0.2)), (b"c", *step(0.3, prompt=[2]))])  # a lane without the key
+    assert model.calls[2]["prompt"].tolist() == [-1, 2]
+    s.process([(b"d", *step(0.1))])
+    assert "prompt" not in model.calls[3]  # no lane sends it: the obs of before
+
+
+def test_a_latched_chunk_plays_on_across_an_id_change_and_a_bad_id_is_refused():
+    inference = {"n_action_steps": N, "chunk_size": N, "num_inference_steps": 10}
+    s = ps.SharedServer(LatchModel(), "pi05:/ckpt", N, inference, "continuous", 1.5, None, 10)
+    header, arrays = step(0.5, prompt=[1])
+    arrays["state"][:, 6], arrays["context"][:, 14] = 1.0, 0.02  # open jaws, a 2 cm target
+    served = []
+    for t in range(33):
+        arrays["prompt"][:] = 1 if t < 8 else 2  # grasp, then carry in the middle of the chunk
+        served.append(s.process([(b"a", header, arrays)])[0][0][2]["action"][0])
+    state = derived_state(arrays["state"], arrays["context"])
+    latched = ps.latch_jaw(LatchModel()({"state": state}), state, 10)[0]
+    np.testing.assert_array_equal(np.stack(served), ps.warp_chunk(latched, 1.5)[0])
+    assert s.forward_sizes == [1]
+    for bad in ([4], [-1]):
+        replies, _ = s.process([(b"a", *step(0.5, prompt=bad))])
+        assert replies[0][1]["error"] == "bad_obs" and "prompt ids" in replies[0][1]["message"]
 
 
 def test_reset_clears_only_its_lane():
@@ -360,6 +409,7 @@ class StandInPolicy:
 
     def predict_action_chunk(self, batch, **kwargs):
         self.kwargs.append(kwargs)
+        self.tasks = batch["task"]
         return torch.zeros(len(batch["task"]), N, 7)
 
 
@@ -409,6 +459,18 @@ def test_the_default_sampling_passes_nothing_to_the_model(stand_in):
             "chunk_size": N,
             "num_inference_steps": 10,
         }
+
+
+def test_the_model_reads_each_row_s_task_from_its_id(stand_in):
+    policy, ckpt = stand_in
+    predict_chunk, *_ = ps.load_pi05(ckpt, "cpu")
+    _, arrays = step(0.5, batch=2)
+    obs = {"state": derived_state(arrays["state"], arrays["context"])}
+    obs |= {"wrist": arrays["wrist"], "overhead": arrays["overhead"]}
+    predict_chunk(obs)
+    assert policy.tasks == [ps.TASK] * 2
+    predict_chunk({**obs, "prompt": np.array([2, 0], np.int16)})
+    assert policy.tasks == ps.tasks(np.array([2, 0]), 2) and "carry it" in policy.tasks[0]
 
 
 def test_the_sampling_switches_reach_sample_actions_and_name_the_policy(stand_in):
