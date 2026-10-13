@@ -526,7 +526,7 @@ def test_a_dagger_smoke_trains_the_mix_at_its_own_recipe(rig):
     (call,) = _calls(rig)
     want = {"peak_lr": 1e-5, "decay_lr": 2.5e-6, "warmup": 200, "decay": 200, "batch_size": 32}
     assert {k: call[k] for k in want} == want
-    assert (call["dagger_root"], call["dagger_share"]) == (str(dag), "0.3")
+    assert call["mix"] == [[str(dag), 0.3]] and not call["prompt_codes"]
 
 
 def test_a_dagger_run_keeps_every_save_and_resumes_only_with_its_mix(rig):
@@ -534,18 +534,18 @@ def test_a_dagger_run_keeps_every_save_and_resumes_only_with_its_mix(rig):
     env = {"DAGGER": dag, "STEPS": 400, "SAVE_FREQ": 100}
     r = _run(rig, **env, FAKE_DIE_AT=250)
     assert r.token.startswith("COLAB_TRAIN_FAIL") and "the trainer exited 137" in r.token
-    assert (rig.run / "dagger_share.txt").read_text() == "0.3\n"
+    assert (rig.run / "mix.txt").read_text() == f"{dag}:0.3|\n"
     shutil.rmtree(rig.out)  # a new VM
     r = _run(rig, **{**env, "DAGGER": None})
-    assert "trains on a DAgger mix: resume it with DAGGER and its share" in r.token
+    assert f"trains on MIX|PROMPT_CODES '{dag}:0.3|': resume it with the same two" in r.token
     r = _run(rig, **env, DAGGER_SHARE=0.5)
-    assert "trains on a DAgger mix" in r.token
+    assert "trains on MIX|PROMPT_CODES" in r.token
     r = _run(rig, **env)
     assert r.token.startswith("COLAB_TRAIN_OK run=checkpoints_ab steps=400 last=000400")
     first, second = _calls(rig)
     assert (first["warmup"], first["decay"], first["peak_lr"]) == (200, 400, 1e-5)
     assert second["resume"] is True and second["start"] == 200
-    assert second["dagger_root"] == str(dag) and second["dagger_share"] == "0.3"
+    assert second["mix"] == [[str(dag), 0.3]]
     keep = sorted(p.name for p in (rig.run / "keep").iterdir())
     assert keep == ["000100", "000200", "000300", "000400"]  # every save, for the reads
 
@@ -563,6 +563,89 @@ def test_each_dagger_stop_prints_one_fail_token(rig, env, why):
         (dag / "meta" / "stats.json").write_text("{}")
     r = _run(rig, **{"DAGGER": dag, **env})
     assert r.token.startswith("COLAB_TRAIN_FAIL") and why in r.token and not _calls(rig)
+
+
+def _mix_roots(rig, codes: bool) -> str:
+    """Run A's two relative MIX roots on the Drive, with their prompt codes if ``codes``, and the
+    corpus codes file: the MIX value."""
+    for name in ("own_a", "takeovers"):
+        root = _dagger_root(rig, rig.drive / "ms7i" / name)
+        if codes:
+            np.save(root / "meta" / "prompt_codes.npy", np.full(5, 4, np.int8))
+    np.save(rig.drive / "ms7i" / "corpus_prompt_codes.npy", np.arange(6, dtype=np.int8))
+    return "ms7i/own_a:0.3 ms7i/takeovers:0.2"
+
+
+def test_run_a_copies_each_drive_root_and_the_codes_and_trains_at_200_tokens(rig):
+    mix = _mix_roots(rig, codes=True)
+    env = {"MIX": mix, "PROMPT_CODES": "ms7i/corpus_prompt_codes.npy", "MAX_LENGTH": 200}
+    env |= {"OUT_ROOT": rig.path / "scratch", "FAKE_LOSS": "0.070"}
+    r = _run(rig, "--smoke", RUN_NAME=None, **env)
+    assert r.token.startswith("COLAB_TRAIN_OK smoke") and "loss200=0.070" in r.token
+    (call,) = _calls(rig)
+    local = [rig.path / "scratch" / f"mix_ms7i_{n}" for n in ("own_a", "takeovers")]
+    assert call["mix"] == [[str(local[0]), 0.3], [str(local[1]), 0.2]] and call["prompt_codes"]
+    assert (call["max_length"], call["tokenizer_max_length"], call["preflight_max_length"]) == (
+        200,
+        200,
+        "200",
+    )
+    for root in local:
+        assert (root / ".copied").exists() and (root / "meta" / "prompt_codes.npy").exists()
+    codes = rig.path / "content" / "dataset" / "meta" / "prompt_codes.npy"
+    assert np.load(codes).tolist() == list(range(6))
+    assert not (rig.drive / "dataset" / "meta" / "prompt_codes.npy").exists()  # Drive untouched
+    (local[0] / "meta" / "info.json").unlink()  # a session copy stays: no second copy
+    _run(rig, "--smoke", RUN_NAME=None, **env)
+    assert not (local[0] / "meta" / "info.json").exists()
+
+
+@pytest.mark.parametrize(
+    "env, why",
+    [
+        ({"MIX": "ms7i/own_a"}, "MIX entry ms7i/own_a: want ROOT:SHARE"),
+        ({"MIX": "ms7i/none:0.3"}, "no {drive}/ms7i/none/meta/info.json: MIX root ms7i/none"),
+        ({"BAD_STATS": 1}, "{drive}/ms7i/takeovers/meta/stats.json md5"),
+        ({"PROMPT_CODES": "ms7i/none.npy"}, "no PROMPT_CODES file {drive}/ms7i/none.npy"),
+        ({"NO_CODES": 1}, "no {drive}/ms7i/own_a/meta/prompt_codes.npy: PROMPT_CODES"),
+        ({"MIX": None}, "PROMPT_CODES needs MIX"),
+        ({"MAX_LENGTH": "2OO"}, "MAX_LENGTH=2OO is not a token count"),
+    ],
+)
+def test_each_mix_stop_prints_one_fail_token_before_any_copy(rig, env, why):
+    mix = _mix_roots(rig, codes=not env.pop("NO_CODES", None))
+    if env.pop("BAD_STATS", None):
+        (rig.drive / "ms7i" / "takeovers" / "meta" / "stats.json").write_text("{}")
+    env = {"MIX": mix, "PROMPT_CODES": "ms7i/corpus_prompt_codes.npy", **env}
+    r = _run(rig, **env)
+    assert r.token.startswith("COLAB_TRAIN_FAIL") and why.format(drive=rig.drive) in r.token
+    assert not _calls(rig) and not (rig.path / "content" / "dataset").exists()
+
+
+def test_a_mix_run_keeps_4k_and_8k_and_resumes_only_with_its_mix_and_codes(rig):
+    mix = _mix_roots(rig, codes=True)
+    env = {"MIX": mix, "PROMPT_CODES": "ms7i/corpus_prompt_codes.npy", "STEPS": None}
+    env |= {"SAVE_FREQ": 2000, "KEEP_EVERY": 4000, "FAKE_STEP_S": 0.0002, "DRIVE_MIN_GB": 0}
+    r = _run(rig, **env, FAKE_DIE_AT=5000)
+    assert r.token.startswith("COLAB_TRAIN_FAIL") and "the trainer exited 137" in r.token
+    assert (rig.run / "mix.txt").read_text() == f"{mix}|ms7i/corpus_prompt_codes.npy\n"
+    assert (rig.run / "last.txt").read_text().strip() == "004000"
+    shutil.rmtree(rig.out)  # a new VM
+    for other in ({"PROMPT_CODES": None}, {"MIX": "ms7i/own_a:0.3"}):
+        r = _run(rig, **{**env, **other})
+        assert "trains on MIX|PROMPT_CODES" in r.token and r.rc == 1
+    r = _run(rig, **env)
+    assert r.token.startswith("COLAB_TRAIN_OK run=checkpoints_ab steps=8000 last=008000")
+    first, second = _calls(rig)
+    assert (first["steps"], first["warmup"], first["decay"], first["peak_lr"]) == (
+        8000,
+        200,
+        8000,
+        1e-5,
+    )
+    assert second["resume"] is True and second["start"] == 4000 and second["prompt_codes"]
+    assert second["mix"] == first["mix"] and len(second["mix"]) == 2
+    assert sorted(p.name for p in (rig.run / "keep").iterdir()) == ["004000", "008000"]
 
 
 def test_prepare_copies_the_dataset_and_trains_nothing(rig):
@@ -635,7 +718,7 @@ def test_the_cli_runner_takes_a_dagger_tar_to_a_kept_run(rig):
     )
     smoke, run = _calls(rig)
     for call in (smoke, run):
-        assert call["dagger_root"] == str(scratch / "dagger_dataset")
+        assert call["mix"] == [[str(scratch / "dagger_dataset"), 0.3]]
         assert call["dataset_root"] == str(scratch / "dataset") and call["peak_lr"] == 1e-5
     assert call["output_dir"] == str(scratch / "pi05_checkpoints_dagger")
 
@@ -669,9 +752,10 @@ def standin(args: list[str]) -> int:
         cfg.validate()
         return cfg
 
-    own = ("--dagger_root=", "--dagger_share=")  # train_pi05.py's flags
-    mix = {a[2:].split("=")[0]: a.split("=", 1)[1] for a in args if a.startswith(own)}
-    sys.argv = ["lerobot-train", *[a for a in args if not a.startswith(own)]]
+    from train_pi05 import split_mix  # train_pi05.py's own flags leave lerobot's argv
+
+    mix, prompts, rest = split_mix(args)
+    sys.argv = ["lerobot-train", *rest]
     cfg = parser.wrap()(parse)()
     model_dir = Path(cfg.policy.pretrained_path)
     tokens = _max_length(model_dir)
@@ -708,8 +792,9 @@ def standin(args: list[str]) -> int:
         "pretrained_path": str(model_dir),
         "output_dir": str(cfg.output_dir),
         "dataset_root": str(cfg.dataset.root),
-        "dagger_root": mix.get("dagger_root"),
-        "dagger_share": mix.get("dagger_share"),
+        "preflight_max_length": os.environ["PREFLIGHT_MAX_LENGTH"],
+        "mix": [[root, share] for root, share in mix],
+        "prompt_codes": prompts,
     }
     with open(Path(os.environ["FAKE_DIR"]) / "cfg.jsonl", "a") as f:
         f.write(json.dumps(record) + "\n")

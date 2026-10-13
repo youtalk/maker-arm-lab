@@ -33,8 +33,8 @@
 #                         the reads; the sync never deletes them
 #   action_space.json     the dataset's gripper contract, found by policy_server's marker walk
 #
-# A fresh run copies START to the local disk, sets its saved tokenizer step to 128 tokens (a
-# warm start reads the saved policy_preprocessor.json and no config.json), and passes every
+# A fresh run copies START to the local disk, sets its saved tokenizer step to MAX_LENGTH tokens
+# (a warm start reads the saved policy_preprocessor.json and no config.json), and passes every
 # recipe flag again; lerobot builds a new optimizer and a new schedule. START=lerobot/pi05_base
 # downloads run 1's start instead (da1f27a), at the revision pinned below; its normalizer takes
 # the dataset's statistics as a warm start's does (run 1's 030000 holds the corpus stats). STEPS
@@ -61,21 +61,28 @@
 #     room, so DRIVE_MIN_GB=0 skips these checks there
 #   - a corpus meta/stats.json whose md5 is not STATS_MD5
 #   - a preflight miss before the first update (pi05_preflight.py: the full weight load, the
-#     normalizer statistics against the corpus file, 128 tokens, action_is_pad at the masked
-#     forward), or a trainer that logs a step with no PREFLIGHT_OK line before it
+#     normalizer statistics against the corpus file, MAX_LENGTH tokens with the longest prompt
+#     under it, action_is_pad at the masked forward), or a trainer that logs a step with no
+#     PREFLIGHT_OK line before it
 #   - a loss outside [LOSS_LO, LOSS_HI] at step 200 (another default band from pi05_base)
 #   - SPAN=1 with no checkpoint past the start step that fits this session, or a KEEP_EVERY that
 #     is not a multiple of the save freq
 #   - a final Drive sync that still fails after SYNC_RETRY_S
 #
-# The DAgger mode (MS7h HD59), with DAGGER=<a dagger_vla.py root on the local disk>: the run trains
-# on the corpus and that root in one mix (train_pi05.py --dagger_root, a draw is a DAgger frame
-# with probability DAGGER_SHARE, 0.3), a warm start from START at its own recipe: warmup 200 to a
-# peak lr of 1e-5, then cosine to 2.5e-6 over STEPS (8000 by default, not N), every checkpoint kept
-# (KEEP_EVERY defaults to the save freq), and its own step-200 loss band. The DAgger root must
-# carry the corpus's meta/stats.json (STATS_MD5): the corpus normalizer trains both. A run keeps
-# its share in $RUN_NAME/dagger_share.txt, and a resume needs DAGGER and the same share again.
-# colab_dagger.sh drives this mode on a CLI runtime.
+# The mix mode (MS7h HD59 with one root, MS7i Run A and Run B with two), with MIX="ROOT:SHARE ...":
+# the run trains on the corpus and each ROOT in one mix (train_pi05.py --mix=ROOT:SHARE, a draw is
+# a frame of ROOT with probability SHARE, a corpus frame with 1 minus their sum), a warm start from
+# START at its own recipe: warmup 200 to a peak lr of 1e-5, then cosine to 2.5e-6 over STEPS (8000
+# by default, not N), every checkpoint kept (KEEP_EVERY defaults to the save freq), and its own
+# step-200 loss band. A ROOT under $DRIVE (a relative path) is copied to $OUT_ROOT/mix_<path> once
+# a session, as the corpus is, so a browser runtime gets every input from the Shared drive; an
+# absolute ROOT is used where it is. Every ROOT must carry the corpus's meta/stats.json
+# (STATS_MD5): the corpus normalizer trains them all. PROMPT_CODES=<a file under $DRIVE> (MS7i
+# Run A) is the corpus's meta/prompt_codes.npy: it is copied into the local corpus copy each
+# session, every ROOT must hold its own, and train_pi05.py gets --prompt_codes. A run keeps
+# "MIX|PROMPT_CODES" in $RUN_NAME/mix.txt, and a resume needs the same two again.
+# DAGGER=<root> [DAGGER_SHARE=0.3] stays as the one-root MIX that colab_dagger.sh sets on a CLI
+# runtime.
 #
 # The pi05 tokenizer google/paligemma-3b-pt-224 is a gated repo: HF_TOKEN must belong to an
 # account that was granted access (the owner's was, 2026-10-05). The script checks that first,
@@ -95,8 +102,9 @@
 #      OUT_ROOT (/content): where the local checkpoints and the start copy go, e.g. the
 #      runtime's local-scratch disk (the owner's A100 runtime had 70 GB free on /content after
 #      the dataset copy and 368 GB there), LOSS_LO, LOSS_HI, DRIVE_MIN_GB (60), STATS_MD5,
-#      SPAN (0), KEEP_EVERY (none), DRIVE_ROOT (/content/drive/MyDrive), LOCAL_DATA
-#      ($CONTENT/$DATASET: where the dataset copy goes), DAGGER (none), DAGGER_SHARE (0.3).
+#      SPAN (0), KEEP_EVERY (none), MAX_LENGTH (128), DRIVE_ROOT (/content/drive/MyDrive),
+#      LOCAL_DATA ($CONTENT/$DATASET: where the dataset copy goes), MIX (none), PROMPT_CODES
+#      (none), DAGGER (none), DAGGER_SHARE (0.3).
 #      CONTENT (/content), UPTIME_FILE (/proc/uptime), POLL_S (60) and SYNC_RETRY_S (1800) are
 #      for the dry-run test (lerobot_stack/test_colab_train_pi05.py).
 # -> one COLAB_TRAIN_OK / COLAB_TRAIN_DONE / COLAB_TRAIN_FAIL line.
@@ -151,19 +159,42 @@ DRIVE_MIN_GB=${DRIVE_MIN_GB:-60}
 KEEP_GB=10 # a kept pretrained_model: run 1's model.safetensors is 9,354,050,752 bytes
 # md5 of h/vla/dataset/meta/stats.json on Machine A, the corpus uploaded to Drive (2026-10-08)
 STATS_MD5=${STATS_MD5:-c10e2a394888ad72532a83779febdc3c}
-MAX_LENGTH=128 # no prompt of the corpus reaches it: the longest is 114 tokens with BOS (review)
+# 128 by default: no prompt of the corpus reaches it, the longest is 114 tokens with BOS (review);
+# MS7i Run A and Run B set 200 (MS7i design rev3 6.1), and the preflight checks the longest prompt
+MAX_LENGTH=${MAX_LENGTH:-128}
+[[ "$MAX_LENGTH" =~ ^[1-9][0-9]*$ ]] || fail "MAX_LENGTH=$MAX_LENGTH is not a token count"
 BASE=lerobot/pi05_base
 # its revision before the 2026-06-03 commit "Add relative action processor steps", whose
 # preprocessor names relative_actions_processor, a step lerobot 0.5.1 registers as
 # delta_actions_processor, so it fails to load (run 1's pin, da1f27a)
 PI05_REV=a538eb273274eb30f126a118f39dbc0ee212c883
-PEAK_LR=2.5e-5 DAGGER_WARMUP=
-MIX=()
-if [ -n "${DAGGER:-}" ]; then
-    [ -f "$DAGGER/meta/info.json" ] || fail "no $DAGGER/meta/info.json: DAGGER=<the DAgger root>"
-    DAGGER_SHARE=${DAGGER_SHARE:-0.3}
-    MIX=(--dagger_root="$DAGGER" --dagger_share="$DAGGER_SHARE")
-    PEAK_LR=1e-5 DAGGER_WARMUP=200
+PEAK_LR=2.5e-5 MIX_WARMUP=
+MIX=${MIX:-${DAGGER:+$DAGGER:${DAGGER_SHARE:-0.3}}}
+read -ra MIX_ENTRIES <<< "$MIX"
+MIX_ARGS=() MIX_SRC=() MIX_LOCAL=()
+for entry in "${MIX_ENTRIES[@]}"; do
+    root=${entry%:*}
+    [[ "$entry" == *:* && -n "$root" && "${entry##*:}" =~ ^[0-9]*\.?[0-9]+$ ]] \
+        || fail "MIX entry $entry: want ROOT:SHARE"
+    case "$root" in
+        /*) MIX_SRC+=("$root") MIX_LOCAL+=("$root") ;;
+        *) MIX_SRC+=("$DRIVE/$root") MIX_LOCAL+=("$LOCAL/mix_${root//\//_}") ;;
+    esac
+    [ -f "${MIX_SRC[-1]}/meta/info.json" ] \
+        || fail "no ${MIX_SRC[-1]}/meta/info.json: MIX root $root"
+    MIX_ARGS+=(--mix="${MIX_LOCAL[-1]}:${entry##*:}")
+done
+if [ -n "${PROMPT_CODES:-}" ]; then
+    [ -n "$MIX" ] || fail "PROMPT_CODES needs MIX"
+    case "$PROMPT_CODES" in /*) CODES_SRC=$PROMPT_CODES ;; *) CODES_SRC=$DRIVE/$PROMPT_CODES ;; esac
+    [ -f "$CODES_SRC" ] || fail "no PROMPT_CODES file $CODES_SRC"
+    for src in "${MIX_SRC[@]}"; do
+        [ -f "$src/meta/prompt_codes.npy" ] || fail "no $src/meta/prompt_codes.npy: PROMPT_CODES"
+    done
+    MIX_ARGS+=(--prompt_codes)
+fi
+if [ -n "$MIX" ]; then
+    PEAK_LR=1e-5 MIX_WARMUP=200
     STEPS=${STEPS:-8000}
     KEEP_EVERY=${KEEP_EVERY:-$SAVE_FREQ}
     # INITIAL: a warm start from a fresh save on the mix, which the DAgger smoke's step 200
@@ -273,11 +304,11 @@ echo "Drive: $free_gb GB free, as df reads $DRIVE"
 stats_md5=$(md5sum < "$DRIVE/$DATA/meta/stats.json" | cut -d' ' -f1)
 [ "$stats_md5" = "$STATS_MD5" ] \
     || fail "$DRIVE/$DATA/meta/stats.json md5 $stats_md5 is not the corpus's $STATS_MD5"
-if [ -n "${DAGGER:-}" ]; then
-    stats_md5=$(md5sum < "$DAGGER/meta/stats.json" | cut -d' ' -f1)
+for src in "${MIX_SRC[@]}"; do
+    stats_md5=$(md5sum < "$src/meta/stats.json" | cut -d' ' -f1)
     [ "$stats_md5" = "$STATS_MD5" ] \
-        || fail "$DAGGER/meta/stats.json md5 $stats_md5 is not the corpus's $STATS_MD5"
-fi
+        || fail "$src/meta/stats.json md5 $stats_md5 is not the corpus's $STATS_MD5"
+done
 
 uptime_s=$(cut -d' ' -f1 "${UPTIME_FILE:-/proc/uptime}")
 FIT=$(awk -v up="$uptime_s" -v sps="$SEC_PER_STEP" -v max="$STEPS_MAX" 'BEGIN {
@@ -294,12 +325,9 @@ fi
 RESUME=0
 if [ "$SMOKE" -eq 0 ] && [ -f "$RUN_DIR/last.txt" ]; then
     RESUME=1
-    if [ -f "$RUN_DIR/dagger_share.txt" ]; then
-        [ "$(cat "$RUN_DIR/dagger_share.txt")" = "${DAGGER:+$DAGGER_SHARE}" ] \
-            || fail "$RUN_NAME trains on a DAgger mix: resume it with DAGGER and its share"
-    elif [ -n "${DAGGER:-}" ]; then
-        fail "$RUN_NAME started without DAGGER: unset it to resume"
-    fi
+    recorded=$(cat "$RUN_DIR/mix.txt" 2>/dev/null || echo "|") # no file: a run without a mix
+    [ "$recorded" = "$MIX|${PROMPT_CODES:-}" ] \
+        || fail "$RUN_NAME trains on MIX|PROMPT_CODES '$recorded': resume it with the same two"
 else
     [ "${SPAN:-0}" = 1 ] || [ "$STEPS" -le "$FIT" ] \
         || fail "STEPS=$STEPS does not fit this session: N=$FIT"
@@ -378,6 +406,17 @@ if [ ! -e "$LOCAL_DATA/.copied" ]; then
     cp -r "$DRIVE/$DATA" "$LOCAL_DATA"
     touch "$LOCAL_DATA/.copied"
 fi
+for i in "${!MIX_SRC[@]}"; do
+    dst=${MIX_LOCAL[$i]}
+    if [ "$dst" != "${MIX_SRC[$i]}" ] && [ ! -e "$dst/.copied" ]; then
+        rm -rf "$dst"
+        mkdir -p "$(dirname "$dst")"
+        echo "copying ${MIX_SRC[$i]} to $dst"
+        cp -r "${MIX_SRC[$i]}" "$dst"
+        touch "$dst/.copied"
+    fi
+done
+[ -z "${PROMPT_CODES:-}" ] || cp "$CODES_SRC" "$LOCAL_DATA/meta/prompt_codes.npy"
 df -h "$CONTENT" | tail -1
 if [ "$PREPARE" -eq 1 ]; then
     RESULT="prepared data=$LOCAL_DATA"
@@ -406,12 +445,12 @@ if [ "$RESUME" -eq 1 ]; then
     # --output_dir: a resumed train_config.json names the first session's output dir;
     # --dataset.root: this session's local copy of the dataset, as a fresh run passes it
     CMD=("${TRAIN[@]}" --config_path="$config" --resume=true --output_dir="$OUT"
-        --dataset.root="$LOCAL_DATA" "${MIX[@]}")
+        --dataset.root="$LOCAL_DATA" "${MIX_ARGS[@]}")
 else
     if [ "$SMOKE" -eq 0 ]; then
         mkdir -p "$RUN_DIR"
-        rm -f "$RUN_DIR/dagger_share.txt"
-        [ -z "${DAGGER:-}" ] || echo "$DAGGER_SHARE" > "$RUN_DIR/dagger_share.txt"
+        rm -f "$RUN_DIR/mix.txt"
+        [ -z "$MIX" ] || echo "$MIX|${PROMPT_CODES:-}" > "$RUN_DIR/mix.txt"
     fi
     START_COPY=$LOCAL/start_model
     # a fresh run: nothing local to keep, and a smoke checkpoint (22.8 GiB) would crowd /content
@@ -431,7 +470,7 @@ snapshot_download(sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3])' \
     START_STEP=0
     # The pi05 preset's schedule (warmup 1000, decay 30000) scaled into STEPS as lerobot scaled
     # it for M2k (2000 steps: warmup 66); equal steps and decay steps skip that rescale.
-    WARMUP=${DAGGER_WARMUP:-$((1000 * STEPS / 30000))}
+    WARMUP=${MIX_WARMUP:-$((1000 * STEPS / 30000))}
     CMD=(
         "${TRAIN[@]}"
         --dataset.repo_id=youtalk/maker-arm-legosort
@@ -461,7 +500,7 @@ snapshot_download(sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3])' \
         --save_freq="$SAVE_FREQ"
         --log_freq="$LOG_FREQ"
         --wandb.enable=false
-        "${MIX[@]}"
+        "${MIX_ARGS[@]}"
     )
 fi
 if [ "$SMOKE" -eq 0 ]; then cp "$LOCAL_DATA/meta/action_space.json" "$DRIVE/action_space.json"; fi
