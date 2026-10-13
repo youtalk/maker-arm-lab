@@ -2773,9 +2773,11 @@ def rollout(
     # cycle close and the cycles closed since they last grew (rule 3).
     interventions = [Counter(strays=0, miss_streak=0) for _ in range(num_envs)]
     streaks = [(0, 0)] * num_envs
-    # ``record_all``: each env's subtask state (lifted, low) and the cycle it belongs to.
+    # ``record_all``: each env's subtask state (lifted, low), the cycle it belongs to, and the
+    # served width its last frame recorded (None before the first), the one its command answered.
     sub_state = [(False, None)] * num_envs
     sub_cycle = [0] * num_envs
+    sub_width = [None] * num_envs
 
     started = time.monotonic()
     max_steps = int(env.max_episode_length)
@@ -3073,9 +3075,10 @@ def rollout(
                 stamp()
             state = policy_state(robot.data.joint_pos).to("cpu").numpy()
             if record_all:
-                # MS7i: each live env's subtask on this frame, from what the frame records: the
-                # served state, the last served gap command and the served row's width. The
-                # state starts over at a new cycle and carries over the steps between cycles.
+                # MS7i: each live env's subtask on this frame, from what the frames record: the
+                # served state, the last served gap command and the width the last frame
+                # recorded. The state starts over at a new cycle and carries over the steps
+                # between cycles.
                 for i, st in enumerate(states):
                     if bool(tracker.done[i]):
                         continue
@@ -3083,7 +3086,7 @@ def rollout(
                         sub_cycle[i], sub_state[i] = st.cycle.ordinal, (False, None)
                     gap = 2.0 * GRIPPER_OPEN_POS * float(state[i, 6])
                     pick_z = float(commanded_pick(rig.ik, state[i, :6])[2])
-                    width = float(ctx_target[i][5])
+                    width = float(ctx_target[i][5]) if sub_width[i] is None else sub_width[i]
                     sid, lifted, low = subtask_step(*sub_state[i], gap, gap_cmd[i], pick_z, width)
                     sub_state[i] = (lifted, low)
                     env.loop_subtask[i] = sid
@@ -3566,6 +3569,8 @@ def rollout(
                     states[i].takeovers_failed += 1
                     env.oracle_actor[i] = 0
         _, _, terminated, truncated, _ = env.step(clamped.to(env.device))
+        if record_all:  # the width each frame recorded (a takeover's is the rig's row)
+            sub_width = [float(w) for w in ctx_target[:, 5]]
         dones = (terminated | truncated).cpu()
         rig.observe(dones)
         # 4. Takeovers the rig handed back this step.

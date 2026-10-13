@@ -224,8 +224,41 @@ def test_a_zero_width_reads_the_idle_threshold():
     assert hold.OPEN_HALF_GAP == pytest.approx(0.0524)
     below, at = hold.OPEN_HALF_GAP - 1e-4, hold.OPEN_HALF_GAP
     assert _subtasks([(W, below, 0.02), (W, at, 0.02)], width=0.0) == ["grasp", "reach"]
-    # With a row, the threshold is its width.
-    assert _subtasks([(W, W - 1e-4, 0.02), (W, W, 0.02)]) == ["grasp", "reach"]
+    # With a row, the threshold is its width plus the margin: the teacher's close on a part
+    # grasped across a wider axis reads closed, its landing (width + 8 mm) open.
+    shut = W + hold.SUBTASK_CLOSED_MARGIN
+    assert hold.SUBTASK_CLOSED_MARGIN == 0.004
+    assert _subtasks([(W, shut - 1e-4, 0.02), (W, shut, 0.02)]) == ["grasp", "reach"]
+    assert _subtasks([(W, W + 0.0002, 0.02), (W, LANDING, 0.02)]) == ["grasp", "reach"]
+
+
+def test_a_hold_the_left_jaw_barely_sees_reads_carry_and_an_empty_rise_does_not():
+    # The 2026-10-13 corpus audit: a part resting against the right jaw leaves the left jaw
+    # 1 mm over its half of the command; empty jaws converge to the command.
+    lift = [(LANDING, CLOSE, 0.02)] + [(CLOSE + 0.001, CLOSE, 0.02 + 0.011 * k) for k in range(6)]
+    assert _subtasks(lift)[-1] == "carry"
+    empty = [(LANDING, CLOSE, 0.02)] + [(CLOSE + 0.0003, CLOSE, 0.02 + 0.011 * k) for k in range(6)]
+    assert set(_subtasks(empty)) == {"grasp"}
+    assert hold.SUBTASK_MIN_EXCESS == 0.0005 and hold.MIN_EXCESS == 0.002  # the detector's
+
+
+def test_a_command_reads_against_the_width_it_answered():
+    # The row names the next, wider part from the frame RELEASE ends: the release opening
+    # (landing), under that part's width, reads against the released part's, and the next
+    # command (the full open) against the new row's. Read against the new row, the landing
+    # made a one-frame carry (2026-10-13 corpus audit).
+    wide = 0.030
+    rows = [
+        (W, CLOSE, 0.01, W, 1),
+        (W, CLOSE, 0.07, W, 1),
+        (LANDING, LANDING, 0.07, W, 1),
+        (LANDING, LANDING, 0.07, wide, 1),
+        (LANDING, JAW_FULL_GAP, 0.07, wide, 1),
+    ]
+    ids = [hold.SUBTASKS[i] for i in hold.subtask_ids(*zip(*rows))]
+    assert ids == ["grasp", "carry", "release", "release", "release"]
+    sid, _, _ = hold.subtask_step(True, None, LANDING, LANDING, 0.07, wide)
+    assert hold.SUBTASKS[sid] == "carry"  # the landing read against the new row's width
 
 
 def test_subtask_ids_resets_on_a_new_cycle_and_carries_over_the_frames_between():

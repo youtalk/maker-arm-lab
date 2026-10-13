@@ -31,10 +31,23 @@ is plain floats.
 MS7i (its rev1 design 5.2 and rev3 design 5.3): ``SUBTASKS`` names the four subtasks of a
 cycle, and ``subtask_step`` reads one frame's from what a recorded frame and a corpus frame
 both hold: twice the left jaw's opening (the corpus has no right jaw, so this is not the
-detector's two-jaw sum), the previous frame's served gap command, the served row's width
-(``environment_state[14]``) and the FK pick point's z. A lift is the detector's ``gripping``
-test plus a 5 cm rise over the lowest pick point since the close. The heap loop records the
-id per frame (``rollout(record_all=True)``); ``subtask_ids`` replays it offline.
+detector's two-jaw sum), the previous frame's served gap command and the served row's width
+it answered (``environment_state[14]``), and the FK pick point's z. A lift is a closed command,
+a measured gap ``SUBTASK_MIN_EXCESS`` over it and a 5 cm rise over the lowest pick point since
+the close. The heap loop records the id per frame (``rollout(record_all=True)``);
+``subtask_ids`` replays it offline.
+
+The two margins are the 2026-10-13 corpus audit's (F9n's corpus, 23,957 teacher episodes, each
+a cycle that lifts and carries a part). With the detector's 2 mm and the width itself as the
+close threshold, 24.8 % of them never read carry. The teacher closes at the width less 6 mm
+and lands at the width plus 8 mm (``grasp.close_gap``, ``grasp.landing_half_gap``), but on a
+part grasped across another axis than the served row's it closes at or over the width
+(``SUBTASK_CLOSED_MARGIN``). The left jaw alone misses the hold of a part that rests against
+the right jaw: over each last lift of an episode the gap's largest excess is under 2 mm in
+19 % of them and under 0.5 mm in 9 %, while a lift the teacher gives up (most of them empty)
+reads 0.18 mm at the median (``SUBTASK_MIN_EXCESS``). The command also reads against the PREVIOUS
+frame's width: the row names the next part from the frame RELEASE ends, and the release
+opening read against that part's width made a one-frame carry after the release.
 """
 
 from __future__ import annotations
@@ -82,6 +95,12 @@ L7); a row without it has the first eight."""
 
 SUBTASKS = ("reach", "grasp", "carry", "release")
 """MS7i rev1 design 5.2: a cycle's subtasks; a subtask's id is its index."""
+SUBTASK_CLOSED_MARGIN = 0.004  # INITIAL: m over the served width, the 2026-10-13 corpus audit
+"""A command under the served width plus this margin reads closed: half way from the teacher's
+close (width - 6 mm) to its landing (width + 8 mm)."""
+SUBTASK_MIN_EXCESS = 0.0005  # INITIAL: m, the 2026-10-13 corpus audit (module docstring)
+"""The lift's gripping margin over the command, on twice the left jaw (``MIN_EXCESS`` stays the
+detector's)."""
 
 
 def gripping(
@@ -98,23 +117,30 @@ def subtask_step(
     """One frame's subtask id (an index of ``SUBTASKS``) and the state for the next frame,
     ``(id, lifted, low)``. ``gap``: m, 2 * GRIPPER_OPEN_POS * observation.state[6].
     ``prev_cmd``: the previous frame's served gap command (None reads open). ``pick_z``: the
-    FK pick point z of observation.state[:6]. ``width``: the served row's width
-    (environment_state[14]); 0 means no row, and the loop's idle threshold
-    ``OPEN_HALF_GAP`` stands in. The command reads closed under the width. ``low`` is the
-    lowest pick z since the close (None while open) and ``lifted`` latches the cycle's lift.
-    The caller starts each cycle at ``(False, None)``. Pure."""
-    closed = prev_cmd is not None and prev_cmd < (width if width > 0.0 else OPEN_HALF_GAP)
+    FK pick point z of observation.state[:6]. ``width``: the served row's width that command
+    answered, the PREVIOUS frame's environment_state[14]; 0 means no row, and the loop's idle
+    threshold ``OPEN_HALF_GAP`` stands in. The command reads closed under the width plus
+    ``SUBTASK_CLOSED_MARGIN``. ``low`` is the lowest pick z since the close (None while open)
+    and ``lifted`` latches the cycle's lift. The caller starts each cycle at
+    ``(False, None)``. Pure."""
+    shut = width + SUBTASK_CLOSED_MARGIN if width > 0.0 else OPEN_HALF_GAP
+    closed = prev_cmd is not None and prev_cmd < shut
     low = None if not closed else pick_z if low is None else min(low, pick_z)
-    lifted = lifted or (closed and gripping(gap, prev_cmd) and pick_z - low >= LIFT_MIN_RISE)
+    grips = closed and gripping(gap, prev_cmd, SUBTASK_MIN_EXCESS)
+    lifted = lifted or (grips and pick_z - low >= LIFT_MIN_RISE)
     return (2 if closed else 3) if lifted else (1 if closed else 0), lifted, low
 
 
 def subtask_ids(gap, prev_cmd, pick_z, width, cycle) -> list[int]:
-    """Offline ``subtask_step`` over one episode's per-frame sequences. The state resets on
-    each new positive ``cycle`` value (obs/loop_cycle; a corpus episode is one cycle) and
-    carries over the 0 frames between cycles, as the loop's does. Pure."""
+    """Offline ``subtask_step`` over one episode's per-frame sequences: ``width`` is each frame's
+    own served width, and a frame reads its command against the previous frame's (the first
+    frame against its own). The state resets on each new positive ``cycle`` value
+    (obs/loop_cycle; a corpus episode is one cycle) and carries over the 0 frames between
+    cycles, as the loop's does. Pure."""
+    width = list(width)
+    answered = width[:1] + width[:-1]
     ids, lifted, low, last = [], False, None, 0
-    for g, cmd, z, w, n in zip(gap, prev_cmd, pick_z, width, cycle, strict=True):
+    for g, cmd, z, w, n in zip(gap, prev_cmd, pick_z, answered, cycle, strict=True):
         if n > 0 and n != last:
             lifted, low, last = False, None, n
         sid, lifted, low = subtask_step(lifted, low, g, cmd, z, w)
