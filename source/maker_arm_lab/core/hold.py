@@ -27,6 +27,14 @@ finger off. The gate never ends a hold that has begun, and without it the detect
 pre-registered bar. ``cycle_rows`` rebuilds those census rows from a per-step trace
 (``loop.rollout(hold_trace=...)``) at any thresholds, for the calibration sweep. The detector
 is plain floats.
+
+MS7i (its rev1 design 5.2 and rev3 design 5.3): ``SUBTASKS`` names the four subtasks of a
+cycle, and ``subtask_step`` reads one frame's from what a recorded frame and a corpus frame
+both hold: twice the left jaw's opening (the corpus has no right jaw, so this is not the
+detector's two-jaw sum), the previous frame's served gap command, the served row's width
+(``environment_state[14]``) and the FK pick point's z. A lift is the detector's ``gripping``
+test plus a 5 cm rise over the lowest pick point since the close. The heap loop records the
+id per frame (``rollout(record_all=True)``); ``subtask_ids`` replays it offline.
 """
 
 from __future__ import annotations
@@ -35,6 +43,7 @@ import statistics
 from collections import deque
 
 from maker_arm_lab.core.eval_loop import GRASP_HOLD_WINDOW
+from maker_arm_lab.core.grasp import OPEN_HALF_GAP
 from maker_arm_lab.core.oracle import LIFT_MIN_RISE
 from maker_arm_lab.robots.frames import JAW_FULL_GAP
 
@@ -69,6 +78,48 @@ measured and commanded gaps (m), the pick point z (m), the contact-held part (-1
 its rise above the cycle's start height (m, 0.0 with none held or no cycle). The ninth, the
 pick-point force (N, ``core.torque``), is there only when the rollout measured it (MS7d L6 or
 L7); a row without it has the first eight."""
+
+
+SUBTASKS = ("reach", "grasp", "carry", "release")
+"""MS7i rev1 design 5.2: a cycle's subtasks; a subtask's id is its index."""
+
+
+def gripping(
+    measured_gap: float, commanded_gap: float, min_excess=MIN_EXCESS, min_gap=MIN_GAP
+) -> bool:
+    """A part blocks the jaws: the measured gap stays ``min_excess`` over the commanded gap
+    and is at least ``min_gap`` wide (m). The detector's entry and exit test. Pure."""
+    return measured_gap - commanded_gap >= min_excess and measured_gap >= min_gap
+
+
+def subtask_step(
+    lifted: bool, low: float | None, gap: float, prev_cmd: float | None, pick_z: float, width: float
+) -> tuple[int, bool, float | None]:
+    """One frame's subtask id (an index of ``SUBTASKS``) and the state for the next frame,
+    ``(id, lifted, low)``. ``gap``: m, 2 * GRIPPER_OPEN_POS * observation.state[6].
+    ``prev_cmd``: the previous frame's served gap command (None reads open). ``pick_z``: the
+    FK pick point z of observation.state[:6]. ``width``: the served row's width
+    (environment_state[14]); 0 means no row, and the loop's idle threshold
+    ``OPEN_HALF_GAP`` stands in. The command reads closed under the width. ``low`` is the
+    lowest pick z since the close (None while open) and ``lifted`` latches the cycle's lift.
+    The caller starts each cycle at ``(False, None)``. Pure."""
+    closed = prev_cmd is not None and prev_cmd < (width if width > 0.0 else OPEN_HALF_GAP)
+    low = None if not closed else pick_z if low is None else min(low, pick_z)
+    lifted = lifted or (closed and gripping(gap, prev_cmd) and pick_z - low >= LIFT_MIN_RISE)
+    return (2 if closed else 3) if lifted else (1 if closed else 0), lifted, low
+
+
+def subtask_ids(gap, prev_cmd, pick_z, width, cycle) -> list[int]:
+    """Offline ``subtask_step`` over one episode's per-frame sequences. The state resets on
+    each new positive ``cycle`` value (obs/loop_cycle; a corpus episode is one cycle) and
+    carries over the 0 frames between cycles, as the loop's does. Pure."""
+    ids, lifted, low, last = [], False, None, 0
+    for g, cmd, z, w, n in zip(gap, prev_cmd, pick_z, width, cycle, strict=True):
+        if n > 0 and n != last:
+            lifted, low, last = False, None, n
+        sid, lifted, low = subtask_step(lifted, low, g, cmd, z, w)
+        ids.append(sid)
+    return ids
 
 
 def commanded_gap(raw: float, gripper_mode: str) -> float:
@@ -123,9 +174,9 @@ class HoldDetector:
         and was refused."""
         self.started = self.lift_started = self.ended = self.lost = self.blocked = False
         self.gaps.append(measured_gap)
-        gripping = measured_gap - commanded_gap >= self.min_excess and measured_gap >= self.min_gap
+        grips = gripping(measured_gap, commanded_gap, self.min_excess, self.min_gap)
         if self.holding:
-            self.fails = 0 if gripping else self.fails + 1
+            self.fails = 0 if grips else self.fails + 1
             if self.fails >= self.exit_steps:
                 self.ended, self.lost = True, self.lifted
                 self.holding = self.lifted = False
@@ -134,7 +185,7 @@ class HoldDetector:
             return
         full = len(self.gaps) == self.stable_steps
         still = full and max(self.gaps) - min(self.gaps) <= self.stable
-        self.run = self.run + 1 if gripping and still else 0
+        self.run = self.run + 1 if grips and still else 0
         if self.run >= self.confirm_steps and not entry:
             self.blocked = self.run == self.confirm_steps
         elif self.run >= self.confirm_steps:

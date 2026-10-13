@@ -177,3 +177,82 @@ def test_cycle_rows_rebuild_the_census_from_a_trace():
 def test_the_bar_constants_are_the_pre_registered_rule():
     assert (hold.BAR_PRECISION, hold.BAR_RECALL, hold.BAR_OFFSET_STEPS) == (0.95, 0.95, 5)
     assert hold.TRUTH_MIN_HELD_STEPS == 10 and hold.LIFT_MIN_RISE == pytest.approx(0.05)
+
+
+def _subtasks(frames, width=W):
+    """Run ``subtask_step`` over (gap, prev_cmd, pick_z) frames from a cycle's start."""
+    ids, lifted, low = [], False, None
+    for gap, cmd, z in frames:
+        sid, lifted, low = hold.subtask_step(lifted, low, gap, cmd, z, width)
+        ids.append(hold.SUBTASKS[sid])
+    return ids
+
+
+def test_subtask_reads_reach_while_open_and_grasp_once_the_command_closes():
+    assert hold.SUBTASKS == ("reach", "grasp", "carry", "release")
+    frames = [(LANDING, LANDING, 0.02)] * 3 + [(LANDING, CLOSE, 0.02)]
+    assert _subtasks(frames) == ["reach"] * 3 + ["grasp"]
+    # No previous command reads open: a corpus episode's first frame.
+    assert _subtasks([(W, None, 0.02)]) == ["reach"]
+
+
+def test_a_rise_with_empty_jaws_stays_grasp():
+    # The jaws close on nothing (the gap converges to the command) and the arm goes up 6 cm.
+    frames = [(g, CLOSE, 0.02) for g in _ramp(LANDING, CLOSE)]
+    frames += [(CLOSE, CLOSE, 0.02 + 0.01 * k) for k in range(1, 7)]
+    assert set(_subtasks(frames)) == {"grasp"}
+
+
+def test_blocked_jaws_and_a_5_cm_rise_over_the_lowest_point_read_carry_then_release():
+    # The close starts at 3 cm, the arm presses down to 1 cm, then lifts: the rise counts
+    # from 1 cm, so 5.5 cm reads carry and 5.0 cm does not yet (pick z 0.059 < 0.01 + 0.05).
+    frames = [(LANDING, CLOSE, 0.03), (W, CLOSE, 0.01), (W, CLOSE, 0.059), (W, CLOSE, 0.065)]
+    assert _subtasks(frames) == ["grasp", "grasp", "grasp", "carry"]
+    frames += [(W, LANDING, 0.065), (LANDING, CLOSE, 0.065)]  # an open, then a new close
+    assert _subtasks(frames)[-2:] == ["release", "carry"]
+
+
+def test_a_reopen_before_the_lift_resets_the_lowest_point():
+    # Pressed to 1 cm, re-opened, then closed again at 3 cm: the rise counts from 3 cm.
+    frames = [(W, CLOSE, 0.01), (LANDING, LANDING, 0.03), (W, CLOSE, 0.03), (W, CLOSE, 0.065)]
+    assert _subtasks(frames) == ["grasp", "reach", "grasp", "grasp"]
+    assert _subtasks(frames + [(W, CLOSE, 0.081)])[-1] == "carry"
+
+
+def test_a_zero_width_reads_the_idle_threshold():
+    # No served row: a command under OPEN_HALF_GAP reads closed, one at it reads open.
+    assert hold.OPEN_HALF_GAP == pytest.approx(0.0524)
+    below, at = hold.OPEN_HALF_GAP - 1e-4, hold.OPEN_HALF_GAP
+    assert _subtasks([(W, below, 0.02), (W, at, 0.02)], width=0.0) == ["grasp", "reach"]
+    # With a row, the threshold is its width.
+    assert _subtasks([(W, W - 1e-4, 0.02), (W, W, 0.02)]) == ["grasp", "reach"]
+
+
+def test_subtask_ids_resets_on_a_new_cycle_and_carries_over_the_frames_between():
+    # Cycle 1 lifts, two frames between cycles keep its lift (release), cycle 2 starts over.
+    rows = [
+        (W, CLOSE, 0.01, W, 1),
+        (W, CLOSE, 0.07, W, 1),
+        (W, LANDING, 0.07, W, 0),
+        (W, CLOSE, 0.07, W, 0),
+        (W, CLOSE, 0.07, W, 2),
+        (W, CLOSE, 0.07, W, 2),
+    ]
+    ids = hold.subtask_ids(*zip(*rows))
+    assert [hold.SUBTASKS[i] for i in ids] == [
+        "grasp",
+        "carry",
+        "release",
+        "carry",
+        "grasp",
+        "grasp",
+    ]
+    # The same cycle value again after the 0 frames is no new cycle.
+    again = [r[:4] + (1,) if r[4] == 2 else r for r in rows]
+    assert [hold.SUBTASKS[i] for i in hold.subtask_ids(*zip(*again))][-2:] == ["carry", "carry"]
+
+
+def test_gripping_is_the_detectors_test():
+    assert hold.gripping(W, CLOSE) and not hold.gripping(CLOSE, CLOSE)
+    assert not hold.gripping(0.002, 0.0)  # under MIN_GAP
+    assert not hold.gripping(W, CLOSE, min_excess=0.01)
