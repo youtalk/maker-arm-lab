@@ -23,7 +23,7 @@ Two tracks run in this repository. The MA milestones prepare and identify the ph
 | MA2 | A MuJoCo bench for the tracking controller | `BENCH_FAIL`: 8 of 10 bars pass. | [`ma2-tracking-bench.md`](docs/ma2-tracking-bench.md) |
 | MS7e | 4 to 8 boxes, 8 classes, round, LDraw and flat parts | Passed: 5299/6000 = 0.883 at 1.271. | [`ms7e-widened-task.md`](docs/ms7e-widened-task.md), [`ms7e-flat-study.md`](docs/ms7e-flat-study.md) |
 | MS7f | 150-part heaps, six categories, a part classifier, speed | Failed, closed by owner decision D25: 2522/3000 = 0.841 at 308.0 correct stows an hour, held-out 0.790. | [`ms7f-real-scale-sorting.md`](docs/ms7f-real-scale-sorting.md) |
-| MS7h | A learned policy that beats the oracle head-to-head: residual RL on ACT and a π0.5 track | `<<README_RESULT>>` | [`ms7h-beyond-the-oracle.md`](docs/ms7h-beyond-the-oracle.md) |
+| MS7h | A learned policy that beats the oracle head-to-head: residual RL on ACT and a π0.5 track | Failed: the π0.5 candidate's checked read stowed 2464/3000 = 0.821 at 244.8 correct stows an hour, held-out 0.753. S stowed 2525 (D = -61, paired SE 31.5). No residual RL screen beat S. | [`ms7h-beyond-the-oracle.md`](docs/ms7h-beyond-the-oracle.md) |
 
 [Reports](#reports) at the end describes each report.
 

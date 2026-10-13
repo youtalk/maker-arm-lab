@@ -2,10 +2,9 @@
 
 Date: 2026-10-06, Track V updated 2026-10-12. Status: draft. This draft uses the ledger through its
 entry of 15:38 on 2026-10-06. Section 7 and the Track V lines of section 1 use it through its entry
-of 16:29 on 2026-10-12. The Track R lines of sections 1, 2, 5 and 11 use it through its entry of
+of 17:02 on 2026-10-12. The Track R lines of sections 1, 2, 5 and 11 use it through its entry of
 23:57 on 2026-10-06. Track V ended at its checked read, and V failed V1(b). The report-only 60k read
-of HD72 is in section 7.20. A placeholder of the form `<<NAME>>` marks each item that the owner
-decides.
+of HD72 and the paused round of HD73 are in section 7.20.
 
 The design of MS7h is the document of 2026-10-05 whose questions the owner answered in chat. This
 report cites it as "MS7h design section N" and restates every rule that it uses. The MS7g report,
@@ -138,7 +137,8 @@ a paired SE of 15.1. On its 20-heap screen it stowed 2495, 38 under S (paired SE
 round, a weight average and the 40k and 50k saves read 837 to 870 on the same 7 heaps. None of them
 beat the 30k save (sections 7.15 to 7.20), so it became the candidate. Its checked read failed
 V1(b) (section 7.20). The last save of the run, 60k, read 858 on the same 7 heaps after the checked
-read (HD72, report-only).
+read (HD72, report-only). HD73 then allowed one more checked read for a round on the 60k save. The
+owner paused that round before any lever ran, so its checked read is unused.
 
 ## 2. What execution showed
 
@@ -2390,6 +2390,21 @@ it decides nothing, and Track V stays ended at the checked read. Its first close
 in 0.154 of the stowed cycles, against 0.069 for S. So the last 10k steps did not close the gap at
 the first close either.
 
+HD73 (10-12 16:53) is the owner's decision. It allows one more checked read for a round of changes
+on the 60k save. Its rules, set before any of its numbers:
+
+1. The base read is h_Vf60k_a0j1slR25g20_a, the 60k save at a0j1slR25g20 on draws 0 to 6. It is
+   the twin of each change.
+2. If a change beats its twin by HD32 (4), it stays. The best result reads draws 7 to 19 for a
+   20-heap screen.
+3. The second checked read h_V_chk2 reads the best screen on seed 20307600, draws 0 to 19, by 10-16
+   18:00. It pairs with h_S_chk2, S on the same seed. Its bars are those of HD36, with the held-out
+   bar at the held-out row of h_S_chk2. No third checked read runs.
+4. The owner allows up to two Colab fine-tunes on the CLI account for the round.
+
+The base read started on a_h11l:7 at 16:55 on 10-12. The owner paused the round at 17:02,
+before any change ran. Seed 20307600 is unburned.
+
 ## 8. The verdict reads
 
 ### 8.1 The candidate
@@ -2546,7 +2561,10 @@ residual layer differs from `feat/ms7h-residual-chunk` only in the guard and ora
 branches are not stacked yet: `feat/ms7h-rig-place`, `feat/ms7h-pick-reward`, `feat/ms7h-learner4`
 and `feat/ms7h-run4`.
 
-`<<STACK>>`
+This report goes up alone as a draft PR onto main. The six layers above stay as pushed, and no
+code PR is open. The Track V branches of sections 7.12 to 7.15 (`feat/ms7h-pi05-*`,
+`feat/ms7h-retry-noise`, `feat/ms7h-stall-replan` and `feat/ms7h-guard-margin`) are not in the stack
+either. The owner decides the restack and the code PRs.
 
 ## 11. Records
 
