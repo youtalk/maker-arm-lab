@@ -15,7 +15,10 @@ driver and the loop's end-to-end check, no server and no cameras needed.
 ``--dagger_dir`` is MS7f wave 3 (ledger D17): the same served loop, and on a failure trigger
 (``loop.TakeoverConfig`` without the random draw, ``loop.HELD_NO_RISE_STEPS``) the teacher takes
 the cycle over. Only the takeover frames are recorded, to ``<dagger_dir>/<shard_name>.hdf5``, for
-``convert_to_lerobot.py --split_cycles --dagger``; the payload names the shard.
+``convert_to_lerobot.py --split_cycles --dagger``; the payload names the shard. ``--record_all``
+(MS7i, with ``--dagger_dir``) records every frame of the episode instead, with the loop's cycle
+ordinal, subtask and the server's reply per frame (``loop.rollout``'s ``record_all``), for
+``convert_to_lerobot.py --own_frames``; the payload says ``record_all``.
 
 ``--classifier_frames DIR`` records every frame the classifier reads on the policy's own cycles
 as a render set file (``mj_render_set.PolicyFrames``), labels read from the simulator; the run
@@ -171,6 +174,12 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "only its frames are recorded to <dagger_dir>/<shard_name>.hdf5; needs the server",
     )
     parser.add_argument("--shard_name", type=str, default="shard", help="with --dagger_dir")
+    parser.add_argument(
+        "--record_all",
+        action="store_true",
+        help="MS7i, with --dagger_dir: record every frame of the episode, the policy's too, with "
+        "obs/loop_cycle, obs/subtask and obs/policy_action",
+    )
     parser.add_argument(
         "--max_wall_minutes",
         type=float,
@@ -503,6 +512,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         parser.error("--desk_boxes must be 0 or more")
     if args.dagger_dir and args.oracle_driver:
         parser.error("--dagger_dir takes cycles over from a policy: it needs the server")
+    if args.record_all and not args.dagger_dir:
+        parser.error("--record_all records to the --dagger_dir shard: it needs --dagger_dir")
     if args.perceived:
         if not args.desk_boxes:
             parser.error("--perceived needs --desk_boxes: a perceived box ends each cycle")
@@ -594,6 +605,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             export_dir=args.dagger_dir or None,
             shard_name=args.shard_name,
             export_all=bool(args.dagger_dir),
+            record_all=args.record_all,
         )
         env.reset(seed=args.run_seed)
         rig_rng = random.Random(args.run_seed)
@@ -719,6 +731,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             vote_weights=args.vote if args.vote_weights else None,
             retry_noise_at=args.retry_noise_at,
             guard_margin=args.guard_margin,
+            record_all=args.record_all,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
@@ -730,6 +743,8 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
         payload["deep_box_floor"] = args.deep_box_floor
         if args.dagger_dir:
             payload["shard"] = str(Path(args.dagger_dir) / f"{args.shard_name}.hdf5")
+        if args.record_all:
+            payload["record_all"] = True
         if args.passenger_check:
             # Each rejected LIFT's passengers, as indices into payload["parts"].
             payload["passenger_rejects"] = [r for log in rig.passenger_log for r in log]

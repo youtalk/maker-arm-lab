@@ -263,6 +263,16 @@ but within M. The pi0.5 policy's releases over the right box end on its rim (22 
 policy's 7) or on the desk within 3 cm of a box (24 against 16) more often, and a wider margin
 holds the jaws until the point is deeper. The ``inference`` block records M only off its default.
 
+``record_all`` (MS7i, with a policy, desk boxes, the continuous gripper, a served target row
+and an env built with ``record_all``) records every frame of the episode, the policy's, a
+handoff's and a rake's too, not only a takeover's. On each step it computes each live env's
+subtask (``hold.subtask_step``, before the policy's request) and writes the census cycle
+ordinal at the ``census_step`` call, so the frames of cycle n number exactly its
+``open_steps + closed_steps``, and the server's reply where the policy composed the action.
+The census rows then carry ``OWN_FRAMES_CENSUS`` and each episode its ``final_box``. It records
+and changes no served step, like the recorder itself (``--dagger_dir``), so it is not in the
+``inference`` block.
+
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
 """
@@ -291,7 +301,13 @@ from maker_arm_lab.core.heap_oracle import (
     RAKE_PART_CAP,
     target_context,
 )
-from maker_arm_lab.core.hold import MIN_EXCESS, HoldDetector, agreement, commanded_gap
+from maker_arm_lab.core.hold import (
+    MIN_EXCESS,
+    HoldDetector,
+    agreement,
+    commanded_gap,
+    subtask_step,
+)
 from maker_arm_lab.core.parts import BASE_CLASSES, FAMILIES, part_class
 from maker_arm_lab.core.quat import quat_apply
 from maker_arm_lab.core.stowed import (
@@ -1180,6 +1196,7 @@ class Cycle:
     open_prev: bool | None = None
     first_held: int = -1  # the part between the jaws at the first held step
     last_held: int = -1  # and at the last one
+    last_held_at: int | None = None  # steps into the cycle at the last held step
     wait_steps: int = 0  # the retreat wait this selection spent (``select_ready``)
     wait_capped: bool = False  # the wait ended on its cap, not on the retreat
     refreshes: int = 0  # target rows ``row_refresh`` rewrote within the cycle
@@ -1259,6 +1276,7 @@ class Cycle:
     held_class: str | None = None  # and its true category
     lift_gap: float | None = None  # m, the narrowest measured jaw gap since that lift
     release_place: str | None = None  # where the jaws first opened after it (release_place)
+    release_at: int | None = None  # and the steps into the cycle at that open
     air_stall_steps: int = 0  # steps in an air stall (AirStall) while the detector holds a part
     air_stall_empty_steps: int = 0  # and while it holds nothing
     air_stalls: int = 0  # stall entries while it holds a part
@@ -1282,6 +1300,7 @@ class Cycle:
     retry_noise: bool = False
     retry_at: int | None = None
     scene: object = None
+    record_all: bool = False  # MS7i ``record_all``: the row exports ``OWN_FRAMES_CENSUS``
 
 
 @dataclass
@@ -1747,6 +1766,7 @@ def census_step(
             cycle.first_held = held
             cycle.first_held_at = t
         cycle.last_held = held
+        cycle.last_held_at = t
         cycle.held_steps += 1
         cycle.max_rise = max(cycle.max_rise, rise)
 
@@ -2148,6 +2168,11 @@ pending (held by the vote rule alone), the rig carry's outcome (None: no handoff
 "placed", "lifted_lost", "failed", "declined", or "carrying" when the episode ended during it)
 and whether an empty air stall opened the jaws and failed the cycle. ``retry_noise_at`` (MS7h)
 adds ``retry_at`` beside them, there only with that switch on: the cycle step retry mode began."""
+OWN_FRAMES_CENSUS = ("box", "last_held_at", "release_at")
+"""``record_all``'s fields in a ``cycle_census`` row (MS7i), there only with the switch on: the
+box served at the cycle's end, and the steps into the cycle at the last contact-held step and
+at the jaws' open after the lift (``release_place``'s step). A frame index is the cycle's first
+frame plus one of these; the episode's ``final_box`` gives the box each part rests in."""
 MISSED_LIFT_COUNTS = ("missed_lifts", "carried_releases", "carried_rechecks")
 """``missed_lift``'s ``perception`` counts, in the payload only with the switch on: the carries
 ``carry_started`` read, the cycles a release ``carry_lost`` started ended, and the selections
@@ -2323,6 +2348,7 @@ def rollout(
     vote_weights: dict | None = None,
     retry_noise_at: int = 0,
     guard_margin: float = GUARD_BOX_MARGIN_M,
+    record_all: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -2392,6 +2418,8 @@ def rollout(
     ``retry``, the per-env retry flags.
     ``guard_margin`` (MS7h) is the module docstring's, in meters; it is finite and 0 or more, and
     off ``GUARD_BOX_MARGIN_M`` it needs ``carry_guard``.
+    ``record_all`` (MS7i) is the module docstring's; it needs a policy, desk boxes, the
+    continuous gripper, a served target row and the env's recorder with ``record_all``.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -2585,6 +2613,19 @@ def rollout(
             "carry_votes",
             f"must lie in [0, {MAX_CARRY_VOTES}] and under {CARRY_VIEW_STEPS} - lift_view_steps",
         )
+    if record_all and not (
+        policy is not None
+        and per_part
+        and gripper_mode == "continuous"
+        and ctx_target is not None
+        and getattr(env, "recorder", None) is not None
+        and getattr(env, "record_all", False)
+    ):
+        raise EvalFailure(
+            "record_all",
+            "needs a policy, desk boxes, the continuous gripper, a served target row and the "
+            "env's recorder with record_all",
+        )
     limits = robot.data.joint_pos_limits[:, arm_ids, :].to("cpu")
     tracker = RolloutTracker(num_envs, k)
     recorder = getattr(env, "recorder", None)
@@ -2732,6 +2773,9 @@ def rollout(
     # cycle close and the cycles closed since they last grew (rule 3).
     interventions = [Counter(strays=0, miss_streak=0) for _ in range(num_envs)]
     streaks = [(0, 0)] * num_envs
+    # ``record_all``: each env's subtask state (lifted, low) and the cycle it belongs to.
+    sub_state = [(False, None)] * num_envs
+    sub_cycle = [0] * num_envs
 
     started = time.monotonic()
     max_steps = int(env.max_episode_length)
@@ -2966,6 +3010,7 @@ def rollout(
                 wait_capped=waited >= int(SELECT_WAIT_FRACTION * CYCLE_STEP_BUDGET),
                 target_in_box=None if boxed is None else bool(boxed[i, target]),
                 swept=None if chosen is None else int(chosen.swept),
+                record_all=record_all,
             )
             if ms7f_tray:
                 hidden[i].append(hidden_share(env, pos[i], truth.quat[i], top_picks[i]))
@@ -3027,6 +3072,21 @@ def rollout(
             if stamp is not None:
                 stamp()
             state = policy_state(robot.data.joint_pos).to("cpu").numpy()
+            if record_all:
+                # MS7i: each live env's subtask on this frame, from what the frame records: the
+                # served state, the last served gap command and the served row's width. The
+                # state starts over at a new cycle and carries over the steps between cycles.
+                for i, st in enumerate(states):
+                    if bool(tracker.done[i]):
+                        continue
+                    if st.cycle is not None and st.cycle.ordinal != sub_cycle[i]:
+                        sub_cycle[i], sub_state[i] = st.cycle.ordinal, (False, None)
+                    gap = 2.0 * GRIPPER_OPEN_POS * float(state[i, 6])
+                    pick_z = float(commanded_pick(rig.ik, state[i, :6])[2])
+                    width = float(ctx_target[i][5])
+                    sid, lifted, low = subtask_step(*sub_state[i], gap, gap_cmd[i], pick_z, width)
+                    sub_state[i] = (lifted, low)
+                    env.loop_subtask[i] = sid
             wrist = env.obs_buf["images"]["wrist_rgb"].to("cpu").numpy()
             overhead = env.obs_buf["images"]["overhead_rgb"].to("cpu").numpy()
             context = env.obs_buf["context"].to("cpu").numpy() if served_width else None
@@ -3098,6 +3158,9 @@ def rollout(
         if policy_action is not None:
             idle = torch.tensor(rig.idle)
             action_cpu[idle] = policy_action[idle]
+            if record_all:  # the server's reply, before the serving rules below
+                env.loop_policy_action.zero_()
+                env.loop_policy_action[idle] = policy_action[idle].to(torch.float32)
             if close_gate or squeeze_floor or square_wrist or pick_snap or dwell_close or wrist_fix:
                 for i, st in enumerate(states):
                     if st.cycle is None or not rig.idle[i] or bool(tracker.done[i]):
@@ -3236,6 +3299,8 @@ def rollout(
                 action_cpu[i, 6] = 2.0 * GRIPPER_OPEN_POS  # ``passenger_drop``: let both go
         signal = open_signal(action_cpu[:, 6], gripper_mode, close_below)
         tracker.record_gripper(signal)
+        if record_all:
+            env.loop_cycle.zero_()
         for i, st in enumerate(states):
             if st.cycle is None or bool(tracker.done[i]):
                 continue
@@ -3269,6 +3334,8 @@ def rollout(
                 close_cm=close_cm,
                 pick_z=float(pick[2]),
             )
+            if record_all:
+                env.loop_cycle[i] = c.ordinal  # the frame of this census step
             if stall_end:
                 c.closed_empty = closed_empty_count(c.closed_empty, grip_open, detectors[i].holding)
             if perceived:
@@ -3454,6 +3521,7 @@ def rollout(
                     c.lift_seen, c.lift_part = True, h
                     c.held_class = keys[h] if h >= 0 else None
                 if jaws_opened(c, gap):
+                    c.release_at = step - c.start_step
                     part = h if h >= 0 else c.lift_part if c.lift_part >= 0 else c.target
                     c.release_place = release_place(
                         top_picks[i][:2],
@@ -3559,6 +3627,8 @@ def rollout(
             st.done_reason = st.done_reason or ("all_stowed" if bool(success[i]) else "time_out")
             rig.rearm([i], idle=True)
             env.oracle_actor[i] = 0
+            if record_all:
+                recorder.end(i, False)  # the reset began an episode the loop never runs
         for i in torch.nonzero(tracker.done & ~was_done).flatten().tolist():
             st = states[i]
             if st.span is not None:  # S0: the last span ends with the episode, step + 1 steps
@@ -3643,6 +3713,8 @@ def rollout(
         )
         if ms7f_tray:
             episodes[-1]["hidden_share"] = hidden[i]
+        if record_all:
+            episodes[-1]["final_box"] = final_box[i].tolist()
         if box_empty:
             # Each emptied part: (part, the box it was emptied from, graded correct).
             episodes[-1]["emptied_parts"] = [
@@ -3865,6 +3937,8 @@ def _book_census(st: EnvState, cycle: Cycle, reason: str) -> None:
         row |= {k: getattr(cycle, k) for k in CARRY_GUARD_CENSUS}
     if cycle.retry_noise:  # ``retry_noise_at``, beside ``CARRY_GUARD_CENSUS``
         row["retry_at"] = cycle.retry_at
+    if cycle.record_all:
+        row |= {k: getattr(cycle, k) for k in OWN_FRAMES_CENSUS}
     st.census.append({k: _rounded(v) for k, v in row.items()})
 
 
