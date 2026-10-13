@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 lerobot_stack/.venv/
+lerobot_stack/.venv-pi
 
 # Generated assets and sim outputs
 assets/usd/

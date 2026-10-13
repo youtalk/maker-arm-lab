@@ -12,6 +12,17 @@ CONVERT = Path(__file__).resolve().parents[1] / "lerobot_stack" / "convert_to_le
 PROTOCOL = Path(__file__).resolve().parents[1] / "lerobot_stack" / "policy_protocol.py"
 
 
+def test_the_pi05_jaw_latch_reads_the_target_width_and_the_full_gap():
+    from maker_arm_lab.mj import context_names as cn
+    from maker_arm_lab.robots.frames import JAW_FULL_GAP
+
+    text = (CONVERT.parent / "pi05_server.py").read_text()
+    names = cn.CONTEXT_CAMERA_NAMES + cn.CONTEXT_BOX_NAMES + cn.CONTEXT_TARGET_NAMES
+    assert len(names) == cn.CONTEXT_DIMS["camera_box_target"]  # the served 16-wide context
+    assert f"\nTARGET_WIDTH = {7 + names.index('target_width')}\n" in text
+    assert "\nJAW_FULL_GAP = 2 * 0.0524125\n" in text and JAW_FULL_GAP == 2 * 0.0524125
+
+
 def test_gripper_travel_pin_matches_urdf():
     text = CONVERT.read_text()
     value = float(re.search(r"^GRIPPER_TRAVEL = ([0-9.]+)", text, re.MULTILINE).group(1))

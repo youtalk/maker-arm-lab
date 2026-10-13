@@ -16,7 +16,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 SWEPT_DIRS = ("source", "scripts", "lerobot_stack", "tests")
 SUFFIXES = {".py", ".sh"}
-SKIP_PARTS = {".venv", "__pycache__"}
+SKIP_PARTS = {".venv", ".venv-pi", "__pycache__"}  # .venv-pi: lerobot_stack/setup_pi_env.sh
 # The MS2 design spec and the MS2 report (docs/ms2-act-gate.md) both HAVE a subdivided
 # section 5, and the scripts cite them as "MS2 spec section 5.x" / "MS2 report section 5.x"
 # on purpose; only an unqualified dotted citation is dangling.

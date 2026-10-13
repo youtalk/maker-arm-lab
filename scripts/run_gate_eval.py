@@ -23,18 +23,37 @@ the harness-task-sweeps lesson). Delete the file to re-roll a draw.
 Prints GATE_OK or GATE_FAIL with the aggregate against --threshold; gate_results.json
 carries everything (per-brick rate with its Wilson 95% interval, the reported-not-gated
 secondaries, the draws, the served inference config).
+
+--pi05 reads a pi0.5 checkpoint (MS7h design 7.3): one lerobot_stack/pi05_server.py under
+lerobot_stack/.venv-pi serves the whole run, --lanes N eval clients run at once against it (the
+server batches the forwards of the lanes whose queues are empty), its log is
+<out_dir>/pi05_server.log, and a cached payload must carry a "pi05:" policy id.
+--pi05_num_steps and --pi05_noise_scale reach the server as its --num_steps and --noise_scale
+(the flow steps a forward, the scale of the initial flow noise), and the cache matches on both.
+--pi05_jaw_noise_scale J reaches it as --jaw_noise_scale (the jaw column's factor on that noise)
+and --pi05_jaw_noise_shared as --jaw_noise_shared (one jaw draw a chunk), and the cache matches
+both. --pi05_jaw_noise_abs A reaches it as --jaw_noise_abs (the jaw column's std at every scale),
+and the cache matches it.
+--pi05_still_noise_scale S2 turns on the server's still rule with --still_rad and --still_open
+(--pi05_still_rad, --pi05_still_open, default the server's), and the cache matches all three.
+--pi05_jaw_latch L reaches the server as --jaw_latch (the jaw commands held after a close), and
+the cache matches it.
 """
 
 import argparse
+import ctypes
 import itertools
 import json
 import math
 import os
 import random
 import shlex
+import signal
 import subprocess
 import sys
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -76,6 +95,18 @@ class GateCfg:
     action_warp: float = 1.0  # the server plays each chunk this many times faster (MS7f speed)
     # MS7g D20: a second pretrained_model dir; the server serves the mean of both checkpoints.
     ensemble_with: str | None = None
+    # MS7h design 7.3: a pi0.5 checkpoint, served by one shared pi05_server.py to `lanes` clients.
+    pi05: bool = False
+    lanes: int = 1
+    pi05_num_steps: int | None = None  # None: the checkpoint's flow steps
+    pi05_noise_scale: float = 1.0
+    pi05_jaw_noise_scale: float = 1.0
+    pi05_jaw_noise_shared: bool = False
+    pi05_jaw_noise_abs: float | None = None  # None: the jaw's noise follows the call's scale
+    pi05_still_noise_scale: float | None = None  # None: the server's still rule is off
+    pi05_still_rad: float = 0.15  # the server's STILL_RAD (tests pin the copy)
+    pi05_still_open: float = 0.9  # the server's STILL_OPEN
+    pi05_jaw_latch: int = 0  # 0: the server's jaw latch is off
     only_processes: tuple | None = None
     eval_timeout_s: float = 4 * 3600
     backend: str = "isaac"  # "mujoco" spawns scripts/mj_eval_policy.py under .venv/bin/python
@@ -723,6 +754,92 @@ def _start_server(cfg: GateCfg) -> _ServerHandle:
     return _ServerHandle(proc, _extract_json_line("".join(lines), "SERVER_READY"))
 
 
+PI05_PYTHON = "lerobot_stack/.venv-pi/bin/python"
+PI05_READY_S = 900  # loading about 9 GB of pi0.5 weights on a busy host takes minutes
+PI05_STILL = ("still_noise_scale", "still_rad", "still_open")  # the server's flags and keys
+
+
+def _pi05_still(cfg: GateCfg) -> dict:
+    """The still rule's entries of the server's inference block, {} with the rule off."""
+    values = (cfg.pi05_still_noise_scale, cfg.pi05_still_rad, cfg.pi05_still_open)
+    return {} if values[0] is None else dict(zip(PI05_STILL, values))
+
+
+def _pi05_server_command(cfg: GateCfg) -> list[str]:
+    """The shared server serves the checkpoint's chunk (50 actions) open loop with its flow steps
+    (10); the warp is a flag (MS7h design 7.3), and so are the flow steps and the noise scale
+    when a read sets them (the MS7h pi0.5 recipe's jaw test)."""
+    return [
+        PI05_PYTHON,
+        "lerobot_stack/pi05_server.py",
+        "--checkpoint",
+        cfg.checkpoint,
+        "--port",
+        str(cfg.port),
+        "--device",
+        cfg.device,
+        "--action_warp",
+        str(cfg.action_warp),
+        *(["--num_steps", str(cfg.pi05_num_steps)] if cfg.pi05_num_steps is not None else []),
+        *(["--noise_scale", str(cfg.pi05_noise_scale)] if cfg.pi05_noise_scale != 1.0 else []),
+        *(
+            ["--jaw_noise_scale", str(cfg.pi05_jaw_noise_scale)]
+            if cfg.pi05_jaw_noise_scale != 1.0
+            else []
+        ),
+        *(["--jaw_noise_shared"] if cfg.pi05_jaw_noise_shared else []),
+        *(
+            ["--jaw_noise_abs", str(cfg.pi05_jaw_noise_abs)]
+            if cfg.pi05_jaw_noise_abs is not None
+            else []
+        ),
+        *itertools.chain(*((f"--{key}", str(value)) for key, value in _pi05_still(cfg).items())),
+        *(["--jaw_latch", str(cfg.pi05_jaw_latch)] if cfg.pi05_jaw_latch else []),
+    ]
+
+
+def _die_with_parent() -> None:
+    """The server's preexec_fn: SIGTERM when the supervisor dies, even by SIGKILL, so no orphan
+    keeps about 10 GB of GPU memory (prctl PR_SET_PDEATHSIG, Linux)."""
+    ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM)
+
+
+def _start_pi05_server(cfg: GateCfg) -> _ServerHandle:
+    """Launch pi05_server.py with its output appended to <out_dir>/pi05_server.log (its
+    FORWARD lines run for the whole read, so no pipe), and block until it prints SERVER_READY."""
+    log_path = cfg.out_dir / "pi05_server.log"
+    with open(log_path, "a") as log:
+        offset = log.tell()
+        proc = subprocess.Popen(
+            _pi05_server_command(cfg),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            preexec_fn=_die_with_parent,  # noqa: PLW1509 -- before any lane thread starts
+        )
+    deadline = time.monotonic() + PI05_READY_S
+    while True:
+        with open(log_path) as log:
+            log.seek(offset)
+            text = log.read()
+        ready = _extract_json_line(text, "SERVER_READY")
+        if ready and cfg.n_action_steps not in (None, ready.get("n_action_steps")):
+            _ServerHandle(proc, ready).stop()
+            raise EvalProcessError(
+                f"pi05_server.py serves {ready.get('n_action_steps')} actions a forward, the read "
+                f"asks {cfg.n_action_steps}: the checkpoint's own chunk is what it serves"
+            )
+        if ready:
+            return _ServerHandle(proc, ready)
+        if proc.poll() is not None or time.monotonic() > deadline:
+            proc.kill()
+            proc.wait()
+            raise EvalProcessError(
+                f"pi05_server.py printed no SERVER_READY (exit {proc.returncode}):\n{text[-4000:]}"
+            )
+        time.sleep(1.0)
+
+
 MUJOCO_PYTHON = ".venv/bin/python"
 
 
@@ -854,7 +971,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
         and payload.get("layout_seed") == draw.layout_seed
         and list(payload.get("permutation", [])) == list(draw.permutation)
     )
-    same_policy = str(payload.get("policy_id", "")).startswith(f"act:{cfg.checkpoint}")
+    kind = "pi05" if cfg.pi05 else "act"  # a pi0.5 payload never stands in for an ACT one
+    same_policy = str(payload.get("policy_id", "")).startswith(f"{kind}:{cfg.checkpoint}")
     # A six-brick payload carries no heap keys, so it never matches a heap gate or back.
     same_task = payload.get("heap_k", 0) == cfg.heap_k
     if cfg.heap_k > 0:
@@ -884,6 +1002,27 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     same_inference = same_inference and served.get("action_warp", 1.0) == cfg.action_warp
     # A payload that predates the ensemble served one checkpoint.
     same_inference = same_inference and served.get("ensemble_with") == cfg.ensemble_with
+    # A pi05 payload records a noise scale off 1.0 and the flow steps it ran. Its policy id
+    # names steps off the checkpoint's ("+steps<N>"), so a read at the checkpoint's own steps
+    # reuses only a payload without that name.
+    same_inference = same_inference and served.get("noise_scale", 1.0) == cfg.pi05_noise_scale
+    jaw = served.get("jaw_noise_scale", 1.0)  # recorded only off 1.0, as the noise scale
+    same_inference = same_inference and jaw == cfg.pi05_jaw_noise_scale
+    shared = served.get("jaw_noise_shared", False)  # recorded only when on
+    same_inference = same_inference and shared == cfg.pi05_jaw_noise_shared
+    jaw_abs = served.get("jaw_noise_abs")  # recorded only when on
+    same_inference = same_inference and jaw_abs == cfg.pi05_jaw_noise_abs
+    # A payload served without the still rule records none of its keys.
+    still = {key: served[key] for key in PI05_STILL if key in served}
+    same_inference = same_inference and still == _pi05_still(cfg)
+    same_inference = same_inference and served.get("jaw_latch", 0) == cfg.pi05_jaw_latch
+    if cfg.pi05:
+        named = str(payload.get("policy_id", "")).removeprefix(f"pi05:{cfg.checkpoint}")
+        same_inference = same_inference and (
+            "+steps" not in named
+            if cfg.pi05_num_steps is None
+            else served.get("num_inference_steps") == cfg.pi05_num_steps
+        )
     # The loop's protocol switches are part of what a draw measured; a payload that predates
     # them ran with every switch off.
     recorded = served.get("loop") or {}
@@ -915,36 +1054,50 @@ def run_gate(cfg: GateCfg, run_eval, start_server) -> dict:
         else:
             todo.append(draw)
     server_ready: dict = {}
+    lock = threading.Lock()  # the lanes of a pi0.5 read finish their draws in parallel
+
+    def run_draw(draw: EvalDraw) -> None:
+        payload = None
+        for attempt in range(cfg.retries + 1):
+            try:
+                payload = run_eval(draw)
+                break
+            except EvalProcessError as err:
+                print(
+                    f"[gate] process {draw.process_index} attempt {attempt + 1} failed: {err}",
+                    flush=True,
+                )
+        if payload is None:
+            raise GateRunError(f"process {draw.process_index} failed {cfg.retries + 1} times")
+        with lock:
+            (cfg.out_dir / f"eval_{draw.process_index:03d}.json").write_text(
+                json.dumps(payload, indent=2)
+            )
+            payloads[draw.process_index] = payload
+            partial = aggregate_gate([payloads[k] for k in sorted(payloads)], cfg.threshold)
+            print(
+                f"[gate] process {draw.process_index}: per-brick so far "
+                f"{partial['gate']['bricks_stowed']}/{partial['gate']['bricks_total']} = "
+                f"{partial['gate']['per_brick_rate']:.3f} over {partial['gate']['episodes']} episodes",
+                flush=True,
+            )
+
     if todo:
         server = start_server()
         server_ready = dict(getattr(server, "ready", {}) or {})
         try:
-            for draw in todo:
-                payload = None
-                for attempt in range(cfg.retries + 1):
+            if cfg.lanes == 1:
+                for draw in todo:
+                    run_draw(draw)
+            else:
+                with ThreadPoolExecutor(cfg.lanes) as pool:
+                    futures = [pool.submit(run_draw, draw) for draw in todo]
                     try:
-                        payload = run_eval(draw)
-                        break
-                    except EvalProcessError as err:
-                        print(
-                            f"[gate] process {draw.process_index} attempt {attempt + 1} failed: {err}",
-                            flush=True,
-                        )
-                if payload is None:
-                    raise GateRunError(
-                        f"process {draw.process_index} failed {cfg.retries + 1} times"
-                    )
-                (cfg.out_dir / f"eval_{draw.process_index:03d}.json").write_text(
-                    json.dumps(payload, indent=2)
-                )
-                payloads[draw.process_index] = payload
-                partial = aggregate_gate([payloads[k] for k in sorted(payloads)], cfg.threshold)
-                print(
-                    f"[gate] process {draw.process_index}: per-brick so far "
-                    f"{partial['gate']['bricks_stowed']}/{partial['gate']['bricks_total']} = "
-                    f"{partial['gate']['per_brick_rate']:.3f} over {partial['gate']['episodes']} episodes",
-                    flush=True,
-                )
+                        for future in as_completed(futures):
+                            future.result()
+                    finally:  # on a failure no new draw starts; the running ones finish
+                        for future in futures:
+                            future.cancel()
         finally:
             server.stop()
     ordered = [payloads[k] for k in sorted(payloads)]
@@ -1060,6 +1213,61 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help="MS7g D20: a second pretrained_model dir at the same path on every host; the "
         "server serves the mean of both checkpoints' actions",
+    )
+    parser.add_argument(
+        "--pi05",
+        action="store_true",
+        help="MS7h design 7.3: --checkpoint is a pi0.5 pretrained_model dir; one shared "
+        "pi05_server.py under lerobot_stack/.venv-pi serves every lane of this run",
+    )
+    parser.add_argument(
+        "--lanes",
+        type=int,
+        default=1,
+        help="with --pi05: this many eval clients run at once against the one server",
+    )
+    parser.add_argument(
+        "--pi05_num_steps",
+        type=int,
+        default=None,
+        help="with --pi05: the server's flow steps a forward (default: the checkpoint's)",
+    )
+    parser.add_argument(
+        "--pi05_noise_scale",
+        type=float,
+        default=None,
+        help="with --pi05: the initial flow noise is this times N(0, I); 0 is deterministic",
+    )
+    parser.add_argument(
+        "--pi05_jaw_noise_scale",
+        type=float,
+        default=None,
+        help="with --pi05: the jaw column of that noise is also multiplied by this",
+    )
+    parser.add_argument(
+        "--pi05_jaw_noise_shared",
+        action="store_true",
+        help="with --pi05: the jaw column of that noise is one draw a row, held over the chunk",
+    )
+    parser.add_argument(
+        "--pi05_jaw_noise_abs",
+        type=float,
+        default=None,
+        help="with --pi05: the jaw column of that noise is this times N(0, 1) at every scale",
+    )
+    parser.add_argument(
+        "--pi05_still_noise_scale",
+        type=float,
+        default=None,
+        help="with --pi05: resample each still chunk once from this times N(0, I)",
+    )
+    parser.add_argument("--pi05_still_rad", type=float, default=None, help="with the still rule")
+    parser.add_argument("--pi05_still_open", type=float, default=None, help="with the still rule")
+    parser.add_argument(
+        "--pi05_jaw_latch",
+        type=int,
+        default=None,
+        help="with --pi05: hold the jaw command this many actions after a close in each chunk",
     )
     parser.add_argument("--only_processes", type=_process_list, default=None)
     parser.add_argument("--eval_timeout_s", type=float, default=4 * 3600)
@@ -1415,6 +1623,52 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def _build_cfg(args: argparse.Namespace) -> GateCfg:
+    if args.lanes != 1 and (args.lanes < 1 or not args.pi05):
+        # The ACT server keeps one action queue, so its lanes are separate supervisors.
+        raise ValueError(f"--lanes {args.lanes}: 1, or more than 1 with --pi05")
+    if args.pi05:
+        if args.heap_k <= 0 or args.backend != "mujoco" or args.context != "camera_box_target":
+            # The pi0.5 state is 7 + the 16-wide context of the derived dataset (design 7.1).
+            raise ValueError(
+                "--pi05 needs --heap_k > 0, --backend mujoco, --context camera_box_target"
+            )
+        if args.temporal_ensemble_coeff is not None or args.ensemble_with:
+            raise ValueError("--pi05 serves one checkpoint open loop: no ensemble flags")
+    jaw = args.pi05_jaw_noise_scale
+    sampling = (args.pi05_num_steps, args.pi05_noise_scale, jaw, args.pi05_jaw_latch)
+    sampling += (args.pi05_jaw_noise_abs,)
+    if not args.pi05 and (sampling != (None,) * 5 or args.pi05_jaw_noise_shared):
+        raise ValueError(
+            "--pi05_num_steps, --pi05_noise_scale and the --pi05_jaw_* flags need --pi05"
+        )
+    if args.pi05_jaw_latch is not None and args.pi05_jaw_latch < 0:
+        raise ValueError(f"--pi05_jaw_latch must be at least 0, got {args.pi05_jaw_latch}")
+    if args.pi05_num_steps is not None and args.pi05_num_steps < 1:  # the server's own refusals
+        raise ValueError(f"--pi05_num_steps must be at least 1, got {args.pi05_num_steps}")
+    if args.pi05_noise_scale is not None and not 0.0 <= args.pi05_noise_scale < math.inf:
+        raise ValueError(
+            f"--pi05_noise_scale must be finite and at least 0, got {args.pi05_noise_scale}"
+        )
+    if jaw is not None and not 0.0 <= jaw < math.inf:
+        raise ValueError(f"--pi05_jaw_noise_scale must be finite and at least 0, got {jaw}")
+    jaw_abs = args.pi05_jaw_noise_abs
+    if jaw_abs is not None and not 0.0 <= jaw_abs < math.inf:
+        raise ValueError(f"--pi05_jaw_noise_abs must be finite and at least 0, got {jaw_abs}")
+    if jaw_abs is not None and (jaw not in (None, 1.0) or args.pi05_jaw_noise_shared):
+        raise ValueError(
+            "--pi05_jaw_noise_abs needs --pi05_jaw_noise_scale 1, no --pi05_jaw_noise_shared"
+        )
+    still = (args.pi05_still_noise_scale, args.pi05_still_rad, args.pi05_still_open)
+    if not args.pi05 and still != (None, None, None):
+        raise ValueError("the --pi05_still_* flags need --pi05")
+    if still[0] is None and still != (None, None, None):  # a no-op read under a new tag
+        raise ValueError("--pi05_still_rad and --pi05_still_open need --pi05_still_noise_scale")
+    if still[0] is not None and not 0.0 <= still[0] < math.inf:  # the server's own refusals
+        raise ValueError(f"--pi05_still_noise_scale must be finite and at least 0, got {still[0]}")
+    if still[1] is not None and not 0.0 < still[1] < math.inf:
+        raise ValueError(f"--pi05_still_rad must be finite and above 0, got {still[1]}")
+    if still[2] is not None and not 0.0 <= still[2] <= 1.0:
+        raise ValueError(f"--pi05_still_open must be in [0, 1], got {still[2]}")
     if not 1.0 <= args.action_warp <= 3.0:  # the server's ACTION_WARP_MIN and ACTION_WARP_MAX
         raise ValueError(f"--action_warp must be in [1.0, 3.0], got {args.action_warp}")
     if args.gripper != "binary" and (args.heap_k <= 0 or args.backend != "mujoco"):
@@ -1536,6 +1790,17 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         temporal_ensemble_coeff=args.temporal_ensemble_coeff,
         action_warp=args.action_warp,
         ensemble_with=args.ensemble_with,
+        pi05=args.pi05,
+        lanes=args.lanes,
+        pi05_num_steps=args.pi05_num_steps,
+        pi05_noise_scale=1.0 if args.pi05_noise_scale is None else args.pi05_noise_scale,
+        pi05_jaw_noise_scale=1.0 if jaw is None else jaw,
+        pi05_jaw_noise_shared=args.pi05_jaw_noise_shared,
+        pi05_jaw_noise_abs=jaw_abs,
+        pi05_still_noise_scale=args.pi05_still_noise_scale,
+        pi05_still_rad=GateCfg.pi05_still_rad if still[1] is None else still[1],
+        pi05_still_open=GateCfg.pi05_still_open if still[2] is None else still[2],
+        pi05_jaw_latch=args.pi05_jaw_latch or 0,
         only_processes=args.only_processes,
         eval_timeout_s=args.eval_timeout_s,
         backend=args.backend,
@@ -1594,7 +1859,7 @@ def main(argv: list[str] | None = None) -> int:
         results = run_gate(
             cfg,
             run_eval=lambda draw: _run_eval_subprocess(cfg, draw),
-            start_server=lambda: _start_server(cfg),
+            start_server=lambda: _start_pi05_server(cfg) if cfg.pi05 else _start_server(cfg),
         )
     except (GateRunError, EvalProcessError, ValueError, FileNotFoundError) as exc:
         print(f"GATE_ERROR: {exc}", file=sys.stderr, flush=True)

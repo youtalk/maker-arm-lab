@@ -20,7 +20,9 @@ rules are the MS7a design's hosts and data flow:
                   a local one runs in the foreground, inside the caller's one tracked call.
   read ...        GATE_OK / GATE_FAIL, READ_FAIL on an orchestration error. One gate read split
                   across hosts by lane caps, then the supervisor's aggregate pass over the
-                  payloads pulled into one fresh TAG directory.
+                  payloads pulled into one fresh TAG directory. With --pi05 (MS7h design
+                  7.3) a host runs one supervisor whose lanes share one pi05_server.py, so
+                  each host holds one pi0.5 copy and no image crosses a host link.
   status          STATUS_OK / STATUS_FAIL. The last token line of every job log per host.
 
 A job's log ends with the wrapper's own "JOB_EXIT rc=N" line after the job's token, so a job
@@ -406,9 +408,28 @@ PROTOCOL = (
 def supervisor_args(args, ledger: str) -> list[str]:
     """The supervisor flags every lane and the aggregate pass share, before the extra flags
     after --, which win on a repeat because argparse keeps the last value."""
+    sampling = []  # the pi05 server's sampling switches, only when a read sets them
+    for name in (
+        "pi05_num_steps",
+        "pi05_noise_scale",
+        "pi05_jaw_noise_scale",
+        "pi05_jaw_noise_shared",
+        "pi05_jaw_noise_abs",
+        "pi05_still_noise_scale",
+        "pi05_still_rad",
+        "pi05_still_open",
+        "pi05_jaw_latch",
+    ):
+        value = getattr(args, name, None)
+        if isinstance(value, bool):  # a store_true switch
+            sampling += [f"--{name}"] * value
+        elif value is not None:
+            sampling += [f"--{name}", str(value)]
     return shlex.split(PROTOCOL) + [
         "--checkpoint",
         args.ckpt,
+        *(["--pi05"] if getattr(args, "pi05", False) else []),
+        *sampling,
         "--ledger",
         ledger,
         "--threshold",
@@ -426,6 +447,22 @@ def supervisor_args(args, ledger: str) -> list[str]:
     ]
 
 
+def host_jobs(args, base, host, name, draws, cap, port, out) -> list[tuple[str, list[str]]]:
+    """(job name, supervisor argv) of every supervisor run of one host, on ports from `port`.
+    An ACT read runs one supervisor, and so one server, a lane. A pi0.5 read runs one supervisor
+    whose --lanes clients share one pi05_server.py (MS7h design 7.3)."""
+    pi05 = getattr(args, "pi05", False)
+    groups = [draws] if pi05 and draws else lanes_of(draws, cap)
+    jobs = []
+    for i, group in enumerate(groups):
+        lane = [*base, "--device", host["device"], *args.extra, "--out_dir", out]
+        lane += ["--port", str(port + i), "--only_processes", ",".join(map(str, group))]
+        if pi05:
+            lane += ["--lanes", str(min(cap, len(draws)))]
+        jobs.append((f"read-{args.tag}-{name}-{i}", lane))
+    return jobs
+
+
 def cmd_read(args, hosts):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import run_gate_eval as ge
@@ -439,6 +476,7 @@ def cmd_read(args, hosts):
     with contextlib.redirect_stdout(sys.stderr):  # its usage error prints GATE_ERROR
         cfg = ge._build_cfg(ge._parse_args(aggregate))
     ge.gate_draws(cfg)  # the seed rules, before any host starts
+    args.pi05 = cfg.pi05  # --pi05 after -- (read_h.sh ADD) too: never one pi0.5 server a lane
     if tag_dir.exists():
         raise FleetError(f"{tag_dir} exists: a TAG is read once")
     caps = [(name, lanes or hosts[name]["lanes"]) for name, lanes in args.hosts]
@@ -447,6 +485,9 @@ def cmd_read(args, hosts):
 
     def prepare(name):
         host = hosts[name]
+        if args.pi05:  # before the long checkpoint copy
+            venv = f"{host['worktree']}/lerobot_stack/.venv-pi/bin/python"
+            check(sh(host, f"test -x {q(venv)}"), f"{name}: no pi0.5 venv {venv}")
         if host["ssh"]:
             ship(LOCAL, args.ckpt, host, args.ckpt)
             ship(LOCAL, ledger, host, ledger)
@@ -464,11 +505,8 @@ def cmd_read(args, hosts):
     for name, cap in caps:
         host, out = hosts[name], f"{tag_dir}/hosts/{name}"
         launches = ["set -e", f"mkdir -p {q(str(tag_dir / 'hosts'))}", f"mkdir {q(out)}"]
-        for i, draws in enumerate(lanes_of(split[name], cap)):
-            job = f"read-{args.tag}-{name}-{i}"
+        for job, lane in host_jobs(args, base, host, name, split[name], cap, port, out):
             log = str(args.campaign / "jobs" / f"{job}.log")
-            lane = [*base, "--device", host["device"], *args.extra, "--out_dir", out]
-            lane += ["--port", str(port), "--only_processes", ",".join(map(str, draws))]
             script = job_script(
                 host,
                 "OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 "
@@ -559,6 +597,22 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     sub.add_parser("status")
     p_read = sub.add_parser("read")
     p_read.add_argument("--ckpt", required=True, help="pretrained_model dir, absolute")
+    p_read.add_argument(
+        "--pi05",
+        action="store_true",
+        help="MS7h design 7.3: --ckpt is a pi0.5 checkpoint, one shared server a host",
+    )
+    p_read.add_argument("--pi05_num_steps", type=int, help="with --pi05: flow steps a forward")
+    p_read.add_argument("--pi05_noise_scale", type=float, help="with --pi05: 0 = zero noise")
+    p_read.add_argument("--pi05_jaw_noise_scale", type=float, help="with --pi05: the jaw's")
+    p_read.add_argument("--pi05_jaw_noise_shared", action="store_true", help="with --pi05")
+    p_read.add_argument("--pi05_jaw_noise_abs", type=float, help="with --pi05: the jaw's std")
+    p_read.add_argument("--pi05_still_noise_scale", type=float, help="with --pi05: still rule")
+    p_read.add_argument("--pi05_still_rad", type=float, help="with --pi05_still_noise_scale")
+    p_read.add_argument("--pi05_still_open", type=float, help="with --pi05_still_noise_scale")
+    p_read.add_argument(
+        "--pi05_jaw_latch", type=int, help="with --pi05: actions held after a close"
+    )
     p_read.add_argument("--tag", required=True, type=lambda s: re.fullmatch(r"[\w.-]+", s)[0])
     p_read.add_argument("--seed", type=int, required=True)
     p_read.add_argument("--draws", type=parse_draws, required=True, help="e.g. 0-11")

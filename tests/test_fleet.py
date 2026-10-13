@@ -146,3 +146,99 @@ def test_run_and_status_on_the_local_host(tmp_path):
     assert "[status] here bad: JOB_EXIT rc=3" in result.stdout
     assert "[status] here live: RUNNING" in result.stdout
     assert "[status] here ok: JOB_EXIT rc=0" in result.stdout
+
+
+def _read_args(**kw) -> SimpleNamespace:
+    base = {
+        "ckpt": "/ck/pretrained_model",
+        "threshold": 0.85,
+        "seed": 20261700,
+        "draws": [0, 1, 2],
+        "split": "all",
+        "n_steps": 50,
+        "client_flags": "--select_at_release --square_wrist",
+        "tag": "t",
+        "extra": ["--num_envs", "1"],
+    }
+    return SimpleNamespace(**{**base, **kw})
+
+
+def test_an_act_read_keeps_its_supervisor_flags_and_a_pi05_read_adds_one():
+    act = fleet.supervisor_args(_read_args(), "/l.json")
+    assert act == fleet.PROTOCOL.split() + [
+        "--checkpoint",
+        "/ck/pretrained_model",
+        "--ledger",
+        "/l.json",
+        "--threshold",
+        "0.85",
+        "--seed",
+        "20261700",
+        "--processes",
+        "3",
+        "--parts_split",
+        "all",
+        "--n_action_steps",
+        "50",
+        "--client_flags",
+        "--select_at_release --square_wrist",
+    ]
+    assert fleet.supervisor_args(_read_args(pi05=False), "/l.json") == act
+    pi05 = fleet.supervisor_args(_read_args(pi05=True), "/l.json")
+    at = act.index("--checkpoint") + 2
+    assert pi05 == act[:at] + ["--pi05"] + act[at:]  # right after the checkpoint
+    cfg = ge._build_cfg(ge._parse_args(pi05 + ["--out_dir", "/o", "--lanes", "2"]))
+    assert (cfg.pi05, cfg.lanes, cfg.n_action_steps) == (True, 2, 50)
+    names = ("num_steps", "noise_scale", "jaw_noise_scale", "still_noise_scale", "still_rad")
+    names += ("still_open", "jaw_latch", "jaw_noise_abs")
+    unset = _read_args(pi05=True, **{f"pi05_{name}": None for name in names})
+    assert fleet.supervisor_args(unset, "/l.json") == pi05
+    unset = _read_args(pi05=True, pi05_jaw_noise_shared=False)  # the parser's default
+    assert fleet.supervisor_args(unset, "/l.json") == pi05
+
+
+def test_a_pi05_read_forwards_its_sampling_switches_and_an_act_read_refuses_them():
+    sampling = {"pi05_num_steps": 50, "pi05_noise_scale": 0.0, "pi05_still_noise_scale": 1.0}
+    sampling |= {"pi05_still_rad": 0.1, "pi05_still_open": 0.8, "pi05_jaw_noise_scale": 0.25}
+    sampling |= {"pi05_jaw_noise_shared": True, "pi05_jaw_latch": 10}
+    pi05 = fleet.supervisor_args(_read_args(pi05=True, **sampling), "/l.json")
+    at = pi05.index("--pi05") + 1
+    assert pi05[at : at + 4] == ["--pi05_num_steps", "50", "--pi05_noise_scale", "0.0"]
+    jaw = ["--pi05_jaw_noise_scale", "0.25", "--pi05_jaw_noise_shared"]
+    assert pi05[at + 4 : at + 7] == jaw  # then the still rule
+    assert pi05[at + 7 : at + 13] == [
+        "--pi05_still_noise_scale",
+        "1.0",
+        "--pi05_still_rad",
+        "0.1",
+        "--pi05_still_open",
+        "0.8",
+    ]
+    cfg = ge._build_cfg(ge._parse_args(pi05 + ["--out_dir", "/o"]))
+    assert (cfg.pi05_num_steps, cfg.pi05_noise_scale, cfg.pi05_jaw_noise_scale) == (50, 0.0, 0.25)
+    assert cfg.pi05_jaw_noise_shared
+    assert (cfg.pi05_still_noise_scale, cfg.pi05_still_rad, cfg.pi05_still_open) == (1.0, 0.1, 0.8)
+    assert pi05[at + 13 : at + 15] == ["--pi05_jaw_latch", "10"] and cfg.pi05_jaw_latch == 10
+    jaw_abs = fleet.supervisor_args(_read_args(pi05=True, pi05_jaw_noise_abs=1.0), "/l.json")
+    assert jaw_abs[at : at + 2] == ["--pi05_jaw_noise_abs", "1.0"]  # it excludes the jaw's others
+    assert ge._build_cfg(ge._parse_args(jaw_abs + ["--out_dir", "/o"])).pi05_jaw_noise_abs == 1.0
+    for name, value in (sampling | {"pi05_jaw_noise_abs": 1.0}).items():
+        act = fleet.supervisor_args(_read_args(**{name: value}), "/l.json")
+        with pytest.raises(ValueError, match="need --pi05"):
+            ge._build_cfg(ge._parse_args(act + ["--out_dir", "/o"]))
+
+
+def test_a_pi05_read_runs_one_supervisor_a_host_and_an_act_read_one_a_lane():
+    host = {"device": "cuda"}
+    lane = ["B", "--device", "cuda", "--num_envs", "1", "--out_dir", "/o", "--port"]
+    act = fleet.host_jobs(_read_args(), ["B"], host, "desk", [0, 1, 2], 2, 7100, "/o")
+    assert act == [
+        ("read-t-desk-0", lane + ["7100", "--only_processes", "0,2"]),
+        ("read-t-desk-1", lane + ["7101", "--only_processes", "1"]),
+    ]
+    pi05 = fleet.host_jobs(_read_args(pi05=True), ["B"], host, "desk", [0, 1, 2], 2, 7100, "/o")
+    assert pi05 == [("read-t-desk-0", lane + ["7100", "--only_processes", "0,1,2", "--lanes", "2"])]
+    one = fleet.host_jobs(_read_args(pi05=True), ["B"], host, "desk", [4], 10, 7100, "/o")
+    assert one[0][1][-2:] == ["--lanes", "1"]
+    for pi05 in (False, True):  # a host with no draw runs nothing
+        assert fleet.host_jobs(_read_args(pi05=pi05), ["B"], host, "desk", [], 2, 7100, "/o") == []
