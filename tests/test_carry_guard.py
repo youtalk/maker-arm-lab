@@ -189,6 +189,163 @@ def test_an_air_stall_with_a_held_part_hands_it_to_the_rig(monkeypatch):
     assert all(row["guard_steps"] == 0 for row in handed)
 
 
+class _Hovering(loop.AirStall):
+    """An air stall whose run grows by one each step from the first, stalled from
+    AIR_STALL_STEPS on (the scenes' arm is never over a tray)."""
+
+    def update(self, pick, over_tray):
+        self.run += 1
+        self.stalled = self.run >= loop.AIR_STALL_STEPS
+        return self.stalled
+
+
+class _HoveringWhileHeld(loop.AirStall):
+    """The same run, but only while the loop's hold detector holds a part."""
+
+    def update(self, pick, over_tray):
+        self.run = self.run + 1 if _Detector.made[-1].holding else 0
+        self.stalled = self.run >= loop.AIR_STALL_STEPS
+        return self.stalled
+
+
+def _asks(scene):
+    """The scene with ``replan_on_switch`` on, and env 0's replan flag, retry flag (None off the
+    wire) and the last ``_Detector``'s hold on every policy step; the policy never sees the retry
+    flag."""
+
+    def build(monkeypatch):
+        env, rig, policy, budget, switches = scene(monkeypatch)
+        asks, retries, held, real = [], [], [], policy.step
+
+        def step(*args, replan=None, retry=None, **kwargs):
+            asks.append(bool(replan[0]))
+            retries.append(None if retry is None else bool(retry[0]))
+            held.append(bool(_Detector.made) and _Detector.made[-1].holding)
+            return real(*args, replan=replan, **kwargs)
+
+        policy.step = step
+        build.asks, build.retries, build.held = asks, retries, held
+        return env, rig, policy, budget, switches | {"replan_on_switch": True}
+
+    return build
+
+
+def test_retry_noise_is_due_once_the_run_reaches_n_with_nothing_held():
+    due = [run for run in range(100) if loop.retry_noise_due(run, 20, holding=False)]
+    assert due == list(range(20, 100))  # a hover already past N at a cycle start enters at once
+    assert not any(loop.retry_noise_due(run, 20, holding=True) for run in range(100))
+    assert not any(loop.retry_noise_due(run, 0, holding=False) for run in range(100))
+
+
+def _retry_run(scene, monkeypatch, **switch):
+    """The payload, env 0's replan and retry flags and its holds of a perceived rollout of
+    ``_asks(scene)``."""
+    _Detector.made = []
+    build = _asks(scene)
+    payload, _ = _run(build, monkeypatch, **switch)
+    return payload, build.asks, build.retries, build.held
+
+
+def _true_runs(flags: list) -> list[tuple[int, int]]:
+    """(first index, length) of each run of True in ``flags``."""
+    runs, start = [], None
+    for t, flag in enumerate([*flags, False]):
+        if flag and start is None:
+            start = t
+        elif not flag and start is not None:
+            runs.append((start, t - start))
+            start = None
+    return runs
+
+
+def test_a_hover_with_nothing_held_flags_the_row_for_retry_noise_to_its_cycle_end(monkeypatch):
+    """A policy that holds still with open jaws over the tray, its air stall's run never reset:
+    on, the first cycle enters retry mode at run N (cycle step 20), and each later cycle, which
+    starts out of retry mode, enters it on its first step. The loop sends the retry flag from the
+    step after the entry to the cycle's last step, and sets the replan flag on that first step
+    only; off, the retry flag stays off the wire. The policy ignores both flags, so every other
+    step and payload byte is the same, and the census records each entry's cycle step."""
+    monkeypatch.setattr(loop, "AirStall", _Hovering)
+    off, off_asks, off_retries, _ = _retry_run(_still_scene, monkeypatch)
+    on, on_asks, on_retries, _ = _retry_run(_still_scene, monkeypatch, retry_noise_at=20)
+    assert set(off_retries) == {None} and None not in on_retries
+    assert len(on_asks) == len(off_asks) == len(on_retries)
+    assert on["inference"]["loop"].pop("retry_noise_at") == 20
+    assert "retry_noise_at" not in off["inference"]["loop"]
+    ep = on["episodes"][0]
+    entries = [row.pop("retry_at") for row in ep["cycle_census"]]
+    assert len(entries) > 2 and entries == [20] + [0] * (len(entries) - 1)
+    assert set(ep["cycle_reasons"]) == {"stall_open"}  # the stall still opens the jaws
+    runs = _true_runs(on_retries)
+    assert [n for _, n in runs] == [steps - at for steps, at in zip(ep["cycle_steps"], entries)]
+    assert runs[0][0] == 21  # the entry at the step whose run read 20, flagged from the next
+    assert [s for s, (a, b) in enumerate(zip(on_asks, off_asks)) if a != b] == [t for t, _ in runs]
+    assert on == off and "retry_at" not in off["episodes"][0]["cycle_census"][0]
+
+
+def test_a_hover_while_a_part_is_held_enters_retry_mode_only_once_the_hold_ends(monkeypatch):
+    """The same run while the detector holds a part: the stall still hands the part to the rig,
+    and those cycles never enter retry mode, though their run passed N. A hold that ends while
+    the run is past N leaves the arm hovering with nothing held, so that cycle enters it on the
+    step the hold ended. The teacher policy ignores the flags: no payload byte changes."""
+    monkeypatch.setattr(loop, "HoldDetector", _Detector)
+    monkeypatch.setattr(loop, "AirStall", _HoveringWhileHeld)
+    switches = {"noise_scales": ZERO, "carry_guard": True}
+    off, off_asks, _, _ = _retry_run(_teacher_scene, monkeypatch, **switches)
+    on, on_asks, on_retries, held = _retry_run(
+        _teacher_scene, monkeypatch, **switches, retry_noise_at=20
+    )
+    rows = on["episodes"][0]["cycle_census"]
+    handed = [row for row in rows if row["handoff"]]
+    assert handed and all(row["retry_at"] is None for row in handed), rows  # the held stalls ran
+    entries = [row.pop("retry_at") for row in rows]
+    runs = _true_runs(on_retries)
+    assert len(runs) == len([at for at in entries if at is not None])
+    assert all(held[s - 2] and not held[s - 1] for s, _ in runs)  # entered as the hold ended
+    assert on["inference"]["loop"].pop("retry_noise_at") == 20
+    assert [s for s, (a, b) in enumerate(zip(on_asks, off_asks)) if a != b] == [s for s, _ in runs]
+    assert on == off
+
+
+def test_the_rollout_refuses_a_retry_noise_at_without_its_guard_or_its_flag(monkeypatch):
+    both = {"carry_guard": True, "replan_on_switch": True}
+    for kwargs in (
+        {"retry_noise_at": 20, "replan_on_switch": True},
+        {"retry_noise_at": 20, "carry_guard": True},
+        {"retry_noise_at": -1, **both},
+        {"retry_noise_at": loop.AIR_STALL_STEPS, **both},  # the stall opens the jaws there
+    ):
+        env, rig, policy, budget, _ = _teacher_scene(monkeypatch)
+        with pytest.raises(loop.EvalFailure) as err:
+            _rollout(env, rig, policy, budget=budget, perceived=True, **kwargs)
+        env.close()
+        assert err.value.reason == "retry_noise_at", kwargs
+
+
+def test_a_margin_past_the_boxs_half_width_guards_the_teachers_centre_release(monkeypatch):
+    """At zero noise the teacher opens over its box centre, so the default margin, passed or not,
+    guards nothing and changes no payload byte. A 0.2 m margin leaves no point deep enough: the
+    guard holds each open, its steps over the box count as rim steps, and the payload records
+    the margin."""
+    switches = {"noise_scales": ZERO, "carry_guard": True}
+    off, off_served = _run(_teacher_scene, monkeypatch, **switches)
+    same, same_served = _run(
+        _teacher_scene, monkeypatch, **switches, guard_margin=loop.GUARD_BOX_MARGIN_M
+    )
+    assert same == off and _same(same_served, off_served)
+    wide, _ = _run(_teacher_scene, monkeypatch, **switches, guard_margin=0.2)
+    assert wide["inference"]["loop"]["guard_margin"] == 0.2
+    assert "guard_margin" not in off["inference"]["loop"]
+    rows = wide["episodes"][0]["cycle_census"]
+    assert any(row["guard_rim_steps"] for row in rows), rows
+    for kwargs in ({"guard_margin": 0.02}, {"guard_margin": -0.01, "carry_guard": True}):
+        env, rig, policy, budget, _ = _teacher_scene(monkeypatch)
+        with pytest.raises(loop.EvalFailure) as err:
+            _rollout(env, rig, policy, budget=budget, perceived=True, **kwargs)
+        env.close()
+        assert err.value.reason == "guard_margin", kwargs
+
+
 def test_a_pending_vote_serves_no_box_so_the_part_goes_where_the_vote_moves_it(
     tmp_path, monkeypatch
 ):
@@ -256,6 +413,133 @@ def test_the_client_refuses_the_switch_with_its_token(argv, message, capsys):
     assert len(out) == 1 and out[0].startswith("EVAL_FAIL ") and message in out[0], out
 
 
+HEAP = ["--heap_k", "3", "--desk_boxes", "4", "--gripper", "continuous", "--num_envs", "1"]
+
+
+class _Policy:
+    def close(self):
+        pass
+
+
+RETRY = ["--perceived", "--carry_guard", "--replan_on_switch", "--retry_noise_at", "20"]
+
+
+@pytest.mark.parametrize(
+    "argv, message",
+    [
+        (RETRY[:1] + RETRY[2:], "--retry_noise_at needs --carry_guard and"),
+        (RETRY[:2] + RETRY[3:], "--retry_noise_at needs --carry_guard and"),
+        (RETRY[:-1] + ["-1"], "--retry_noise_at must be 0 (off) or more, under 60"),
+        (RETRY[:-1] + ["60"], "--retry_noise_at must be 0 (off) or more, under 60"),
+    ],
+)
+def test_the_client_refuses_a_bad_retry_noise_at_with_its_token(argv, message, capsys):
+    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    with pytest.raises(SystemExit) as exit_info:
+        module.main(HEAP + argv)
+    assert exit_info.value.code == 2
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1 and out[0].startswith("EVAL_FAIL ") and message in out[0], out
+
+
+def test_the_client_hands_the_retry_noise_at_to_the_rollout(monkeypatch, capsys):
+    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    monkeypatch.setattr(module.policy_client, "ServerPolicy", lambda server: _Policy())
+    real_env = module.MjLegoSortEnv
+    monkeypatch.setattr(
+        module, "MjLegoSortEnv", lambda *a, **k: real_env(*a, **{**k, "cameras": False})
+    )
+    seen = []
+
+    def run(env, rig, policy, **kwargs):
+        seen.append(kwargs)
+        return {}
+
+    for argv, at in ((RETRY, 20), (RETRY[:-2], 0)):
+        assert module.main(HEAP + argv, run=run) == 0
+        assert capsys.readouterr().out.strip().splitlines()[-1].startswith("EVAL_OK ")
+        assert seen.pop()["retry_noise_at"] == at
+
+
+def test_the_supervisor_forwards_the_retry_noise_at_and_splits_the_cache_on_it(tmp_path):
+    draw = ge.make_eval_draws(1, 1)[0]
+    argv = _gate_argv(tmp_path) + ["--gripper", "continuous", "--perceived", "--carry_guard"]
+    plain = ge._build_cfg(ge._parse_args(argv + ["--client_flags=--replan_on_switch"]))
+    flags = ["--client_flags=--replan_on_switch --retry_noise_at 20"]
+    cfg = ge._build_cfg(ge._parse_args(argv + flags))
+    cmd = ge._eval_command(cfg, draw)
+    assert cmd[cmd.index("--retry_noise_at") + 1] == "20"
+    assert "--retry_noise_at" not in ge._eval_command(plain, draw)
+    found = ge.loop_switches(cfg.client_flags)
+    assert found["retry_noise_at"] == 20
+    assert ge.loop_switches(plain.client_flags)["retry_noise_at"] == 0
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    path = tmp_path / "eval_000.json"
+
+    def hit(gate, loop_block):
+        inference = {**served, "loop": loop_block}
+        payload = _heap_payload(draw, desk_boxes=4, gripper="continuous", inference=inference)
+        path.write_text(json.dumps(payload))
+        return ge._cached_payload(gate, draw) is not None
+
+    recorded = {k: v for k, v in found.items() if k != "retry_noise_at"}  # off: not recorded
+    assert hit(plain, recorded) and not hit(cfg, recorded)
+    on = recorded | {"retry_noise_at": 20}
+    assert hit(cfg, on) and not hit(plain, on)
+    assert not hit(cfg, recorded | {"retry_noise_at": 30})
+
+
+def test_the_client_hands_the_guard_margin_to_the_rollout(monkeypatch, capsys):
+    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    with pytest.raises(SystemExit):
+        module.main(HEAP + ["--perceived", "--guard_margin", "0.02"])
+    assert "--guard_margin needs --carry_guard" in capsys.readouterr().out
+    monkeypatch.setattr(module.policy_client, "ServerPolicy", lambda server: _Policy())
+    real_env = module.MjLegoSortEnv
+    monkeypatch.setattr(
+        module, "MjLegoSortEnv", lambda *a, **k: real_env(*a, **{**k, "cameras": False})
+    )
+    seen = []
+
+    def run(env, rig, policy, **kwargs):
+        seen.append(kwargs)
+        return {}
+
+    guard = ["--perceived", "--carry_guard"]
+    for argv, margin in ((guard + ["--guard_margin", "0.02"], 0.02), (guard, 0.010)):
+        assert module.main(HEAP + argv, run=run) == 0
+        assert capsys.readouterr().out.strip().splitlines()[-1].startswith("EVAL_OK ")
+        assert seen.pop()["guard_margin"] == margin
+
+
+def test_the_supervisor_forwards_the_guard_margin_and_splits_the_cache_on_it(tmp_path):
+    assert ge.LOOP_MARGINS == {"guard_margin": loop.GUARD_BOX_MARGIN_M}
+    draw = ge.make_eval_draws(1, 1)[0]
+    argv = _gate_argv(tmp_path) + ["--gripper", "continuous", "--perceived", "--carry_guard"]
+    plain = ge._build_cfg(ge._parse_args(argv))
+    cfg = ge._build_cfg(ge._parse_args(argv + ["--client_flags=--guard_margin 0.02"]))
+    same = ge._build_cfg(ge._parse_args(argv + ["--client_flags=--guard_margin 0.01"]))
+    cmd = ge._eval_command(cfg, draw)
+    assert cmd[cmd.index("--guard_margin") + 1] == "0.02"
+    assert "--guard_margin" not in ge._eval_command(plain, draw)
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    path = tmp_path / "eval_000.json"
+
+    def hit(gate, loop_block):
+        inference = {**served, "loop": loop_block}
+        payload = _heap_payload(draw, desk_boxes=4, gripper="continuous", inference=inference)
+        path.write_text(json.dumps(payload))
+        return ge._cached_payload(gate, draw) is not None
+
+    # The client records the margin only off its default, so a default read leaves it out.
+    recorded = ge.loop_switches(plain.client_flags)
+    del recorded["guard_margin"]
+    assert hit(plain, recorded) and hit(same, recorded) and not hit(cfg, recorded)
+    on = recorded | {"guard_margin": 0.02}
+    assert hit(cfg, on) and not hit(plain, on)
+    assert not hit(cfg, recorded | {"guard_margin": 0.03})
+
+
 def test_the_supervisor_forwards_the_switch_and_its_cache_key_records_it(tmp_path):
     draw = ge.make_eval_draws(1, 1)[0]
     argv = _gate_argv(tmp_path) + ["--gripper", "continuous", "--perceived"]
@@ -265,7 +549,12 @@ def test_the_supervisor_forwards_the_switch_and_its_cache_key_records_it(tmp_pat
     assert "--carry_guard" not in ge._eval_command(plain, draw)
     base = {name: False for name in ge.LOOP_SWITCHES} | {"perceived": True}
     base["noise_scales"] = ge.noise_scales_key("")
-    assert ge.loop_switches(cfg.client_flags) == base | {"carry_guard": True, "rake_cap": 0}
+    assert ge.loop_switches(cfg.client_flags) == base | {
+        "carry_guard": True,
+        "rake_cap": 0,
+        "retry_noise_at": 0,
+        "guard_margin": 0.010,
+    }
     served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
     path = tmp_path / "eval_000.json"
 

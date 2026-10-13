@@ -33,12 +33,19 @@ re-open within 10 actions of their own close in 29 % (29-31 % in the loop). Its 
 is ``+latch<L>``, last. S * J ties the jaw's noise to the call's scale: at S = 0.01 and J = 100, a
 still resample at S2 = 1 draws the jaw at 100. So --jaw_noise_abs A draws the jaw column of every
 initial noise from A * N(0, 1), whatever the call's scale (the arm keeps its own), with J = 1 and
-no shared draw. Its policy id part is ``+jawabs<A>``, after ``+jawshared``.
+no shared draw. Its policy id part is ``+jawabs<A>``, after ``+jawshared``. At zero arm noise V
+hovers still after a missed grasp, and a one-chunk redraw does not help: the next forward at zero
+arm noise goes back to the hover. So the heap loop's ``retry_noise_at`` flags a row that started to
+hover for the rest of its cycle, and --retry_noise_scale S forwards each row whose retry flag is
+set with its arm noise at S in place of --noise_scale, in a forward of their own; the jaw keeps its
+own rules, and the still rule and the latch apply as before. Its policy id part is ``+retry<S>``,
+right after the sampling parts.
 2026-10-05 on Machine A's RTX 5090, shared with ACT read servers, on a 50-step dry-run checkpoint:
 one forward of 1 row took 172-207 ms, 3 rows 245-291 ms and 6 rows 346 ms, at 9.4 GiB peak.
-Every forward prints "FORWARD rows=N ms=T" (plus " still=K", the rows resampled, with the rule
-on, and " latched=K", the rows the latch changed, with it on), so a read's log holds its batch
-sizes and times.
+Every forward prints "FORWARD rows=N ms=T" (plus " retry=K", the rows forwarded at the retry
+noise, with --retry_noise_scale on, " still=K", the rows resampled, with the rule on, and
+" latched=K", the rows the latch changed, with it on), so a read's log holds its batch sizes and
+times.
 
 The checkpoint is a pretrained_model directory of a pi05 fine-tune on the derived dataset; its
 action_space.json marker (the same walk as policy_server's) must say "absolute" and name the
@@ -69,6 +76,7 @@ from policy_protocol import (
     OBS_SCHEMA,
     PROTOCOL_VERSION,
     REPLAN_KEY,
+    RETRY_KEY,
     decode_frames,
     encode_frames,
     validate_obs,
@@ -147,7 +155,8 @@ class SharedServer:
     unnormalized (n, n_action_steps, 7) chunk. ``process`` is socket-free for the tests. With
     ``still`` = (S2, E, F), the still rows of a forward (``still_rows`` at E and F) get
     ``predict_chunk(obs of those rows, S2)``'s chunk. ``jaw_latch`` L > 0 passes every chunk
-    through ``latch_jaw`` before the warp."""
+    through ``latch_jaw`` before the warp. ``retry_noise_scale`` S forwards the rows whose retry
+    flag is set with ``predict_chunk(obs of those rows, S)``, in a forward of their own."""
 
     def __init__(
         self,
@@ -159,6 +168,7 @@ class SharedServer:
         action_warp: float = 1.0,
         still: tuple[float, float, float] | None = None,
         jaw_latch: int = 0,
+        retry_noise_scale: float | None = None,
     ):
         if not ACTION_WARP_MIN <= action_warp <= ACTION_WARP_MAX:
             raise ValueError(
@@ -171,9 +181,12 @@ class SharedServer:
         if still is not None:
             names = ("still_noise_scale", "still_rad", "still_open")
             self._inference |= dict(zip(names, still))
+        if retry_noise_scale is not None:
+            self._inference["retry_noise_scale"] = retry_noise_scale
         if jaw_latch:
             self._inference["jaw_latch"] = jaw_latch
         self._still = still
+        self._retry = retry_noise_scale
         self._latch = jaw_latch
         self._gripper = gripper
         self._warp = action_warp
@@ -244,14 +257,27 @@ class SharedServer:
             replies.extend(self._step(steps))
         return replies, keep
 
+    def _forward(self, obs: dict, *scale) -> np.ndarray:
+        """The (n, n_action_steps, 7) chunk of ``obs``'s n rows, at the noise ``scale`` (none:
+        the configured one)."""
+        rows = len(obs["state"])
+        chunk = np.asarray(self._predict(obs, *scale), dtype=np.float32)
+        if chunk.shape != (rows, self._n, *ACTION_SHAPE):
+            raise ValueError(f"predict_chunk returned {chunk.shape}, want ({rows}, {self._n}, 7)")
+        return chunk
+
     def _step(self, steps: list) -> list:
         need = []  # (lane, row) of every env row whose queue is refilled now
+        retrying = []  # per need row: its retry flag is set
         for lane, arrays in steps:
             batch = int(arrays["state"].shape[0])
             if len(self._queues.get(lane, ())) != batch:
                 self._queues[lane] = [deque() for _ in range(batch)]
             replan = arrays.get(REPLAN_KEY, np.zeros(batch, dtype=bool))
-            need += [(lane, i) for i, q in enumerate(self._queues[lane]) if replan[i] or not q]
+            retry = arrays.get(RETRY_KEY, np.zeros(batch, dtype=bool))
+            due = [i for i, q in enumerate(self._queues[lane]) if replan[i] or not q]
+            need += [(lane, i) for i in due]
+            retrying += [bool(retry[i]) for i in due]
         if need:
             rows = {lane: arrays for lane, arrays in steps}
             obs = {
@@ -262,12 +288,18 @@ class SharedServer:
                 **{k: np.stack([rows[lane][k][i] for lane, i in need]) for k in IMAGE_KEYS},
             }
             start = time.perf_counter()
+            retried = np.flatnonzero(retrying) if self._retry is not None else []
             try:
-                chunk = np.asarray(self._predict(obs), dtype=np.float32)
-                if chunk.shape != (len(need), self._n, *ACTION_SHAPE):
-                    raise ValueError(
-                        f"predict_chunk returned {chunk.shape}, want ({len(need)}, {self._n}, 7)"
+                if len(retried):  # the retry rows' arm noise at S, in a forward of their own
+                    rest = np.setdiff1d(np.arange(len(need)), retried)
+                    chunk = np.empty((len(need), self._n, *ACTION_SHAPE), dtype=np.float32)
+                    chunk[retried] = self._forward(
+                        {k: v[retried] for k, v in obs.items()}, self._retry
                     )
+                    if len(rest):
+                        chunk[rest] = self._forward({k: v[rest] for k, v in obs.items()})
+                else:
+                    chunk = self._forward(obs)
                 if self._still is not None:  # one more forward over the still rows only
                     still = still_rows(chunk, obs["state"], *self._still[1:])
                     if len(still):
@@ -283,6 +315,7 @@ class SharedServer:
             self.forward_sizes.append(len(need))
             ms = 1000 * (time.perf_counter() - start)
             log = f"FORWARD rows={len(need)} ms={ms:.1f}"  # the read's batch log
+            log += "" if self._retry is None else f" retry={len(retried)}"
             log += "" if self._still is None else f" still={len(still)}"
             print(log + (f" latched={latched}" if self._latch else ""), flush=True)
             for (lane, i), actions in zip(need, warp_chunk(chunk, self._warp)):
@@ -453,6 +486,7 @@ def main() -> int:
     parser.add_argument("--jaw_noise_scale", type=float, default=1.0, help="the jaw column's")
     parser.add_argument("--jaw_noise_shared", action="store_true", help="one jaw draw a chunk")
     parser.add_argument("--jaw_noise_abs", type=float, help="the jaw's std at every scale")
+    parser.add_argument("--retry_noise_scale", type=float, help="the arm noise of a retry row")
     parser.add_argument("--still_noise_scale", type=float, help="resample still rows at this")
     parser.add_argument("--still_rad", type=float, default=STILL_RAD)
     parser.add_argument("--still_open", type=float, default=STILL_OPEN)
@@ -472,6 +506,9 @@ def main() -> int:
             parser.error(f"--jaw_noise_abs must be finite and at least 0, got {jaw_abs}")
         if jaw_abs is not None and (args.jaw_noise_scale != 1.0 or args.jaw_noise_shared):
             parser.error("--jaw_noise_abs needs --jaw_noise_scale 1 and no --jaw_noise_shared")
+        retry = args.retry_noise_scale
+        if retry is not None and not 0.0 <= retry < float("inf"):
+            parser.error(f"--retry_noise_scale must be finite and at least 0, got {retry}")
         scale, rad, open_frac = args.still_noise_scale, args.still_rad, args.still_open
         if scale is not None and not 0.0 <= scale < float("inf"):
             parser.error(f"--still_noise_scale must be finite and at least 0, got {scale}")
@@ -494,7 +531,8 @@ def main() -> int:
             f"+warp{args.action_warp}" if args.action_warp != 1.0 else ""
         )
         still = None if scale is None else (scale, rad, open_frac)
-        policy_id += sampling + ("" if still is None else "+still{}r{}o{}".format(*still))
+        policy_id += sampling + ("" if retry is None else f"+retry{retry}")
+        policy_id += "" if still is None else "+still{}r{}o{}".format(*still)
         policy_id += f"+latch{args.jaw_latch}" if args.jaw_latch else ""
         server = SharedServer(
             predict_chunk,
@@ -505,6 +543,7 @@ def main() -> int:
             args.action_warp,
             still,
             args.jaw_latch,
+            retry,
         )
         socket = zmq.Context.instance().socket(zmq.ROUTER)
         socket.bind(f"tcp://127.0.0.1:{args.port}")

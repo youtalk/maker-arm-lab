@@ -651,6 +651,27 @@ def test_the_step_hands_the_replan_flag_to_the_policy_only_when_sent():
     assert calls["replan"] == [None, [True, False]]
 
 
+def test_the_step_validates_the_retry_flag_and_never_hands_it_to_the_policy():
+    calls = {"reset": 0, "replan": []}
+
+    def fake_policy(state, wrist, overhead, context=None, replan=None):
+        calls["replan"].append(None if replan is None else replan.tolist())
+        return np.zeros((state.shape[0], 7), dtype=np.float32)
+
+    req, thread = _start_server(fake_policy, calls)
+    send_message(req, {"type": "step", "batch": 2}, {**_obs(), "retry": np.array([True, False])})
+    assert recv_message(req)[0]["type"] == "action"
+    retry = {"replan": np.array([False, True]), "retry": np.ones(2, dtype=bool)}
+    send_message(req, {"type": "step", "batch": 2}, {**_obs(), **retry})
+    assert recv_message(req)[0]["type"] == "action"
+    send_message(req, {"type": "step", "batch": 2}, {**_obs(), "retry": np.zeros(3, dtype=bool)})
+    header, _ = recv_message(req)
+    assert header["type"] == "error" and header["error"] == "bad_obs"
+    assert "retry" in header["message"]
+    _stop_server(req, thread)
+    assert calls["replan"] == [None, [False, True]]
+
+
 CHECKPOINT = Path.home() / "data/maker-arm-ms6/m/train/checkpoints/400000/pretrained_model"
 
 

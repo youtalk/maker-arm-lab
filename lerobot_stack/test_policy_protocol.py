@@ -194,3 +194,20 @@ def test_optional_replan_is_validated_when_present():
         validate_obs({**arrays, REPLAN_KEY: np.zeros(3, dtype=bool)}, 2)
     with pytest.raises(ValueError, match="replan"):
         validate_obs({**arrays, REPLAN_KEY: np.zeros(2, dtype=np.uint8)}, 2)
+
+
+def test_optional_retry_is_validated_when_present():
+    from policy_protocol import REPLAN_KEY, RETRY_KEY, validate_obs
+
+    assert RETRY_KEY == "retry"
+    arrays = {
+        "state": np.zeros((2, 7), np.float32),
+        "wrist": np.zeros((2, 224, 224, 3), np.uint8),
+        "overhead": np.zeros((2, 224, 224, 3), np.uint8),
+    }
+    validate_obs({**arrays, RETRY_KEY: np.zeros(2, dtype=bool)}, 2)
+    validate_obs({**arrays, REPLAN_KEY: np.ones(2, bool), RETRY_KEY: np.ones(2, bool)}, 2)
+    with pytest.raises(ValueError, match="retry"):
+        validate_obs({**arrays, RETRY_KEY: np.zeros(3, dtype=bool)}, 2)
+    with pytest.raises(ValueError, match="retry"):
+        validate_obs({**arrays, RETRY_KEY: np.zeros(2, dtype=np.uint8)}, 2)

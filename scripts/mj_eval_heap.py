@@ -27,6 +27,7 @@ of every lift whose read agreed with the overhead read, a frame the classifier d
 import argparse
 import gzip
 import json
+import math
 import os
 import random
 import sys
@@ -57,8 +58,10 @@ from maker_arm_lab.core.eval_loop import EvalFailure
 from maker_arm_lab.core.heap_oracle import CELL_FAILURE_CAP, HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.core.loop import (
+    AIR_STALL_STEPS,
     CARRY_VIEW_STEPS,
     CYCLE_STEP_BUDGET,
+    GUARD_BOX_MARGIN_M,
     HELD_NO_RISE_STEPS,
     MAX_CARRY_VOTES,
     MAX_CELL_FAILURE_CAP,
@@ -356,6 +359,22 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "refuses --passenger_drop",
     )
     parser.add_argument(
+        "--retry_noise_at",
+        type=int,
+        default=0,
+        help="MS7h, with --carry_guard and --replan_on_switch: once an air stall with nothing "
+        "held has run N steps, flag the row for the server's retry noise to its cycle's end "
+        "(loop.retry_noise_due); 0 is off",
+    )
+    parser.add_argument(
+        "--guard_margin",
+        type=float,
+        default=GUARD_BOX_MARGIN_M,
+        help="MS7h, with --carry_guard: the jaws open on a lifted part only with the pick point "
+        "this many meters inside the served box's interior (loop.in_box_interior); default "
+        f"{GUARD_BOX_MARGIN_M}",
+    )
+    parser.add_argument(
         "--clear_first",
         action="store_true",
         help="MS7g, with --perceived: the selector ranks the grasps that sweep no standing "
@@ -420,6 +439,14 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
     check_teacher_waits(parser, args)
     if args.carry_guard and args.passenger_drop:
         parser.error("--carry_guard refuses --passenger_drop, which opens over the tray")
+    if not 0 <= args.retry_noise_at < AIR_STALL_STEPS:
+        parser.error(f"--retry_noise_at must be 0 (off) or more, under {AIR_STALL_STEPS}")
+    if args.retry_noise_at and not (args.carry_guard and args.replan_on_switch):
+        parser.error("--retry_noise_at needs --carry_guard and --replan_on_switch")
+    if not 0.0 <= args.guard_margin < math.inf:
+        parser.error("--guard_margin must be a finite margin of 0 m or more")
+    if args.guard_margin != GUARD_BOX_MARGIN_M and not args.carry_guard:
+        parser.error("--guard_margin needs --carry_guard")
     if args.classifier and not (args.perceived and args.categories):
         parser.error(
             "--classifier reads the categories on the perceived views: it needs --perceived and "
@@ -690,6 +717,8 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             overhang_guard=args.overhang_guard,
             bank_views=args.bank_views,
             vote_weights=args.vote if args.vote_weights else None,
+            retry_noise_at=args.retry_noise_at,
+            guard_margin=args.guard_margin,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed

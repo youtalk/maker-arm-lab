@@ -190,7 +190,7 @@ def test_an_act_read_keeps_its_supervisor_flags_and_a_pi05_read_adds_one():
     cfg = ge._build_cfg(ge._parse_args(pi05 + ["--out_dir", "/o", "--lanes", "2"]))
     assert (cfg.pi05, cfg.lanes, cfg.n_action_steps) == (True, 2, 50)
     names = ("num_steps", "noise_scale", "jaw_noise_scale", "still_noise_scale", "still_rad")
-    names += ("still_open", "jaw_latch", "jaw_noise_abs")
+    names += ("still_open", "jaw_latch", "jaw_noise_abs", "retry_noise_scale")
     unset = _read_args(pi05=True, **{f"pi05_{name}": None for name in names})
     assert fleet.supervisor_args(unset, "/l.json") == pi05
     unset = _read_args(pi05=True, pi05_jaw_noise_shared=False)  # the parser's default
@@ -201,6 +201,7 @@ def test_a_pi05_read_forwards_its_sampling_switches_and_an_act_read_refuses_them
     sampling = {"pi05_num_steps": 50, "pi05_noise_scale": 0.0, "pi05_still_noise_scale": 1.0}
     sampling |= {"pi05_still_rad": 0.1, "pi05_still_open": 0.8, "pi05_jaw_noise_scale": 0.25}
     sampling |= {"pi05_jaw_noise_shared": True, "pi05_jaw_latch": 10}
+    sampling |= {"pi05_retry_noise_scale": 1.0}
     pi05 = fleet.supervisor_args(_read_args(pi05=True, **sampling), "/l.json")
     at = pi05.index("--pi05") + 1
     assert pi05[at : at + 4] == ["--pi05_num_steps", "50", "--pi05_noise_scale", "0.0"]
@@ -219,6 +220,8 @@ def test_a_pi05_read_forwards_its_sampling_switches_and_an_act_read_refuses_them
     assert cfg.pi05_jaw_noise_shared
     assert (cfg.pi05_still_noise_scale, cfg.pi05_still_rad, cfg.pi05_still_open) == (1.0, 0.1, 0.8)
     assert pi05[at + 13 : at + 15] == ["--pi05_jaw_latch", "10"] and cfg.pi05_jaw_latch == 10
+    retry = ["--pi05_retry_noise_scale", "1.0"]
+    assert pi05[at + 15 : at + 17] == retry and cfg.pi05_retry_noise_scale == 1.0
     jaw_abs = fleet.supervisor_args(_read_args(pi05=True, pi05_jaw_noise_abs=1.0), "/l.json")
     assert jaw_abs[at : at + 2] == ["--pi05_jaw_noise_abs", "1.0"]  # it excludes the jaw's others
     assert ge._build_cfg(ge._parse_args(jaw_abs + ["--out_dir", "/o"])).pi05_jaw_noise_abs == 1.0
