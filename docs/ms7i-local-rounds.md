@@ -664,12 +664,14 @@ each lever with its evidence so far.
 ## 8. The code
 
 The code of record is on four pushed branches. None of them is in main. `feat/ms7i-vla-dagger`
-stacks on 4f0d095, which is in main ce97325. The launchers, the conversion pipeline and the audit
+stacks on 4f0d095, which is in main ce97325. The first three are draft PRs #194, #195 and #196 in
+stack #198. ACT-C trained from `feat/ms7i-act-mix` 87b320a. Its commit, cherry-picked onto main
+with the same diff as b4e8ac5, is draft PR #197. The launchers, the conversion pipeline and the audit
 tools are outside the repository, in `~/data/maker-arm-ms7/i/bin/`.
 
 | branch | tip | base | what it adds |
 | --- | --- | --- | --- |
-| `feat/ms7i-vla-dagger` | 61763a8 | 4f0d095 | `dagger_vla.py` converts DAgger takeover shards into the π0.5 dataset format with the corpus statistics. `train_pi05.py --dagger_root` and `colab_dagger.sh` fine-tune π0.5 on a corpus and DAgger mix, and the converter gains `--drop_reopen_lead`. |
-| `feat/ms7i-own-frames` | f20db17 | 61763a8 | `--record_all` records every frame with its cycle, its subtask and the census extras, and `core/hold.py` gains the subtask function. `convert_to_lerobot.py --own_frames` joins each cycle to its census row and writes the IR5 labels with rule changes (1), (2), (4) and (5). |
-| `feat/ms7i-prompt` | 538ad33 | f20db17 | The optional prompt id on the wire, the prompt of each request in `pi05_server.py` with no forced replan, and `--pi05_prompt`. `train_pi05.py` trains on an N-source mix with a prompt code for each frame and the 20 % tag drop, and `prompt_codes.py` writes the teacher tags of rule change (3). |
-| `feat/ms7i-act-mix` | 87b320a | 61763a8 | `train_masked.py --extra_root` appends extra roots to the corpus, capped by `--extra_max_share` (0.3). Without the switch it reproduces the F9n recipe byte for byte. |
+| `feat/ms7i-vla-dagger` (#194) | 61763a8 | 4f0d095 | `dagger_vla.py` converts DAgger takeover shards into the π0.5 dataset format with the corpus statistics. `train_pi05.py --dagger_root` and `colab_dagger.sh` fine-tune π0.5 on a corpus and DAgger mix, and the converter gains `--drop_reopen_lead`. |
+| `feat/ms7i-own-frames` (#195) | f20db17 | 61763a8 | `--record_all` records every frame with its cycle, its subtask and the census extras, and `core/hold.py` gains the subtask function. `convert_to_lerobot.py --own_frames` joins each cycle to its census row and writes the IR5 labels with rule changes (1), (2), (4) and (5). |
+| `feat/ms7i-prompt` (#196) | 538ad33 | f20db17 | The optional prompt id on the wire, the prompt of each request in `pi05_server.py` with no forced replan, and `--pi05_prompt`. `train_pi05.py` trains on an N-source mix with a prompt code for each frame and the 20 % tag drop, and `prompt_codes.py` writes the teacher tags of rule change (3). |
+| `feat/ms7i-act-mix` (#197 as b4e8ac5) | 87b320a | 61763a8 | `train_masked.py --extra_root` appends extra roots to the corpus, capped by `--extra_max_share` (0.3). Without the switch it reproduces the F9n recipe byte for byte. |
