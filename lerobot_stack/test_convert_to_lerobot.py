@@ -500,6 +500,11 @@ def test_every_quick_reopen_and_the_last_close_of_a_cycle_with_no_lift_are_event
     assert info["events"]["no_lift"] == []
     _, (info,) = _labels(_row(50), *_episode(), cls="no_close")
     assert info["events"]["no_lift"] == [] and info["events"]["reopen"] == []
+    # A close of fewer than REOPEN_MIN_CLOSED steps is a command flicker: no event.
+    cycle, actor, phase, subtask = _episode()
+    subtask[20:22] = GRASP  # closed 20..21, open at 22
+    _, (info,) = _labels(_row(50, held_steps=3), cycle, actor, phase, subtask, cls="stowed")
+    assert info["events"]["reopen"] == []
 
 
 def test_a_takeover_ends_the_window_on_the_last_policy_frame_and_a_decline_on_the_cycle_end():
@@ -572,6 +577,11 @@ def test_a_clean_grasp_and_a_carry_the_policy_ends_in_its_served_box_are_positiv
     sub[28], sub[31:40] = CARRY, RELEASE  # opens RELEASE_LEAD steps before the release (41)
     label, _ = _labels(row, cycle, actor, phase, sub, final=(-1, -1, 1, -1))
     assert (label[5:55] == POS).all()
+    # A close and a quick open after the release is no failing re-open.
+    sub = subtask.copy()
+    sub[44:48] = CARRY
+    label, (info,) = _labels(row, cycle, actor, phase, sub, final=(-1, -1, 1, -1))
+    assert info["events"]["reopen"] == [] and (label[5:55] == POS).all()
 
 
 def test_a_takeover_carry_stays_untagged_and_a_part_picked_again_is_no_positive_carry():

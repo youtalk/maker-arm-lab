@@ -173,6 +173,7 @@ FAILING_PLACES = ("tray", "desk", "rim")
 BOX_PLACES = ("right_box", "wrong_box")
 NEG_WINDOW = 30  # frames that end at a failing event, the event's included (rev3 design 5.3)
 REOPEN_WITHIN = 10  # steps from a close to the open that makes it a failing re-open
+REOPEN_MIN_CLOSED = 3  # steps: a shorter close is a command flicker (the round 1 audit)
 RELEASE_LEAD = 10  # steps: a positive carry opens first at most this long before its release
 OFF_TARGET_M = 0.020  # m, the MS7h jaw table's off-target first close: off_z or the xy distance
 EVENTS = ("off_target", "reopen", "no_lift", "takeover", "lost", "release")
@@ -207,7 +208,9 @@ def own_labels(rows, classes, reasons, final_box, cycle, actor, phase, subtask):
     re-open a closed-to-open edge. The events (frame e, a policy frame of the cycle: one on a
     takeover's or a handoff's frame is the teacher's, and dropped): ``off_target`` the first
     close with off_z or the xy offset over ``OFF_TARGET_M``; ``reopen`` each re-open within
-    ``REOPEN_WITHIN`` steps of its close; ``no_lift`` the last close of a cycle that lifted
+    ``REOPEN_WITHIN`` steps of its close, when that close lasted ``REOPEN_MIN_CLOSED`` steps or
+    more and came before the first carry frame (a grasp that hesitates, not a command flicker or
+    a release); ``no_lift`` the last close of a cycle that lifted
     nothing (max_rise under ``LIFT_MIN_RISE``) and did not stow; ``takeover`` the last frame
     before the teacher's first, or the last frame of a ``takeover_declined`` cycle; ``lost`` the
     frame after the last contact-held step of a lifted cycle, if it reads closed and the release
@@ -245,9 +248,11 @@ def own_labels(rows, classes, reasons, final_box, cycle, actor, phase, subtask):
             off_xy = math.hypot(row["off_x"], row["off_y"])
             if row["off_z"] > OFF_TARGET_M or off_xy > OFF_TARGET_M:
                 hits.append(("off_target", s + row["first_close_at"]))
+        carry = [t for t in span if subtask[t] == CARRY]
         for r in opened:
             c = max((t for t in shut if t < r), default=None)
-            if c is not None and r - c <= REOPEN_WITHIN:
+            grasping = not carry or c is not None and c < carry[0]
+            if c is not None and REOPEN_MIN_CLOSED <= r - c <= REOPEN_WITHIN and grasping:
                 hits.append(("reopen", r))
         lifted = row["max_rise"] >= LIFT_MIN_RISE
         if not lifted and classes[j] != "stowed" and shut:
@@ -268,7 +273,6 @@ def own_labels(rows, classes, reasons, final_box, cycle, actor, phase, subtask):
                 info["events"][name].append(int(e))
                 window = slice(max(s, e - NEG_WINDOW + 1), e + 1)
                 label[window][policy[window]] = TAG_NEGATIVE
-        carry = [t for t in span if subtask[t] == CARRY]
         if not carry:
             continue
         start = info["carry_start"] = carry[0]
