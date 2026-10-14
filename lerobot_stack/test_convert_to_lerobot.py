@@ -518,6 +518,10 @@ def test_a_slip_of_a_lifted_part_and_a_release_off_the_boxes_are_events():
     row = _row(50, max_rise=0.06, held_steps=5, last_held=2, last_held_at=30)  # no positive
     label, (info,) = _labels(row, cycle, actor, phase, subtask, cls="lifted_lost")
     assert info["events"]["lost"] == [36] and _window(label, 7, 36)
+    # A part that the opening jaws let go of over a box is no slip.
+    boxed = row | {"release_place": "right_box", "release_at": 40}
+    _, (info,) = _labels(boxed, cycle, actor, phase, subtask, cls="stowed")
+    assert info["events"]["lost"] == []
     subtask[36:41] = RELEASE  # an open there is a release, not a slip
     _, (info,) = _labels(row, cycle, actor, phase, subtask, cls="lifted_lost")
     assert info["events"]["lost"] == []
@@ -559,6 +563,15 @@ def test_a_clean_grasp_and_a_carry_the_policy_ends_in_its_served_box_are_positiv
     label, (info,) = _labels(row, cycle, actor, phase, sub, final=(-1, -1, 1, -1))
     assert info["events"]["reopen"] == [18] and (label[5:19] == NEG).all()
     assert (label[19:25] == UNT).all() and (label[25:55] == POS).all()
+    # An open mid-carry, more than RELEASE_LEAD steps before the release: no positive carry.
+    sub = subtask.copy()
+    sub[28] = RELEASE
+    label, (info,) = _labels(row, cycle, actor, phase, sub, final=(-1, -1, 1, -1))
+    assert info["events"]["reopen"] == [] and (label[5:25] == POS).all()
+    assert (label[25:55] == UNT).all()
+    sub[28], sub[31:40] = CARRY, RELEASE  # opens RELEASE_LEAD steps before the release (41)
+    label, _ = _labels(row, cycle, actor, phase, sub, final=(-1, -1, 1, -1))
+    assert (label[5:55] == POS).all()
 
 
 def test_a_takeover_carry_stays_untagged_and_a_part_picked_again_is_no_positive_carry():

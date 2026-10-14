@@ -173,6 +173,7 @@ FAILING_PLACES = ("tray", "desk", "rim")
 BOX_PLACES = ("right_box", "wrong_box")
 NEG_WINDOW = 30  # frames that end at a failing event, the event's included (rev3 design 5.3)
 REOPEN_WITHIN = 10  # steps from a close to the open that makes it a failing re-open
+RELEASE_LEAD = 10  # steps: a positive carry opens first at most this long before its release
 OFF_TARGET_M = 0.020  # m, the MS7h jaw table's off-target first close: off_z or the xy distance
 EVENTS = ("off_target", "reopen", "no_lift", "takeover", "lost", "release")
 OWN_META = "own_frames.json"
@@ -209,12 +210,14 @@ def own_labels(rows, classes, reasons, final_box, cycle, actor, phase, subtask):
     ``REOPEN_WITHIN`` steps of its close; ``no_lift`` the last close of a cycle that lifted
     nothing (max_rise under ``LIFT_MIN_RISE``) and did not stow; ``takeover`` the last frame
     before the teacher's first, or the last frame of a ``takeover_declined`` cycle; ``lost`` the
-    frame after the last contact-held step of a lifted cycle, if it reads closed (a slip);
+    frame after the last contact-held step of a lifted cycle, if it reads closed and the release
+    puts the part in no box (a slip; a part the opening jaws let go of over a box is none);
     ``release`` the open after the lift onto ``FAILING_PLACES``. The positives: the grasp
     segment (cycle start to the first carry frame) of a cycle with a hold and a lift, no re-open
     before the carry and no rig frame; the carry segment (the first carry frame to the cycle
-    end) when the policy ends it alone (no handoff, no rig frame) with a release over a box and
-    its part, held by no later cycle, at rest in the served box. A negative window wins."""
+    end) when the policy ends it alone (no handoff, no rig frame) with a release over a box, no
+    open more than ``RELEASE_LEAD`` steps before that release, and its part, held by no later
+    cycle, at rest in the served box. A negative window wins."""
     n = len(cycle)
     policy = (phase == -1) & (actor == 0)
     closed = np.isin(subtask, (SUBTASKS.index("grasp"), CARRY))
@@ -254,7 +257,7 @@ def own_labels(rows, classes, reasons, final_box, cycle, actor, phase, subtask):
             hits.append(("takeover", s + int(teacher[0]) - 1))
         elif reasons[j] == "takeover_declined":
             hits.append(("takeover", last))
-        if lifted and row["last_held_at"] is not None:
+        if lifted and row["last_held_at"] is not None and row["release_place"] not in BOX_PLACES:
             e = s + row["last_held_at"] + 1
             if e <= last and closed[e]:
                 hits.append(("lost", e))
@@ -280,6 +283,7 @@ def own_labels(rows, classes, reasons, final_box, cycle, actor, phase, subtask):
             and policy[rest].all()
             and row["release_at"] is not None
             and row["release_place"] in BOX_PLACES
+            and not any(start < r < s + row["release_at"] - RELEASE_LEAD for r in opened)
             and part >= 0
             and not again
             and final_box[part] == row["box"]
