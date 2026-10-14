@@ -1,5 +1,5 @@
 """prompt_codes.py: a V root's frames reach the subtask bridge by index, and the codes are
-3 * subtask + POSITIVE, one int8 a frame."""
+3 * subtask + tag, one int8 a frame, POSITIVE on a clean episode only."""
 
 import json
 import subprocess
@@ -43,12 +43,12 @@ def _root(tmp_path, index=None):
     return root
 
 
-def test_the_codes_are_positive_subtask_codes_by_frame_index(tmp_path):
+def test_the_codes_are_subtask_codes_by_frame_index(tmp_path):
     root, seen = _root(tmp_path), []
 
     def fake_ids(frames):
         seen.append(frames)
-        return np.array([0, 1, 2, 3, 0])
+        return np.array([1, 2, 3, 0, 1])  # a clean pick, then no carry
 
     summary = prompt_codes.write_codes(root, root / CODES, fake_ids)
     (frames,) = seen
@@ -58,10 +58,24 @@ def test_the_codes_are_positive_subtask_codes_by_frame_index(tmp_path):
     np.testing.assert_allclose(frames["cmd"], 0.1 + np.arange(5), rtol=1e-6)
     assert frames["episode"].tolist() == [0, 0, 0, 1, 1]
     codes = np.load(root / CODES)
-    assert codes.dtype == np.int8 and codes.tolist() == [1, 4, 7, 10, 1]
-    assert prompt(codes[2]).endswith("carry it to its box. Advantage: positive")
+    assert codes.dtype == np.int8 and codes.tolist() == [4, 7, 10, 0, 3]
+    assert prompt(codes[1]).endswith("carry it to its box. Advantage: positive")
     assert (summary["frames"], summary["episodes"]) == (5, 2)
-    assert summary["shares"]["reach the marked part"] == 0.4
+    assert summary["shares"]["reach the marked part"] == 0.2 and summary["positive"] == 0.6
+
+
+def test_only_a_carry_then_a_release_with_no_close_after_it_is_positive():
+    episode = np.repeat(np.arange(5), 4)
+    ids = np.array(
+        [0, 1, 2, 3]  # clean
+        + [1, 2, 3, 1]  # a close after the release: a regrasp
+        + [0, 1, 0, 1]  # no carry
+        + [0, 1, 2, 2]  # no release
+        + [2, 3, 3, 0]  # starts in the carry, released
+    )
+    tags = prompt_codes.teacher_tags(ids, episode)
+    assert tags.reshape(5, 4)[:, 0].tolist() == [1, 0, 0, 0, 1]
+    assert (tags.reshape(5, 4) == tags.reshape(5, 4)[:, :1]).all()
 
 
 def test_a_root_out_of_index_order_fails_and_the_real_bridge_runs(tmp_path):
@@ -80,8 +94,8 @@ def test_a_root_out_of_index_order_fails_and_the_real_bridge_runs(tmp_path):
     assert last.startswith("CODES_OK "), out.stdout + out.stderr
     # each episode starts at reach; a command reads against the width its frame answered, the
     # last frame's (hold.subtask_ids): 0.1048 m at most over 0.02 m reads open (reach), over the
-    # fixture's 1.02 m and up closed with no lift (grasp)
-    assert np.load(tmp_path / "c.npy").tolist() == [1, 1, 4, 1, 4]
+    # fixture's 1.02 m and up closed with no lift (grasp); no carry, so every tag is untagged
+    assert np.load(tmp_path / "c.npy").tolist() == [0, 0, 3, 0, 3]
 
 
 def test_a_usage_error_prints_the_fail_token():
