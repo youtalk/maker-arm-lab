@@ -636,11 +636,20 @@ if both re-read.
 The owner chooses the levers of round 2 after this report (spec section 4.1). This draft list gives
 each lever with its evidence so far.
 
-1. The subtask rule for regrasps on a wider axis. Under the round 1 rule, 16.7 % of the corpus
-   episodes never read a carry, mostly regrasps on a wider axis (13:30). Under rule change (3)
-   these episodes are untagged. Their frames never get the carry subtask in the prompt codes of
-   Run A. The raw shards behind the final roots stay on disk (`STATE.md`). So a new rule can
-   relabel round 1 without a new collection.
+1. The subtask rule. Under the round 1 rule, 16.7 % of the corpus episodes (4,003) never read a
+   carry. A study measured why (`i/tables/subtask_r2/subtask_r2.md`). Its truth proxy is the
+   teacher's release over the box. In 2,411 of these episodes (10.1 % of the corpus) no carry is
+   the right reading: 1,882 failed lifts, 526 with no lift and 3 with no close. Only 1,592
+   (6.6 %) are real misses: a thin grip under the 3 mm gap floor (719), a close wider than the
+   served row (405, of which 63 % on the first close), a cycle split after the lift (404) and a
+   soft grip (64). So the ledger's first reading, "mostly regrasps on a wider axis", was wrong.
+   Two variants stay on the perceived boundary. V1 lets a gap under 3 mm grip when it is at least
+   1.0 mm over the command. It raises the corpus carry share from 83.3 % to 86.4 % and the
+   positive share from 69.0 % to 71.8 %, and it changes 1.18 % of the own-frame labels. V2 adds a
+   close threshold from the close's own command and a rise from the desk for a held start. It
+   reads 89.6 % carry and 74.4 % positive, and it changes 3.00 % of the own-frame labels. Neither
+   reads a carry in a corpus episode with no lift. The raw shards behind the final roots stay on
+   disk (`STATE.md`), so a new rule can relabel round 1 without a new collection.
 2. The carry-guard margin, H1. The core count is 42 for ACT-C 400k and 21 for S. The margin 0.020
    gained +31 on the 30k save of V, at a paired SE of 12.9. A change alters the serving of S, so it
    needs the owner. The census field of section 5.6 tells this cause apart from a release while
