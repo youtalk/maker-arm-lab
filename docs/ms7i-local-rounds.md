@@ -286,9 +286,25 @@ The roots of each track:
   frames). Section 5.1 gives their share of the mix.
 
 IR5 also asks for the share of own frames whose served action a serving rule changed. It comes
-from `obs/policy_action`.
+from `obs/policy_action`. A frame counts as changed if a joint target moved more than 1e-6 rad
+from the policy's action, or if the gripper column differs. The labels behind the table come from
+`own_labels()` at f20db17, and they match the conversion on 64 of 64 shards
+(`i/tables/served_share/served_share.md`).
 
-Pending: the share of own frames that a serving rule changed. The ledger does not hold it yet.
+| frames | V | B | pooled |
+| --- | --- | --- | --- |
+| all own frames | 0.380 (433,900 of 1,141,082) | 0.412 (460,577 of 1,116,765) | 0.396 (894,477 of 2,257,847) |
+| positive | 0.405 | 0.382 | 0.391 |
+| negative | 0.443 | 0.584 | 0.494 |
+| untagged | 0.354 | 0.439 | 0.388 |
+
+Pooled, 0.159 of the frames change only in the joints, 0.153 only in the gripper, and 0.085 in
+both. The recorder writes no rule tag on a frame, so the split by rule comes from the sign of each
+change and the census counters. The arm changes come from the IK re-solve of `--pick_snap`, with
+`--square_wrist` on the same steps (about 0.24 of the frames each). A narrower gap comes from
+`--squeeze_floor` (0.216) and the carry guard (0.0075). A wider gap comes from `--snap_hold`
+(0.0153). The time warp of 1.0 changed no frame. So the policies of both tracks learn about 40 %
+of their own frames from the serving rules, not from the driver's own output.
 
 ## 4. The labels and the Claude audit
 
