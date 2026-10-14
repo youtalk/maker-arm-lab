@@ -1,9 +1,9 @@
 # MS7i: local rounds, round 1
 
-Date: 2026-10-14. Status: draft. This draft uses the ledger through its entry of 04:34 on
+Date: 2026-10-14. Status: draft. This draft uses the ledger through its entry of 06:18 on
 2026-10-14. Round 1 runs from 10-13 to 10-19. The collection, the labels, the audit, the S
-reference reads and Track ACT are final for round 1. Track V, the H1 probe and the choice of the
-round 2 levers are pending. Each pending item has a line that starts with "Pending:".
+reference reads and Track ACT are final for round 1. Track V and the choice of the round 2
+levers are pending. Each pending item has a line that starts with "Pending:".
 
 The design of MS7i is revision 3 of the design document of 2026-10-13. The owner started the run on
 it with /goal at about 11:35 on 2026-10-13. This report cites the design as "spec section N" and
@@ -573,7 +573,24 @@ number: S and ACT-C 400k each read the screen with `--guard_margin 0.020`. Each 
 own 0.010 screen, h_S_scr 2533 and i_C400_scr 2512. A gain of 2 SE_D or more for both makes the
 margin a round 2 option. i_S_gm20_scr runs on Machine A and i_C400_gm20_scr on Machine B.
 
-Pending: the H1 probe.
+The H1 probe fails its rule. The margin hurts ACT-C, and S gains less than 2 SE_D:
+
+| read | correct | rate | held-out | D against its 0.010 read | lifted_lost | budget |
+| --- | --- | --- | --- | --- | --- | --- |
+| i_C400_gm20_scr | 2468 | 346.9 | 0.811 | -44 (SE_D 37.7) | 250 vs 202 | 207 vs 147 |
+| i_S_gm20_scr | 2570 | 359.7 | 0.809 | +37 (SE_D 25.4) | 188 vs 183 | 161 vs 143 |
+| i_S_gm20_d2039 | 2531 | 371.6 | 0.779 | +5 (SE_D 24.5) | 192 vs 194 | 113 vs 152 |
+
+S with the margin read 2570 on the screen, above the 2550 bar. The margin was one setting fixed
+before the read, so the screen did not pick it among many. Fresh draws decided whether the gain
+was real. Rule, entered before its number (05:42): S with the margin reads draws 20 to 39 against
+i_S_d2039 2526, and D pooled over the 40 heaps must reach 2 paired SE. It read 2531, D +5. Pooled
+over the 40 heaps, D is +42 at a paired SE of 35.2, which is 1.19 SE. So the margin is not a lever
+on this evidence. On the screen, one heap (draw 12, +19) gave half of the gain.
+
+With ACT-C, the margin holds more carries until the budget ends (207 cycles against 147), and
+more parts end lost (250 against 202). So ACT-C does not carry the part deeper into the box when
+the guard holds the jaws.
 
 H2, the training length. The far-side trait belongs to the F9n recipe at 400k to 600k, not to the
 frames of B. For F9n the core count falls with training: 41 at 400k, 30 at 600k and 25 at 800k.
@@ -627,9 +644,8 @@ each lever with its evidence so far.
 2. The carry-guard margin, H1. The core count is 42 for ACT-C 400k and 21 for S. The margin 0.020
    gained +31 on the 30k save of V, at a paired SE of 12.9. A change alters the serving of S, so it
    needs the owner. The census field of section 5.6 tells this cause apart from a release while
-   the arm moves.
-
-   Pending: the H1 probe.
+   the arm moves. The H1 probe of section 5.6 does not support it: ACT-C loses 44 parts with the
+   margin, and S gains +42 over 40 heaps at 1.19 SE. It is not offered.
 
 3. The ACT training length, H2. The core count falls with training: F9n 41, 30 and 25, and ACT-C
    42, 45 and 29, at 400k, 600k and 800k. The correct total of ACT-C does not rise with it: 2512,
