@@ -441,6 +441,7 @@ def _row(frames, **fields):
         "first_held": -1,
         "last_held": -1,
         "last_held_at": None,
+        "first_held_at": None,
         "release_place": None,
         "release_at": None,
         "box": -1,
@@ -541,7 +542,7 @@ def _clean(cycle, actor, phase, subtask):
     release over box 1 at cycle step 36."""
     subtask[15:25], subtask[25:40], subtask[40:55] = GRASP, CARRY, RELEASE
     row = _row(50, max_rise=0.08, held_steps=20, first_held=2, last_held=2, last_held_at=34)
-    return row | {"release_place": "right_box", "release_at": 36, "box": 1}
+    return row | {"first_held_at": 12, "release_place": "right_box", "release_at": 36, "box": 1}
 
 
 def test_a_clean_grasp_and_a_carry_the_policy_ends_in_its_served_box_are_positive():
@@ -577,6 +578,11 @@ def test_a_clean_grasp_and_a_carry_the_policy_ends_in_its_served_box_are_positiv
     sub[28], sub[31:40] = CARRY, RELEASE  # opens RELEASE_LEAD steps before the release (41)
     label, _ = _labels(row, cycle, actor, phase, sub, final=(-1, -1, 1, -1))
     assert (label[5:55] == POS).all()
+    # A census hold that begins after the carry start (frame 25): the carry read is false.
+    label, _ = _labels(
+        row | {"first_held_at": 21}, cycle, actor, phase, subtask, final=(-1, -1, 1, -1)
+    )
+    assert not label.any()
     # A close and a quick open after the release is no failing re-open.
     sub = subtask.copy()
     sub[44:48] = CARRY

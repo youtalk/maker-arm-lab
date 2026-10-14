@@ -217,8 +217,9 @@ def own_labels(rows, classes, reasons, final_box, cycle, actor, phase, subtask):
     puts the part in no box (a slip; a part the opening jaws let go of over a box is none);
     ``release`` the open after the lift onto ``FAILING_PLACES``. The positives: the grasp
     segment (cycle start to the first carry frame) of a cycle with a hold and a lift, no re-open
-    before the carry and no rig frame; the carry segment (the first carry frame to the cycle
-    end) when the policy ends it alone (no handoff, no rig frame) with a release over a box, no
+    before the carry and no rig frame, whose census hold began by the first carry frame (a
+    cycle that starts closed can read a carry before any hold); the carry segment (the first
+    carry frame to the cycle end) of such a cycle when the policy ends it alone (no handoff, no rig frame) with a release over a box, no
     open more than ``RELEASE_LEAD`` steps before that release, and its part, held by no later
     cycle, at rest in the served box. A negative window wins."""
     n = len(cycle)
@@ -277,13 +278,19 @@ def own_labels(rows, classes, reasons, final_box, cycle, actor, phase, subtask):
             continue
         start = info["carry_start"] = carry[0]
         grasp, rest = slice(s, start), slice(start, last + 1)
-        held = row["held_steps"] >= CENSUS_MIN_HELD_STEPS and lifted
+        held = (  # the census hold began by the carry start, else the carry read is false
+            row["held_steps"] >= CENSUS_MIN_HELD_STEPS
+            and lifted
+            and row["first_held_at"] is not None
+            and s + row["first_held_at"] <= start
+        )
         if held and not any(r < start for r in opened) and policy[grasp].all():
             label[grasp][label[grasp] != TAG_NEGATIVE] = TAG_POSITIVE
         part = row["last_held"]
         again = any(part in (later["first_held"], later["last_held"]) for later in rows[j + 1 :])
         if (
-            row.get("handoff") is None
+            held
+            and row.get("handoff") is None
             and policy[rest].all()
             and row["release_at"] is not None
             and row["release_place"] in BOX_PLACES
