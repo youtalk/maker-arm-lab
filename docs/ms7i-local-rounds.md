@@ -41,7 +41,7 @@ draws. The paired SE is the standard error of D, from the differences heap by he
 error is the spread of a measured value. `i/bin/s1_score.py` computes both.
 
 The times. All times are PDT. Each time is the stamp of the ledger entry that records the event. A
-time without a date from 11:41 to 23:59 is on 2026-10-13. A time without a date from 00:00 to 04:34
+time without a date from 11:41 to 23:59 is on 2026-10-13. A time without a date from 00:00 to 06:18
 is on 2026-10-14.
 
 The numbers. Every number comes from the ledger or from a file that this report names. A few
