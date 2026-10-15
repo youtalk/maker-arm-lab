@@ -1166,7 +1166,6 @@ class Cycle:
     start_step: int
     stowed_before: set[int]
     close_below: float = IDLE_CLOSE_GAP  # m, the continuous close threshold (cycle_close_below)
-    takeover: int = 0  # the rig's takeover ordinal while the rig holds this cycle, else 0
     # "takeover_failed" or "takeover_declined": the rig's answer ends the cycle as a failure
     # (phase B design 5.5), after the stowed rule had its chance. A decline while the jaws
     # hold a part is not an answer: the cycle runs on (``_take_over``). "placed": a perceived
@@ -3101,7 +3100,7 @@ def rollout(
                 ctx_target[i] = target_context(scene.brick_pos[target], st.selector.grasp)
             replan[i] = True
             if policy is None:
-                _take_over(rig, env, st, i, ordinal, reason="driver")
+                _take_over(rig, env, st, i, ordinal)
         close_below = torch.tensor(
             [IDLE_CLOSE_GAP if st.cycle is None else st.cycle.close_below for st in states]
         )
@@ -3167,7 +3166,6 @@ def rollout(
                             st,
                             i,
                             ordinal,
-                            reason="scripted_place",
                             holding=True,
                             start_z=c.start_z,
                         )
@@ -3653,8 +3651,6 @@ def rollout(
                     # Phase B design 5.5: the loop grades the takeover's cycle like any other,
                     # so a failed hand-back ends it (next pass 1, after the stowed rule).
                     st.cycle.takeover_end = "takeover_failed"
-            if st.cycle is not None:
-                st.cycle.takeover = 0
             rig.takeover_result[i] = None
             env.oracle_actor[i] = 0
         # 5. Episode ends: the env's own (auto-reset) and the loop's.
@@ -4022,7 +4018,6 @@ def _take_over(
     i: int,
     ordinal: list[int],
     *,
-    reason: str,
     holding: bool = False,
     start_z=None,
     any_part: bool = False,
@@ -4052,7 +4047,6 @@ def _take_over(
         st.cycle.taken_over = True
         ordinal[i] += 1
         st.takeovers += 1
-        st.cycle.takeover = ordinal[i]
         env.oracle_actor[i] = ordinal[i]
         return True
     if not holding:
@@ -4197,9 +4191,7 @@ class _TriggerState:
             self.closed_no_pinch[i] = 0
             self.held_no_rise[i] = 0
             holding = int(held[i]) >= 0
-            if _take_over(
-                rig, env, st, i, ordinal, reason=reason, holding=holding, any_part=self.any_part
-            ):
+            if _take_over(rig, env, st, i, ordinal, holding=holding, any_part=self.any_part):
                 self.counts[reason] += 1
             else:
                 # The decline cooldown stays (phase B design 5.5). A decline on a held part

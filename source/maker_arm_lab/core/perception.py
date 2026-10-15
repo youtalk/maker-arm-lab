@@ -564,13 +564,6 @@ class PartClassifier:
     def _forward(self, x, wrist: bool, known):
         return self.model(x, wrist) if known is None else self.model(x, wrist, known)
 
-    def read(
-        self, frame, active: Sequence[str], wrist: bool = False, size=None
-    ) -> tuple[str, bool]:
-        """``log_probs``' most likely category and its passenger read."""
-        logp, rider = self.log_probs(frame, active, wrist, size)
-        return active[max(range(len(active)), key=logp.__getitem__)], rider
-
 
 class PositionMemory:
     """Counts kept by perceived position: the failure memory and the rake counter.
