@@ -1,8 +1,8 @@
 # MS7i: local rounds, round 1
 
-Date: 2026-10-14. Status: draft. This draft uses the ledger through its entry of 06:18 on
-2026-10-14. Round 1 runs from 10-13 to 10-19. The collection, the labels, the audit, the S
-reference reads and Track ACT are final for round 1. Track V and the choice of the round 2
+Date: 2026-10-15. Status: draft. This draft uses the ledger through its entry of 03:26 on
+2026-10-15. Round 1 runs from 10-13 to 10-19. The collection, the labels, the audit, the S
+reference reads, Track ACT and Run A are final for round 1. Run B and the choice of the round 2
 levers are pending. Each pending item has a line that starts with "Pending:".
 
 The design of MS7i is revision 3 of the design document of 2026-10-13. The owner started the run on
@@ -42,7 +42,7 @@ error is the spread of a measured value. `i/bin/s1_score.py` computes both.
 
 The times. All times are PDT. Each time is the stamp of the ledger entry that records the event. A
 time without a date from 11:41 to 23:59 is on 2026-10-13. A time without a date from 00:00 to 06:18
-is on 2026-10-14.
+is on 2026-10-14. Section 6 gives the date of each of its times.
 
 The numbers. Every number comes from the ledger or from a file that this report names. A few
 totals are sums of those numbers.
@@ -85,10 +85,12 @@ The reads of round 1 so far:
 | i_S_d2039 | S | 20307000, 20-39 | 2526 | 360.92 | 642 of 801, 0.8015 | |
 | i_C400_d2039 | ACT-C 400k | 20307000, 20-39 | 2464 | 373.63 | 613 of 801, 0.7653 | -62, 33.7 |
 | i_S_chk | S | 20307600, 0-19 | 2535 | 366.93 | 597 of 763, 0.7824 | |
+| i_VA8k_scr | Run A 8k | 20307000, 0-19 | 2471 | 178.50 | 587 of 744, 0.7890 | -62, 26.2 |
 
-Track V waits for the owner (section 6). Its inputs reached the Shared drive at 00:03 on 10-14. A
-probe of the carry-guard margin runs now (section 5.6). Section 7 lists the round 2 levers for the
-owner.
+Run A of Track V failed its screen (section 6). Its better save, 8k, stowed 2471 against 2533 for
+S, at 178.50 an hour against the bar of 200. Its first close misses the target more often than
+that of its 30k start. Run B trains now. A probe of the carry-guard margin found no lever (section
+5.6). Section 7 lists the round 2 levers for the owner.
 
 ## 2. The bars and the candidate path
 
@@ -608,23 +610,100 @@ release while the arm moves.
 ## 6. Track V
 
 IR7 sets the two runs. Both start from the fresh 30k weights on the second account, 8,000 steps
-at batch 32. Their inputs reached the Shared drive at 00:03 on 10-14 (section 3.6). The owner
-starts each runtime in the browser.
+at batch 32 and 200 tokens. The draws come from the corpus (0.5), V's own frames (0.3) and the
+takeovers (0.2). Each run saves at 4k and 8k. Their inputs reached the Shared drive at 00:03 on
+10-14 (section 3.6). The owner starts each runtime in the browser. The times in this section carry
+their dates.
+
+`i/bin/v_chain.sh` takes each save from the Drive with `run_fetch.sh`. It copies the save in
+400 MB parts with a size and sha256 check, through a CPU runtime of the Colab CLI. Then it starts
+the stage-1 read of the save with `v_stage1.sh`, at 25 actions a forward.
 
 ### 6.1 Run A
 
-Pending: Run A, with the subtask and advantage prompt and all three labels, and its 4k and 8k
-saves.
+Run A trains on V's own frames with all three labels (section 4.2), with the subtask and advantage
+prompt and a 20 % tag drop. Its own-frame root `own_a` holds 4,569 episodes and 1,141,082 frames.
+The takeover root holds 3,296 episodes and 1,189,019 teacher frames.
+
+- The smoke passed at 07:57 on 10-14: 3.884 s a step, a loss of 0.038 at step 200 against the band
+  0.015 to 0.10, and a checkpoint of 22.80 GiB.
+- The run started at 08:01:45 on 10-14. The preflight read a longest prompt of 124 tokens, under
+  the 200 cap, and a pad share of 0.0644.
+- The loss read 0.035 at step 1800, 0.036 at step 1900 and 0.035 at step 4000, at 12:21:56 on
+  10-14.
+- The 4k save came back at 13:13 on 10-14 and the 8k save at 17:31 on 10-14, each 8.8 GB.
+
+A read-only subagent checked the prompt path of Run A (`i/vla/prompt_audit/`, 18:14 on 10-14).
+Training and serving build the same prompt bytes with the same function and the same tokenizer,
+and no prompt is cut. The server always serves the positive tag. The loop computes each subtask id
+with the training function, on the perceived inputs. One boundary differs. The teacher roots, 0.7
+of the draws, label the retreat after a release "release it". Serving starts the next cycle about
+11 frames after the jaws open and labels the same retreat "reach the marked part". About 6.2 % of
+the training draws carry this mismatch. Under the positive tag, V's own frames make up 36 % of the
+reach draws and 25 % of the grasp draws.
 
 ### 6.2 Run B
 
-Pending: Run B, with the original prompt and the positive own frames only, and its 4k and 8k
-saves.
+Run B trains on the positive own frames only, with the original prompt. Its own-frame root
+`own_b_positive` holds 2,578 episodes and 431,790 frames. The takeover root is that of Run A.
+
+- The smoke started at about 20:19 on 10-14. It passed at 21:24 on 10-14: 3.841 s a step and a
+  loss of 0.034 at step 200.
+- The run started at 21:28:24 on 10-14. The preflight read the normalizer statistics of Run A, a
+  longest prompt of 114 tokens and a pad share of 0.1331.
+
+The pad share of Run B is twice that of Run A. A pad row is an action row past the end of an
+episode, and the pad mask leaves it out of the loss. The positive own episodes of Run B are
+shorter, 167 frames on average against 250 for `own_a`. So more of their frames lie within 50
+steps of an episode end.
+
+Pending: the 4k and 8k saves of Run B. The CLI authorization of the CPU runtime ran out between
+23:26 on 10-14 and 01:26 on 10-15. So the fetch waits for the owner to authorize the CLI again.
 
 ### 6.3 The stage-1 reads
 
-Pending: the stage-1 reads of each save on seed 20307000, draws 0 to 6, against the twin
-h_Vf30k_a0j1slR25gm20_a (885). Then the 20-heap screen of the better save of each run.
+Rule (IR7): each save reads seed 20307000, draws 0 to 6, on 7 lanes, at the exact serving of its
+twin. The twin is h_Vf30k_a0j1slR25gm20_a, the 30k start served at a0j1slR25g20, with 885 correct
+stows. Run A also sends its prompt (`--pi05_prompt`). `s1_score.py` pairs each read with the twin
+and with h_S_scr on the same draws. Its score is the smaller of D over SE_D and the rate gap over
+its SE. The better save of each run, by HD32 (4), then reads draws 7 to 19 for a 20-heap screen.
+HD32 (4) takes the correct total first and then the rate.
+
+| read | save | correct of 1050 | rate | held-out row | steps a cycle | D against the twin, paired SE | rate gap against the twin, SE | score |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| i_VA4k_s1 | Run A 4k | 850 | 160.01 | 193 of 249, 0.7751 | 436.9 | -35, 19.0 | -68.19, 18.43 | -3.70 |
+| i_VA8k_s1 | Run A 8k | 856 | 181.23 | 199 of 249, 0.7992 | 398.5 | -29, 13.1 | -46.97, 15.50 | -3.03 |
+| h_Vf30k_a0j1slR25gm20_a | the twin, V 30k | 885 | 228.20 | 199 of 249, 0.7992 | 344.7 | | | |
+| h_S_scr, draws 0 to 6 | S | 890 | 366.47 | 191 of 249, 0.7671 | 231.5 | | | |
+
+The jaw table of the same reads:
+
+| measure | Run A 4k | Run A 8k | the twin | S |
+| --- | --- | --- | --- | --- |
+| re-open within 10 steps after a precise first close | 0.134 | 0.100 | 0.116 | 0.015 |
+| first close off the target, stowed cycles | 0.212 | 0.182 | 0.119 | 0.069 |
+| first close to hold, stowed cycles, mean steps | 121 | 108 | 90 | 45 |
+| lifted_lost cycles | 142 | 110 | 99 | 60 |
+| carry-guard steps | 5474 | 5342 | 9059 | 1846 |
+
+- Both saves of Run A stow fewer parts than the twin and stow them more slowly.
+- The first close of Run A misses the target more often than that of its 30k start: 0.182 at 8k
+  against 0.119.
+- 8k is the better save of Run A: 856 against 850.
+
+The 20-heap screen of Run A 8k pools i_VA8k_s1 and i_VA8k_d719, which read draws 7 to 19 on 10
+lanes of Machine A (22:50 on 10-14). `reads/i_VA8k_scr` holds links to both reads.
+
+| read | correct of 3000 | rate | held-out row | steps a cycle | D against h_S_scr, paired SE | rate gap, SE |
+| --- | --- | --- | --- | --- | --- | --- |
+| i_VA8k_scr | 2471, 0.824 | 178.50 | 587 of 744, 0.7890 | 408.4 | -62, 26.2 | -190.97, 8.38 |
+| h_S_scr | 2533, 0.8443 | 369.46 | 581 of 744, 0.7809 | 228.7 | | |
+
+Run A 8k fails the screen. It stows 2471 against 2533, and its rate of 178.50 is under the bar of
+200 an hour. On the screen its first close misses the target in 0.198 of the stowed cycles,
+against 0.068 for S. So Run A does not enter the candidate path.
+
+Pending: the stage-1 reads of Run B and the screen of its better save.
 
 ### 6.4 Run A against Run B
 
