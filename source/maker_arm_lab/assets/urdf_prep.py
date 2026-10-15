@@ -1,10 +1,9 @@
 """Read the vendored Maker Arm URDF and derive the Z-up copy the simulator loads.
 
 The vendored ``robot.urdf`` keeps the CAD's Y-up base frame (upstream README) and is never
-edited. Isaac Lab's IK action term and the ported ``AttitudeHold`` work in the articulation
-ROOT frame, so the root must be Z-up at identity: this module writes a derived copy with one
-extra fixed link (``mount_link`` -> ``base_link``, rotated ``MOUNT_RPY``) into the build
-directory. Joint coordinates are unchanged, so the joint-coordinate contract with
+edited. Isaac Lab's IK action term works in the articulation ROOT frame, so the root must be
+Z-up at identity: this module writes a derived copy with one extra fixed link
+(``mount_link`` -> ``base_link``, rotated ``MOUNT_RPY``) into the build directory. Joint coordinates are unchanged, so the joint-coordinate contract with
 maker-arm-rs (spec section 4.1) holds on the derived file too.
 """
 

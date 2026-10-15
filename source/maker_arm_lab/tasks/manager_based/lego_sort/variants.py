@@ -8,8 +8,7 @@ joint-effort variants of openyam-lab are not registered here (spec section 2.3).
 Known behaviour of the upstream action term, measured in openyam-lab and unchanged here:
 a zero rotation delta does NOT hold the tool orientation (`apply_delta_pose` re-bases the
 desired orientation on the measured one every step), so anything that needs a held attitude
-must servo the rotation channel from a world-frame axis-angle error --
-`core.attitude_hold.AttitudeHold` is that loop.
+must servo the rotation channel from a world-frame axis-angle error.
 """
 
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
