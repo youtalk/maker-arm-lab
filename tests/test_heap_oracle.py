@@ -12,7 +12,6 @@ from maker_arm_lab.core.quat import quat_from_rpy_deg
 BL = layout.DEFAULT_BIN_LAYOUT
 BRICK = parts.make_part("brick", 2, 4)
 SMALL = parts.make_part("brick", 1, 2)
-LONG_PLATE = parts.make_part("plate", 2, 8)  # one closing axis: its 15.8 mm side
 TOWER_OFFSET = 0.044
 """How far out a 48 mm tower sits to block the target's landing spot but not another tower.
 

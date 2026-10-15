@@ -101,9 +101,6 @@ def test_the_desk_is_a_hard_surface_under_a_pressed_part():
     assert 0.0 <= sunk < 0.001, sunk
 
 
-ROUND = [p for p in parts._replayable() if p.family == "round"]
-
-
 def test_round_physics_changes_the_round_parts_only():
     """MS7e design section 6.4: collision studs and condim 6 on round parts, under the switch
     only. Every other part's geoms are the same bytes either way."""

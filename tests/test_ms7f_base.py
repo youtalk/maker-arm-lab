@@ -120,7 +120,6 @@ def test_with_categories_off_the_draws_and_the_map_are_ms7es():
 # -- the category map (design section 6.2) --------------------------------------------------
 
 CATS = ("brick", "special", "flat", "round")
-SIZES8 = [(0.08, 0.08, 0.04)] * 8
 
 
 @pytest.mark.parametrize("n", [2, 3, 4, 5, 6, 7, 8, 9])
