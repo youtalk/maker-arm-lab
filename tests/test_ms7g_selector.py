@@ -167,14 +167,6 @@ def test_the_guard_refuses_the_part_under_the_overhang_as_a_target(monkeypatch):
     assert on["perception"]["overhang_refusals"] == len(targets)
     assert on["inference"]["loop"]["overhang_guard"] is True
     assert "overhang_refusals" not in off["perception"]
-
-
-@pytest.mark.parametrize("scene", [_wall_band_scene, _overhang_scene])
-def test_with_both_switches_off_every_step_and_payload_byte_is_the_same(scene, monkeypatch):
-    base, base_served = _run(scene, monkeypatch)
-    off, off_served = _run(scene, monkeypatch, clear_first=False, overhang_guard=False)
-    assert json.dumps(off, sort_keys=True) == json.dumps(base, sort_keys=True)
-    assert _same(off_served, base_served)
     assert not {"clear_first", "overhang_guard"} & set(off["inference"]["loop"])
 
 

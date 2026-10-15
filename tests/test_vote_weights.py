@@ -57,10 +57,7 @@ def _run(tmp_path, vote=None):
 
 
 def test_off_is_the_served_vote_and_on_fuses_the_views(tmp_path):
-    off, off_served, env = _run(tmp_path)
-    none, none_served, _ = _run(tmp_path, vote=None)
-    assert len(none_served) == len(off_served) > 0
-    assert json.dumps(none, sort_keys=True) == json.dumps(off, sort_keys=True)
+    off, _, env = _run(tmp_path)
     assert "vote_weights" not in off["inference"]["loop"]
     rows = [r for e in off["episodes"] for r in e["cycle_census"] if r["lift_class"]]
     assert rows and {r["taken_class"] for r in rows if not r["vote_lost"]} == {"wide"}

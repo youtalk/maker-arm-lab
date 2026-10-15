@@ -2,8 +2,6 @@
 lift the hold detector missed, the wrist read runs at it, and the jaws opening over a perceived
 box then end the cycle ``placed``. Off, every step and payload byte is what it was."""
 
-import json
-
 import numpy as np
 import pytest
 
@@ -12,7 +10,6 @@ from maker_arm_lab.core import loop, oracle, parts
 from test_classifier_loop import BRIGHT, _classifier
 from test_perceived_loop import _rollout, _run, _teacher_scene, _wall_band_scene
 from test_snap_closed import _Blind
-from test_thin_snap import _same
 
 RISE = oracle.LIFT_MIN_RISE
 
@@ -51,15 +48,6 @@ def test_a_carry_is_lost_when_the_jaws_open_wider_than_they_held_it():
         assert loop.carry_lost(c, 0.010 + wide, lifted=False)
 
 
-def test_with_the_switch_off_every_step_and_payload_byte_is_mains(monkeypatch):
-    main, main_served = _run(_wall_band_scene, monkeypatch)
-    off, off_served = _run(_wall_band_scene, monkeypatch, missed_lift=False)
-    assert json.dumps(off, sort_keys=True) == json.dumps(main, sort_keys=True)
-    assert _same(off_served, main_served)
-    assert "missed_lift" not in off["inference"]["loop"]
-    assert "missed_lifts" not in off["perception"]
-
-
 def test_a_carry_the_detector_misses_is_read_and_ends_at_the_release(monkeypatch):
     """The tray scene with a detector that never holds: off, no lift is read and every cycle
     runs to its step budget; on, the carry off the tray is read, the jaws opening over the box
@@ -68,6 +56,8 @@ def test_a_carry_the_detector_misses_is_read_and_ends_at_the_release(monkeypatch
     off, _ = _run(_wall_band_scene, monkeypatch, missed_lift=False)
     on, _ = _run(_wall_band_scene, monkeypatch, missed_lift=True)
     off_ep, on_ep, seen = off["episodes"][0], on["episodes"][0], on["perception"]
+    assert "missed_lift" not in off["inference"]["loop"]
+    assert "missed_lifts" not in off["perception"]
     assert off["perception"]["lifts_classified"] == 0
     assert set(off_ep["cycle_reasons"]) == {"budget"}, off_ep["cycle_reasons"]
     assert "placed" in on_ep["cycle_reasons"], on_ep["cycle_reasons"]

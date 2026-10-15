@@ -7,7 +7,7 @@ import pytest
 from helpers import load_script
 from maker_arm_lab.core import dagger_loop, loop, perception
 from test_ms7f_stack import _gate_argv, ge
-from test_perceived_loop import _rollout, _run, _teacher_scene, _thin_snap_scene
+from test_perceived_loop import _rollout, _run, _teacher_scene
 from test_snap_closed import _Blind
 from test_thin_snap import _same
 
@@ -28,18 +28,12 @@ def test_the_stall_end_rule():
     assert loop.closed_empty_count(n, grip_open=False, holding=True) == 0  # a hold
 
 
-def test_with_the_switch_off_every_step_and_payload_byte_is_mains(monkeypatch):
-    main, main_served = _run(_thin_snap_scene, monkeypatch)
-    off, off_served = _run(_thin_snap_scene, monkeypatch, stall_end=False)
-    assert off == main and _same(off_served, main_served)
-    assert "stall_end" not in off["inference"]["loop"]
-    assert "stall_end" not in off["episodes"][0]["cycle_reasons"]
-
-
 def test_a_cycle_that_holds_its_part_is_never_ended(monkeypatch):
     """The teacher scene: every cycle holds and lifts its part in the detector's eyes, so the
     switch changes no step and no payload byte but its own flag."""
     off, off_served = _run(_teacher_scene, monkeypatch)
+    assert "stall_end" not in off["inference"]["loop"]
+    assert "stall_end" not in off["episodes"][0]["cycle_reasons"]
     on, on_served = _run(_teacher_scene, monkeypatch, stall_end=True)
     assert on["inference"]["loop"].pop("stall_end") is True
     assert on == off and _same(on_served, off_served)

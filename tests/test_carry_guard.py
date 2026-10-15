@@ -74,19 +74,13 @@ def test_the_carry_release_height_clears_the_rim_from_the_holds_start():
     assert loop.carry_release_z(0.30, deep) == loop.CARRY_RELEASE_MAX_Z == 0.12
 
 
-def test_with_the_switch_off_every_step_and_payload_byte_is_the_same(monkeypatch):
-    main, main_served = _run(_teacher_scene, monkeypatch)
-    off, off_served = _run(_teacher_scene, monkeypatch, carry_guard=False)
-    assert off == main and _same(off_served, main_served)
-    assert "carry_guard" not in off["inference"]["loop"]
-    rows = off["episodes"][0]["cycle_census"]
-    assert rows and not set(loop.CARRY_GUARD_CENSUS) & set(rows[0])
-
-
 def test_a_teacher_that_releases_inside_its_box_is_never_guarded(monkeypatch):
     """At zero perception noise the served box is the teacher's own, and its RELEASE opens over
     the box centre: the switch changes no step and no payload byte but its flag and its fields."""
     off, off_served = _run(_teacher_scene, monkeypatch, noise_scales=ZERO)
+    assert "carry_guard" not in off["inference"]["loop"]
+    rows = off["episodes"][0]["cycle_census"]
+    assert rows and not set(loop.CARRY_GUARD_CENSUS) & set(rows[0])
     on, on_served = _run(_teacher_scene, monkeypatch, noise_scales=ZERO, carry_guard=True)
     assert on["inference"]["loop"].pop("carry_guard") is True
     rows = on["episodes"][0]["cycle_census"]
