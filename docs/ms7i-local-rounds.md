@@ -668,7 +668,8 @@ The CLI authorization of the CPU runtime ran out between 23:26 on 10-14 and 01:2
 runtime died. The owner authorized the CLI again and mounted the Drive in a new runtime at 05:38 on
 10-15. Then the fetch of both saves started.
 
-Pending: the reads of the 4k and 6k saves of Run B.
+The 4k save came back at 06:02 and the 6k save at 06:20 on 10-15, each 8.8 GB. Then the CPU
+runtime stopped.
 
 ### 6.3 The stage-1 reads
 
@@ -683,23 +684,26 @@ HD32 (4) takes the correct total first and then the rate.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | i_VA4k_s1 | Run A 4k | 850 | 160.01 | 193 of 249, 0.7751 | 436.9 | -35, 19.0 | -68.19, 18.43 | -3.70 |
 | i_VA8k_s1 | Run A 8k | 856 | 181.23 | 199 of 249, 0.7992 | 398.5 | -29, 13.1 | -46.97, 15.50 | -3.03 |
+| i_VB4k_s1 | Run B 4k | 853 | 189.33 | 195 of 249, 0.7831 | 383.7 | -32, 17.9 | -38.88, 11.09 | -3.51 |
+| i_VB6k_s1 | Run B 6k | 862 | 208.95 | 187 of 249, 0.7510 | 369.4 | -23, 17.3 | -19.25, 14.74 | -1.33 |
 | h_Vf30k_a0j1slR25gm20_a | the twin, V 30k | 885 | 228.20 | 199 of 249, 0.7992 | 344.7 | | | |
 | h_S_scr, draws 0 to 6 | S | 890 | 366.47 | 191 of 249, 0.7671 | 231.5 | | | |
 
 The jaw table of the same reads:
 
-| measure | Run A 4k | Run A 8k | the twin | S |
-| --- | --- | --- | --- | --- |
-| re-open within 10 steps after a precise first close | 0.134 | 0.100 | 0.116 | 0.015 |
-| first close off the target, stowed cycles | 0.212 | 0.182 | 0.119 | 0.069 |
-| first close to hold, stowed cycles, mean steps | 121 | 108 | 90 | 45 |
-| lifted_lost cycles | 142 | 110 | 99 | 60 |
-| carry-guard steps | 5474 | 5342 | 9059 | 1846 |
+| measure | Run A 4k | Run A 8k | Run B 4k | Run B 6k | the twin | S |
+| --- | --- | --- | --- | --- | --- | --- |
+| re-open within 10 steps after a precise first close | 0.134 | 0.100 | 0.163 | 0.099 | 0.116 | 0.015 |
+| first close off the target, stowed cycles | 0.212 | 0.182 | 0.165 | 0.155 | 0.119 | 0.069 |
+| first close to hold, stowed cycles, mean steps | 121 | 108 | 102 | 97 | 90 | 45 |
+| lifted_lost cycles | 142 | 110 | 117 | 105 | 99 | 60 |
+| carry-guard steps | 5474 | 5342 | 5869 | 3556 | 9059 | 1846 |
 
-- Both saves of Run A stow fewer parts than the twin and stow them more slowly.
-- The first close of Run A misses the target more often than that of its 30k start: 0.182 at 8k
-  against 0.119.
-- 8k is the better save of Run A: 856 against 850.
+- All four saves stow fewer parts than the twin and stow them more slowly.
+- The first close of both runs misses the target more often than that of their 30k start: 0.182
+  for Run A 8k and 0.155 for Run B 6k, against 0.119.
+- Run B 6k is the only save over the rate bar of 200 an hour, at 208.95.
+- 8k is the better save of Run A: 856 against 850. 6k is the better save of Run B: 862 against 853.
 
 The 20-heap screen of Run A 8k pools i_VA8k_s1 and i_VA8k_d719, which read draws 7 to 19 on 10
 lanes of Machine A (22:50 on 10-14). `reads/i_VA8k_scr` holds links to both reads.
@@ -713,9 +717,10 @@ Run A 8k fails the screen. It stows 2471 against 2533, and its rate of 178.50 is
 200 an hour. On the screen its first close misses the target in 0.198 of the stowed cycles,
 against 0.068 for S. So Run A does not enter the candidate path.
 
-Pending: the stage-1 reads of Run B and the screen of its better save.
+Pending: the 20-heap screen of Run B 6k. i_VB6k_d719 reads draws 7 to 19 on 10 lanes of
+Machine A since 08:51 on 10-15.
 
-### 6.4 Where Run A loses time
+### 6.4 Where the fine-tunes lose time
 
 A read-only subagent split the steps of Run A by cycle phase (`i/vla/analysis/run_a_loss.md`,
 03:50 on 10-15). Retry mode starts when the jaws hold nothing and the pick point stays almost still
@@ -736,19 +741,43 @@ that state is the hover. S has no retry mode.
 The own frames of `own_a` hold few hovers: 3.1 % of V's own cycles on Machine A entered retry
 mode. So the first suspect was the served prompt. The H3 probe tested it, with its rule at 03:50
 and its result at 05:46 on 10-15. Rule, entered before its number: Run A 8k reads draws 0 to 6
-without `--pi05_prompt`, so the server sends the plain task text. A retry share under 15 % blames the served prompt. A share of 30 % or
-more says that the weights hover without it.
+without `--pi05_prompt`, so the server sends the plain task text. A retry share under 15 %
+blames the served prompt. A share of 30 % or more says that the weights hover without it.
 
 | read | correct of 1050 | rate | cycles in retry mode | first close off the target |
 | --- | --- | --- | --- | --- |
 | i_VA8k_np_s1, without the prompt | 864 | 179.51 | 36.4 % | 0.197 |
 | i_VA8k_s1, with the prompt | 856 | 181.23 | 37.7 % | 0.182 |
 | i_VA4k_s1, with the prompt | 850 | 160.01 | 43.9 % | 0.212 |
+| i_VB6k_s1, Run B, no prompt in training | 862 | 208.95 | 30.6 % | 0.155 |
+| i_VB4k_s1, Run B, no prompt in training | 853 | 189.33 | 28.7 % | 0.165 |
 | the twin | 885 | 228.20 | 7.2 % | 0.119 |
 
 The share stays at 36.4 %, so the weights hover without the prompt. The served prompt does not
-cause the hover. Run B never trained with the prompt, so its reads tell whether the mix of the
-fine-tune causes it.
+cause the hover. Run B never trained with the prompt, and it hovers too, at 28.7 % of its cycles at
+4k and 30.6 % at 6k. So the fine-tune brings the hover, early and in both mixes.
+
+A second read-only subagent looked for the hover in the training frames
+(`i/vla/analysis/hover_src/hover_src.md`, 09:02 on 10-15). It used every frame of the four roots
+and replayed the retry trigger of the loop on the forward kinematics of each frame.
+
+| frames in a run of 20 or more still, open frames | corpus | takeovers | `own_a` |
+| --- | --- | --- | --- |
+| joints still | 2.13 % | 1.58 % | 0.03 % |
+| joints still, over the tray at 6 cm or more | 1.00 % | 0.49 % | 0.00 % |
+| the retry trigger of the loop fires | 1.03 % | 0.44 % | 0.07 % |
+
+- The added sources hold fewer still frames than the corpus. Weighted by their draws, both mixes
+  carry 0.59 to 0.76 times the still frames of the corpus.
+- No takeover starts with a dwell. 1 of 3,296 takeovers starts with 10 or more still frames.
+- One share rises. Open frames over the tray before the first close make up 1.44 times (Run A)
+  and 1.58 times (Run B) the share of the corpus. 54 to 58 % of them are own frames. An own episode
+  spends a median of 54 to 60 frames there, against 39 for the corpus. 90 to 93 % of these own
+  frames move at 1 mm a step or more.
+
+So the policy does not copy still frames. Hypothesis H4, not tested: the fine-tune gives too much
+weight to the slow, correcting reach of the own frames at hover height. With no arm noise, the
+served reach then slows under the stall speed of the retry trigger.
 
 ### 6.5 Run A against Run B
 
@@ -783,7 +812,19 @@ each lever with its evidence so far.
 3. The ACT training length, H2. The core count falls with training: F9n 41, 30 and 25, and ACT-C
    42, 45 and 29, at 400k, 600k and 800k. The correct total of ACT-C does not rise with it: 2512,
    2502 and 2498. No ACT-C save beats S on the screen.
-4. Pending: Track V levers, after Run A, Run B and their reads.
+4. The Track V recipe. No save of round 1 beats its 30k start (section 6.3), and both runs add the
+   hover (section 6.4). Run B reads better than Run A at both saves: 853 and 862 correct at 189.33
+   and 208.95 an hour, against 850 and 856 at 160.01 and 181.23. The second account has no compute
+   units left. Each run below needs about 59 compute units on an A100, 8.7 h at 6.77 an hour, which
+   the owner buys.
+   - V-a, the test of H4: the recipe of Run B without the own frames before the first close. Their
+     draws go to the corpus. The prediction: the retry share falls toward the 7.2 % of the start,
+     most of all in the hovers that start before a close.
+   - V-b, a control: a fine-tune of the same length from 30k on the corpus only. It tells an effect
+     of the fine-tune itself from an effect of the mix.
+   - V-c, a pause of Track V in round 2. The 30k start itself is under S: 885 against 890 on draws
+     0 to 6, at 228.20 against 366.47 an hour. Its MS7h checked read gave 2464 against 2525 (MS7h
+     report section 1). The compute of round 2 then goes to Track ACT.
 
 ## 8. The code
 
