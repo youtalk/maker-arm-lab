@@ -237,7 +237,6 @@ class CampaignCfg:
     split_cycles: bool = False
     # With split_cycles: SETTLE frames kept on each source's first cycle (recipe design 5.3).
     lead_keep: int = 0
-    sidecar_dir: Path | None = None
 
 
 class Ledger:
@@ -837,8 +836,6 @@ def _convert_command(cfg: CampaignCfg, shard_path: Path) -> list[str]:
     ]
     if cfg.split_cycles:
         cmd.append("--split_cycles")
-        if cfg.sidecar_dir is not None:
-            cmd += ["--sidecar_dir", str(cfg.sidecar_dir)]
     if cfg.lead_keep:
         if not cfg.split_cycles:
             raise ValueError("lead_keep requires split_cycles")
@@ -1063,7 +1060,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=0,
         help="with --split_cycles: SETTLE frames kept on each source's first cycle",
     )
-    parser.add_argument("--sidecar_dir", type=Path, default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument(
@@ -1072,13 +1068,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=Path(os.environ.get("ISAACLAB_PATH", str(Path.home() / "src/IsaacLab"))),
     )
     args = parser.parse_args(argv)
-    if args.sidecar_dir is not None and not args.split_cycles:
-        # Mirrors convert_to_lerobot.py's own guard (parser.error there, ValueError in
-        # convert()) so the two entry points agree on which flag combinations are legal --
-        # without this, a bare --sidecar_dir with no --split_cycles would run this whole
-        # script to completion, exit 0, and produce no sidecars, silently defeating the
-        # only reason --sidecar_dir was passed.
-        parser.error("--sidecar_dir requires --split_cycles")
     if args.no_images and args.context is None:
         parser.error("--no_images needs --context")
     if args.no_cameras and not args.no_images:

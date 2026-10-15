@@ -517,11 +517,9 @@ def test_convert_command_forwards_split_flags(tmp_path):
         out_dir=tmp_path,
         dataset_root=tmp_path / "ds",
         split_cycles=True,
-        sidecar_dir=tmp_path / "sidecars",
     )
     cmd = gd._convert_command(cfg, tmp_path / "shard.hdf5")
     assert "--split_cycles" in cmd
-    assert "--sidecar_dir" in cmd and str(tmp_path / "sidecars") in cmd
 
 
 def test_convert_command_default_omits_split_flags(tmp_path):
@@ -538,20 +536,6 @@ def test_convert_command_default_omits_split_flags(tmp_path):
         "--root",
         str(tmp_path / "ds"),
     ]
-
-
-def test_parse_args_rejects_sidecar_dir_without_split_cycles(tmp_path):
-    with pytest.raises(SystemExit):
-        gd._parse_args(
-            [
-                "--out_dir",
-                str(tmp_path / "w"),
-                "--dataset_root",
-                str(tmp_path / "d"),
-                "--sidecar_dir",
-                str(tmp_path / "sidecars"),
-            ]
-        )
 
 
 def test_campaign_target_default_matches_generate_batch_s_extrapolation_target(tmp_path):

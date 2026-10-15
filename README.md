@@ -196,7 +196,7 @@ MS4 round c2 adds DAgger with the oracle as expert. `scripts/mj_dagger_batch.py`
 - A grasp center outside the workspace.
 - A random trigger at a mean interval of 300 steps, which doubles each round.
 
-A takeover runs one brick cycle from the state that the policy reached, then gives the env back. The recorder keeps only takeover frames. `obs/actor` holds the takeover ordinal of each kept frame. If a cycle does not stow its brick, its ordinal goes negative. `convert_to_lerobot.py --dagger --split_cycles` keeps the positive-actor cycles. `lerobot_stack/probe_held.py` is the realizability probe that gates round 1. The ceiling lanes of c2 record with `generate_dataset.py --no_cameras --context privileged --no_images`.
+A takeover runs one brick cycle from the state that the policy reached, then gives the env back. The recorder keeps only takeover frames. `obs/actor` holds the takeover ordinal of each kept frame. If a cycle does not stow its brick, its ordinal goes negative. `convert_to_lerobot.py --dagger --split_cycles` keeps the positive-actor cycles. The ceiling lanes of c2 record with `generate_dataset.py --no_cameras --context privileged --no_images`.
 
 ```bash
 uv run python scripts/mj_dagger_batch.py --num_envs 12 --run_seed 1 --layout_seed 2 \

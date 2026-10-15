@@ -162,32 +162,6 @@ def test_cycle_segments_with_no_brick_yields_no_segments():
     assert cycle_segments(phase, brick) == []
 
 
-def test_split_cycles_roundtrip_with_sidecars(tmp_path):
-    shard = tmp_path / "shard.hdf5"
-    _write_shard(shard, demos=1, steps=10)
-    phase = [0, 0, 1, 2, 3, 8, 1, 2, 3, 8]
-    brick = [-1, -1, 0, 0, 0, 0, 1, 1, 1, 1]
-    _add_cycle_channels(shard, [phase], [brick])
-    root, sidecars = tmp_path / "dataset", tmp_path / "sidecars"
-    converted, total, *_ = convert(
-        [shard],
-        root,
-        "youtalk/maker-arm-legosort-test",
-        fps=30,
-        split_cycles=True,
-        sidecar_dir=sidecars,
-    )
-    assert (converted, total) == (2, 2)
-    ds = LeRobotDataset("youtalk/maker-arm-legosort-test", root=root)
-    assert len(ds) == 8  # 10 frames minus the 2 SETTLE frames
-    s0 = np.load(sidecars / "0.npz")
-    assert sorted(s0.files) == ["cycle_brick", "cycle_phase"]
-    assert s0["cycle_brick"].tolist() == [0, 0, 0, 0]
-    s1 = np.load(sidecars / "1.npz")
-    assert s1["cycle_brick"].tolist() == [1, 1, 1, 1]
-    assert s1["cycle_phase"].tolist() == [1, 2, 3, 8]
-
-
 def test_split_cycles_lead_keep_extends_the_first_cycle(tmp_path):
     shard = tmp_path / "shard.hdf5"
     _write_shard(shard, demos=1, steps=10)
@@ -207,9 +181,7 @@ def test_split_cycles_lead_keep_extends_the_first_cycle(tmp_path):
         convert([shard], tmp_path / "other", "youtalk/maker-arm-legosort-test", fps=30, lead_keep=1)
 
 
-def test_split_cycles_roundtrip_without_sidecars(tmp_path):
-    # generate_dataset._convert_command emits exactly this (split_cycles, no sidecar_dir)
-    # whenever cfg.sidecar_dir is unset -- the campaign's most common mode.
+def test_split_cycles_roundtrip(tmp_path):
     shard = tmp_path / "shard.hdf5"
     _write_shard(shard, demos=1, steps=10)
     phase = [0, 0, 1, 2, 3, 8, 1, 2, 3, 8]
@@ -222,67 +194,10 @@ def test_split_cycles_roundtrip_without_sidecars(tmp_path):
         "youtalk/maker-arm-legosort-test",
         fps=30,
         split_cycles=True,
-        sidecar_dir=None,
     )
     assert (converted, total) == (2, 2)
     ds = LeRobotDataset("youtalk/maker-arm-legosort-test", root=root)
     assert len(ds) == 8  # 10 frames minus the 2 SETTLE frames
-    assert not (tmp_path / "sidecars").exists()
-
-
-def test_sidecar_dir_non_empty_on_create_errors(tmp_path):
-    # Campaign A's sidecars must not silently mix with a campaign B that starts a brand
-    # new --root but reuses A's --sidecar_dir; episode indices in both start at 0.
-    shard = tmp_path / "shard.hdf5"
-    _write_shard(shard, demos=1, steps=10)
-    phase = [0, 0, 1, 2, 3, 8, 1, 2, 3, 8]
-    brick = [-1, -1, 0, 0, 0, 0, 1, 1, 1, 1]
-    _add_cycle_channels(shard, [phase], [brick])
-    sidecars = tmp_path / "sidecars"
-    sidecars.mkdir()
-    (sidecars / "0.npz").write_bytes(b"not a real npz, just occupying the slot")
-    root = tmp_path / "dataset"  # fresh -- never created
-    with pytest.raises(RuntimeError, match="being created fresh"):
-        convert(
-            [shard],
-            root,
-            "youtalk/maker-arm-legosort-test",
-            fps=30,
-            split_cycles=True,
-            sidecar_dir=sidecars,
-        )
-
-
-def test_sidecar_dir_non_empty_on_resume_appends(tmp_path):
-    shard = tmp_path / "shard.hdf5"
-    _write_shard(shard, demos=1, steps=10)
-    phase = [0, 0, 1, 2, 3, 8, 1, 2, 3, 8]
-    brick = [-1, -1, 0, 0, 0, 0, 1, 1, 1, 1]
-    _add_cycle_channels(shard, [phase], [brick])
-    root, sidecars = tmp_path / "dataset", tmp_path / "sidecars"
-    convert(
-        [shard],
-        root,
-        "youtalk/maker-arm-legosort-test",
-        fps=30,
-        split_cycles=True,
-        sidecar_dir=sidecars,
-    )
-    assert sorted(p.name for p in sidecars.iterdir()) == ["0.npz", "1.npz"]
-
-    shard2 = tmp_path / "shard2.hdf5"
-    _write_shard(shard2, demos=1, steps=10)
-    _add_cycle_channels(shard2, [phase], [brick])
-    converted, total, *_ = convert(
-        [shard2],
-        root,
-        "youtalk/maker-arm-legosort-test",
-        fps=30,
-        split_cycles=True,
-        sidecar_dir=sidecars,
-    )
-    assert (converted, total) == (2, 4)
-    assert sorted(p.name for p in sidecars.iterdir()) == ["0.npz", "1.npz", "2.npz", "3.npz"]
 
 
 def test_split_cycles_without_channels_errors(tmp_path):
@@ -318,11 +233,11 @@ def test_a_usage_error_still_prints_a_token(tmp_path):
         str(tmp_path / "s.hdf5"),
         "--root",
         str(tmp_path / "ds"),
-        "--sidecar_dir",
-        str(tmp_path / "sidecars"),
+        "--host",
+        "a",
     )
     assert result.returncode != 0
-    assert "CONVERT_FAIL usage: --sidecar_dir requires --split_cycles" in result.stdout
+    assert "CONVERT_FAIL usage: --host names the host of --own_frames rows" in result.stdout
 
 
 def test_a_successful_run_prints_the_ok_token(tmp_path):
