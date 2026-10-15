@@ -6,7 +6,6 @@ import pytest
 
 from helpers import load_script
 from maker_arm_lab.core import dagger_loop, loop, perception
-from test_ms7f_stack import _gate_argv, ge
 from test_perceived_loop import _rollout, _run, _teacher_scene
 from test_snap_closed import _Blind
 from test_thin_snap import _same
@@ -85,14 +84,3 @@ def test_the_clients_refuse_the_switch_where_no_serving_loop_reads_it(
     assert exit_info.value.code == 2
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 1 and "_FAIL" in out[0] and message in out[0], out
-
-
-def test_the_supervisor_forwards_the_switch_and_its_cache_key_records_it(tmp_path):
-    assert ge.MS7F_OFF["stall_end"] is False and "stall_end" in ge.MS7F_READY
-    draw = ge.make_eval_draws(1, 1)[0]
-    argv = _gate_argv(tmp_path)
-    plain = ge._build_cfg(ge._parse_args(argv))
-    cfg = ge._build_cfg(ge._parse_args(argv + ["--stall_end"]))
-    assert ge.ms7f_block(cfg) == ge.MS7F_OFF | {"stall_end": True}
-    assert ge._eval_command(cfg, draw).count("--stall_end") == 1
-    assert "--stall_end" not in ge._eval_command(plain, draw)

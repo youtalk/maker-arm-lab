@@ -159,6 +159,9 @@ def test_the_supervisor_forwards_every_ms7f_switch_and_its_cache_refuses_other_v
     block = ge.ms7f_block(cfg)
     for name, value in block.items():
         assert value != ge.MS7F_OFF[name], name
+        assert cmd.count(f"--{name}") == 1, name
+        one = ge._build_cfg(ge._parse_args(argv + ON[name]))
+        assert ge.ms7f_block(one) == ge.MS7F_OFF | {name: value}, name
         at = cmd.index(f"--{name}")
         if value is not True:
             assert cmd[at + 1] == str(value), name

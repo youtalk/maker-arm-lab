@@ -966,28 +966,69 @@ def test_the_gate_reports_desk_box_rows_and_counts_own_box_stows_only():
     assert "stowed_by_class" not in six
 
 
-def test_the_scripted_place_reaches_the_heap_client_keys_the_cache_and_names_its_pass(
-    tmp_path, monkeypatch, capsys
+HEAP = ["--backend", "mujoco", "--heap_k", "50"]
+PERCEIVED = HEAP + ["--desk_boxes", "4", "--gripper", "continuous", "--perceived"]
+ISAAC = (["--backend", "isaac"], "needs --heap_k > 0 and --backend mujoco")
+NO_PERCEIVED = (PERCEIVED[:-1], "needs --perceived")
+SWITCH_READS = {
+    "scripted_place": (HEAP, [(["--backend", "mujoco"], "needs --heap_k > 0")]),
+    "scripted_rake": (HEAP + ["--tray"], [ISAAC]),
+    "part_failures": (HEAP, [ISAAC]),
+    "pick_snap": (HEAP, [ISAAC]),
+    "dwell_close": (HEAP, [ISAAC]),
+    "adopt_held": (HEAP, [ISAAC]),
+    "park_done": (HEAP + ["--tray", "--desk_boxes", "4"], [ISAAC]),
+    "rake_turn": (HEAP + ["--tray", "--desk_boxes", "4"], [ISAAC]),
+    "carry_guard": (
+        PERCEIVED,
+        [NO_PERCEIVED, (PERCEIVED + ["--passenger_drop"], "refuses --passenger_drop")],
+    ),
+    "clear_first": (PERCEIVED + ["--tray"], [NO_PERCEIVED, ISAAC]),
+    "overhang_guard": (
+        PERCEIVED + ["--tray"],
+        [NO_PERCEIVED, ISAAC, (PERCEIVED, "reads the tray wall's overhang: it needs --tray")],
+    ),
+}
+"""The heap loop's on/off switches that have no test of their own here: the flags of the read each
+one needs, and each refusal as the flags of a read and the message after the switch's flag."""
+
+
+@pytest.mark.parametrize("name", list(SWITCH_READS))
+def test_a_loop_switch_reaches_the_heap_client_once_keys_the_cache_and_needs_its_read(
+    name, tmp_path, monkeypatch, capsys
 ):
-    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
-    argv += ["--threshold", "0.7", "--seed", "1"]
-    heap = ["--backend", "mujoco", "--heap_k", "50"]
-    cfg = ge._build_cfg(ge._parse_args(argv + heap + ["--scripted_place"]))
+    read, refusals = SWITCH_READS[name]
+    argv = _argv(tmp_path / "gate") + read
+    plain = ge._build_cfg(ge._parse_args(argv))
+    cfg = ge._build_cfg(ge._parse_args(argv + [f"--{name}"]))
     draw = ge.make_eval_draws(1, 1)[0]
-    assert "--scripted_place" in ge._eval_command(cfg, draw)
-    assert ge.loop_switches(cfg.client_flags)["scripted_place"] is True
-    plain = ge._build_cfg(ge._parse_args(argv + heap))
-    assert "--scripted_place" not in ge._eval_command(plain, draw)
+    assert ge._eval_command(cfg, draw).count(f"--{name}") == 1
+    assert f"--{name}" not in ge._eval_command(plain, draw)
+    off = {n: False for n in ge.LOOP_SWITCHES} | {"rake_cap": 0, "retry_noise_at": 0}
+    off |= {"guard_margin": 0.010, "noise_scales": ""}
+    if "--perceived" in read:
+        off |= {"perceived": True, "noise_scales": ge.noise_scales_key("")}
+    assert ge.loop_switches(plain.client_flags) == off
+    assert ge.loop_switches(cfg.client_flags) == off | {name: True}
     cfg.out_dir.mkdir()
     served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
-    for on, hit in ((True, True), (False, False)):
-        loop = {name: False for name in ge.LOOP_SWITCHES} | {"scripted_place": on}
-        payload = _heap_payload(draw, inference={**served, "loop": loop})
+    heap = {"tray": cfg.tray, "desk_boxes": cfg.desk_boxes, "gripper": cfg.gripper}
+
+    def hit(gate, loop):
+        payload = _heap_payload(draw, inference={**served, "loop": loop}, **heap)
         (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
-        assert (ge._cached_payload(cfg, draw) is not None) is hit
+        return ge._cached_payload(gate, draw) is not None
+
+    # A payload that predates the switch, or records it only when on, ran with it off.
+    older = {k: v for k, v in off.items() if k != name}
+    assert hit(plain, off) and hit(plain, older) and not hit(plain, off | {name: True})
+    assert hit(cfg, off | {name: True}) and not hit(cfg, off) and not hit(cfg, older)
+    assert not hit(cfg, {})
     monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
-    assert ge.main(argv + ["--backend", "mujoco", "--scripted_place"]) == 2
-    assert "--scripted_place" in capsys.readouterr().err
+    for bad, message in refusals:
+        assert ge.main(_argv(tmp_path) + bad + [f"--{name}"]) == 2
+        out = capsys.readouterr()
+        assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and f"--{name} {message}" in out.err
 
 
 def test_a_pass_through_the_scripted_place_is_its_own_outcome(tmp_path):
@@ -1005,98 +1046,6 @@ def test_a_pass_through_the_scripted_place_is_its_own_outcome(tmp_path):
     (cfg.out_dir / "eval_000.json").unlink()
     results = ge.run_gate(cfg, run_eval=lambda d: _heap_payload(d), start_server=server)
     assert results["gate"]["outcome"] == "PASS" and draw.process_index == 0
-
-
-def test_the_scripted_rake_reaches_the_heap_client_only_and_keys_the_cache(
-    tmp_path, monkeypatch, capsys
-):
-    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
-    argv += ["--threshold", "0.7", "--seed", "1"]
-    heap = ["--backend", "mujoco", "--heap_k", "50", "--tray"]
-    cfg = ge._build_cfg(ge._parse_args(argv + heap + ["--scripted_rake"]))
-    draw = ge.make_eval_draws(1, 1)[0]
-    assert "--scripted_rake" in ge._eval_command(cfg, draw)
-    assert ge.loop_switches(cfg.client_flags)["scripted_rake"] is True
-    plain = ge._build_cfg(ge._parse_args(argv + heap))
-    assert "--scripted_rake" not in ge._eval_command(plain, draw)
-    cfg.out_dir.mkdir()
-    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
-    for on, hit in ((True, True), (False, False)):
-        loop = {name: False for name in ge.LOOP_SWITCHES} | {"scripted_rake": on}
-        payload = _heap_payload(draw, tray=True, inference={**served, "loop": loop})
-        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
-        assert (ge._cached_payload(cfg, draw) is not None) is hit
-    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
-    assert ge.main(argv + ["--backend", "isaac", "--scripted_rake"]) == 2
-    assert "--scripted_rake" in capsys.readouterr().err
-
-
-def test_part_failures_reach_the_heap_client_only_and_key_the_cache(tmp_path, monkeypatch, capsys):
-    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
-    argv += ["--threshold", "0.7", "--seed", "1"]
-    heap = ["--backend", "mujoco", "--heap_k", "50"]
-    cfg = ge._build_cfg(ge._parse_args(argv + heap + ["--part_failures"]))
-    draw = ge.make_eval_draws(1, 1)[0]
-    assert "--part_failures" in ge._eval_command(cfg, draw)
-    assert ge.loop_switches(cfg.client_flags)["part_failures"] is True
-    assert "--part_failures" not in ge._eval_command(
-        ge._build_cfg(ge._parse_args(argv + heap)), draw
-    )
-    cfg.out_dir.mkdir()
-    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
-    for on, hit in ((True, True), (False, False)):
-        loop = {name: False for name in ge.LOOP_SWITCHES} | {"part_failures": on}
-        payload = _heap_payload(draw, inference={**served, "loop": loop})
-        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
-        assert (ge._cached_payload(cfg, draw) is not None) is hit
-    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
-    assert ge.main(argv + ["--backend", "isaac", "--part_failures"]) == 2
-    assert "--part_failures" in capsys.readouterr().err
-
-
-def test_pick_snap_reaches_the_heap_client_only_and_keys_the_cache(tmp_path, monkeypatch, capsys):
-    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
-    argv += ["--threshold", "0.7", "--seed", "1"]
-    heap = ["--backend", "mujoco", "--heap_k", "50"]
-    cfg = ge._build_cfg(ge._parse_args(argv + heap + ["--pick_snap"]))
-    draw = ge.make_eval_draws(1, 1)[0]
-    assert "--pick_snap" in ge._eval_command(cfg, draw)
-    assert ge.loop_switches(cfg.client_flags)["pick_snap"] is True
-    assert "--pick_snap" not in ge._eval_command(ge._build_cfg(ge._parse_args(argv + heap)), draw)
-    cfg.out_dir.mkdir()
-    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
-    for on, hit in ((True, True), (False, False)):
-        loop = {name: False for name in ge.LOOP_SWITCHES} | {"pick_snap": on}
-        payload = _heap_payload(draw, inference={**served, "loop": loop})
-        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
-        assert (ge._cached_payload(cfg, draw) is not None) is hit
-    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
-    assert ge.main(argv + ["--backend", "isaac", "--pick_snap"]) == 2
-    assert "--pick_snap" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize("name", ["dwell_close", "adopt_held"])
-def test_the_serving_2_switches_reach_the_heap_client_only_and_key_the_cache(
-    name, tmp_path, monkeypatch, capsys
-):
-    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
-    argv += ["--threshold", "0.7", "--seed", "1"]
-    heap = ["--backend", "mujoco", "--heap_k", "50"]
-    cfg = ge._build_cfg(ge._parse_args(argv + heap + [f"--{name}"]))
-    draw = ge.make_eval_draws(1, 1)[0]
-    assert f"--{name}" in ge._eval_command(cfg, draw)
-    assert ge.loop_switches(cfg.client_flags)[name] is True
-    assert f"--{name}" not in ge._eval_command(ge._build_cfg(ge._parse_args(argv + heap)), draw)
-    cfg.out_dir.mkdir()
-    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
-    for on, hit in ((True, True), (False, False)):
-        loop = {n: False for n in ge.LOOP_SWITCHES} | {name: on}
-        payload = _heap_payload(draw, inference={**served, "loop": loop})
-        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
-        assert (ge._cached_payload(cfg, draw) is not None) is hit
-    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
-    assert ge.main(argv + ["--backend", "isaac", f"--{name}"]) == 2
-    assert f"--{name}" in capsys.readouterr().err
 
 
 def test_the_rake_settings_reach_the_heap_client_only_and_key_the_cache(tmp_path, monkeypatch):
@@ -1142,30 +1091,6 @@ def test_the_tray_lean_reaches_the_heap_client_and_keys_the_cache(tmp_path):
     for lean, hit in ((45.0, True), (30.0, False), (0.0, False)):
         path.write_text(json.dumps(_heap_payload(draw, tray=True, tray_lean=lean)))
         assert (ge._cached_payload(cached, draw) is not None) is hit, lean
-
-
-def test_the_tail_switches_reach_the_heap_client_only_and_key_the_cache(tmp_path):
-    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
-    argv += ["--threshold", "0.7", "--seed", "1"]
-    heap = ["--backend", "mujoco", "--heap_k", "50", "--tray", "--desk_boxes", "4"]
-    draw = ge.make_eval_draws(1, 1)[0]
-    plain = ge._eval_command(ge._build_cfg(ge._parse_args(argv + heap)), draw)
-    assert "--park_done" not in plain and "--rake_turn" not in plain
-    cfg = ge._build_cfg(ge._parse_args(argv + heap + ["--park_done", "--rake_turn"]))
-    cmd = ge._eval_command(cfg, draw)
-    assert "--park_done" in cmd and "--rake_turn" in cmd
-    found = ge.loop_switches(cfg.client_flags)
-    assert found["park_done"] is True and found["rake_turn"] is True
-    cfg.out_dir.mkdir()
-    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
-    both = {name: False for name in ge.LOOP_SWITCHES} | {"park_done": True, "rake_turn": True}
-    for loop, hit in ((both, True), (both | {"rake_turn": False}, False), ({}, False)):
-        payload = _heap_payload(draw, tray=True, desk_boxes=4, inference={**served, "loop": loop})
-        (cfg.out_dir / "eval_000.json").write_text(json.dumps(payload))
-        assert (ge._cached_payload(cfg, draw) is not None) is hit, loop
-    for flag in ("--park_done", "--rake_turn"):
-        with pytest.raises(ValueError, match=flag):
-            ge._build_cfg(ge._parse_args(argv + ["--backend", "isaac", flag]))
 
 
 def test_the_perceived_flags_reach_the_heap_client_and_key_the_cache(tmp_path):

@@ -25,7 +25,7 @@ from test_perceived_loop import (
     _teacher_scene,
     _wall_band_scene,
 )
-from test_run_gate_eval import _heap_payload, ge
+from test_run_gate_eval import ge
 from test_thin_snap import _same
 
 STUD = parts.make_part("brick", 1, 1)
@@ -200,45 +200,6 @@ def test_the_client_refuses_the_switches_where_no_perceived_selector_reads_them(
     assert exit_info.value.code == 2
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 1 and out[0].startswith("EVAL_FAIL") and message in out[0], out
-
-
-def test_the_supervisor_forwards_both_switches_and_keys_the_cache_on_them(tmp_path):
-    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
-    argv += ["--threshold", "0.7", "--seed", "1"]
-    heap = ["--backend", "mujoco", "--heap_k", "50", "--tray", "--desk_boxes", "4"]
-    heap += ["--gripper", "continuous", "--perceived"]
-    draw = ge.make_eval_draws(1, 1)[0]
-    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
-    base = {name: False for name in ge.LOOP_SWITCHES} | {"perceived": True}
-    base["noise_scales"] = ge.noise_scales_key("")
-    path = tmp_path / "gate" / "eval_000.json"
-    path.parent.mkdir()
-
-    def hit(cfg, loop_block):
-        inference = {**served, "loop": loop_block}
-        payload = _heap_payload(
-            draw, tray=True, desk_boxes=4, gripper="continuous", inference=inference
-        )
-        path.write_text(json.dumps(payload))
-        return ge._cached_payload(cfg, draw) is not None
-
-    plain = ge._build_cfg(ge._parse_args(argv + heap))
-    assert not {f"--{name}" for name in ge.MS7G_SWITCHES} & set(ge._eval_command(plain, draw))
-    # A payload that predates the switches, or records them off by leaving them out, is off.
-    old = {k: v for k, v in base.items() if k not in ge.MS7G_SWITCHES}
-    assert hit(plain, base) and hit(plain, old)
-    for name in ge.MS7G_SWITCHES:
-        cfg = ge._build_cfg(ge._parse_args(argv + heap + [f"--{name}"]))
-        assert f"--{name}" in ge._eval_command(cfg, draw)
-        assert hit(cfg, old | {name: True}) and not hit(cfg, old)
-        assert not hit(plain, old | {name: True})
-        with pytest.raises(ValueError, match=f"--{name} needs --perceived"):
-            ge._build_cfg(ge._parse_args(argv + heap[:-1] + [f"--{name}"]))
-        with pytest.raises(ValueError, match=f"--{name} needs --heap_k"):
-            ge._build_cfg(ge._parse_args(argv + ["--backend", "isaac", f"--{name}"]))
-    no_tray = [a for a in heap if a != "--tray"]
-    with pytest.raises(ValueError, match="--overhang_guard reads the tray wall's overhang"):
-        ge._build_cfg(ge._parse_args(argv + no_tray + ["--overhang_guard"]))
 
 
 def test_the_client_parses_the_three_ms7g_switches_the_supervisor_forwards(tmp_path):
