@@ -393,7 +393,6 @@ DESK_REST_MAX_Z = desk_boxes.DESK_BOX_RELEASE_Z - oracle.LIFT_MIN_RISE
 """m: with desk boxes, the highest a part off every box may lie to count as knocked out of
 reach, a lift's rise under the release. A teacher-driven policy's cycle ended out_of_reach at
 its own release, the part in the opening jaws at z 0.098 m over its box (2026-09-23)."""
-FRAME_EVERY = 10
 CONTROL_HZ = 30.0
 """Control steps per simulated second, the env's (``mj.env.CONTROL_HZ``)."""
 EVENT_NAMES = ("tray_refill", "box_empty")
@@ -438,7 +437,6 @@ def stows_per_hour(stowed: int, steps: int, control_hz: float = CONTROL_HZ) -> f
     return 3600.0 * stowed * control_hz / steps if steps else 0.0
 
 
-"""Steps between two frames ``rollout``'s ``on_frame`` dump receives."""
 STRETCH_MISS_STREAK = 10
 """MS7f stretch rule 3 (MS7f design 10.4): ``stretch`` ends an env's episode after this many
 cycles in a row closed with no new correct stow; a person clears the jaws and the tray top and
@@ -2326,7 +2324,6 @@ def rollout(
     max_wall_minutes: float,
     takeover=None,
     log=print,
-    on_frame=None,
     on_classify=None,
     select_at_release: bool = False,
     replan_on_switch: bool = False,
@@ -2389,8 +2386,6 @@ def rollout(
     ``step`` takes ``replan``, and the flag is left off the wire when the switch is off;
     ``squeeze_floor``, ``close_gate``, ``square_wrist`` and ``pick_snap`` need the continuous
     gripper and a served target row.
-    ``on_frame(ordinal, step_in_cycle, wrist, overhead)`` is called with env 0's two policy
-    frames every ``FRAME_EVERY`` steps of each of its cycles, for a forensics dump.
     ``on_classify(view, i, frame, size, step, cycle, detector)`` is called with every frame the
     ``classifier`` reads, before it reads it: the view ("overhead", "lift", "carry", or "wrist"
     for a ``carry_votes`` read), the env, the frame, the perceived size the read gets, the step,
@@ -3134,13 +3129,6 @@ def rollout(
             wrist = env.obs_buf["images"]["wrist_rgb"].to("cpu").numpy()
             overhead = env.obs_buf["images"]["overhead_rgb"].to("cpu").numpy()
             context = env.obs_buf["context"].to("cpu").numpy() if served_width else None
-            c0 = states[0].cycle
-            if (
-                on_frame is not None
-                and c0 is not None
-                and (step - c0.start_step) % FRAME_EVERY == 0
-            ):
-                on_frame(c0.ordinal, step - c0.start_step, wrist[0], overhead[0])
             extra = {"replan": replan.numpy().copy()} if replan_on_switch else {}
             if retry_noise_at:  # each env's retry mode, which lasts to its cycle's end
                 retrying = [st.cycle is not None and st.cycle.retry_at is not None for st in states]

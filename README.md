@@ -225,14 +225,12 @@ The heap contexts are wider:
 
 Heap shards also carry `obs/images/overhead_depth` (uint16 millimeters, 0 is a hole), `obs/target_part`, `obs/context_box`, a `parts` attribute and `initial_state/destination_bin`. The overhead image carries a white marker on the target part.
 
-`scripts/heap_yield_read.py` sums a set of `*.meta.json` sidecars into the phase A read. `scripts/mj_inspect_heap.py` replays one heap episode. It logs the teacher's decisions to `events.jsonl` and records a free-camera video. `scripts/heap_inspect_read.py` sums those logs (`docs/ms6-teacher-inspection.md`).
+`scripts/heap_yield_read.py` sums a set of `*.meta.json` sidecars into the phase A read.
 
 ```bash
 uv run python scripts/mj_generate_batch.py --out_dir /tmp/h0 --attempts 12 --num_envs 12 \
     --heap_k 50 --parts_split heldout --probe                          # BATCH_OK exported=12 attempts=12
 python3 scripts/heap_yield_read.py --meta '/tmp/h*/shard.meta.json' --out /tmp/read.json   # YIELD_OK {...}
-uv run python scripts/mj_inspect_heap.py --out_dir /tmp/i0 --heap_k 12 --parts_split heldout   # INSPECT_OK {...}
-python3 scripts/heap_inspect_read.py /tmp/i0/events.jsonl                                      # INSPECT_READ {...}
 ```
 
 ### Dataset schema
@@ -344,7 +342,7 @@ MS7e widens the task. These switches are in `core/batch_loop.py`, and `run_gate_
 - `--carry_via` and `--passenger_check` are adopted teacher levers. `--thin_snap` and `--wall_band_cont` are adopted serving levers.
 - `--snap_closed`, with `--pick_snap`, ends the landing hold once the measured jaw gap is under the served width plus a margin. It fixes the flat pinches that the hold detector misses (`docs/ms7e-flat-study.md`).
 
-`scripts/ldraw_parts.py` builds the LDraw JSON files from LDraw `.dat` files. It needs the `ldraw` dependency group (CoACD and trimesh), so run it in a throwaway venv. The runtime reads only the committed JSON. `scripts/mj_part_table.py` drops one part at a time into the tray and reads whether the teacher lifts and stows it. `scripts/box_count_ceiling.py` finds the largest box count that fits beside the arm.
+`scripts/ldraw_parts.py` builds the LDraw JSON files from LDraw `.dat` files. It needs the `ldraw` dependency group (CoACD and trimesh), so run it in a throwaway venv. The runtime reads only the committed JSON. `scripts/mj_part_table.py` drops one part at a time into the tray and reads whether the teacher lifts and stows it.
 
 ### Real-scale sorting (MS7f)
 
@@ -374,14 +372,7 @@ lerobot_stack/.venv/bin/python lerobot_stack/train_part_classifier.py \
 
 ### Heap DAgger
 
-Round k rolls out the policy of the previous round on train-split heaps and records takeover frames only. Convert with `--dagger --split_cycles --context camera_box --gripper <mode>`. `mj_eval_heap.py --dagger_dir` records the takeovers of a served heap instead (MS7f wave 3).
-
-```bash
-uv run python scripts/mj_dagger_heap.py --num_envs 5 --heap_k 50 --parts_split train \
-    --run_seed 20261510 --layout_seed 20261610 --episode_draws --frame_jitter \
-    --context camera_box --gripper continuous --server tcp://127.0.0.1:5700 --round 1 \
-    --out_dir ~/data/maker-arm-ms6/l/dagger/r1 --shard_name proc_0
-```
+`mj_eval_heap.py --dagger_dir` serves a heap and records the takeover frames only (MS7f wave 3). Convert with `--dagger --split_cycles --context camera_box --gripper <mode>`.
 
 ### Reads across hosts
 

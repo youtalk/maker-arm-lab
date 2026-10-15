@@ -292,8 +292,6 @@ def test_the_box_draw_is_built_and_reaches_every_client():
     for name in (
         "mj_eval_heap.py",
         "mj_generate_batch.py",
-        "mj_dagger_heap.py",
-        "mj_inspect_heap.py",
         "mj_release_envelope_check.py",
     ):
         assert "box_sizes=env.desk_box_sizes[i]" in (root / name).read_text(), name

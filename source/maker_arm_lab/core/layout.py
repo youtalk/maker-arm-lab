@@ -319,7 +319,7 @@ HEAP_DROP_INSET = 0.02
 0.291 m (rung b3 of the bare-desk ladder, ~/data/maker-arm-ms6/j)."""
 SCATTER_MIN_RADIUS = 0.10
 """Nearest radius from the base a driven descend picked at: campaign d's reach band probe
-(docs/ms6-lever-verification.md), `scripts/mj_probe_bottom_pick.py --mode reach_band`. Like
+(docs/ms6-lever-verification.md). Like
 SCATTER_MAX_RADIUS it is a TRACKING bound read on a lone brick, not a solver report."""
 REACH_Y_SLACK = 0.02
 """How far (m) past SCATTER_Y a part is still a target: the overhead camera frames the zone
