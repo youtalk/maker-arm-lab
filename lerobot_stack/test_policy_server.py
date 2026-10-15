@@ -12,11 +12,9 @@ from policy_protocol import PROTOCOL_VERSION, recv_message, send_message
 from policy_server import (
     PolicyServer,
     blank_streams,
-    find_gripper_bce_marker,
-    find_gripper_marker,
+    find_markers,
     inference_policy_id,
     resolve_inference_overrides,
-    squash_gripper_logit,
 )
 
 
@@ -327,78 +325,6 @@ def test_blank_streams_rejects_an_unknown_stream_name():
         blank_streams(wrist, wrist, "elbow")
 
 
-# --- BCE gripper head tests. The code under test is PORTED BUT INACTIVE in this repo:
-# nothing here writes a gripper_bce.json, so these exercise a path no live checkpoint takes.
-# See the section marker in policy_server.py. ---
-#
-# Gripper-dim action stats standing in for a checkpoint's own: raw = logit * RAW_STD +
-# RAW_MEAN. These two values are an OPENYAM measurement (its v1 dataset's action mean/std
-# at dim 6), carried over unchanged and UNMEASURED on the Maker Arm. Nothing under test
-# depends on their values -- squash_gripper_logit inverts whatever (mean, std) it is
-# handed -- so they are fixture constants here, not a claim about this robot's data.
-RAW_MEAN = 0.1294
-RAW_STD = 0.9916
-
-
-def _action_with_gripper_raw(raw_values):
-    action = np.zeros((len(raw_values), 7), dtype=np.float32)
-    action[:, 6] = raw_values
-    return action
-
-
-def test_squash_maps_the_unnormalized_logit_back_to_a_unit_action():
-    # a saturated open logit (+10) lands near +1, a saturated closed logit
-    # (-10) near -1, and the p=0.5 boundary (logit 0) at exactly raw 0 --
-    # so the client's raw >= 0 open threshold now coincides with the
-    # boundary the BCE head was trained against
-    raw = [10.0 * RAW_STD + RAW_MEAN, -10.0 * RAW_STD + RAW_MEAN, RAW_MEAN]
-    out = squash_gripper_logit(_action_with_gripper_raw(raw), RAW_MEAN, RAW_STD)
-    assert out[0, 6] == pytest.approx(1.0, abs=1e-3)
-    assert out[1, 6] == pytest.approx(-1.0, abs=1e-3)
-    assert out[2, 6] == pytest.approx(0.0, abs=1e-6)
-    assert np.abs(out[:, 6]).max() < 1.0 + 1e-6
-
-
-def test_squash_touches_only_the_gripper_dim_and_not_in_place():
-    action = np.full((2, 7), 0.5, dtype=np.float32)
-    action[:, 6] = 8.26
-    out = squash_gripper_logit(action, RAW_MEAN, RAW_STD)
-    np.testing.assert_array_equal(out[:, :6], action[:, :6])
-    assert out.dtype == np.float32
-    assert action[0, 6] == pytest.approx(8.26)  # caller's buffer untouched
-
-
-def test_marker_is_found_in_the_checkpoint_dir_itself(tmp_path):
-    marker = {"gripper_bce": True, "gripper_raw_mean": RAW_MEAN, "gripper_raw_std": RAW_STD}
-    (tmp_path / "gripper_bce.json").write_text(json.dumps(marker))
-    assert find_gripper_bce_marker(str(tmp_path)) == marker
-
-
-def test_marker_is_found_by_walking_up_to_the_training_output_dir(tmp_path):
-    # openyam-lab's train_act_gripper wrote the marker to output_dir while the server is
-    # handed output_dir/checkpoints/<step>/pretrained_model. That trainer is not ported, so
-    # this layout is the one the lookup is designed for, not one produced in this repo.
-    marker = {"gripper_bce": True, "gripper_raw_mean": RAW_MEAN, "gripper_raw_std": RAW_STD}
-    (tmp_path / "gripper_bce.json").write_text(json.dumps(marker))
-    ckpt = tmp_path / "checkpoints" / "last" / "pretrained_model"
-    ckpt.mkdir(parents=True)
-    assert find_gripper_bce_marker(str(ckpt)) == marker
-
-
-def test_no_marker_means_no_squash(tmp_path):
-    assert find_gripper_bce_marker(str(tmp_path)) is None
-
-
-def test_policy_id_records_the_gripper_squash():
-    assert inference_policy_id("/ckpt", {}, gripper_squash=True) == "act:/ckpt+gbce"
-    assert (
-        inference_policy_id("/ckpt", {"temporal_ensemble_coeff": 0.01}, gripper_squash=True)
-        == "act:/ckpt+te0.01+gbce"
-    )
-    # default stays byte-identical for non-BCE checkpoints
-    assert inference_policy_id("/ckpt", {}) == "act:/ckpt"
-
-
 def test_policy_id_records_the_ablation_alongside_the_inference_override():
     assert inference_policy_id("/ckpt", {}, blank_camera="wrist") == "act:/ckpt+blankwrist"
     assert (
@@ -510,13 +436,11 @@ def test_handshake_carries_the_served_inference():
 
 
 def test_action_space_marker_is_found_up_the_checkpoint_tree(tmp_path):
-    from policy_server import find_action_space_marker
-
     ckpt = tmp_path / "checkpoints" / "575000" / "pretrained_model"
     ckpt.mkdir(parents=True)
-    assert find_action_space_marker(str(ckpt)) == "absolute"
+    assert find_markers(str(ckpt)) == ("absolute", "binary", None)
     (tmp_path / "action_space.json").write_text('{"action_space": "delta_prev"}')
-    assert find_action_space_marker(str(ckpt)) == "delta_prev"
+    assert find_markers(str(ckpt)) == ("delta_prev", "binary", None)
 
 
 def test_integrate_delta_adds_the_anchor_and_keeps_the_gripper():
@@ -551,9 +475,9 @@ def test_the_handshake_carries_the_gripper_contract(tmp_path):
     marker.write_text(json.dumps({"action_space": "absolute", "gripper": "continuous"}))
     ckpt = tmp_path / "checkpoints" / "000100" / "pretrained_model"
     ckpt.mkdir(parents=True)
-    assert find_gripper_marker(str(ckpt)) == "continuous"
+    assert find_markers(str(ckpt))[1] == "continuous"
     marker.write_text(json.dumps({"action_space": "absolute"}))
-    assert find_gripper_marker(str(tmp_path)) == "binary"
+    assert find_markers(str(tmp_path))[1] == "binary"
     srv = PolicyServer(
         policy_fn=lambda *a: None,
         reset_fn=lambda: None,
@@ -730,19 +654,19 @@ def test_the_roll_wraps_to_a_small_signed_angle_on_numpy_and_torch():
 
 
 def test_the_context_marker_gates_the_transform(tmp_path):
-    from policy_server import CONTEXT_NORM, find_context_marker
+    from policy_server import CONTEXT_NORM
 
     ckpt = tmp_path / "checkpoints" / "050000" / "pretrained_model"
     ckpt.mkdir(parents=True)
-    assert find_context_marker(str(ckpt)) is None
+    assert find_markers(str(ckpt))[2] is None
     marker = tmp_path / "action_space.json"
     marker.write_text('{"action_space": "absolute", "gripper": "continuous"}')
-    assert find_context_marker(str(ckpt)) is None  # every checkpoint before D12
+    assert find_markers(str(ckpt))[2] is None  # every checkpoint before D12
     marker.write_text(json.dumps({"action_space": "absolute", "context": CONTEXT_NORM}))
-    assert find_context_marker(str(ckpt)) == CONTEXT_NORM
+    assert find_markers(str(ckpt))[2] == CONTEXT_NORM
     marker.write_text('{"action_space": "absolute", "context": "zscore"}')
     with pytest.raises(ValueError, match="unknown context transform"):
-        find_context_marker(str(ckpt))
+        find_markers(str(ckpt))
 
 
 def test_policy_id_marks_a_normalized_context_only():
@@ -797,7 +721,6 @@ def _stub_member(path, scale, *, context_norm=None, gripper="continuous"):
         contract={
             "action_space": "absolute",
             "gripper": gripper,
-            "gripper_squash": False,
             "action_shape": [7],
             "context_dim": 16,
             **inference,

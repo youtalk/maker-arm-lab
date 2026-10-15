@@ -80,9 +80,8 @@ OBS_SCHEMA = {
 # of observability against the openyam-lab original, not an oversight.
 ACTION_SHAPE = (7,)
 ACTION_DTYPE = "float32"
-# Index of the gripper column in BOTH arrays. policy_server.GRIPPER_DIM is the action-side
-# counterpart; the two are deliberately separate constants for two separate contracts that
-# happen to share an index, so neither can be "fixed" into the other.
+# Index of the STATE's gripper column. The action's gripper command sits at the same index
+# under a separate contract.
 STATE_GRIPPER_DIM = 6
 # The fraction is clipped to [0, 1] at conversion, so training data is strictly in range.
 # The tolerance absorbs a client that computes the fraction without clipping (a hair over 1
