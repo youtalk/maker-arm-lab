@@ -47,7 +47,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 
@@ -929,39 +929,9 @@ def _make_real_run_convert(cfg: CampaignCfg) -> Callable[[Path], dict]:
 
 
 def _build_cfg(args: argparse.Namespace) -> CampaignCfg:
-    return CampaignCfg(
-        out_dir=args.out_dir,
-        dataset_root=args.dataset_root,
-        target=args.target,
-        attempts_per_run=args.attempts_per_run,
-        num_envs=args.num_envs,
-        seed=args.seed,
-        isaaclab_path=args.isaaclab_path,
-        max_wall_minutes=args.max_wall_minutes,
-        noise_scale=args.noise_scale,
-        start_pose_offset_rad=args.start_pose_offset_rad,
-        induce_prob=args.induce_prob,
-        induce_offset_weight=args.induce_offset_weight,
-        induce_offset_min=args.induce_offset_min,
-        induce_offset_max=args.induce_offset_max,
-        induce_noise_boost=args.induce_noise_boost,
-        randomize_pick_order=args.randomize_pick_order,
-        nearest_first_pick_order=args.nearest_first_pick_order,
-        hover_jitter_min=args.hover_jitter_min,
-        hover_jitter_max=args.hover_jitter_max,
-        episode_draws=args.episode_draws,
-        frame_jitter=args.frame_jitter,
-        keep_shards=args.keep_shards,
-        no_cameras=args.no_cameras,
-        context=args.context,
-        no_images=args.no_images,
-        backend=args.backend,
-        breaker_min_rate=None if args.breaker_min_rate < 0 else args.breaker_min_rate,
-        breaker_min_runs=args.breaker_min_runs,
-        split_cycles=args.split_cycles,
-        lead_keep=args.lead_keep,
-        sidecar_dir=args.sidecar_dir,
-    )
+    values = {f.name: getattr(args, f.name) for f in fields(CampaignCfg)}
+    values["breaker_min_rate"] = None if args.breaker_min_rate < 0 else args.breaker_min_rate
+    return CampaignCfg(**values)
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:

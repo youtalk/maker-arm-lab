@@ -56,7 +56,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 ALL_PERMUTATIONS = sorted(itertools.permutations(range(4)))
@@ -1742,67 +1742,19 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
             raise ValueError("--context privileged has no heap channel: use camera_box")
         if args.max_cycles_per_stowed is None:
             args.max_cycles_per_stowed = 1.3  # the heap gate's rule (phase B design 5.3)
-    return GateCfg(
-        checkpoint=args.checkpoint,
-        out_dir=args.out_dir,
-        processes=args.processes,
-        num_envs=args.num_envs,
-        seed=args.seed,
-        threshold=args.threshold,
-        ledger=args.ledger,
-        isaaclab_path=args.isaaclab_path,
-        port=args.port,
-        device=args.device,
-        retries=args.retries,
-        n_action_steps=args.n_action_steps,
-        temporal_ensemble_coeff=args.temporal_ensemble_coeff,
-        action_warp=args.action_warp,
-        ensemble_with=args.ensemble_with,
-        pi05=args.pi05,
-        lanes=args.lanes,
-        pi05_num_steps=args.pi05_num_steps,
-        pi05_noise_scale=1.0 if args.pi05_noise_scale is None else args.pi05_noise_scale,
-        pi05_jaw_noise_scale=1.0 if jaw is None else jaw,
-        pi05_jaw_noise_shared=args.pi05_jaw_noise_shared,
-        pi05_jaw_noise_abs=jaw_abs,
-        pi05_retry_noise_scale=retry,
-        pi05_still_noise_scale=args.pi05_still_noise_scale,
-        pi05_still_rad=GateCfg.pi05_still_rad if still[1] is None else still[1],
-        pi05_still_open=GateCfg.pi05_still_open if still[2] is None else still[2],
-        pi05_jaw_latch=args.pi05_jaw_latch or 0,
-        only_processes=args.only_processes,
-        eval_timeout_s=args.eval_timeout_s,
-        backend=args.backend,
-        episode_draws=args.episode_draws,
-        frame_jitter=args.frame_jitter,
-        spatial_scale=args.spatial_scale,
-        context=args.context,
-        heap_k=args.heap_k,
-        parts_seed=args.parts_seed,
-        parts_split=args.parts_split,
-        cycle_budget=args.cycle_budget,
-        max_cycles_per_stowed=args.max_cycles_per_stowed,
-        min_stows_per_hour=args.min_stows_per_hour,
-        heldout_threshold=args.heldout_threshold,
-        gripper=args.gripper,
-        desk_boxes=args.desk_boxes,
-        tray=args.tray,
-        tray_lean=args.tray_lean,
-        deep_box_floor=args.deep_box_floor,
-        families=families,
-        box_draw=args.box_draw,
-        release_lean=args.release_lean,
-        carry_via=args.carry_via,
-        box_unseen=args.box_unseen,
-        heap_family=args.heap_family,
-        passenger_check=args.passenger_check,
-        wall_band_cont=args.wall_band_cont,
-        thin_snap=args.thin_snap,
-        snap_closed=args.snap_closed,
-        seen_seeds=args.seen_seeds,
-        ms7f=ms7f,
-        client_flags=tuple(client_flags),
-    )
+    # Each field has the flag of its name; these are the ones whose flag is not the value.
+    values = {f.name: getattr(args, f.name) for f in fields(GateCfg) if hasattr(args, f.name)}
+    values |= {
+        "pi05_noise_scale": 1.0 if args.pi05_noise_scale is None else args.pi05_noise_scale,
+        "pi05_jaw_noise_scale": 1.0 if jaw is None else jaw,
+        "pi05_still_rad": GateCfg.pi05_still_rad if still[1] is None else still[1],
+        "pi05_still_open": GateCfg.pi05_still_open if still[2] is None else still[2],
+        "pi05_jaw_latch": args.pi05_jaw_latch or 0,
+        "families": families,
+        "ms7f": ms7f,
+        "client_flags": tuple(client_flags),
+    }
+    return GateCfg(**values)
 
 
 def main(argv: list[str] | None = None) -> int:
