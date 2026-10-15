@@ -45,12 +45,16 @@ FEATURES = {
 }
 
 
-def host_root(path, lengths, rng):
+def host_root(path, lengths, rng, labels=False):
     """A v3.0 root of len(lengths) episodes with random state, action and context; the camera
-    roll on either side of +-pi, as rpy_from_quat returns it."""
+    roll on either side of +-pi, as rpy_from_quat returns it. ``labels``: also the int8 label
+    and subtask columns of convert_to_lerobot.py --own_frames labeled, at random."""
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-    ds = LeRobotDataset.create(REPO, 30, FEATURES, root=path, use_videos=True)
+    features = dict(FEATURES)
+    if labels:
+        features |= {n: {"dtype": "int8", "shape": (1,), "names": [n]} for n in dv.LABELS}
+    ds = LeRobotDataset.create(REPO, 30, features, root=path, use_videos=True)
     for n in lengths:
         for _ in range(n):
             env = rng.normal(size=16).astype(np.float32)
@@ -63,6 +67,14 @@ def host_root(path, lengths, rng):
                     "observation.images.wrist": rng.integers(0, 255, (64, 64, 3), np.uint8),
                     "observation.images.overhead": rng.integers(0, 255, (64, 64, 3), np.uint8),
                     "task": "sort the lego bricks into the color-matched bins",
+                    **(
+                        {
+                            "label": rng.integers(0, 3, 1).astype(np.int8),
+                            "subtask": rng.integers(0, 4, 1).astype(np.int8),
+                        }
+                        if labels
+                        else {}
+                    ),
                 }
             )
         ds.save_episode()
@@ -187,3 +199,27 @@ def test_a_fraction_keeps_the_first_episodes_of_each_wave(merged):
 def test_an_existing_out_is_refused(merged, derived):
     with pytest.raises(FileExistsError):
         dv.derive(merged, derived)
+
+
+def test_a_labeled_root_moves_its_labels_into_the_prompt_codes(tmp_path, derived):
+    from lerobot.datasets.aggregate import aggregate_datasets
+
+    from train_pi05 import CODES
+
+    host = host_root(tmp_path / "lane0", [4, 3], np.random.default_rng(3), labels=True)
+    src = tmp_path / "w9/own"  # merged as dagger_vla.py merges its lanes
+    aggregate_datasets([REPO], REPO, roots=[host], aggr_root=src)
+    out = tmp_path / "vla"
+    assert dv.derive(src, out)["frames"] == 7
+    info = json.loads((out / "meta/info.json").read_text())
+    plain = json.loads((derived / "meta/info.json").read_text())
+    assert info["features"].keys() == plain["features"].keys()  # the corpus's features
+    old, new = frames(src), frames(out)
+    assert not set(dv.LABELS) & set(new)
+    want = 3 * old["subtask"] + old["label"]
+    codes = np.load(out / CODES)
+    assert codes.dtype == np.int8 and codes.tolist() == want.tolist()
+    assert not set(dv.LABELS) & set(json.loads((out / "meta/stats.json").read_text()))
+    episodes = dv.read_tables(out / "meta/episodes").column_names
+    assert not [c for c in episodes if c.startswith(("stats/label/", "stats/subtask/"))]
+    assert not (derived / CODES).exists()  # an unlabeled root gets no sidecar

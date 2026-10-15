@@ -36,6 +36,11 @@ consumers and are unchanged):
     initial_state/class_box_mask (C,M) bool     MS7f --categories only: every box of each
         category (the first is class_to_box's), in the same `names` order
     attrs: parts (JSON list of part names, MS6 heap shards only)
+    MS7i ``record_all`` shards only (the heap loop's ``rollout(record_all=True)``, every frame
+    of the episode): obs/loop_cycle (T,) i16 the census cycle ordinal (0 outside a cycle),
+    obs/subtask (T,) i8 the loop's ``core.hold.subtask_step`` id, obs/policy_action (T,7)
+    f32 the server's reply before the loop's serving rules (zeros where the rig drove), and
+    attrs: env_index (int)
     attrs (file level): gripper_mode ("binary" | "continuous", MS6 phase B design 5.4)
 
 Frames are appended per control step. Images go to resizable datasets under ``inflight/``
@@ -124,6 +129,9 @@ class ShardRecorder:
             "target_part": [],
             "context_box": [],
             "context_target": [],
+            "loop_cycle": [],
+            "subtask": [],
+            "policy_action": [],
         }
 
     # -- episode lifecycle --------------------------------------------------
@@ -172,7 +180,12 @@ class ShardRecorder:
         target_part: int = -1,
         context_box: np.ndarray | None = None,
         context_target: np.ndarray | None = None,
+        loop_cycle: int | None = None,
+        subtask: int | None = None,
+        policy_action: np.ndarray | None = None,
     ) -> None:
+        if not self._open[env_index]:
+            return  # an episode the loop ended: its env still steps with the batch
         s = self._scalars[env_index]
         s["joint_pos_abs"].append(np.asarray(joint_pos, dtype=np.float32).copy())
         s["actions"].append(np.asarray(action, dtype=np.float32).copy())
@@ -188,6 +201,10 @@ class ShardRecorder:
             s["context_box"].append(np.asarray(context_box, dtype=np.float32).copy())
         if context_target is not None:
             s["context_target"].append(np.asarray(context_target, dtype=np.float32).copy())
+        if loop_cycle is not None:
+            s["loop_cycle"].append(np.int16(loop_cycle))
+            s["subtask"].append(np.int8(subtask))
+            s["policy_action"].append(np.asarray(policy_action, dtype=np.float32).copy())
         if self.cameras:
             imgs = self._images[env_index]
             imgs["wrist_rgb"].append(np.asarray(wrist, dtype=np.uint8).copy())
@@ -198,6 +215,8 @@ class ShardRecorder:
                 self._flush_images(env_index)
 
     def post_step(self, env_index: int, joint_targets: np.ndarray, clamped: bool) -> None:
+        if not self._open[env_index]:
+            return
         s = self._scalars[env_index]
         s["joint_targets"].append(np.asarray(joint_targets, dtype=np.float32).copy())
         s["clamped"].append(bool(clamped))
@@ -241,6 +260,11 @@ class ShardRecorder:
             if s[key]:
                 ds = obs.create_dataset(key, data=np.stack(s[key][:steps]))
                 ds.attrs["names"] = json.dumps(list(names))
+        if s["loop_cycle"]:  # MS7i record_all
+            group.attrs["env_index"] = env_index
+            obs.create_dataset("loop_cycle", data=np.asarray(s["loop_cycle"][:steps], np.int16))
+            obs.create_dataset("subtask", data=np.asarray(s["subtask"][:steps], np.int8))
+            obs.create_dataset("policy_action", data=np.stack(s["policy_action"][:steps]))
         if self.cameras:
             images = obs.create_group("images")
             for key, ds in self._image_ds[env_index].items():

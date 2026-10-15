@@ -246,3 +246,29 @@ def test_client_sends_the_retry_flag_only_when_given(monkeypatch):
     shutdown()
     assert sent == [None, [False, True], [True, True]]
     assert seen == [None, None, [True, False]]
+
+
+def test_client_sends_the_prompt_ids_as_int16_only_when_given(monkeypatch):
+    """The subtask ids ride on the wire when given, and the ACT server ignores them."""
+    import policy_client
+    import policy_protocol
+
+    sent, real = [], policy_protocol.send_message
+
+    def send(socket, header, arrays=None):
+        if header["type"] == "step":
+            sent.append((arrays or {}).get(policy_protocol.PROMPT_KEY))
+        real(socket, header, arrays)
+
+    monkeypatch.setattr(policy_client.policy_protocol, "send_message", send)
+
+    def fake_policy(state, wrist, overhead, context=None, replan=None):
+        return np.zeros((state.shape[0], *ACTION_SHAPE), dtype="float32")
+
+    endpoint, shutdown = _serve(policy_fn=fake_policy, reset_fn=lambda: None, policy_id="fake:p")
+    client = ServerPolicy(endpoint)
+    client.step(*_obs(2))
+    client.step(*_obs(2), prompt=[3, 0])
+    client.close()
+    shutdown()
+    assert sent[0] is None and sent[1].dtype == np.int16 and sent[1].tolist() == [3, 0]

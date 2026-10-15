@@ -40,6 +40,14 @@ hover for the rest of its cycle, and --retry_noise_scale S forwards each row who
 set with its arm noise at S in place of --noise_scale, in a forward of their own; the jaw keeps its
 own rules, and the still rule and the latch apply as before. Its policy id part is ``+retry<S>``,
 right after the sampling parts.
+MS7i Run A (the heap loop's ``--pi05_prompt``) sends each env's subtask id under the wire's
+optional ``prompt`` key. The server reads a row's id only when it refills that row's queue, so a
+new id between two refills changes nothing and never forces a replan: the chunk in play, its
+latched jaw included, plays on (MS7i review C6). A refilled row's task is Run A's serving prompt
+``train_pi05.prompt(3 * id + POSITIVE)``, which always ends in "Advantage: positive"; a row
+without the key keeps derive_vla_dataset.TASK, so a request without it sends the bytes it sent
+before. An id outside [0, 4) is bad_obs. The policy id does not change: the client's loop block
+records the switch.
 2026-10-05 on Machine A's RTX 5090, shared with ACT read servers, on a 50-step dry-run checkpoint:
 one forward of 1 row took 172-207 ms, 3 rows 245-291 ms and 6 rows 346 ms, at 9.4 GiB peak.
 Every forward prints "FORWARD rows=N ms=T" (plus " retry=K", the rows forwarded at the retry
@@ -74,6 +82,7 @@ from policy_protocol import (
     ACTION_SHAPE,
     CONTEXT_KEY,
     OBS_SCHEMA,
+    PROMPT_KEY,
     PROTOCOL_VERSION,
     REPLAN_KEY,
     RETRY_KEY,
@@ -87,6 +96,7 @@ from policy_server import (
     _read_action_space_marker,
     warp_chunk,
 )
+from train_pi05 import PHRASES, POSITIVE, prompt
 
 CONTEXT_DIM = 16
 TOKENIZER = "tokenizer_processor"  # the registry name of lerobot's prompt tokenizer step
@@ -149,9 +159,18 @@ def still_rows(chunk: np.ndarray, state: np.ndarray, rad: float, open_frac: floa
     return np.flatnonzero((moved < rad) & (state[:, 6] >= open_frac))
 
 
+def tasks(prompts, rows: int) -> list[str]:
+    """Each row's task string: TASK without ids (the key absent, bytes as before), else Run A's
+    serving prompt of the row's subtask id, and TASK for an id of -1 (a lane without the key)."""
+    if prompts is None:
+        return [TASK] * rows
+    return [TASK if p < 0 else prompt(3 * int(p) + POSITIVE) for p in prompts]
+
+
 class SharedServer:
     """The protocol and the queues, with the model injected: ``predict_chunk(obs)`` takes
-    {"state": (n, 23), "wrist": (n, 224, 224, 3) uint8, "overhead": ...} and returns the
+    {"state": (n, 23), "wrist": (n, 224, 224, 3) uint8, "overhead": ...} (and "prompt", the (n,)
+    int16 subtask ids, when a lane of the forward sends them) and returns the
     unnormalized (n, n_action_steps, 7) chunk. ``process`` is socket-free for the tests. With
     ``still`` = (S2, E, F), the still rows of a forward (``still_rows`` at E and F) get
     ``predict_chunk(obs of those rows, S2)``'s chunk. ``jaw_latch`` L > 0 passes every chunk
@@ -223,6 +242,9 @@ class SharedServer:
         width = 0 if CONTEXT_KEY not in arrays else int(arrays[CONTEXT_KEY].shape[1])
         if width != CONTEXT_DIM:
             return f"context width {width}, this policy takes {CONTEXT_DIM}"
+        ids = arrays.get(PROMPT_KEY)
+        if ids is not None and not ((ids >= 0) & (ids < len(PHRASES))).all():
+            return f"prompt ids {ids.tolist()}, want each in [0, {len(PHRASES)})"
         return None
 
     def process(self, requests: list) -> tuple[list, bool]:
@@ -287,6 +309,12 @@ class SharedServer:
                 ),
                 **{k: np.stack([rows[lane][k][i] for lane, i in need]) for k in IMAGE_KEYS},
             }
+            if any(PROMPT_KEY in rows[lane] for lane, _ in need):  # read at the refill only
+                ids = [
+                    rows[lane][PROMPT_KEY][i] if PROMPT_KEY in rows[lane] else -1
+                    for lane, i in need
+                ]
+                obs["prompt"] = np.asarray(ids, dtype=np.int16)
             start = time.perf_counter()
             retried = np.flatnonzero(retrying) if self._retry is not None else []
             try:
@@ -448,7 +476,8 @@ def load_pi05(
         sampled = sampled or jaw_noise_abs is not None
         if sampled:  # else sample_actions' own draw
             noise["noise"] = initial_noise(rows, scale)
-        batch = {"observation.state": torch.from_numpy(obs["state"]), "task": [TASK] * rows}
+        batch = {"observation.state": torch.from_numpy(obs["state"])}
+        batch["task"] = tasks(obs.get("prompt"), rows)
         for key, name in IMAGE_KEYS.items():
             batch[name] = torch.from_numpy(obs[key]).permute(0, 3, 1, 2).to(torch.float32) / 255.0
         with torch.inference_mode():

@@ -22,6 +22,9 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
     env.context_mode, env.obs_buf["context"], env.context_camera, env.context_privileged
     env.oracle_actor (N,) int16, set by the DAgger loop: 0 records nothing, k records the
         frame as takeover k
+    env.record_all (MS7i, with a recorder): every frame is recorded, actor 0 too, with the
+        heap loop's env.loop_cycle (N,) int16, env.loop_subtask (N,) int8 and
+        env.loop_policy_action (N,7) float32 (``mj.recorder``'s three record_all datasets)
     env.gripper_mode ("binary" | "continuous") and env.jaw_targets(raw)
     heap mode (MS6, ``parts`` given): env.parts, env.destination_bins (N,) long,
         env.stow_half_extents, env.target_part (N,) int16 (the overhead marker; from the rig's
@@ -282,6 +285,7 @@ class MjLegoSortEnv:
         export_dir: Path | str | None = None,
         shard_name: str = "shard",
         export_all: bool = False,
+        record_all: bool = False,
         gripper_mode: str = "binary",
         desk_boxes: int = 0,
         tray: bool = False,
@@ -542,6 +546,11 @@ class MjLegoSortEnv:
             if export_dir is not None
             else None
         )
+        self.record_all = record_all
+        if record_all:  # MS7i: the heap loop writes these on every step
+            self.loop_cycle = torch.zeros(num_envs, dtype=torch.int16)
+            self.loop_subtask = torch.zeros(num_envs, dtype=torch.int8)
+            self.loop_policy_action = torch.zeros(num_envs, 7)
         self.recorder_manager = (
             self.recorder
             if self.recorder is not None
@@ -593,9 +602,16 @@ class MjLegoSortEnv:
             brick = getattr(self, "oracle_cycle_brick", None)
             for i in range(self.num_envs):
                 who = 1 if actor is None else int(actor[i])
-                if who == 0:
+                if who == 0 and not self.record_all:
                     continue  # a policy-driven DAgger frame: not recorded (design 6.4)
                 recorded[i] = True
+                extra = {}
+                if self.record_all:
+                    extra = {
+                        "loop_cycle": int(self.loop_cycle[i]),
+                        "subtask": int(self.loop_subtask[i]),
+                        "policy_action": self.loop_policy_action[i].numpy(),
+                    }
                 self.recorder.pre_step(
                     i,
                     robot._joint_pos[i],
@@ -611,6 +627,7 @@ class MjLegoSortEnv:
                     target_part=int(self.target_part[i]) if heap else -1,
                     context_box=self.context_box[i] if heap else None,
                     context_target=self.context_target[i] if heap else None,
+                    **extra,
                 )
         step_limit = GRIPPER_RATE_M_PER_S / CONTROL_HZ
         self._grip_ctrl += np.clip(targets[:, 6:] - self._grip_ctrl, -step_limit, step_limit)

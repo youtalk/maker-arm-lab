@@ -77,3 +77,40 @@ def test_the_served_context_roll_index_is_the_camera_roll():
     text = (CONVERT.parent / "policy_server.py").read_text()
     index = int(re.search(r"^CONTEXT_ROLL = (\d+)", text, re.MULTILINE).group(1))
     assert CONTEXT_CAMERA_NAMES.index("overhead_cam_roll") == index
+
+
+def test_the_own_frames_labels_copy_the_subtasks_and_the_census_rules():
+    import ast
+
+    from maker_arm_lab.core import hold, loop, oracle
+
+    text = CONVERT.read_text()
+
+    def pinned(name):
+        found = re.search(rf"^{name} = (.+)$", text, re.MULTILINE).group(1)
+        return ast.literal_eval(found.split("  #")[0])
+
+    assert pinned("SUBTASKS") == hold.SUBTASKS
+    assert pinned("LIFT_MIN_RISE") == oracle.LIFT_MIN_RISE
+    assert pinned("CENSUS_MIN_HELD_STEPS") == loop.CENSUS_MIN_HELD_STEPS
+    failing, boxes = pinned("FAILING_PLACES"), pinned("BOX_PLACES")
+    assert sorted(failing + boxes) == sorted(loop.RELEASE_PLACES)
+    assert set(boxes) == {"right_box", "wrong_box"}
+
+
+def test_run_a_s_phrases_follow_the_subtask_ids_and_the_task_is_derive_s():
+    from maker_arm_lab.core.hold import SUBTASKS
+
+    text = (CONVERT.parent / "train_pi05.py").read_text()
+    pinned = re.search(r"^PHRASES = \(([^)]*)\)", text, re.MULTILINE).group(1)
+    phrases = tuple(v.strip().strip('"') for v in pinned.split(","))
+    meaning = {  # MS7i design rev1 5.2: each subtask's phrase
+        "reach": "reach the marked part",
+        "grasp": "close on the part",
+        "carry": "carry it to its box",
+        "release": "release it",
+    }
+    assert phrases == tuple(meaning[name] for name in SUBTASKS)
+    task = re.compile(r'^TASK = "([^"]+)"', re.MULTILINE)
+    derive = (CONVERT.parent / "derive_vla_dataset.py").read_text()
+    assert task.search(text).group(1) == task.search(derive).group(1)

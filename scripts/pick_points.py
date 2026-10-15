@@ -17,25 +17,32 @@ import traceback
 CHUNK = 100_000  # rows per fk_batch call: bounds the Python lists the binding builds
 
 
+def pick_points(q):
+    """(N, 6) URDF joint rows (numpy) -> the (N, 3) pick points (numpy)."""
+    import numpy as np
+    import torch
+
+    from maker_arm_lab.core.global_ik import GlobalIK
+    from maker_arm_lab.robots.frames import PICK_OFFSET_MEASURED
+
+    ik = GlobalIK()
+    offset = torch.tensor(PICK_OFFSET_MEASURED, dtype=torch.float64)
+    picks = [np.zeros((0, 3))]
+    for start in range(0, len(q), CHUNK):
+        pos, rot = ik.fk_batch(torch.from_numpy(q[start : start + CHUNK]))
+        picks.append((pos + rot @ offset).numpy())
+    return np.concatenate(picks)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     try:
         if len(argv) != 2:
             raise ValueError("usage: pick_points.py IN.npy OUT.npy")
         import numpy as np
-        import torch
-
-        from maker_arm_lab.core.global_ik import GlobalIK
-        from maker_arm_lab.robots.frames import PICK_OFFSET_MEASURED
 
         q = np.load(argv[0]).reshape(-1, 6)
-        ik = GlobalIK()
-        offset = torch.tensor(PICK_OFFSET_MEASURED, dtype=torch.float64)
-        picks = [np.zeros((0, 3))]
-        for start in range(0, len(q), CHUNK):
-            pos, rot = ik.fk_batch(torch.from_numpy(q[start : start + CHUNK]))
-            picks.append((pos + rot @ offset).numpy())
-        np.save(argv[1], np.concatenate(picks))
+        np.save(argv[1], pick_points(q))
     except Exception as err:  # noqa: BLE001 -- every failure must become a token
         print(f"PICK_FAIL {type(err).__name__}: {err}", flush=True)
         traceback.print_exc()

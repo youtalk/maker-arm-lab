@@ -19,7 +19,11 @@ unchanged. Before the first optimizer step it stops the run with ``PREFLIGHT_FAI
   ``PREFLIGHT_STATS`` (the corpus ``meta/stats.json``): a warm start and a resume take them
   from the dataset root (lerobot_train.py:279-297). The image statistics are left out: the
   images are not normalized, and ``use_imagenet_stats`` replaces them;
-- the tokenizer step pads to ``PREFLIGHT_MAX_LENGTH``;
+- the tokenizer step pads to ``PREFLIGHT_MAX_LENGTH``, and the longest prompt of the run stays
+  under it: lerobot truncates a longer one silently, "Action:" first. The prompts are
+  ``train_pi05.TASK``, or with ``--prompt_codes`` the 12 of ``train_pi05.prompt``, each with a
+  state of three-digit bins (the longest of [-1, 255]). 2026-10-13, the cached paligemma
+  tokenizer: TASK 114 tokens, Run A's longest 124, with BOS;
 - the forward that trains is not lerobot's stock one, and its first batch carries
   ``action_is_pad`` of shape (batch, chunk).
 
@@ -82,10 +86,21 @@ def patch_max_length(model_dir: str, max_length: int) -> int:
     return old
 
 
-def install(train_module, policy_cls, stats: dict, max_length: int) -> None:
+def longest_prompt(step, tasks: list[str], state_dim: int) -> int:
+    """Tokens of the longest of ``tasks`` in lerobot's pi05 prompt (processor_pi05.py), BOS
+    included, through the tokenizer of ``step``, the state at three-digit bins."""
+    state = " ".join(["255"] * state_dim)
+    return max(
+        len(step.input_tokenizer(f"Task: {t}, State: {state};\nAction: ")["input_ids"])
+        for t in tasks
+    )
+
+
+def install(train_module, policy_cls, stats: dict, max_length: int, tasks: list[str]) -> None:
     """Wrap ``policy_cls.from_pretrained`` and ``train_module.make_pre_post_processors``; ``stats``
-    is the flat {"feature.stat": values} of the corpus file (``file_stats``). The
-    checks run when the processors are built, and the forward check at the first forward."""
+    is the flat {"feature.stat": values} of the corpus file (``file_stats``) and ``tasks`` the
+    run's task strings. The checks run when the processors are built, and the forward check at
+    the first forward."""
     loads = []
     load = policy_cls.from_pretrained
     stock = policy_cls.forward
@@ -111,9 +126,14 @@ def install(train_module, policy_cls, stats: dict, max_length: int) -> None:
         for name, got in (("normalizer", stats_sha(norm)), ("unnormalizer", stats_sha(unnorm))):
             if got != want:
                 raise PreflightError(f"{name} stats sha {got[:12]} != corpus {want[:12]}")
-        tokens = _step(pre, "TokenizerProcessorStep").max_length
+        tokenizer = _step(pre, "TokenizerProcessorStep")
+        tokens = tokenizer.max_length
         if tokens != max_length:
             raise PreflightError(f"the tokenizer pads to {tokens}, want {max_length}")
+        state_dim = np.asarray(stats["observation.state.mean"]).size
+        longest = longest_prompt(tokenizer, tasks, state_dim)
+        if longest >= tokens:
+            raise PreflightError(f"the longest prompt takes {longest} of {tokens} tokens")
         masked = policy_cls.forward
         if masked is stock:
             raise PreflightError("the policy trains with lerobot's stock forward (no mask)")
@@ -129,6 +149,7 @@ def install(train_module, policy_cls, stats: dict, max_length: int) -> None:
                     raise PreflightError(f"action_is_pad {got} at the forward, want {want_shape}")
                 print(
                     f"PREFLIGHT_OK full_load=1 stats_sha={want[:12]} max_length={tokens}"
+                    f" longest={longest}"
                     f" action_is_pad={want_shape} pad_share={float(pad.float().mean()):.4f}",
                     flush=True,
                 )
@@ -152,8 +173,11 @@ def train(argv: list[str]) -> None:
     from lerobot.policies.pi05.modeling_pi05 import PI05Policy
     from lerobot.scripts import lerobot_train
 
+    from train_pi05 import PHRASES, PROMPTS_FLAG, TASK, prompt  # this file's folder
+
     stats = file_stats(os.environ["PREFLIGHT_STATS"])
-    install(lerobot_train, PI05Policy, stats, int(os.environ["PREFLIGHT_MAX_LENGTH"]))
+    tasks = [prompt(c) for c in range(3 * len(PHRASES))] if PROMPTS_FLAG in argv else [TASK]
+    install(lerobot_train, PI05Policy, stats, int(os.environ["PREFLIGHT_MAX_LENGTH"]), tasks)
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train_pi05.py")
     sys.argv = [script, *argv]
     runpy.run_path(script, run_name="__main__")

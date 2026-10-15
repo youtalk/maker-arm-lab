@@ -363,3 +363,557 @@ def test_a_shard_without_the_attribute_is_binary(tmp_path):
     c2l.convert([shard], tmp_path / "ds", "t/x", 30)
     info = json.loads((tmp_path / "ds" / "meta" / "info.json").read_text())
     assert info["features"]["action"]["names"][6] == "gripper"
+
+
+def test_reopen_lead_is_the_teacher_opening_jaws_the_policy_left_closed():
+    cmd = np.full(6, 0.016)
+    opening = np.array([0.0, 0.004, 0.010, 0.0145, 0.016, 0.016])
+    assert c2l.reopen_lead(opening, cmd, 0.002) == 3  # within 2 mm of the command at frame 3
+    assert c2l.reopen_lead(np.full(6, 0.016), cmd, 0.002) == 0  # starts open
+    assert c2l.reopen_lead(np.full(6, 0.006), np.full(6, 0.0036), 0.002) == 0  # holds a part
+    blocked = np.array([0.016, 0.016, 0.0, 0.0])  # the jaws never open: the first close ends it
+    assert c2l.reopen_lead(np.full(4, 0.002), blocked, 0.002) == 2
+    assert c2l.reopen_lead(np.zeros(3), cmd[:3], 0.002) == 3
+
+
+def _continuous(shard, per_jaw, command):
+    """Give a _shard both jaws at ``per_jaw`` and a continuous gap command."""
+    with h5py.File(shard, "a") as f:
+        f.attrs["gripper_mode"] = "continuous"
+        g = f["data/demo_0"]
+        state = g["obs/joint_pos_abs"][:]
+        state[:, 6] = state[:, 7] = per_jaw
+        g["obs/joint_pos_abs"][...] = state
+        actions = g["actions"][:]
+        actions[:, 6] = command
+        g["actions"][...] = actions
+    return shard
+
+
+def test_drop_reopen_lead_cuts_each_takeover_and_counts_it(tmp_path):
+    # takeover 1 opens closed jaws over its first 3 frames, takeover 2 starts open
+    shard = _shard(tmp_path / "s.hdf5", actor=[1] * 5 + [2] * 3, bricks=[0] * 5 + [1] * 3)
+    per_jaw = np.array([0.0, 0.002, 0.005, 0.00725, 0.008, 0.008, 0.008, 0.008])
+    _continuous(shard, per_jaw, 0.016)
+    kw = {"split_cycles": True, "dagger": True, "context": "camera", "gripper": "continuous"}
+    reopen = c2l.ReopenLead(0.002)
+    assert c2l.convert([shard], tmp_path / "ds", "t/x", 30, reopen=reopen, **kw) == (2, 2, 1, 0)
+    assert reopen == c2l.ReopenLead(0.002, frames=3, takeovers=1, emptied=0)
+    info = json.loads((tmp_path / "ds" / "meta" / "info.json").read_text())
+    assert info["total_frames"] == 5
+    assert c2l.convert([shard], tmp_path / "off", "t/x", 30, **kw) == (2, 2, 1, 0)
+    with pytest.raises(ValueError, match="dagger and gripper continuous"):
+        c2l.convert([shard], tmp_path / "b", "t/x", 30, split_cycles=True, reopen=reopen)
+
+
+def test_a_takeover_that_never_opens_is_not_written(tmp_path):
+    shard = _continuous(_shard(tmp_path / "s.hdf5", actor=[1] * 8), 0.0, 0.016)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--shards", str(shard), "--root", str(tmp_path / "ds")]
+        + ["--split_cycles", "--dagger", "--gripper", "continuous", "--drop_reopen_lead", "0.002"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.stdout.splitlines()[-1] == (
+        "CONVERT_OK episodes=0 total=0 read=1 skipped=0 reopen_tol=0.002 reopen_frames=8"
+        " reopen_takeovers=1 reopen_emptied=1"
+    ), result.stdout + result.stderr
+
+
+# -- MS7i --own_frames -----------------------------------------------------------------------
+
+NEG, POS, UNT = c2l.TAG_NEGATIVE, c2l.TAG_POSITIVE, c2l.TAG_UNTAGGED
+REACH, GRASP, CARRY, RELEASE = range(4)
+
+
+def _row(frames, **fields):
+    """A census row of ``frames`` steps: nothing held, nothing lifted, no event."""
+    row = {
+        "open_steps": frames,
+        "closed_steps": 0,
+        "first_close_at": None,
+        "off_x": None,
+        "off_y": None,
+        "off_z": None,
+        "max_rise": 0.0,
+        "held_steps": 0,
+        "first_held": -1,
+        "last_held": -1,
+        "last_held_at": None,
+        "first_held_at": None,
+        "release_place": None,
+        "release_at": None,
+        "box": -1,
+    }
+    return row | fields
+
+
+def _episode(n=60, s=5, last=54):
+    """One cycle on frames s..last of an n-frame episode, policy frames everywhere: the
+    per-frame cycle, actor, phase and subtask arrays."""
+    cycle = np.zeros(n, np.int16)
+    cycle[s : last + 1] = 1
+    return cycle, np.zeros(n, np.int16), np.full(n, -1, np.int8), np.zeros(n, np.int8)
+
+
+def _labels(row, cycle, actor, phase, subtask, cls="close_miss", reason="budget", final=(-1,) * 4):
+    return c2l.own_labels([row], [cls], [reason], list(final), cycle, actor, phase, subtask)
+
+
+def _window(label, lo, hi):
+    """The frames lo..hi are negative and every other frame untagged."""
+    want = np.full(len(label), UNT, np.int8)
+    want[lo : hi + 1] = NEG
+    return np.array_equal(label, want)
+
+
+def test_an_off_target_first_close_ends_a_30_frame_window_clipped_to_the_cycle_start():
+    cycle, actor, phase, subtask = _episode()
+    row = _row(50, first_close_at=40, off_x=0.0, off_y=0.0, off_z=0.03, max_rise=0.06)
+    label, (info,) = _labels(row, cycle, actor, phase, subtask, cls="lifted_lost")
+    assert info["events"]["off_target"] == [45] and _window(label, 16, 45)
+    assert (info["first"], info["last"], info["carry_start"]) == (5, 54, None)
+    row |= {"first_close_at": 10, "off_z": 0.0, "off_x": 0.015, "off_y": 0.015}  # 21 mm in xy
+    label, _ = _labels(row, cycle, actor, phase, subtask, cls="lifted_lost")
+    assert _window(label, 5, 15)
+    row |= {"off_x": 0.01, "off_y": 0.01}  # 14 mm: on the target
+    assert not _labels(row, cycle, actor, phase, subtask, cls="lifted_lost")[0].any()
+    # The window covers policy frames only.
+    phase[20:25] = 3
+    row |= {"first_close_at": 40, "off_z": 0.03}
+    label, _ = _labels(row, cycle, actor, phase, subtask, cls="lifted_lost")
+    assert (
+        (label[20:25] == UNT).all() and (label[16:20] == NEG).all() and (label[25:46] == NEG).all()
+    )
+
+
+def test_every_quick_reopen_and_the_last_close_of_a_cycle_with_no_lift_are_events():
+    cycle, actor, phase, subtask = _episode()
+    subtask[20:25] = GRASP  # closed 20..24, open at 25: a re-open 5 steps after its close
+    subtask[26:40] = GRASP  # closed 26..39, open at 40: 14 steps, no event
+    subtask[45:55] = GRASP  # the last close, held to the cycle end
+    label, (info,) = _labels(_row(50, held_steps=3), cycle, actor, phase, subtask)
+    assert info["events"]["reopen"] == [25] and info["events"]["no_lift"] == [45]
+    assert _window(label, 5, 45)  # 5..25 and 16..45
+    # A stowed cycle has no no-lift event, and neither has one that never closed.
+    _, (info,) = _labels(_row(50), cycle, actor, phase, subtask, cls="stowed")
+    assert info["events"]["no_lift"] == []
+    _, (info,) = _labels(_row(50), *_episode(), cls="no_close")
+    assert info["events"]["no_lift"] == [] and info["events"]["reopen"] == []
+    # A close of fewer than REOPEN_MIN_CLOSED steps is a command flicker: no event.
+    cycle, actor, phase, subtask = _episode()
+    subtask[20:22] = GRASP  # closed 20..21, open at 22
+    _, (info,) = _labels(_row(50, held_steps=3), cycle, actor, phase, subtask, cls="stowed")
+    assert info["events"]["reopen"] == []
+
+
+def test_a_takeover_ends_the_window_on_the_last_policy_frame_and_a_decline_on_the_cycle_end():
+    cycle, actor, phase, subtask = _episode()
+    actor[30:55], phase[30:55] = 1, 2
+    label, (info,) = _labels(_row(50), cycle, actor, phase, subtask, cls="stowed")
+    assert info["events"]["takeover"] == [29] and _window(label, 5, 29)
+    cycle, actor, phase, subtask = _episode()
+    label, (info,) = _labels(_row(50), cycle, actor, phase, subtask, reason="takeover_declined")
+    assert info["events"]["takeover"] == [54] and _window(label, 25, 54)
+
+
+def test_a_slip_of_a_lifted_part_and_a_release_off_the_boxes_are_events():
+    cycle, actor, phase, subtask = _episode()
+    subtask[20:41] = CARRY  # the frame after the last held step (s + 30 + 1 = 36) reads closed
+    row = _row(50, max_rise=0.06, held_steps=5, last_held=2, last_held_at=30)  # no positive
+    label, (info,) = _labels(row, cycle, actor, phase, subtask, cls="lifted_lost")
+    assert info["events"]["lost"] == [36] and _window(label, 7, 36)
+    # A part that the opening jaws let go of over a box is no slip.
+    boxed = row | {"release_place": "right_box", "release_at": 40}
+    _, (info,) = _labels(boxed, cycle, actor, phase, subtask, cls="stowed")
+    assert info["events"]["lost"] == []
+    subtask[36:41] = RELEASE  # an open there is a release, not a slip
+    _, (info,) = _labels(row, cycle, actor, phase, subtask, cls="lifted_lost")
+    assert info["events"]["lost"] == []
+    for place, hit in (("desk", [45]), ("rim", [45]), ("tray", [45]), ("wrong_box", [])):
+        row |= {"release_place": place, "release_at": 40}
+        _, (info,) = _labels(row, cycle, actor, phase, subtask, cls="lifted_lost")
+        assert info["events"]["release"] == hit, place
+
+
+def _clean(cycle, actor, phase, subtask):
+    """A clean pick of part 2: reach 5..14, grasp 15..24, carry 25..39, release 40..54, its
+    release over box 1 at cycle step 36."""
+    subtask[15:25], subtask[25:40], subtask[40:55] = GRASP, CARRY, RELEASE
+    row = _row(50, max_rise=0.08, held_steps=20, first_held=2, last_held=2, last_held_at=34)
+    return row | {"first_held_at": 12, "release_place": "right_box", "release_at": 36, "box": 1}
+
+
+def test_a_clean_grasp_and_a_carry_the_policy_ends_in_its_served_box_are_positive():
+    cycle, actor, phase, subtask = _episode()
+    row = _clean(cycle, actor, phase, subtask)
+    label, (info,) = _labels(row, cycle, actor, phase, subtask, "stowed", "stowed", (-1, -1, 1, -1))
+    assert info["carry_start"] == 25 and (label[5:55] == POS).all()
+    assert (label[:5] == UNT).all() and (label[55:] == UNT).all()
+    # A classifier's wrong box: the part rests in the served box, so the carry stays positive.
+    row_w = row | {"release_place": "wrong_box", "box": 3}
+    label, _ = _labels(row_w, cycle, actor, phase, subtask, final=(-1, -1, 3, -1))
+    assert (label[25:55] == POS).all()
+    # The policy's wrong box: the box served was right, the part rests in another.
+    label, _ = _labels(row, cycle, actor, phase, subtask, final=(-1, -1, 3, -1))
+    assert (label[5:25] == POS).all() and (label[25:55] == UNT).all()
+    # A handoff finished the carry: untagged.
+    label, _ = _labels(
+        row | {"handoff": "placed"}, cycle, actor, phase, subtask, final=(-1, -1, 1, -1)
+    )
+    assert (label[5:25] == POS).all() and (label[25:55] == UNT).all()
+    # A re-open before the carry spoils the grasp segment; the window wins where it lands.
+    sub = subtask.copy()
+    sub[18] = REACH
+    label, (info,) = _labels(row, cycle, actor, phase, sub, final=(-1, -1, 1, -1))
+    assert info["events"]["reopen"] == [18] and (label[5:19] == NEG).all()
+    assert (label[19:25] == UNT).all() and (label[25:55] == POS).all()
+    # An open mid-carry, more than RELEASE_LEAD steps before the release: no positive carry.
+    sub = subtask.copy()
+    sub[28] = RELEASE
+    label, (info,) = _labels(row, cycle, actor, phase, sub, final=(-1, -1, 1, -1))
+    assert info["events"]["reopen"] == [] and (label[5:25] == POS).all()
+    assert (label[25:55] == UNT).all()
+    sub[28], sub[31:40] = CARRY, RELEASE  # opens RELEASE_LEAD steps before the release (41)
+    label, _ = _labels(row, cycle, actor, phase, sub, final=(-1, -1, 1, -1))
+    assert (label[5:55] == POS).all()
+    # A census hold that begins after the carry start (frame 25): the carry read is false.
+    label, _ = _labels(
+        row | {"first_held_at": 21}, cycle, actor, phase, subtask, final=(-1, -1, 1, -1)
+    )
+    assert not label.any()
+    # A close and a quick open after the release is no failing re-open.
+    sub = subtask.copy()
+    sub[44:48] = CARRY
+    label, (info,) = _labels(row, cycle, actor, phase, sub, final=(-1, -1, 1, -1))
+    assert info["events"]["reopen"] == [] and (label[5:55] == POS).all()
+
+
+def test_a_takeover_carry_stays_untagged_and_a_part_picked_again_is_no_positive_carry():
+    cycle, actor, phase, subtask = _episode()
+    row = _clean(cycle, actor, phase, subtask)
+    actor[45:55], phase[45:55] = 1, 7
+    label, (info,) = _labels(row, cycle, actor, phase, subtask, final=(-1, -1, 1, -1))
+    assert info["events"]["takeover"] == [44]
+    assert (label[15:45] == NEG).all() and (label[5:15] == POS).all() and (label[45:] == UNT).all()
+    cycle, actor, phase, subtask = _episode(n=80)
+    row = _clean(cycle, actor, phase, subtask)
+    cycle[60:70] = 2
+    again = _row(10, first_held=2, last_held=2, held_steps=10)
+    label, _ = c2l.own_labels(
+        [row, again],
+        ["stowed", "close_miss"],
+        ["stowed", "budget"],
+        [-1, -1, 1, -1],
+        cycle,
+        actor,
+        phase,
+        subtask,
+    )
+    assert (label[5:25] == POS).all() and (label[25:55] == UNT).all()
+
+
+def test_the_join_raises_on_any_mismatch():
+    cycle, actor, phase, subtask = _episode()
+    with pytest.raises(RuntimeError, match="census steps"):
+        _labels(_row(49), cycle, actor, phase, subtask)
+    split = cycle.copy()
+    split[30] = 0
+    split[55] = 1
+    with pytest.raises(RuntimeError, match="census steps"):
+        _labels(_row(50), split, actor, phase, subtask)
+    extra = cycle.copy()
+    extra[56:58] = 2
+    with pytest.raises(RuntimeError, match="reaches 2"):
+        _labels(_row(50), extra, actor, phase, subtask)
+    # A row whose cycle has no frame (it opened and closed with no census step) joins empty.
+    label, infos = c2l.own_labels(
+        [_row(50), _row(0)],
+        ["close_miss"] * 2,
+        ["budget"] * 2,
+        [-1] * 4,
+        cycle,
+        actor,
+        phase,
+        subtask,
+    )
+    assert infos[1]["first"] is None and not label.any()
+
+
+def _own_shard(path, cycle, actor, phase, subtask, rows, final_box, classes=None, reasons=None):
+    """A record_all shard of one demo and its payload ``<name>.meta.json``."""
+    n = len(cycle)
+    _shard(path, frames=n, actor=actor, box=True, target=True, success=False)
+    with h5py.File(path, "a") as f:
+        f.attrs["gripper_mode"] = "continuous"
+        g = f["data/demo_0"]
+        g.attrs["env_index"] = 0
+        g["obs/cycle_phase"][...] = phase
+        g.create_dataset("obs/loop_cycle", data=cycle)
+        g.create_dataset("obs/subtask", data=subtask)
+        g.create_dataset("obs/policy_action", data=np.zeros((n, 7), np.float32))
+    payload = {
+        "shard": f"/elsewhere/{path.name}",
+        "record_all": True,
+        "episodes": [
+            {
+                "env_index": 0,
+                "steps": n,
+                "cycle_census": rows,
+                "cycle_classes": classes or ["stowed"] * len(rows),
+                "cycle_reasons": reasons or ["stowed"] * len(rows),
+                "final_box": final_box,
+            }
+        ],
+    }
+    path.with_name(path.stem + ".meta.json").write_text(json.dumps(payload))
+    return path
+
+
+def _two_cycles(tmp_path, name="proc_0.hdf5"):
+    """Cycle 1 clean (positive), a handoff's rig frames 55..57, frames 58..59 between cycles,
+    cycle 2 a close miss whose last close is an event (frames 60..79)."""
+    cycle, actor, phase, subtask = _episode(n=80)
+    row = _clean(cycle, actor, phase, subtask)
+    phase[55:58] = 4
+    cycle[60:80] = 2
+    subtask[70:80] = GRASP
+    miss = _row(20, held_steps=2)
+    path = tmp_path / "host_a" / name
+    path.parent.mkdir(exist_ok=True)
+    return _own_shard(
+        path,
+        cycle,
+        actor,
+        phase,
+        subtask,
+        [row, miss],
+        [-1, -1, 1, -1],
+        ["stowed", "close_miss"],
+        ["stowed", "budget"],
+    )
+
+
+def test_labeled_writes_every_policy_frame_with_the_label_and_subtask_columns(tmp_path):
+    shard = _two_cycles(tmp_path)
+    own = c2l.OwnFrames("labeled")
+    kw = {"context": "camera_box_target", "gripper": "continuous", "images": False}
+    counts = c2l.convert([shard], tmp_path / "ds", "t/x", 30, own=own, **kw)
+    # Runs: 0..4 (no cycle), 5..54 (cycle 1), 58..59 (no cycle), 60..79 (cycle 2).
+    assert counts == (4, 4, 1, 0)
+    info = json.loads((tmp_path / "ds" / "meta" / "info.json").read_text())
+    assert info["total_frames"] == 77
+    assert info["features"]["label"]["dtype"] == "int8"
+    assert info["features"]["subtask"]["shape"] == [1]
+    assert own.counts["own_pos"] == 50 and own.counts["own_neg"] == 11
+    assert own.counts["own_untagged"] == 16 and own.counts["rig_frames"] == 3
+    assert own.counts["ev_no_lift"] == 1 and own.counts["joined"] == own.counts["cycles"] == 2
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    ds = LeRobotDataset("t/x", root=tmp_path / "ds")
+    labels = [int(ds[i]["label"]) for i in range(len(ds))]
+    assert labels[5:55] == [POS] * 50 and labels[-20:] == [NEG] * 11 + [UNT] * 9
+    assert int(ds[30]["subtask"]) == CARRY
+    rows = json.loads((tmp_path / "ds" / "meta" / "own_frames.json").read_text())["cycles"]
+    assert [r["ordinal"] for r in rows] == [1, 2] and rows[0]["host"] == "host_a"
+    assert rows[0]["written"] == [[1, 5, 50]] and rows[1]["events"]["no_lift"] == [70]
+    assert rows[0]["labels"] == {"positive": 50, "negative": 0, "untagged": 0}
+    assert rows[0]["carry_start"] == 25 and rows[0]["demo"] == "demo_0"
+
+
+def test_positive_writes_only_positive_frames_in_the_stock_schema(tmp_path):
+    shard = _two_cycles(tmp_path)
+    kw = {"context": "camera_box_target", "gripper": "continuous", "images": False}
+    own = c2l.OwnFrames("positive", host="c")
+    assert c2l.convert([shard], tmp_path / "ds", "t/x", 30, own=own, **kw)[:2] == (1, 1)
+    info = json.loads((tmp_path / "ds" / "meta" / "info.json").read_text())
+    assert info["total_frames"] == 50 and "label" not in info["features"]
+    stock = _shard(tmp_path / "stock.hdf5", box=True, target=True)
+    with h5py.File(stock, "a") as f:
+        f.attrs["gripper_mode"] = "continuous"
+    c2l.convert([stock], tmp_path / "corpus", "t/y", 30, **kw)
+    corpus = json.loads((tmp_path / "corpus" / "meta" / "info.json").read_text())
+    assert info["features"] == corpus["features"]
+    rows = json.loads((tmp_path / "ds" / "meta" / "own_frames.json").read_text())["cycles"]
+    assert {r["host"] for r in rows} == {"c"}
+
+
+def test_own_frames_refuses_a_masked_shard_a_foreign_payload_and_the_stock_switches(tmp_path):
+    kw = {"context": "camera_box_target", "gripper": "continuous", "images": False}
+    shard = _two_cycles(tmp_path)
+    with h5py.File(shard, "a") as f:
+        f.create_dataset("data/demo_0/obs/actor_raw", data=np.zeros(80, np.int16))
+    with pytest.raises(RuntimeError, match="actor_raw"):
+        c2l.convert([shard], tmp_path / "a", "t/x", 30, own=c2l.OwnFrames("labeled"), **kw)
+    other = _two_cycles(tmp_path, "proc_1.hdf5")
+    meta = other.with_name("proc_1.meta.json")
+    meta.write_text(meta.read_text().replace("proc_1.hdf5", "proc_9.hdf5"))
+    with pytest.raises(RuntimeError, match="record_all payload"):
+        c2l.convert([other], tmp_path / "b", "t/x", 30, own=c2l.OwnFrames("labeled"), **kw)
+    for bad in ({"dagger": True, "split_cycles": True}, {"split_cycles": True}):
+        with pytest.raises(ValueError, match="own_frames refuses"):
+            c2l.convert(
+                [shard], tmp_path / "c", "t/x", 30, own=c2l.OwnFrames("labeled"), **kw, **bad
+            )
+    with pytest.raises(ValueError, match="camera_box_target"):
+        c2l.convert(
+            [shard],
+            tmp_path / "d",
+            "t/x",
+            30,
+            own=c2l.OwnFrames("labeled"),
+            gripper="continuous",
+            context="camera_box",
+            images=False,
+        )
+
+
+def test_convert_ok_reports_the_label_and_event_counts(tmp_path):
+    shard = _two_cycles(tmp_path)
+    argv = ["--shards", str(shard), "--root", str(tmp_path / "ds"), "--no_images"]
+    argv += ["--context", "camera_box_target", "--gripper", "continuous", "--own_frames", "labeled"]
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), *argv], capture_output=True, text=True, check=False
+    )
+    line = result.stdout.splitlines()[-1]
+    assert line.startswith("CONVERT_OK episodes=4 total=4 read=1 skipped=0 own_frames=labeled")
+    for part in ("own_pos=50", "own_neg=11", "own_untagged=16", "cycles=2", "joined=2"):
+        assert f" {part}" in line, line
+    assert " ev_no_lift=1 " in line and line.endswith(" ev_release=0")
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), *argv[:4], "--host", "x"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.stdout.startswith("CONVERT_FAIL usage: --host")
+
+
+def test_the_stock_dagger_pass_keeps_exactly_the_takeover_frames_of_an_all_frames_shard(tmp_path):
+    """Policy, handoff and takeover frames interleave in a record_all shard; the stock pass
+    keeps the same frames and cuts as on the shard that records the takeovers only."""
+    actor = np.array([0, 0, 1, 1, 1, 0, 0, 0, 2, 2, -3, -3, 0, 4, 4, 0], np.int16)
+    phase = np.array([-1, -1, 1, 2, 3, -1, 4, 5, 1, 2, 1, 2, -1, 1, 9, -1], np.int8)
+    bricks = np.array([-1, -1, 0, 0, 0, -1, 1, 1, 1, 1, 2, 2, -1, 3, 3, -1], np.int8)
+    full = _shard(tmp_path / "full.hdf5", frames=16, actor=actor, bricks=bricks)
+    kept = actor != 0
+    part = _shard(
+        tmp_path / "part.hdf5", frames=int(kept.sum()), actor=actor[kept], bricks=bricks[kept]
+    )
+    for path, rows in ((full, slice(None)), (part, kept)):
+        with h5py.File(path, "a") as f:
+            f.attrs["gripper_mode"] = "continuous"
+            g = f["data/demo_0"]
+            g["obs/cycle_phase"][...] = phase[rows]
+            state = np.zeros((16, 8), np.float32)
+            state[:, 0] = np.arange(16)
+            state[:, 6:8] = 0.008
+            g["obs/joint_pos_abs"][...] = state[rows]
+            actions = np.zeros((16, 7), np.float32)
+            actions[:, 6] = 0.016
+            g["actions"][...] = actions[rows]
+    kw = {"split_cycles": True, "dagger": True, "context": "camera", "gripper": "continuous"}
+    out = {}
+    for name, path in (("full", full), ("part", part)):
+        counts = c2l.convert(
+            [path], tmp_path / name, "t/x", 30, images=False, reopen=c2l.ReopenLead(0.002), **kw
+        )
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+        ds = LeRobotDataset("t/x", root=tmp_path / name)
+        out[name] = (counts[:2], [float(ds[i]["observation.state"][0]) for i in range(len(ds))])
+    # Three takeovers (the negated one dropped), the same frames in both: state[0] is the frame.
+    assert out["full"] == out["part"] == ((3, 3), [2.0, 3.0, 4.0, 8.0, 9.0, 13.0, 14.0])
+
+
+VIDEO = {
+    "dtype": "video",
+    "shape": [224, 224, 3],
+    "names": ["height", "width", "channels"],
+    "info": {
+        "video.height": 224,
+        "video.width": 224,
+        "video.codec": "av1",
+        "video.pix_fmt": "yuv420p",
+        "video.is_depth_map": False,
+        "video.fps": 30,
+        "video.channels": 3,
+        "has_audio": False,
+    },
+}
+CAMERA = ["overhead_cam_" + k for k in ("x", "y", "z", "roll", "pitch", "yaw")]
+TARGET = ["target_" + k for k in ("x", "y", "z", "cos", "sin", "width", "half_height")]
+INDEX = {"dtype": "int64", "shape": [1], "names": None}
+CORPUS_FEATURES = {
+    "action": {"dtype": "float32", "shape": [7], "names": c2l.ARM_JOINTS + ["gripper_gap_m"]},
+    "observation.state": {
+        "dtype": "float32",
+        "shape": [7],
+        "names": c2l.ARM_JOINTS + ["gripper_open"],
+    },
+    "observation.images.wrist": VIDEO,
+    "observation.images.overhead": VIDEO,
+    "observation.environment_state": {
+        "dtype": "float32",
+        "shape": [16],
+        "names": CAMERA + ["box_x", "box_y", "box_yaw"] + TARGET,
+    },
+    "timestamp": {"dtype": "float32", "shape": [1], "names": None},
+    "frame_index": INDEX,
+    "episode_index": INDEX,
+    "index": INDEX,
+    "task_index": INDEX,
+}
+"""The F9n corpus's features (~/data/maker-arm-ms7/g/w1234567/dataset/meta/info.json): the
+ACT-C mix refuses an extra root whose features differ from it in any byte."""
+CORPUS_INFO = Path.home() / "data/maker-arm-ms7/g/w1234567/dataset/meta/info.json"
+
+
+def test_the_positive_and_takeover_roots_have_the_corpus_schema_and_marker(tmp_path):
+    shard = _two_cycles(tmp_path)
+    with h5py.File(shard, "a") as f:
+        obs = f["data/demo_0/obs"]
+        obs["actor"][60:80] = 1  # cycle 2 is a takeover: the stock pass converts it
+        for key, names in (("camera", CAMERA), ("box", ["box_x", "box_y", "box_yaw"])):
+            obs[f"context_{key}"].attrs["names"] = json.dumps(names)
+        obs["context_target"].attrs["names"] = json.dumps(TARGET)
+    kw = {"context": "camera_box_target", "gripper": "continuous"}
+    own = c2l.OwnFrames("positive")
+    assert c2l.convert([shard], tmp_path / "pos", "t/x", 30, own=own, **kw)[:2] == (1, 1)
+    stock = {"split_cycles": True, "dagger": True, "reopen": c2l.ReopenLead(0.002)}
+    assert c2l.convert([shard], tmp_path / "dag", "t/y", 30, **kw, **stock)[:2] == (1, 1)
+    if CORPUS_INFO.exists():  # Machine A's corpus, the reference the constant copies
+        assert json.loads(CORPUS_INFO.read_text())["features"] == CORPUS_FEATURES
+    for root in ("pos", "dag"):
+        info = json.loads((tmp_path / root / "meta" / "info.json").read_text())
+        assert info["features"] == CORPUS_FEATURES and info["fps"] == 30, root
+        marker = json.loads((tmp_path / root / "meta" / "action_space.json").read_text())
+        assert marker == {"action_space": "absolute", "gripper": "continuous"}, root
+    # The recorded subtasks ride along by frame index (the prompt codes' sidecar).
+    with h5py.File(shard, "r") as f:
+        recorded = f["data/demo_0/obs/subtask"][:]
+    assert np.array_equal(np.load(tmp_path / "pos/meta/subtask.npy"), recorded[5:55])
+    assert np.array_equal(np.load(tmp_path / "dag/meta/subtask.npy"), recorded[60:80])
+    stock = _shard(tmp_path / "stock.hdf5", box=True, target=True)
+    with h5py.File(stock, "a") as f:
+        f.attrs["gripper_mode"] = "continuous"
+    with pytest.raises(RuntimeError, match="without obs/subtask would join"):
+        c2l.convert([stock], tmp_path / "dag", "t/y", 30, **kw)
+    c2l.convert([stock], tmp_path / "plain", "t/z", 30, **kw)
+    assert not (tmp_path / "plain/meta/subtask.npy").exists()
+
+
+def test_an_event_on_a_teacher_frame_is_dropped():
+    """The still scene's cycle 2 (2026-10-13 audit): the census's first close was the takeover's
+    first frame, so off_target landed on a teacher frame. Events come from policy frames only;
+    the takeover's own event still ends on the last policy frame."""
+    cycle, actor, phase, subtask = _episode()
+    actor[30:55], phase[30:55] = 1, 2
+    row = _row(50, first_close_at=25, off_x=0.0, off_y=0.0, off_z=0.03)
+    label, (info,) = _labels(row, cycle, actor, phase, subtask, cls="stowed")
+    assert info["events"]["off_target"] == [] and info["events"]["takeover"] == [29]
+    assert _window(label, 5, 29)
+    phase[30:55], actor[30:55] = 4, 0  # a handoff's rig frames: the teacher's too
+    _, (info,) = _labels(row, cycle, actor, phase, subtask, cls="stowed")
+    assert info["events"]["off_target"] == []
