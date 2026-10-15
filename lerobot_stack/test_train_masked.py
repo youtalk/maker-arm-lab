@@ -16,6 +16,8 @@ class FakeDataset:
 
     episode_ends = (6, 10)
     num_frames = 10
+    num_episodes = 2
+    fps = 30
     delta_timestamps: ClassVar[dict] = {"action": [k / 30 for k in range(4)]}
     meta = SimpleNamespace(fps=30, episodes={"length": [6, 4]})
     root = "fake"
@@ -197,3 +199,98 @@ def test_the_context_switches_are_checked_and_leave_lerobot_the_rest(monkeypatch
     ):
         with pytest.raises(SystemExit):
             _main(monkeypatch, bad)
+
+
+# MS7i ACT-C: the corpus mixed with extra roots (--extra_root, --extra_max_share).
+
+
+def test_the_extra_roots_keep_their_natural_share_under_the_cap():
+    lengths = [np.array([10, 20]), np.array([5])]
+    kept = tm.keep_episodes(lengths, corpus_frames=100, max_share=0.3)  # 35 / 135 = 0.26
+    assert [k.tolist() for k in kept] == [[0, 1], [0]]
+
+
+def test_over_the_cap_a_fixed_subset_of_episodes_stays_within_the_share():
+    lengths = [np.full(50, 10), np.full(30, 7)]  # 710 frames against a 300-frame budget
+    kept = tm.keep_episodes(lengths, corpus_frames=700, max_share=0.3)
+    frames = sum(int(n[k].sum()) for n, k in zip(lengths, kept))
+    assert 300 - 10 < frames <= 300  # 300 / (700 + 300) = 0.3
+    assert all(
+        len(k) and np.all(np.diff(k) > 0) and k.max() < len(n) for n, k in zip(lengths, kept)
+    )
+    again = tm.keep_episodes(lengths, corpus_frames=700, max_share=0.3)
+    assert all(np.array_equal(a, b) for a, b in zip(kept, again))  # fixed: no global RNG
+
+
+def _mix_maker(tmp_path, other_features=False):
+    rows = np.array([[0.1, 0.2, 0.7, 3.13], [0.1, 0.2, 0.7, -3.135]], np.float32)
+    _write_context(tmp_path, rows)
+
+    def make(cfg):
+        data = ContextDataset(cfg.dataset.root)
+        if other_features and cfg.dataset.root != tmp_path:
+            data.meta.features = {tm.ENV: {"names": ["a", "b", "c", "d"]}}
+        return data
+
+    return make, SimpleNamespace(dataset=SimpleNamespace(root=tmp_path))
+
+
+def test_the_mix_adds_each_extra_frame_once_with_the_corpus_meta_and_the_roll_wrap(tmp_path):
+    make, cfg = _mix_maker(tmp_path)
+    mix = tm.masked(make, None, tm.CONTEXT_NORM, ("/b1", "/b2"), max_share=0.7)(cfg)
+    assert (len(mix), mix.num_frames, mix.num_episodes) == (30, 30, 6)
+    assert cfg.dataset.root == tmp_path  # restored
+    assert [d.root for d in mix.datasets[1:]] == ["/b1", "/b2"]
+    assert mix.meta is mix.datasets[0].meta  # the corpus's stats serve every root
+    assert abs(float(mix.meta.stats[tm.ENV]["mean"][3])) < 0.01
+    for j in (0, 10, 20):  # a corpus, a b1 and a b2 frame: every root's roll is wrapped
+        assert float(mix[j][tm.ENV][3]) == pytest.approx(-3.135 + np.pi, abs=1e-5)
+    capped = tm.masked(make, None, tm.CONTEXT_NORM, ("/b1", "/b2"), max_share=0.3)(cfg)
+    assert len(capped) - 10 <= 10 * 0.3 / 0.7 and capped.num_episodes < 6
+
+
+def test_an_extra_root_with_other_features_is_refused(tmp_path):
+    make, cfg = _mix_maker(tmp_path, other_features=True)
+    with pytest.raises(RuntimeError, match="other features"):
+        tm.masked(make, None, tm.CONTEXT_NORM, ("/b1",))(cfg)
+    assert cfg.dataset.root == tmp_path
+
+
+def test_without_an_extra_root_the_dataset_is_f9n_s(tmp_path):
+    make, cfg = _mix_maker(tmp_path)
+    data = tm.masked(make, None, tm.CONTEXT_NORM)(cfg)
+    assert type(data) is tm.MaskedFrames and data.transform is tm.wrap_item_roll
+    assert data.keep.tolist() == list(range(10)) and data.dataset.root == tmp_path
+
+
+def test_the_mix_switches_are_checked_and_leave_lerobot_the_rest(monkeypatch):
+    argv, untouched = _main(
+        monkeypatch, ["--steps=5", "--extra_root=/b1", "--extra_root=/b2", "--extra_max_share=0.2"]
+    )
+    assert argv == ["--steps=5"] and not untouched
+    for bad in (["--extra_max_share=0.3"], ["--extra_root=/b", "--extra_max_share=1"]):
+        with pytest.raises(SystemExit):
+            _main(monkeypatch, bad)
+
+
+def test_on_converted_datasets_the_mix_keeps_whole_episodes_of_the_extra_root(tmp_path):
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    import reopen_mask as rm
+    from test_reopen_mask import converted, corpus
+
+    root = converted(tmp_path, corpus(tmp_path))
+
+    def make(cfg):
+        return LeRobotDataset(rm.REPO_ID, root=cfg.dataset.root)
+
+    cfg = SimpleNamespace(dataset=SimpleNamespace(root=root))
+    whole = tm.masked(make, None, extras=(str(root),), max_share=0.6)(cfg)
+    n = len(whole.datasets[0])
+    assert len(whole) == 2 * n and whole.num_episodes == 2 * whole.datasets[0].num_episodes
+    # Episodes of 68, 72 and 72 frames against a budget of 0.45 / 0.55 * 212 = 173 frames.
+    capped = tm.masked(make, None, extras=(str(root),), max_share=0.45)(cfg)
+    extra = capped.datasets[1]
+    lengths = np.asarray(extra.meta.episodes["length"])
+    kept = sorted({int(extra[i]["episode_index"]) for i in range(len(extra))})
+    assert len(kept) == 2 and len(extra) == lengths[kept].sum() and capped.num_episodes == 5
