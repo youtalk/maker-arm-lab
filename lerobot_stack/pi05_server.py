@@ -488,6 +488,14 @@ class TokenArgumentParser(argparse.ArgumentParser):
         os._exit(2)
 
 
+def nonneg(text: str) -> float:
+    """argparse type of a noise flag: a finite float, at least 0."""
+    value = float(text)
+    if not 0.0 <= value < float("inf"):
+        raise argparse.ArgumentTypeError(f"must be finite and at least 0, got {value}")
+    return value
+
+
 def main() -> int:
     parser = TokenArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--checkpoint", required=True, help="a pi05 pretrained_model directory")
@@ -495,12 +503,12 @@ def main() -> int:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--action_warp", type=float, default=1.0)
     parser.add_argument("--num_steps", type=int, help="flow steps a forward (the checkpoint's)")
-    parser.add_argument("--noise_scale", type=float, default=1.0, help="0: deterministic chunks")
-    parser.add_argument("--jaw_noise_scale", type=float, default=1.0, help="the jaw column's")
+    parser.add_argument("--noise_scale", type=nonneg, default=1.0, help="0: deterministic chunks")
+    parser.add_argument("--jaw_noise_scale", type=nonneg, default=1.0, help="the jaw column's")
     parser.add_argument("--jaw_noise_shared", action="store_true", help="one jaw draw a chunk")
-    parser.add_argument("--jaw_noise_abs", type=float, help="the jaw's std at every scale")
-    parser.add_argument("--retry_noise_scale", type=float, help="the arm noise of a retry row")
-    parser.add_argument("--still_noise_scale", type=float, help="resample still rows at this")
+    parser.add_argument("--jaw_noise_abs", type=nonneg, help="the jaw's std at every scale")
+    parser.add_argument("--retry_noise_scale", type=nonneg, help="the arm noise of a retry row")
+    parser.add_argument("--still_noise_scale", type=nonneg, help="resample still rows at this")
     parser.add_argument("--still_rad", type=float, default=STILL_RAD)
     parser.add_argument("--still_open", type=float, default=STILL_OPEN)
     parser.add_argument("--jaw_latch", type=int, default=0, help="actions held after a close")
@@ -508,23 +516,11 @@ def main() -> int:
         args = parser.parse_args()
         if args.num_steps is not None and args.num_steps < 1:
             parser.error(f"--num_steps must be at least 1, got {args.num_steps}")
-        if not 0.0 <= args.noise_scale < float("inf"):
-            parser.error(f"--noise_scale must be finite and at least 0, got {args.noise_scale}")
-        if not 0.0 <= args.jaw_noise_scale < float("inf"):
-            parser.error(
-                f"--jaw_noise_scale must be finite and at least 0, got {args.jaw_noise_scale}"
-            )
         jaw_abs = args.jaw_noise_abs
-        if jaw_abs is not None and not 0.0 <= jaw_abs < float("inf"):
-            parser.error(f"--jaw_noise_abs must be finite and at least 0, got {jaw_abs}")
         if jaw_abs is not None and (args.jaw_noise_scale != 1.0 or args.jaw_noise_shared):
             parser.error("--jaw_noise_abs needs --jaw_noise_scale 1 and no --jaw_noise_shared")
         retry = args.retry_noise_scale
-        if retry is not None and not 0.0 <= retry < float("inf"):
-            parser.error(f"--retry_noise_scale must be finite and at least 0, got {retry}")
         scale, rad, open_frac = args.still_noise_scale, args.still_rad, args.still_open
-        if scale is not None and not 0.0 <= scale < float("inf"):
-            parser.error(f"--still_noise_scale must be finite and at least 0, got {scale}")
         if not 0.0 < rad < float("inf"):
             parser.error(f"--still_rad must be finite and above 0, got {rad}")
         if not 0.0 <= open_frac <= 1.0:
