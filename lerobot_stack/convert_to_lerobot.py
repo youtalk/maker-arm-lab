@@ -79,8 +79,6 @@ import h5py
 import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-from extract_replay_bundle import initial_state_arrays
-
 TASK = "sort the lego bricks into the color-matched bins"
 ARM_JOINTS = [
     "link_002_joint",
@@ -476,15 +474,7 @@ def convert(
     """Convert `shards` into (or append them onto) the LeRobot dataset at `root`.
 
     When `sidecar_dir` is set, every sub-episode written under `split_cycles` gets a
-    `{episode_index}.npz` sidecar holding its `cycle_phase`/`cycle_brick` slices plus
-    `initial_state_arrays(grp)` (see extract_replay_bundle.py). That `initial_state` is
-    the SOURCE DEMO's t=0 state -- pre-SETTLE, before any brick has been picked -- not
-    the sub-episode's own first frame: for segment k>0 it describes a scene that never
-    coexisted with the sub-episode (earlier bricks are still on the desk, not yet in a
-    bin), and even segment 0's sidecar carries the pre-SETTLE pose rather than its own
-    first recorded frame. It is not a replayable start state for the sub-episode by
-    itself -- do not feed it to `scene.reset_to()` expecting it to reproduce where the
-    sub-episode begins.
+    `{episode_index}.npz` sidecar holding its `cycle_phase`/`cycle_brick` slices.
     """
     if action_space not in ACTION_SPACES:
         raise ValueError(f"action_space must be one of {ACTION_SPACES}, got {action_space!r}")
@@ -637,11 +627,6 @@ def convert(
                     )
                 else:
                     segments = [np.arange(steps)]
-                # Hoisted out of the segment loop: read+stack once per demo instead of once
-                # per sub-episode, and raise (on a shard with cycle channels but no
-                # initial_state group) before save_episode() writes any of this demo's
-                # segments, instead of after some of them already landed.
-                init_arrays = initial_state_arrays(grp) if sidecar_dir is not None else None
                 for seg in segments:
                     if reopen is not None:
                         cut = reopen_lead(
@@ -696,7 +681,6 @@ def convert(
                             sidecar_dir / f"{episode_index}.npz",
                             cycle_phase=phase[seg],
                             cycle_brick=brick[seg],
-                            **init_arrays,
                         )
                     converted += 1
     dataset.finalize()
@@ -805,11 +789,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Directory for one {episode_index}.npz replay-label sidecar per sub-episode "
-            "(requires --split_cycles). Each sidecar's initial_state is its SOURCE DEMO's "
-            "t=0 (pre-SETTLE) state, not the sub-episode's own start -- see convert()'s "
-            "docstring. Must be empty (or a fresh path) when --root is being created; "
-            "reuse it only to resume into that same --root."
+            "Directory for one {episode_index}.npz sidecar of cycle_phase/cycle_brick labels "
+            "per sub-episode (requires --split_cycles). Must be empty (or a fresh path) when "
+            "--root is being created; reuse it only to resume into that same --root."
         ),
     )
     parser.add_argument(
