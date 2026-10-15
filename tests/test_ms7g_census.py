@@ -100,15 +100,6 @@ def _without_census(payload: dict) -> dict:
     return payload
 
 
-def test_with_every_new_switch_off_a_pinned_draw_reads_mains_payload(monkeypatch):
-    """Ledger rule G4: the census only adds fields. Every other payload byte of the pinned
-    draws, every cycle's end, step count and first-close geometry among them, is main's."""
-    pinned = json.loads(PIN.read_text())
-    for name, scene in SCENES.items():
-        got = _payload(scene, monkeypatch)
-        assert _without_census(got) == _without_census(pinned[name]), name
-
-
 # -- the air stall ------------------------------------------------------------------------------
 
 
@@ -182,10 +173,14 @@ def test_the_release_motion_reads_the_point_its_velocity_and_the_served_box_fram
 
 
 @pytest.mark.parametrize("name", list(SCENES))
-def test_every_cycle_row_carries_the_census_fields(name, monkeypatch):
-    """Every row has every field; a release place only after a lift, with the held part's true
-    category; the log probabilities in the order the perception block names; and the swept
-    count of the grasp each selection chose."""
+def test_a_pinned_draw_reads_mains_payload_and_every_cycle_row_carries_the_census(
+    name, monkeypatch
+):
+    """Ledger rule G4, with every new switch off: the census only adds fields. Every other
+    payload byte of the pinned draw, every cycle's end, step count and first-close geometry
+    among them, is main's. Every row has every field; a release place only after a lift, with
+    the held part's true category; the log probabilities in the order the perception block
+    names; and the swept count of the grasp each selection chose."""
     chosen = []
     real = heap_oracle.HeapOracle.select_target
 
@@ -196,6 +191,8 @@ def test_every_cycle_row_carries_the_census_fields(name, monkeypatch):
 
     monkeypatch.setattr(heap_oracle.HeapOracle, "select_target", spy)
     payload = _payload(SCENES[name], monkeypatch)
+    pinned = json.loads(PIN.read_text())[name]
+    assert _without_census(payload) == _without_census(pinned)
     rows = [row for ep in payload["episodes"] for row in ep["cycle_census"]]
     assert rows and all(set(loop.MS7G_CENSUS) <= set(row) for row in rows)
     assert [row["swept"] for row in rows] == [s for s in chosen if s is not None]
