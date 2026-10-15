@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import zmq
 
-from policy_protocol import PROTOCOL_VERSION, recv_message, send_message
+from policy_protocol import PROTOCOL_VERSION, hello_reply, recv_message, send_message
 from policy_server import (
     PolicyServer,
     blank_streams,
@@ -486,7 +486,7 @@ def test_the_handshake_carries_the_gripper_contract(tmp_path):
         n_action_steps=1,
         gripper="continuous",
     )
-    assert srv._hello_ack()["gripper"] == "continuous"
+    assert hello_reply({"protocol": PROTOCOL_VERSION}, srv.ready())["gripper"] == "continuous"
 
 
 def _chunk_of(state, n):

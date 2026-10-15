@@ -29,13 +29,11 @@ import numpy as np
 import zmq
 
 from policy_protocol import (
-    ACTION_DTYPE,
-    ACTION_SHAPE,
     ANCHOR_KEY,
     CONTEXT_KEY,
-    OBS_SCHEMA,
     PROTOCOL_VERSION,
     REPLAN_KEY,
+    hello_reply,
     recv_message,
     send_message,
     validate_action,
@@ -85,7 +83,11 @@ class PolicyServer:
             self._port = self._socket.bind_to_random_port("tcp://127.0.0.1")
         else:
             self._socket.bind(f"tcp://127.0.0.1:{self._port}")
-        ready = {
+        print("SERVER_READY " + json.dumps(self.ready()), flush=True)
+        return self._port
+
+    def ready(self) -> dict:
+        return {
             "port": self._port,
             "policy_id": self._policy_id,
             "n_action_steps": self._n_action_steps,
@@ -95,39 +97,13 @@ class PolicyServer:
             "action_space": self._action_space,
             "gripper": self._gripper,
         }
-        print("SERVER_READY " + json.dumps(ready), flush=True)
-        return self._port
-
-    def _hello_ack(self) -> dict:
-        return {
-            "type": "hello_ack",
-            "protocol": PROTOCOL_VERSION,
-            "policy_id": self._policy_id,
-            "n_action_steps": self._n_action_steps,
-            "inference": self._inference,
-            "context_dim": self._context_dim,
-            "action_space": self._action_space,
-            "gripper": self._gripper,
-            "obs_schema": {k: [list(shape), dtype] for k, (shape, dtype) in OBS_SCHEMA.items()},
-            "action": [list(ACTION_SHAPE), ACTION_DTYPE],
-        }
 
     def handle_one(self) -> bool:
         header, arrays = recv_message(self._socket)
         kind = header.get("type")
         try:
             if kind == "hello":
-                if header.get("protocol") != PROTOCOL_VERSION:
-                    send_message(
-                        self._socket,
-                        {
-                            "type": "error",
-                            "error": "protocol_mismatch",
-                            "message": f"server speaks {PROTOCOL_VERSION}, client sent {header.get('protocol')}",
-                        },
-                    )
-                else:
-                    send_message(self._socket, self._hello_ack())
+                send_message(self._socket, hello_reply(header, self.ready()))
             elif kind == "reset":
                 self._reset_fn()
                 send_message(self._socket, {"type": "reset_ack"})

@@ -92,17 +92,16 @@ CONTEXT_KEY = "context"
 CONTEXT_DTYPE = "float32"
 
 ANCHOR_KEY = "anchor"
-ANCHOR_SHAPE = (6,)
-ANCHOR_DTYPE = "float32"
-
 REPLAN_KEY = "replan"
-REPLAN_DTYPE = "bool"
-
 RETRY_KEY = "retry"
-RETRY_DTYPE = "bool"
-
 PROMPT_KEY = "prompt"
-PROMPT_DTYPE = "int16"
+# The optional fixed-shape arrays beside the observation, per sample like OBS_SCHEMA.
+OPTIONAL_SCHEMA = {
+    ANCHOR_KEY: ((6,), "float32"),  # the previous clamped arm command
+    REPLAN_KEY: ((), "bool"),  # which envs replan from this observation
+    RETRY_KEY: ((), "bool"),  # which envs are in retry mode
+    PROMPT_KEY: ((), "int16"),  # each env's subtask id
+}
 
 
 def _pack(array: np.ndarray) -> bytes:
@@ -175,28 +174,8 @@ def validate_context(array: np.ndarray, batch_size: int) -> None:
         raise ValueError(f"context: dtype {array.dtype}, want {CONTEXT_DTYPE}")
 
 
-def validate_anchor(array: np.ndarray, batch_size: int) -> None:
-    """A (batch, 6) float32 array: the previous clamped arm command."""
-    _check(ANCHOR_KEY, array, ANCHOR_SHAPE, ANCHOR_DTYPE, batch_size)
-
-
-def validate_replan(array: np.ndarray, batch_size: int) -> None:
-    """A (batch,) bool array: which envs replan from this observation."""
-    _check(REPLAN_KEY, array, (), REPLAN_DTYPE, batch_size)
-
-
-def validate_retry(array: np.ndarray, batch_size: int) -> None:
-    """A (batch,) bool array: which envs are in retry mode."""
-    _check(RETRY_KEY, array, (), RETRY_DTYPE, batch_size)
-
-
-def validate_prompt(array: np.ndarray, batch_size: int) -> None:
-    """A (batch,) int16 array: each env's subtask id."""
-    _check(PROMPT_KEY, array, (), PROMPT_DTYPE, batch_size)
-
-
 def validate_obs(arrays: dict, batch_size: int) -> None:
-    keys = set(arrays) - {CONTEXT_KEY, ANCHOR_KEY, REPLAN_KEY, RETRY_KEY, PROMPT_KEY}
+    keys = set(arrays) - {CONTEXT_KEY, *OPTIONAL_SCHEMA}
     if keys != set(OBS_SCHEMA):
         raise ValueError(
             f"obs keys {sorted(arrays)}, want {sorted(OBS_SCHEMA)} "
@@ -207,15 +186,25 @@ def validate_obs(arrays: dict, batch_size: int) -> None:
     _check_gripper_fraction(arrays["state"])
     if CONTEXT_KEY in arrays:
         validate_context(arrays[CONTEXT_KEY], batch_size)
-    if ANCHOR_KEY in arrays:
-        validate_anchor(arrays[ANCHOR_KEY], batch_size)
-    if REPLAN_KEY in arrays:
-        validate_replan(arrays[REPLAN_KEY], batch_size)
-    if RETRY_KEY in arrays:
-        validate_retry(arrays[RETRY_KEY], batch_size)
-    if PROMPT_KEY in arrays:
-        validate_prompt(arrays[PROMPT_KEY], batch_size)
+    for name, (sample_shape, dtype) in OPTIONAL_SCHEMA.items():
+        if name in arrays:
+            _check(name, arrays[name], sample_shape, dtype, batch_size)
 
 
 def validate_action(array: np.ndarray, batch_size: int) -> None:
     _check("action", array, ACTION_SHAPE, ACTION_DTYPE, batch_size)
+
+
+def hello_reply(hello: dict, ready: dict) -> dict:
+    """A server's reply to a ``hello`` header: a ``protocol_mismatch`` error, or the hello_ack,
+    which carries the server's SERVER_READY fields (``ready``, the port left out) and the
+    schemas."""
+    if hello.get("protocol") != PROTOCOL_VERSION:
+        message = f"server speaks {PROTOCOL_VERSION}, client sent {hello.get('protocol')}"
+        return {"type": "error", "error": "protocol_mismatch", "message": message}
+    return {
+        "type": "hello_ack",
+        **{key: value for key, value in ready.items() if key != "port"},
+        "obs_schema": {k: [list(shape), dtype] for k, (shape, dtype) in OBS_SCHEMA.items()},
+        "action": [list(ACTION_SHAPE), ACTION_DTYPE],
+    }

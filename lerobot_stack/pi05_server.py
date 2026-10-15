@@ -78,16 +78,15 @@ import zmq
 
 from derive_vla_dataset import TASK, derived_state
 from policy_protocol import (
-    ACTION_DTYPE,
     ACTION_SHAPE,
     CONTEXT_KEY,
-    OBS_SCHEMA,
     PROMPT_KEY,
     PROTOCOL_VERSION,
     REPLAN_KEY,
     RETRY_KEY,
     decode_frames,
     encode_frames,
+    hello_reply,
     validate_obs,
 )
 from policy_server import (
@@ -224,15 +223,6 @@ class SharedServer:
             "gripper": self._gripper,
         }
 
-    def _hello_ack(self) -> dict:
-        ack = {key: value for key, value in self.ready(0).items() if key != "port"}
-        return {
-            "type": "hello_ack",
-            **ack,
-            "obs_schema": {k: [list(shape), dtype] for k, (shape, dtype) in OBS_SCHEMA.items()},
-            "action": [list(ACTION_SHAPE), ACTION_DTYPE],
-        }
-
     def _check_step(self, header: dict, arrays: dict) -> str | None:
         """The bad_obs message of a step request, None if it is servable."""
         try:
@@ -254,13 +244,7 @@ class SharedServer:
         for lane, header, arrays in requests:
             kind = header.get("type")
             if kind == "hello":
-                if header.get("protocol") != PROTOCOL_VERSION:
-                    message = (
-                        f"server speaks {PROTOCOL_VERSION}, client sent {header.get('protocol')}"
-                    )
-                    replies.append((lane, _error("protocol_mismatch", message), None))
-                else:
-                    replies.append((lane, self._hello_ack(), None))
+                replies.append((lane, hello_reply(header, self.ready(0)), None))
             elif kind == "reset":
                 self._queues.pop(lane, None)
                 replies.append((lane, {"type": "reset_ack"}, None))
