@@ -1283,6 +1283,11 @@ class Cycle:
     lift_gap: float | None = None  # m, the narrowest measured jaw gap since that lift
     release_place: str | None = None  # where the jaws first opened after it (release_place)
     release_at: int | None = None  # and the steps into the cycle at that open
+    # The MS7i release census (``RELEASE_CENSUS``) at that open, observation only.
+    release_xyz: list | None = None  # m, the FK pick point (world)
+    release_vel: list | None = None  # m/s, its velocity over the control step before
+    release_box: int | None = None  # the box served then (``box``), None without desk boxes
+    release_box_xy: list | None = None  # m, the pick point's xy in that box's frame
     air_stall_steps: int = 0  # steps in an air stall (AirStall) while the detector holds a part
     air_stall_empty_steps: int = 0  # and while it holds nothing
     air_stalls: int = 0  # stall entries while it holds a part
@@ -1584,6 +1589,20 @@ def release_place(xy, boxes, right, lean_deg: float | None, height=layout.TRAY_W
     return "rim" if rim else "desk"
 
 
+def release_motion(pick, last, pose) -> tuple:
+    """The MS7i release census (``RELEASE_CENSUS``) at the jaws' open: the FK pick point
+    ``pick`` (m), its velocity from the point ``last`` one control step before (m/s; None
+    without one), and its xy in the frame of the served box at ``pose`` (x, y, yaw), the box's
+    centre and axes (m; None without a box). A metric read. Pure."""
+    xyz = [float(v) for v in pick[:3]]
+    vel = None if last is None else [(a - b) * CONTROL_HZ for a, b in zip(xyz, last)]
+    if pose is None:
+        return xyz, vel, None
+    dx, dy = xyz[0] - float(pose[0]), xyz[1] - float(pose[1])
+    c, s = math.cos(float(pose[2])), math.sin(float(pose[2]))
+    return xyz, vel, [c * dx + s * dy, c * dy - s * dx]
+
+
 GUARD_BOX_MARGIN_M = 0.010  # INITIAL: the g_cg_scr read's guard_rim_steps say whether it holds
 """m: ``carry_guard`` (MS7g design 5.2) lets the jaws open on a lifted part only with the FK pick
 point this far inside the served box's interior walls (``in_box_interior``). A guard step with
@@ -1874,6 +1893,12 @@ needs no close threshold, which a grasp across another axis than the served row'
 that lift. ``swept``: the selector's chosen grasp's swept count at the selection
 (``grasp.rank_grasps``). The three ``AirStall`` counts. The three views' log probabilities,
 whose category order the payload's ``perception`` block names (``logp_order``)."""
+RELEASE_CENSUS = ("release_xyz", "release_vel", "release_box", "release_box_xy")
+"""The MS7i release census, on every row beside ``CENSUS_EXPORT``, None without a
+``release_place``. At ``release_place``'s step and point (``release_motion``): the FK pick point
+(m, world), its velocity over the last control step (m/s, world), the box served then
+(``Cycle.box``, an index into the episode's boxes; None without desk boxes) and the point's xy
+in that box's true frame, its centre and yaw axes (m). Observation only, never the metric."""
 
 
 def cycle_class(cycle: Cycle, reason: str) -> str:
@@ -3529,6 +3554,7 @@ def rollout(
             d, c, h = detectors[i], st.cycle, int(held[i])
             gap, pick_z = float(gaps[i]), float(top_picks[i][2])
             stall = stalls[i]
+            last_pick = stall.last  # the pick point a control step ago, the release census's
             stall.update(top_picks[i], tray and over_tray(top_picks[i][:2], lean, wall_height))
             if c is not None:
                 if d.holding and c.first_hold_at is None:
@@ -3551,6 +3577,11 @@ def rollout(
                         part_sets[i][part] if per_part else (),
                         lean if tray else None,
                         wall_height,
+                    )
+                    c.release_box = c.box if per_part and c.box >= 0 else None
+                    box_pose = None if c.release_box is None else true_boxes[i][c.release_box][0]
+                    c.release_xyz, c.release_vel, c.release_box_xy = release_motion(
+                        top_picks[i], last_pick, box_pose
                     )
                 if stall.stalled and d.holding:
                     c.air_stall_steps += 1
@@ -3952,7 +3983,7 @@ def _book_census(st: EnvState, cycle: Cycle, reason: str) -> None:
     st.classes.append(cycle_class(cycle, reason))
     close_cm = cycle.first_close_cm
     st.first_close_cm.append(None if close_cm is None else round(close_cm, 2))
-    row = {name: getattr(cycle, name) for name in CENSUS_EXPORT}
+    row = {name: getattr(cycle, name) for name in CENSUS_EXPORT + RELEASE_CENSUS}
     row["first_held_is_target"] = cycle.first_held == cycle.target
     row["last_held_is_target"] = cycle.last_held == cycle.target
     if cycle.read_logp is not None:  # ``classifier``: the reads behind the cycle's box

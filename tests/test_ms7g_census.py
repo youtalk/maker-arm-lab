@@ -3,6 +3,7 @@ the release place, the census fields on every cycle row, and ledger rule G4's pi
 switch off, a pinned draw gives main 56c42b6's payload except for the new census fields."""
 
 import json
+import math
 import tempfile
 from pathlib import Path
 
@@ -91,13 +92,14 @@ SCENES = {"tray": _tray_scene, "desk": _desk_scene}
 
 
 def _without_census(payload: dict) -> dict:
-    """The payload without what the MS7g census adds, floats to 9 decimals."""
+    """The payload without what the MS7g census and the MS7i release census add, floats to 9
+    decimals."""
     payload = json.loads(json.dumps(payload), parse_float=lambda s: round(float(s), 9))
     payload["perception"].pop("logp_order", None)
     for ep in payload["episodes"]:
         ep.pop("wrong_box_part_ids", None)
         for row in ep["cycle_census"]:
-            for name in loop.MS7G_CENSUS:
+            for name in loop.MS7G_CENSUS + loop.RELEASE_CENSUS:
                 row.pop(name, None)
     return payload
 
@@ -171,6 +173,15 @@ def test_the_release_place_reads_the_box_interiors_their_walls_the_tray_and_the_
     assert loop.RELEASE_PLACES == ("tray", "right_box", "wrong_box", "desk", "rim")
 
 
+def test_the_release_motion_reads_the_point_its_velocity_and_the_served_box_frame():
+    pick = torch.tensor([0.12, 0.21, 0.08], dtype=torch.float64)
+    xyz, vel, box_xy = loop.release_motion(pick, [0.11, 0.20, 0.08], (0.10, 0.20, math.pi / 2))
+    assert xyz == pytest.approx([0.12, 0.21, 0.08])
+    assert vel == pytest.approx([0.3, 0.3, 0.0])  # 1 cm in one 30 Hz control step
+    assert box_xy == pytest.approx([0.01, -0.02])  # at 90 degrees the box's x axis is world y
+    assert loop.release_motion(pick, None, None)[1:] == (None, None)
+
+
 # -- the census on a rollout --------------------------------------------------------------------
 
 
@@ -199,6 +210,12 @@ def test_every_cycle_row_carries_the_census_fields(name, monkeypatch):
         lifted = row["lift_detected"] or row["held_class"] is not None
         assert row["release_place"] in (*loop.RELEASE_PLACES, None)
         assert row["release_place"] is None or lifted, row
+        release = [row[k] for k in loop.RELEASE_CENSUS]
+        if row["release_place"] is None:
+            assert release == [None] * 4, row
+        else:  # the desk boxes serve every cycle a box
+            xyz, vel, box, box_xy = release
+            assert len(xyz) == len(vel) == 3 and box >= 0 and len(box_xy) == 2, row
         assert row["held_class"] is None or row["held_class"] in names
         for key in ("read_logp", "lift_logp", "carry_logp"):
             assert row[key] is None or len(row[key]) == len(order), (key, row[key])
