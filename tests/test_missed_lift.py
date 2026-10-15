@@ -10,7 +10,7 @@ import pytest
 from helpers import load_script
 from maker_arm_lab.core import loop, oracle, parts
 from test_classifier_loop import BRIGHT, _classifier
-from test_perceived_loop import _rollout, _served, _teacher_scene, _wall_band_scene
+from test_perceived_loop import _rollout, _run, _teacher_scene, _wall_band_scene
 from test_snap_closed import _Blind
 from test_thin_snap import _same
 
@@ -49,18 +49,6 @@ def test_a_carry_is_lost_when_the_jaws_open_wider_than_they_held_it():
         assert not loop.carry_lost(c, 0.010 + wide - 1e-4, lifted=False)
         assert not loop.carry_lost(c, 0.010 + wide, lifted=True)  # the detector's own end
         assert loop.carry_lost(c, 0.010 + wide, lifted=False)
-
-
-def _run(scene, monkeypatch, **switch):
-    """The scene's perceived rollout: the payload without its wall clock, and what env 0 was
-    served on every step."""
-    env, rig, policy, budget, switches = scene(monkeypatch)
-    served = _served(env)
-    payload = _rollout(env, rig, policy, budget=budget, perceived=True, **switches, **switch)
-    env.close()
-    for key in ("wall_sec", "wall_sec_per_episode"):
-        payload.pop(key)
-    return payload, served
 
 
 def test_with_the_switch_off_every_step_and_payload_byte_is_mains(monkeypatch):

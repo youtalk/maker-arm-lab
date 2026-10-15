@@ -20,7 +20,7 @@ from test_perceived_loop import (
     ZERO,
     _env_and_rig,
     _rollout,
-    _served,
+    _run,
     _Still,
     _teacher_scene,
     _wall_band_scene,
@@ -141,17 +141,6 @@ def _overhang_scene(monkeypatch):
     x = layout.TRAY_CENTER[0]
     _place(env, [(0.222, -0.135, 0.0049, 0.0), (x, 0.0, 0.0049, 0.3), (x, 0.04, 0.0049, 0.0)])
     return env, rig, _Still(), 3, {"select_at_release": True, "noise_scales": ZERO}
-
-
-def _run(scene, monkeypatch, **switch):
-    """The scene's perceived rollout without its wall clock, and what env 0 was served."""
-    env, rig, policy, budget, switches = scene(monkeypatch)
-    served = _served(env)
-    payload = _rollout(env, rig, policy, budget=budget, perceived=True, **switches, **switch)
-    env.close()
-    for key in ("wall_sec", "wall_sec_per_episode"):
-        payload.pop(key)
-    return payload, served
 
 
 def test_the_loop_hands_clear_first_to_its_selector_and_not_to_the_teacher(monkeypatch):

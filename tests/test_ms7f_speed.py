@@ -13,7 +13,7 @@ import pytest
 from maker_arm_lab.core import batch_loop, layout, loop, oracle, trajectory
 from maker_arm_lab.tasks.manager_based.lego_sort import oracle_runtime
 from test_oracle import _snapshot
-from test_perceived_loop import _rollout, _served, _thin_snap_scene
+from test_perceived_loop import _rollout, _run, _thin_snap_scene
 from test_snap_closed import _Blind
 from test_thin_snap import _same
 
@@ -102,19 +102,9 @@ def test_the_lift_budget_rule():
     assert not loop.lift_budget_ends(500, False, True, 300)  # it holds one now
 
 
-def _run(monkeypatch, **switch):
-    env, rig, policy, budget, switches = _thin_snap_scene(monkeypatch)
-    served = _served(env)
-    payload = _rollout(env, rig, policy, budget=budget, perceived=True, **switches, **switch)
-    env.close()
-    for key in ("wall_sec", "wall_sec_per_episode"):
-        payload.pop(key)
-    return json.loads(json.dumps(payload, sort_keys=True)), served
-
-
 def test_with_the_lift_budget_off_every_step_and_payload_byte_is_mains(monkeypatch):
-    main, main_served = _run(monkeypatch)
-    off, off_served = _run(monkeypatch, lift_budget=0)
+    main, main_served = _run(_thin_snap_scene, monkeypatch)
+    off, off_served = _run(_thin_snap_scene, monkeypatch, lift_budget=0)
     assert off == main and _same(off_served, main_served)
     assert "lift_budget" not in main["episodes"][0]["cycle_reasons"]
 
@@ -123,7 +113,7 @@ def test_a_cycle_that_lifts_nothing_ends_at_the_lift_budget(monkeypatch):
     """A detector that never reads a hold: every cycle of the flat scene lifts nothing in its
     eyes, so under the switch each one ends at the budget, and it needs perceived."""
     monkeypatch.setattr(loop, "HoldDetector", _Blind)
-    on, _ = _run(monkeypatch, lift_budget=40)
+    on, _ = _run(_thin_snap_scene, monkeypatch, lift_budget=40)
     ep = on["episodes"][0]
     assert ep["cycle_reasons"] and set(ep["cycle_reasons"]) == {"lift_budget"}
     assert set(ep["cycle_steps"]) == {40}

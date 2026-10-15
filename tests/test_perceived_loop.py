@@ -3,6 +3,7 @@ box and frozen marker, the failure memory by position, the class at lift, and th
 test (MS7c design section 10), on the three-part MuJoCo heap with four desk boxes, cameras off.
 """
 
+import json
 import math
 import random
 import tempfile
@@ -168,6 +169,18 @@ def _served(env):
 
     env.step = step
     return served
+
+
+def _run(scene, monkeypatch, **switch):
+    """The scene's perceived rollout with ``switch`` over the scene's switches: the payload
+    without its wall clock, through JSON, and what env 0 was served on every step."""
+    env, rig, policy, budget, switches = scene(monkeypatch)
+    served = _served(env)
+    payload = _rollout(env, rig, policy, budget=budget, perceived=True, **(switches | switch))
+    env.close()
+    for key in ("wall_sec", "wall_sec_per_episode"):
+        payload.pop(key)
+    return json.loads(json.dumps(payload, sort_keys=True)), served
 
 
 def _selections(monkeypatch):

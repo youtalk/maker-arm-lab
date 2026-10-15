@@ -13,7 +13,7 @@ import torch
 
 from maker_arm_lab.core import desk_boxes, heap_oracle, layout, loop, parts
 from test_classifier_loop import _classifier
-from test_perceived_loop import MS7D_ON, _rollout, _Still, _teacher_scene
+from test_perceived_loop import MS7D_ON, _rollout, _run, _Still, _teacher_scene
 from test_snap_closed import _Blind
 
 PIN = Path(__file__).parent / "data" / "ms7g_census_pin_56c42b6.json"
@@ -64,17 +64,13 @@ def _desk_scene(monkeypatch):
     return env, rig, policy, budget, switches | MS7D_ON
 
 
-def _payload(scene, monkeypatch, **switch) -> dict:
+def _payload(scene, monkeypatch) -> dict:
     torch.manual_seed(0)  # the teacher's command noise draws from torch's global generator
-    env, rig, policy, budget, switches = scene(monkeypatch)
-    payload = _rollout(env, rig, policy, budget=budget, perceived=True, **switches, **switch)
-    env.close()
-    for key in ("wall_sec", "wall_sec_per_episode"):
-        payload.pop(key)
+    payload, _ = _run(scene, monkeypatch)
     switches = payload["inference"]["loop"]
     if "classifier" in switches:  # the stub's file lies in a fresh temporary directory
         switches["classifier"] = Path(switches["classifier"]).name
-    return json.loads(json.dumps(payload))
+    return payload
 
 
 def pinned_payloads(monkeypatch) -> dict:

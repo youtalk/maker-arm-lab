@@ -14,7 +14,7 @@ from maker_arm_lab.core import desk_boxes, grasp, loop, parts
 from maker_arm_lab.core.hold import MIN_EXCESS
 from test_classifier_loop import SWITCHES, _classifier, _scene
 from test_ms7f_stack import _gate_argv, ge
-from test_perceived_loop import ZERO, _carry_scene, _rollout, _served, _teacher_scene
+from test_perceived_loop import ZERO, _carry_scene, _rollout, _run, _teacher_scene
 from test_run_gate_eval import _heap_payload
 from test_thin_snap import _same
 
@@ -72,19 +72,6 @@ def test_the_carry_release_height_clears_the_rim_from_the_holds_start():
     assert loop.carry_release_z(0.05, deep) == pytest.approx(0.115)
     assert loop.carry_release_z(0.05, shallow) == pytest.approx(0.10)
     assert loop.carry_release_z(0.30, deep) == loop.CARRY_RELEASE_MAX_Z == 0.12
-
-
-def _run(scene, monkeypatch, **switch):
-    """The scene's perceived rollout: the payload without its wall clock, and what env 0 was
-    served on every step."""
-    env, rig, policy, budget, switches = scene(monkeypatch)
-    switches |= switch
-    served = _served(env)
-    payload = _rollout(env, rig, policy, budget=budget, perceived=True, **switches)
-    env.close()
-    for key in ("wall_sec", "wall_sec_per_episode"):
-        payload.pop(key)
-    return json.loads(json.dumps(payload, sort_keys=True)), served
 
 
 def test_with_the_switch_off_every_step_and_payload_byte_is_the_same(monkeypatch):

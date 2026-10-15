@@ -2,14 +2,12 @@
 in a row while the hold detector holds nothing and the cycle has lifted nothing ends as a failure,
 booked as a budget end. Off, every step and payload byte is what it was."""
 
-import json
-
 import pytest
 
 from helpers import load_script
 from maker_arm_lab.core import dagger_loop, loop, perception
 from test_ms7f_stack import _gate_argv, ge
-from test_perceived_loop import _rollout, _served, _teacher_scene, _thin_snap_scene
+from test_perceived_loop import _rollout, _run, _teacher_scene, _thin_snap_scene
 from test_snap_closed import _Blind
 from test_thin_snap import _same
 
@@ -28,18 +26,6 @@ def test_the_stall_end_rule():
     assert not loop.stall_ends(n, lifted=True, holding=False)  # the cycle lifted one
     assert loop.closed_empty_count(n, grip_open=True, holding=False) == 0  # an open read
     assert loop.closed_empty_count(n, grip_open=False, holding=True) == 0  # a hold
-
-
-def _run(scene, monkeypatch, **switch):
-    """The scene's perceived rollout: the payload without its wall clock, and what env 0 was
-    served on every step."""
-    env, rig, policy, budget, switches = scene(monkeypatch)
-    served = _served(env)
-    payload = _rollout(env, rig, policy, budget=budget, perceived=True, **switches, **switch)
-    env.close()
-    for key in ("wall_sec", "wall_sec_per_episode"):
-        payload.pop(key)
-    return json.loads(json.dumps(payload, sort_keys=True)), served
 
 
 def test_with_the_switch_off_every_step_and_payload_byte_is_mains(monkeypatch):
