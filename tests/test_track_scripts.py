@@ -1,16 +1,15 @@
 """Token contracts of the tracking bench and Thor timing scripts."""
 
 import ast
-import importlib.util
 import json
-import pathlib
 import subprocess
 import sys
 
 import maker_arm_rs
 import pytest
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+from helpers import ROOT, load_script
+
 SCRIPTS = {"mj_track_bench.py": "BENCH", "track_timing.py": "TIMING", "track_soak.py": "SOAK"}
 THOR_ALLOWED = {
     "__future__",
@@ -110,9 +109,7 @@ def test_a_bench_out_write_failure_keeps_the_verdict(tmp_path):
 
 
 def test_a_stopped_loop_ends_the_soak_and_still_stops_the_arm(monkeypatch):
-    spec = importlib.util.spec_from_file_location("track_soak", ROOT / "scripts" / "track_soak.py")
-    soak = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(soak)
+    soak = load_script("track_soak")
     calls = []
 
     class Arm:

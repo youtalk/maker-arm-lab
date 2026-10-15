@@ -2,7 +2,6 @@
 rig leans EXTEND toward its box and the overhead camera moves back; with it off, both are
 MS7d's."""
 
-import argparse
 import itertools
 import math
 import pathlib
@@ -20,6 +19,7 @@ from maker_arm_lab.mj import scene
 from maker_arm_lab.mj.env import HEAP_PARK_X, MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import LEAN_AZIMUTH, OracleRig
 from test_mj_heap_oracle import _place
+from test_thin_snap import _checked
 
 BRICK = parts.make_part("brick", 2, 4)
 BEHIND = (-0.05, 0.19, 0.3)
@@ -273,15 +273,6 @@ def test_the_unseen_rim_row_keeps_b2s_rim_frame():
     assert env._box_draw_args["back"] == desk_boxes.B2_UNSEEN_DRAWS["rim"]["back"]
     assert env._box_draw_args["band_x"] == desk_boxes.B2_BAND_X
     env.close()
-
-
-def _checked(argv):
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--desk_boxes", type=int, default=0)
-    batch_loop.add_ms7e_arguments(parser)
-    args = parser.parse_args(argv)
-    batch_loop.check_ms7e(parser, args)
-    return args
 
 
 def test_eight_boxes_need_the_switch_and_the_switch_is_built_in_every_client():

@@ -10,15 +10,15 @@ import types
 import numpy as np
 import pytest
 
+from helpers import ROOT, load_script
 from maker_arm_lab.core import loop, parts
 from maker_arm_lab.core.eval_loop import EvalFailure
 from maker_arm_lab.core.hold import HoldDetector
 from test_classifier_loop import SWITCHES, _classifier, _scene, _usage
-from test_ms7f_stack import ROOT, _load
 from test_perceived_loop import _rollout, _served
 from test_thin_snap import _same
 
-render = _load(ROOT / "scripts" / "mj_render_set.py")
+render = load_script("mj_render_set")
 ARGS = argparse.Namespace(run_seed=11, layout_seed=5, families=(), parts_seed=20260915)
 HEAP = ["--heap_k", "3", "--desk_boxes", "4", "--box_draw", "4", "--gripper", "continuous"]
 
@@ -35,7 +35,7 @@ def _trainer(monkeypatch):
     """``lerobot_stack/train_part_classifier.py`` under this venv: ``load`` reads numpy only, so a
     stand-in torchvision (absent here) is enough to import it."""
     monkeypatch.setitem(sys.modules, "torchvision", types.ModuleType("torchvision"))
-    return _load(ROOT / "lerobot_stack" / "train_part_classifier.py")
+    return load_script(ROOT / "lerobot_stack" / "train_part_classifier.py")
 
 
 def _run(tmp_path, record: bool, wrist: str = "wide", bank: bool = False):
@@ -184,7 +184,7 @@ class _Policy:
 def test_the_client_writes_the_frames_when_the_run_ends(ends, tmp_path, monkeypatch, capsys):
     """The heap client builds the recorder, hands it to the rollout and writes its file whether
     the rollout returns or fails; only the recording run's payload names it."""
-    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    module = load_script("mj_eval_heap")
     monkeypatch.setattr(module.policy_client, "ServerPolicy", lambda server: _Policy())
     real_env = module.MjLegoSortEnv
     monkeypatch.setattr(

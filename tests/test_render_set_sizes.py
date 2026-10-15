@@ -1,25 +1,17 @@
 """scripts/render_set_sizes.py: the token contract, and on a hand-made render file, each overhead
 row's part size with the perception noise and each wrist row the size of its selection target."""
 
-import importlib.util
 import json
-import pathlib
 import random
 import subprocess
 import sys
 
 import numpy as np
 
+from helpers import ROOT, load_script
 from maker_arm_lab.core import parts
 
-SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "render_set_sizes.py"
-
-
-def _load():
-    spec = importlib.util.spec_from_file_location(SCRIPT.stem, SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+SCRIPT = ROOT / "scripts" / "render_set_sizes.py"
 
 
 def test_usage_errors_print_the_fail_token():
@@ -54,7 +46,7 @@ def test_wrist_rows_take_their_selection_target_s_size(tmp_path):
         true = sorted(parts.by_name([name[n]])[0].size)
         assert np.all(np.abs(got[n] - true) < 0.01) and list(got[n]) == sorted(got[n])
     assert (got[2] == got[0]).all() and (got[5] == got[4]).all() and (got[3] == -1.0).all()
-    render = _load()
+    render = load_script(SCRIPT)
     assert render.perceived((0.01, 0.02, 0.03), random.Random(0)) == render.perceived(
         (0.01, 0.02, 0.03), random.Random(0)
     )

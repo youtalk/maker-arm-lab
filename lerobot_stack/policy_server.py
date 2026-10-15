@@ -29,13 +29,11 @@ import numpy as np
 import zmq
 
 from policy_protocol import (
-    ACTION_DTYPE,
-    ACTION_SHAPE,
     ANCHOR_KEY,
     CONTEXT_KEY,
-    OBS_SCHEMA,
     PROTOCOL_VERSION,
     REPLAN_KEY,
+    hello_reply,
     recv_message,
     send_message,
     validate_action,
@@ -85,7 +83,11 @@ class PolicyServer:
             self._port = self._socket.bind_to_random_port("tcp://127.0.0.1")
         else:
             self._socket.bind(f"tcp://127.0.0.1:{self._port}")
-        ready = {
+        print("SERVER_READY " + json.dumps(self.ready()), flush=True)
+        return self._port
+
+    def ready(self) -> dict:
+        return {
             "port": self._port,
             "policy_id": self._policy_id,
             "n_action_steps": self._n_action_steps,
@@ -95,39 +97,13 @@ class PolicyServer:
             "action_space": self._action_space,
             "gripper": self._gripper,
         }
-        print("SERVER_READY " + json.dumps(ready), flush=True)
-        return self._port
-
-    def _hello_ack(self) -> dict:
-        return {
-            "type": "hello_ack",
-            "protocol": PROTOCOL_VERSION,
-            "policy_id": self._policy_id,
-            "n_action_steps": self._n_action_steps,
-            "inference": self._inference,
-            "context_dim": self._context_dim,
-            "action_space": self._action_space,
-            "gripper": self._gripper,
-            "obs_schema": {k: [list(shape), dtype] for k, (shape, dtype) in OBS_SCHEMA.items()},
-            "action": [list(ACTION_SHAPE), ACTION_DTYPE],
-        }
 
     def handle_one(self) -> bool:
         header, arrays = recv_message(self._socket)
         kind = header.get("type")
         try:
             if kind == "hello":
-                if header.get("protocol") != PROTOCOL_VERSION:
-                    send_message(
-                        self._socket,
-                        {
-                            "type": "error",
-                            "error": "protocol_mismatch",
-                            "message": f"server speaks {PROTOCOL_VERSION}, client sent {header.get('protocol')}",
-                        },
-                    )
-                else:
-                    send_message(self._socket, self._hello_ack())
+                send_message(self._socket, hello_reply(header, self.ready()))
             elif kind == "reset":
                 self._reset_fn()
                 send_message(self._socket, {"type": "reset_ack"})
@@ -315,52 +291,15 @@ def resolve_inference_overrides(
     return {}
 
 
-# --------------------------------------------------------------------------------------
-# BCE gripper head -- PORTED BUT INACTIVE IN THIS REPO.
-#
-# openyam-lab trained a variant whose gripper dim is a BCE logit rather than an L1 output,
-# and its trainer (train_act_gripper.py, NOT ported) dropped a gripper_bce.json marker next
-# to the checkpoint. NOTHING IN THIS REPO WRITES THAT FILE: find_gripper_bce_marker()
-# returns None for every checkpoint this milestone trains, squash_gripper_logit() is never
-# reached on a live path, and the "+gbce" policy-id suffix never appears.
-#
-# Kept, not deleted: it is tested, self-contained, and a ported BCE trainer would need no
-# server-side change. Marked, not silent: do not go looking for the producer of the marker
-# file when debugging a gripper problem here -- there is no producer, and the None path is
-# the only one that runs.
-# --------------------------------------------------------------------------------------
-
-GRIPPER_DIM = 6  # the ACTION's gripper column (policy_protocol.STATE_GRIPPER_DIM is the state's)
-
-
-def find_gripper_bce_marker(checkpoint_dir: str) -> dict | None:
-    """Locate the gripper_bce.json a BCE-head training run left behind.
-
-    openyam-lab's train_act_gripper.py wrote it to the run's output_dir, while the
-    server is handed output_dir/checkpoints/<step>/pretrained_model -- so look in
-    the checkpoint dir itself, then walk up the three levels to output_dir.
-    Returns the parsed marker, or None for stock-L1 checkpoints. No trainer in this
-    repo emits one, so every checkpoint produced here takes the None path today; the
-    lookup is kept so a ported BCE trainer needs no change on the server side.
-    """
-    from pathlib import Path
-
-    directory = Path(checkpoint_dir)
-    for candidate in [directory, *directory.parents[:3]]:
-        marker = candidate / "gripper_bce.json"
-        if marker.is_file():
-            return json.loads(marker.read_text())
-    return None
-
-
 ACTION_SPACE_MARKER = "action_space.json"
 
 
 def _read_action_space_marker(checkpoint_dir: str) -> dict | None:
     """The parsed action_space.json nearest checkpoint_dir, walking up to output_dir.
 
-    Same walk as find_gripper_bce_marker: the checkpoint dir, then up to output_dir.
-    Shared by find_action_space_marker and find_gripper_marker so both keys read one file.
+    train_act.sh writes it to the run's output_dir, while the server is handed
+    output_dir/checkpoints/<step>/pretrained_model -- so look in the checkpoint dir itself,
+    then walk up the three levels to output_dir.
     """
     from pathlib import Path
 
@@ -370,19 +309,6 @@ def _read_action_space_marker(checkpoint_dir: str) -> dict | None:
         if marker.is_file():
             return json.loads(marker.read_text())
     return None
-
-
-def find_action_space_marker(checkpoint_dir: str) -> str:
-    """The action space train_act.sh recorded next to the checkpoints, "absolute" if none."""
-    marker = _read_action_space_marker(checkpoint_dir)
-    return "absolute" if marker is None else marker["action_space"]
-
-
-def find_gripper_marker(checkpoint_dir: str) -> str:
-    """The gripper contract train_act.sh recorded next to the checkpoints, "binary" if none
-    (MS6 phase B design 5.4). Same walk as find_action_space_marker."""
-    marker = _read_action_space_marker(checkpoint_dir)
-    return "binary" if marker is None else marker.get("gripper", "binary")
 
 
 # MS7g D12 (2026-10-03): the overhead camera looks down, so its roll sits near pi and
@@ -395,14 +321,18 @@ CONTEXT_NORM = "roll_wrapped_norm"
 CONTEXT_ROLL = 3  # overhead_cam_roll's index (tests/test_lerobot_schema_pin.py)
 
 
-def find_context_marker(checkpoint_dir: str) -> str | None:
-    """The context transform recorded next to the checkpoints, None if none (every checkpoint
-    before MS7g D12). Same walk as find_action_space_marker; an unknown value is refused."""
+def find_markers(checkpoint_dir: str) -> tuple[str, str, str | None]:
+    """The action space, the gripper contract (MS6 phase B design 5.4) and the context
+    transform recorded next to the checkpoints. Without a marker they are "absolute", "binary"
+    and None; without a gripper key "binary"; without a context key None (every checkpoint
+    before MS7g D12). An unknown context transform is refused."""
     marker = _read_action_space_marker(checkpoint_dir)
-    value = None if marker is None else marker.get("context")
-    if value not in (None, CONTEXT_NORM):
-        raise ValueError(f"unknown context transform {value!r} in {ACTION_SPACE_MARKER}")
-    return value
+    if marker is None:
+        return "absolute", "binary", None
+    context = marker.get("context")
+    if context not in (None, CONTEXT_NORM):
+        raise ValueError(f"unknown context transform {context!r} in {ACTION_SPACE_MARKER}")
+    return marker["action_space"], marker.get("gripper", "binary"), context
 
 
 def wrap_context_roll(context):
@@ -421,28 +351,6 @@ def integrate_delta(action: np.ndarray, state: np.ndarray) -> np.ndarray:
     out = action.copy()
     out[:, :6] += state[:, :6]
     return out
-
-
-def squash_gripper_logit(action: np.ndarray, raw_mean: float, raw_std: float) -> np.ndarray:
-    """Turn the unnormalized BCE logit back into a unit gripper action. INACTIVE here.
-
-    Unreachable in this repo -- see the section marker above; nothing produces the marker
-    file that switches it on.
-
-    A BCE-head checkpoint emits dim 6 as a logit, which the checkpoint's own
-    unnormalizer then treats as a normalized action: raw = logit * std + mean,
-    landing well outside the +-1 the protocol promises. (openyam-lab measured
-    near +-8 on its own action stats -- an OPENYAM measurement, unmeasured on
-    this arm; the inversion below does not depend on the magnitude, only on the
-    (mean, std) it is handed.) Invert that and squash with 2*sigmoid(logit) - 1
-    (== tanh(logit/2)), so the trained p=0.5 boundary (logit 0) lands exactly at
-    raw 0 -- the gripper convention's open threshold, since a raw action >= 0
-    opens and < 0 closes. The caller's array is not modified.
-    """
-    action = action.copy()
-    logit = (action[:, GRIPPER_DIM] - raw_mean) / raw_std
-    action[:, GRIPPER_DIM] = np.tanh(logit / 2.0)
-    return action
 
 
 BLANKABLE_STREAMS = ("wrist", "overhead")
@@ -477,7 +385,6 @@ def inference_policy_id(
     checkpoint_dir: str,
     overrides: dict,
     blank_camera: str | None = None,
-    gripper_squash: bool = False,
     context_dim: int = 0,
     action_space: str = "absolute",
     gripper: str = "binary",
@@ -492,8 +399,6 @@ def inference_policy_id(
         policy_id += f"+nas{overrides['n_action_steps']}"
     if action_warp != 1.0:
         policy_id += f"+warp{action_warp}"
-    if gripper_squash:
-        policy_id += "+gbce"
     if blank_camera is not None:
         policy_id += f"+blank{blank_camera}"
     if context_dim:
@@ -652,22 +557,13 @@ def _load_member(
         pretrained_path=checkpoint_dir,
         preprocessor_overrides={"device_processor": {"device": device}},
     )
-    marker = find_gripper_bce_marker(checkpoint_dir)
-    action_space = find_action_space_marker(checkpoint_dir)
-    gripper = find_gripper_marker(checkpoint_dir)
-    context_norm = find_context_marker(checkpoint_dir)
+    action_space, gripper, context_norm = find_markers(checkpoint_dir)
     if context_norm and "ENV" not in policy.config.normalization_mapping:
         raise ValueError(f"the marker says {context_norm} but the checkpoint maps no ENV feature")
     if action_space == "delta":
         raise ValueError(
             "this checkpoint was trained on the c1 delta definition (target minus the measured "
             "joints of the same frame), which MS4 c2 removed; only absolute and delta_prev serve"
-        )
-    if marker is not None and ("gripper_raw_mean" not in marker or "gripper_raw_std" not in marker):
-        raise ValueError(
-            "gripper_bce.json next to this checkpoint predates the logit-scale "
-            "fix and lacks gripper_raw_mean/gripper_raw_std; backfill them from "
-            "the training dataset's meta/stats.json action mean/std at dim 6"
         )
 
     def _images(array: np.ndarray) -> torch.Tensor:
@@ -686,12 +582,7 @@ def _load_member(
         return pre(batch)
 
     def _finish(action) -> np.ndarray:
-        action = np.asarray(post(action).detach().to("cpu"), dtype=np.float32)
-        if marker is not None:
-            action = squash_gripper_logit(
-                action, marker["gripper_raw_mean"], marker["gripper_raw_std"]
-            )
-        return action
+        return np.asarray(post(action).detach().to("cpu"), dtype=np.float32)
 
     def predict_chunk(obs: dict) -> np.ndarray:
         """(b, n_action_steps, 7): the chunk head ``select_action`` would queue, unnormalized
@@ -713,7 +604,6 @@ def _load_member(
             checkpoint_dir,
             overrides,
             blank_camera,
-            gripper_squash=marker is not None,
             context_dim=context_dim,
             action_space=action_space,
             gripper=gripper,
@@ -728,7 +618,6 @@ def _load_member(
         contract={
             "action_space": action_space,
             "gripper": gripper,
-            "gripper_squash": marker is not None,
             "action_shape": list(policy.config.action_feature.shape),
             "context_dim": context_dim,
             **served_inference(policy.config),

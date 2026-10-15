@@ -3,12 +3,8 @@
 Torch-free and isaaclab-free on purpose. This is a constant every consumer
 must agree on, and this milestone's rule is that such constants are imported
 rather than retyped: it lives here so the env cfg that installs it
-(``tasks.manager_based.lego_sort.variants``), the attitude-hold anti-windup
-band derived from it (``core.attitude_hold.DEFAULT_MAX_LEAD``) and the CPU
-tests that describe the arm through it all read the same object. Before
-Task 13's final review the three carried three independent copies, one of
-which conceded in a comment that "nothing here can catch the two drifting
-apart".
+(``tasks.manager_based.lego_sort.variants``) and the oracle rig's joint noise
+(``oracle_runtime.JOINT_NOISE_PER_RAW_UNIT``) read the same object.
 
 Same reasoning that put ``TOP_DOWN_X_LIMIT`` in ``core.layout`` (Task 10) and
 the overhead-camera derivation there (Task 12).
@@ -24,6 +20,3 @@ the overhead-camera derivation there (Task 12).
 # constant is re-measured with the same 120-step per-axis protocol and the
 # result recorded in docs/ms1-maker-arm-sim.md.
 IK_SCALE: tuple[float, ...] = (0.002, 0.002, 0.002, 0.01, 0.01, 0.01)
-
-# Rotation entries alone, the slice every rotation consumer wants.
-IK_SCALE_ROT: tuple[float, ...] = IK_SCALE[3:6]

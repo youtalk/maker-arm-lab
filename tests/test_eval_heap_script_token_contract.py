@@ -5,28 +5,16 @@ contract is checked structurally, as tests/test_dagger_script_token_contract.py 
 
 import ast
 import os
-import pathlib
 import subprocess
 import sys
 
 import pytest
 
+from helpers import ROOT, load_script
 from maker_arm_lab.core import batch_loop, parts
+from test_grasp_script_token_contract import _module_scope_calls
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "mj_eval_heap.py"
-
-
-def _module_scope_calls(tree):
-    found = set()
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            continue
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Call):
-                func = sub.func
-                found.add(func.id if isinstance(func, ast.Name) else getattr(func, "attr", ""))
-    return found
 
 
 def test_tokens_are_printed_inside_main_and_nothing_risky_runs_at_module_scope():
@@ -93,16 +81,28 @@ def test_the_heap_client_takes_the_protocol_switches():
 PERCEIVED = ["--perceived", "--desk_boxes", "4", "--gripper", "continuous"]
 
 
-def _run(argv):
+def _refused(argv, capsys):
+    """``main(argv)`` in this process: a usage error exits 2 with one token line."""
+    with pytest.raises(SystemExit) as exit_info:
+        load_script(SCRIPT).main(argv)
+    assert exit_info.value.code == 2
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1 and out[0].startswith('EVAL_FAIL {"reason": "usage"'), out
+
+
+def test_a_usage_error_run_as_a_process_prints_one_token_line():
     env = {**os.environ, "PYTHONPATH": str(ROOT / "source"), "MUJOCO_GL": "disable"}  # CI has no GL
-    return subprocess.run(
-        [sys.executable, str(SCRIPT), *argv],
+    out = subprocess.run(
+        [sys.executable, str(SCRIPT), "--contact_hold"],
         capture_output=True,
         text=True,
         env=env,
         timeout=300,
         check=False,
     )
+    assert out.returncode == 2, out.stderr
+    assert out.stdout.strip().splitlines() == [out.stdout.strip()]  # one token line
+    assert out.stdout.startswith('EVAL_FAIL {"reason": "usage"'), out.stdout
 
 
 @pytest.mark.parametrize(
@@ -118,11 +118,8 @@ def _run(argv):
         *([f"--{name}"] for name in PERCEIVED_ONLY),
     ],
 )
-def test_the_perceived_flags_refuse_a_bad_combination_with_the_token(argv):
-    out = _run(argv)
-    assert out.returncode == 2, out.stderr
-    assert out.stdout.strip().splitlines() == [out.stdout.strip()]  # one token line
-    assert out.stdout.startswith('EVAL_FAIL {"reason": "usage"'), out.stdout
+def test_the_perceived_flags_refuse_a_bad_combination_with_the_token(argv, capsys):
+    _refused(argv, capsys)
 
 
 def test_the_heap_client_writes_the_hold_trace():
@@ -143,13 +140,10 @@ SWITCH_ARGV["box_unseen"] = ["--box_unseen", "rim"]
         ["--heap_family", "flat"],  # not among --families
     ],
 )
-def test_an_ms7e_switch_not_built_on_this_commit_fails_with_the_token(argv):
+def test_an_ms7e_switch_not_built_on_this_commit_fails_with_the_token(argv, capsys):
     """MS7e design section 10.2: a switch whose behaviour is not in the commit never runs as a
     no-op. The cases follow ``parts.READY_FAMILIES`` and ``batch_loop.UNBUILT_SWITCHES``."""
-    out = _run(argv)
-    assert out.returncode == 2, out.stderr
-    assert out.stdout.strip().splitlines() == [out.stdout.strip()]  # one token line
-    assert out.stdout.startswith('EVAL_FAIL {"reason": "usage"'), out.stdout
+    _refused(argv, capsys)
 
 
 def test_the_heap_client_records_the_ms7e_switches_and_serves_the_active_classes():

@@ -9,11 +9,11 @@ import numpy as np
 import pytest
 import torch
 
+from helpers import ROOT, load_script
 from maker_arm_lab.core import loop
-from test_ms7f_stack import ROOT, _load
 from test_vote_weights import NAMES, _vote
 
-bank = _load(ROOT / "lerobot_stack" / "vote_bank.py")
+bank = load_script(ROOT / "lerobot_stack" / "vote_bank.py")
 
 
 def test_the_bank_tool_applies_the_loop_s_rules():

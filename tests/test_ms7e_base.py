@@ -4,18 +4,15 @@ switch off, each draw equals MS7d's: the pinned values were computed from main c
 the change."""
 
 import argparse
-import importlib.util
 import itertools
 import math
 import random
 from collections import Counter
-from pathlib import Path
 
 import pytest
 
+from helpers import load_script
 from maker_arm_lab.core import batch_loop, desk_boxes, parts, perception
-
-BATCH = Path(__file__).resolve().parents[1] / "scripts" / "mj_generate_batch.py"
 
 MS7D_CATALOG = [
     *(f"brick_1x{n}" for n in range(1, 9)),
@@ -290,13 +287,6 @@ def test_any_family_or_the_box_draw_turns_on_the_eight_classes():
     assert batch_loop.heap_classes(_args(release_lean=True)) == parts.BASE_CLASSES
 
 
-def _load_batch():
-    spec = importlib.util.spec_from_file_location("mj_generate_batch", BATCH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 HEAP = ["--out_dir", "/tmp/x", "--heap_k", "3"]
 UNBUILT = [
     ["--families", "round"],
@@ -316,7 +306,7 @@ def test_the_recorder_refuses_an_unbuilt_ms7e_switch_with_its_fail_token(argv, c
     """The base commit's state, whatever the tracks have built since."""
     monkeypatch.setattr(parts, "READY_FAMILIES", frozenset())
     monkeypatch.setattr(batch_loop, "UNBUILT_SWITCHES", ("box_draw", "release_lean", "box_unseen"))
-    batch = _load_batch()
+    batch = load_script("mj_generate_batch")
     with pytest.raises(SystemExit) as exit_info:
         batch.main(HEAP + argv)
     assert exit_info.value.code == 2
@@ -325,7 +315,7 @@ def test_the_recorder_refuses_an_unbuilt_ms7e_switch_with_its_fail_token(argv, c
 
 
 def test_the_run_meta_records_the_ms7e_switches(monkeypatch):
-    batch = _load_batch()
+    batch = load_script("mj_generate_batch")
     args = batch.parse_args(HEAP)
     draw, _, noise = batch.build_run(args)
     meta = batch.run_meta(

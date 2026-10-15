@@ -1,20 +1,17 @@
 """MS5 design section 4.2: the perception worker's wire format, numpy and pyzmq only."""
 
 import ast
-import importlib.util
 import math
-from pathlib import Path
 
 import numpy as np
 import pytest
 import zmq
 
+from helpers import ROOT, load_script
 from maker_arm_lab.core.parts import BASE_CLASSES
 
-PROTOCOL = Path(__file__).resolve().parents[1] / "perception_stack" / "perception_protocol.py"
-spec = importlib.util.spec_from_file_location("perception_protocol_under_test", PROTOCOL)
-proto = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(proto)
+PROTOCOL = ROOT / "perception_stack" / "perception_protocol.py"
+proto = load_script(PROTOCOL)
 
 GOOD = {
     "centre": [0.2, 0.0, 0.006],

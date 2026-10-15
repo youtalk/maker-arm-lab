@@ -43,7 +43,7 @@ phase rather than to the pick alone:
     droop, which is effort-limit saturation on `link_004_joint`/`link_007_joint` and not
     missing gravity compensation (Task D3 part 9).
 
-There is no attitude servo any more. `core.attitude_hold.AttitudeHold` existed because the
+There is no attitude servo any more. The removed `AttitudeHold` servo existed because the
 IK-Rel term re-bases the desired orientation on the measured one every step, so a zero
 rotation delta does not hold an attitude; the solver constrains tilt, lean azimuth and jaw
 heading directly, so the attitude is a property of the joint vector being commanded. For the

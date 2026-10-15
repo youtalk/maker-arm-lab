@@ -79,8 +79,6 @@ import h5py
 import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-from extract_replay_bundle import initial_state_arrays
-
 TASK = "sort the lego bricks into the color-matched bins"
 ARM_JOINTS = [
     "link_002_joint",
@@ -463,7 +461,6 @@ def convert(
     fps: int,
     *,
     split_cycles: bool = False,
-    sidecar_dir: Path | None = None,
     lead_keep: int = 0,
     context: str | None = None,
     images: bool = True,
@@ -473,25 +470,11 @@ def convert(
     reopen: ReopenLead | None = None,
     own: OwnFrames | None = None,
 ) -> Counts:
-    """Convert `shards` into (or append them onto) the LeRobot dataset at `root`.
-
-    When `sidecar_dir` is set, every sub-episode written under `split_cycles` gets a
-    `{episode_index}.npz` sidecar holding its `cycle_phase`/`cycle_brick` slices plus
-    `initial_state_arrays(grp)` (see extract_replay_bundle.py). That `initial_state` is
-    the SOURCE DEMO's t=0 state -- pre-SETTLE, before any brick has been picked -- not
-    the sub-episode's own first frame: for segment k>0 it describes a scene that never
-    coexisted with the sub-episode (earlier bricks are still on the desk, not yet in a
-    bin), and even segment 0's sidecar carries the pre-SETTLE pose rather than its own
-    first recorded frame. It is not a replayable start state for the sub-episode by
-    itself -- do not feed it to `scene.reset_to()` expecting it to reproduce where the
-    sub-episode begins.
-    """
+    """Convert `shards` into (or append them onto) the LeRobot dataset at `root`."""
     if action_space not in ACTION_SPACES:
         raise ValueError(f"action_space must be one of {ACTION_SPACES}, got {action_space!r}")
     if gripper not in GRIPPER_MODES:
         raise ValueError(f"gripper must be one of {GRIPPER_MODES}, got {gripper!r}")
-    if sidecar_dir is not None and not split_cycles:
-        raise ValueError("sidecar_dir requires split_cycles")
     if lead_keep and not split_cycles:
         raise ValueError("lead_keep requires split_cycles")
     if dagger and not split_cycles:
@@ -507,9 +490,9 @@ def convert(
     if own is not None:
         if own.mode not in OWN_MODES:
             raise ValueError(f"own_frames must be one of {OWN_MODES}, got {own.mode!r}")
-        if split_cycles or dagger or lead_keep or sidecar_dir is not None or reopen is not None:
+        if split_cycles or dagger or lead_keep or reopen is not None:
             raise ValueError(
-                "own_frames refuses split_cycles, dagger, lead_keep, sidecar_dir and reopen: "
+                "own_frames refuses split_cycles, dagger, lead_keep and reopen: "
                 "the stock --dagger pass converts the takeovers"
             )
         if gripper != "continuous" or context != "camera_box_target":
@@ -537,20 +520,6 @@ def convert(
             # conversion) is otherwise indistinguishable on disk from "nothing here yet", so
             # remove it and create fresh.
             root.rmdir()
-        # A NEW root pairs one-to-one with a NEW sidecar_dir. A non-empty sidecar_dir here
-        # means files from some earlier campaign (whose episode indices started at 0, same
-        # as this fresh dataset's will) -- writing into it would silently overwrite or
-        # interleave with that campaign's `{episode_index}.npz` files with nothing on disk
-        # telling them apart. On resume (the branch above) this check does not run: an
-        # existing sidecar_dir is expected to already hold this same dataset's earlier
-        # episodes, and appending to it is correct.
-        if sidecar_dir is not None and sidecar_dir.exists() and any(sidecar_dir.iterdir()):
-            raise RuntimeError(
-                f"{sidecar_dir} exists and is non-empty, but {root} is being created fresh -- "
-                "refusing to guess whether these sidecars belong to this campaign or a previous "
-                "one; use a fresh --sidecar_dir for a new dataset root, or resume into the "
-                "existing --root that produced them"
-            )
         features = build_features(context_names, images, gripper)
         if own is not None and own.mode == "labeled":
             for name in ("label", "subtask"):
@@ -637,11 +606,6 @@ def convert(
                     )
                 else:
                     segments = [np.arange(steps)]
-                # Hoisted out of the segment loop: read+stack once per demo instead of once
-                # per sub-episode, and raise (on a shard with cycle channels but no
-                # initial_state group) before save_episode() writes any of this demo's
-                # segments, instead of after some of them already landed.
-                init_arrays = initial_state_arrays(grp) if sidecar_dir is not None else None
                 for seg in segments:
                     if reopen is not None:
                         cut = reopen_lead(
@@ -689,14 +653,6 @@ def convert(
                     if own is not None and cycle[seg[0]] > 0:  # the audit's frame map
                         infos[cycle[seg[0]] - 1]["written"].append(
                             [episode_index, int(seg[0]), len(seg)]
-                        )
-                    if sidecar_dir is not None:
-                        sidecar_dir.mkdir(parents=True, exist_ok=True)
-                        np.savez(
-                            sidecar_dir / f"{episode_index}.npz",
-                            cycle_phase=phase[seg],
-                            cycle_brick=brick[seg],
-                            **init_arrays,
                         )
                     converted += 1
     dataset.finalize()
@@ -801,18 +757,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --split_cycles: keep the last N SETTLE frames on each demo's first cycle",
     )
     parser.add_argument(
-        "--sidecar_dir",
-        type=Path,
-        default=None,
-        help=(
-            "Directory for one {episode_index}.npz replay-label sidecar per sub-episode "
-            "(requires --split_cycles). Each sidecar's initial_state is its SOURCE DEMO's "
-            "t=0 (pre-SETTLE) state, not the sub-episode's own start -- see convert()'s "
-            "docstring. Must be empty (or a fresh path) when --root is being created; "
-            "reuse it only to resume into that same --root."
-        ),
-    )
-    parser.add_argument(
         "--context",
         choices=CONTEXT_CHANNELS,
         default=None,
@@ -880,8 +824,6 @@ def main() -> int:
         args = parser.parse_args()
         tol = args.drop_reopen_lead
         reopen = None if tol is None else ReopenLead(tol)
-        if args.sidecar_dir is not None and not args.split_cycles:
-            parser.error("--sidecar_dir requires --split_cycles")
         if args.host is not None and args.own_frames is None:
             parser.error("--host names the host of --own_frames rows")
         own = None if args.own_frames is None else OwnFrames(args.own_frames, args.host)
@@ -892,7 +834,6 @@ def main() -> int:
             args.fps,
             split_cycles=args.split_cycles,
             lead_keep=args.lead_keep,
-            sidecar_dir=args.sidecar_dir,
             context=args.context,
             images=not args.no_images,
             action_space=args.action_space,

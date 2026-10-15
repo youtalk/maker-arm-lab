@@ -39,6 +39,7 @@ import numpy as np
 import torch
 
 from policy_server import CONTEXT_NORM, CONTEXT_ROLL, wrap_context_roll
+from train_pi05 import root_datasets
 
 FLAG = "--frame_mask="
 CONTEXT_FLAG = "--context_norm="
@@ -130,16 +131,7 @@ def keep_episodes(lengths: list, corpus_frames: int, max_share: float) -> list:
 
 def mixed(make_dataset, cfg, corpus, roots: list, max_share: float, transform) -> Mixed:
     """``corpus`` and the datasets ``make_dataset`` builds at ``roots``, as one ``Mixed``."""
-    main_root, data = cfg.dataset.root, []
-    try:
-        for root in roots:
-            cfg.dataset.root = root
-            data.append(make_dataset(cfg))
-    finally:
-        cfg.dataset.root = main_root
-    for root, d in zip(roots, data):
-        if d.meta.features != corpus.meta.features or d.fps != corpus.fps:
-            raise RuntimeError(f"{root} has other features or fps than the corpus")
+    data = root_datasets(make_dataset, cfg, corpus, roots)
     lengths = [np.asarray(d.meta.episodes["length"]) for d in data]
     kept = keep_episodes(lengths, len(corpus), max_share)
     extras = []

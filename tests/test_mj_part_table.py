@@ -1,23 +1,15 @@
 """scripts/mj_part_table.py: the token contract, the seed rule, the MS7e part order and one real
 trial (about 2 s on Machine A, so it runs in the CPU suite)."""
 
-import importlib.util
 import json
-import pathlib
 import random
 import subprocess
 import sys
 
+from helpers import ROOT, load_script
 from maker_arm_lab.core import parts
 
-SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "mj_part_table.py"
-
-
-def _load():
-    spec = importlib.util.spec_from_file_location(SCRIPT.stem, SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+SCRIPT = ROOT / "scripts" / "mj_part_table.py"
 
 
 def _run(*argv):
@@ -42,7 +34,7 @@ def test_usage_errors_print_the_fail_token():
 
 
 def test_the_ms7e_part_order_and_its_families():
-    table = _load()
+    table = load_script(SCRIPT)
     order = table.part_order()
     assert order[:29] == [p.name for p in parts.catalog()]
     assert len(order) == len(set(order)) == 51 + len(parts.JOINT_IDS) + len(parts.MINIFIG_IDS)
@@ -68,7 +60,7 @@ def test_the_ms7e_part_order_and_its_families():
 
 
 def test_the_seed_rule():
-    table = _load()
+    table = load_script(SCRIPT)
     index = parts.catalog_index("brick_2x4")
     want = random.Random(20289000 + index)
     assert table.trial_seeds("brick_2x4", 12) == [want.randrange(2**31) for _ in range(12)]
@@ -90,7 +82,7 @@ def test_one_real_trial_on_brick_2x4_stows(tmp_path):
     assert lines[-1].startswith("TABLE_OK ")
     result = json.loads(out_json.read_text())
     (record,) = result["records"]
-    assert record["seed"] == _load().trial_seeds("brick_2x4", 1)[0]
+    assert record["seed"] == load_script(SCRIPT).trial_seeds("brick_2x4", 1)[0]
     # The base control: the teacher lifts and stows a 2x4 (84 of 84 on 2026-09-29).
     assert record["lifted"] and record["stowed"] and record["end_phase"] == "RETREAT>DONE"
     assert record["lifts"][0]["gate"]["force_n"][0] > 0.5

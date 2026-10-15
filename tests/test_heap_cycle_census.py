@@ -1,14 +1,11 @@
 """scripts/heap_cycle_census.py on synthetic heap payloads (imported, stdlib only)."""
 
-import importlib.util
 import json
 from pathlib import Path
 
-_spec = importlib.util.spec_from_file_location(
-    "_heap_cycle_census", Path(__file__).resolve().parents[1] / "scripts/heap_cycle_census.py"
-)
-census = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(census)
+from helpers import load_script
+
+census = load_script("heap_cycle_census")
 
 
 def _episode(**extra) -> dict:

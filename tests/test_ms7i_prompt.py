@@ -8,9 +8,10 @@ import h5py
 import numpy as np
 import pytest
 
+from helpers import load_script
 from maker_arm_lab.core import hold, loop
 from test_ms7f_dagger import ARGV, _wiring
-from test_ms7f_stack import _load, ge
+from test_ms7f_stack import ge
 from test_ms7i_own_frames import EVAL_HEAP, _scene
 from test_perceived_loop import _env_and_rig, _rollout, _served
 from test_run_gate_eval import PI05_HEAP, _argv, _cfg, _episode, _fake_ledger, _payload
@@ -95,7 +96,7 @@ def test_the_client_wires_the_switch_and_refuses_it_with_the_oracle_driver(monke
     assert _wiring(monkeypatch, ARGV + ["--pi05_prompt"])["rollout"]["pi05_prompt"] is True
     assert _wiring(monkeypatch, ARGV)["rollout"]["pi05_prompt"] is False
     capsys.readouterr()
-    module = _load(EVAL_HEAP)
+    module = load_script(EVAL_HEAP)
     with pytest.raises(SystemExit) as exit_info:
         module.main(ARGV + ["--oracle_driver", "--pi05_prompt"])
     assert exit_info.value.code == 2

@@ -1,15 +1,14 @@
 """MS5 design section 10: the unchanged heap loop runs on RealEnv under the MS7d served
 switches, and no decision on the rig reads a truth accessor."""
 
-import importlib.util
 import math
 import random
-from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
 
+from helpers import load_script
 from maker_arm_lab.core import loop, oracle, perception
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.parts import BASE_CLASSES, make_part
@@ -25,10 +24,7 @@ from test_perceived_loop import (
     _TruthlessEnv,
 )
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "real_eval_heap.py"
-spec = importlib.util.spec_from_file_location("real_eval_heap", SCRIPT)
-real_eval_heap = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(real_eval_heap)
+real_eval_heap = load_script("real_eval_heap")
 
 BUDGET = 3
 SERVED = real_eval_heap.SERVED_SWITCHES

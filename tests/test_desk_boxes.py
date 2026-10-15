@@ -484,16 +484,10 @@ def test_the_envelope_check_prints_its_fail_token_on_a_usage_error(argv):
 
 def test_the_heap_clients_take_the_desk_boxes_flag():
     root = pathlib.Path(__file__).resolve().parents[1] / "scripts"
-    for name in ("mj_eval_heap.py", "mj_dagger_heap.py"):
-        text = (root / name).read_text()
-        assert '"--desk_boxes"' in text and "desk_boxes=args.desk_boxes" in text, name
-        assert 'payload["desk_boxes"] = args.desk_boxes' in text, name
-    for name in (
-        "mj_eval_heap.py",
-        "mj_dagger_heap.py",
-        "mj_generate_batch.py",
-        "mj_inspect_heap.py",
-    ):
+    text = (root / "mj_eval_heap.py").read_text()
+    assert '"--desk_boxes"' in text and "desk_boxes=args.desk_boxes" in text
+    assert 'payload["desk_boxes"] = args.desk_boxes' in text
+    for name in ("mj_eval_heap.py", "mj_generate_batch.py"):
         text = (root / name).read_text()
         assert "boxes=env.desk_box_poses[i]" in text and "int(env.destination_bins[i])" not in text
 

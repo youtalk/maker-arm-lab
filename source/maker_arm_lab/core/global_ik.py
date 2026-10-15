@@ -62,14 +62,6 @@ _CHAIN = (*ARM_JOINT_NAMES, "grasp_center_joint")
 # commanding a 0.5 rad lurch through the scene.
 MAX_WAYPOINT_STEP = 0.12
 
-# A solution counts as feasible only if it actually satisfies the task. These are far tighter
-# than the grasp needs (the brick is 15.8 mm wide); a Levenberg-Marquardt root find on a
-# well-posed 6x6 system converges to machine precision or not at all, so a loose tolerance
-# would only let non-convergence through as success. The values live with the solver in
-# maker-arm-rs; they are re-exported here for the callers that read them.
-POS_TOL = Kinematics.POS_TOL  # m
-ANG_TOL = Kinematics.ANG_TOL  # rad
-
 _DEFAULT_RESTARTS = 24
 # Fixed so that two runs of the same task return the same joint vector. An oracle that
 # silently picks a different IK branch run to run would make datasets irreproducible.
@@ -92,8 +84,6 @@ def _rpy_matrix(roll: float, pitch: float, yaw: float) -> torch.Tensor:
 
 def wrap_to_pi(angle: torch.Tensor | float) -> torch.Tensor | float:
     """Fold an angle into [-pi, pi) -- exactly +pi comes back as -pi."""
-    if isinstance(angle, torch.Tensor):
-        return (angle + math.pi) % (2.0 * math.pi) - math.pi
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 

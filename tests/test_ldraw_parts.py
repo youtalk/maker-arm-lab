@@ -3,10 +3,8 @@
 cap, each MS7f family holds out a fifth of its kinds rounded up, and the generator keeps its
 token contract. ``test_mj_scene_parts.py`` builds them in the scene."""
 
-import importlib.util
 import json
 import math
-import pathlib
 import subprocess
 import sys
 
@@ -14,10 +12,10 @@ import mujoco
 import numpy as np
 import pytest
 
+from helpers import ROOT, load_script
 from maker_arm_lab.core import parts
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-GENERATOR = ROOT / "scripts" / "ldraw_parts.py"
+GENERATOR = ROOT / "scripts" / "ldraw_parts.py"  # stdlib at import; coacd only inside a run
 LDRAW = [parts.ldraw_part(i) for i in parts.LDRAW_IDS]
 MS7F = {f: ids for f, ids in parts.LDRAW_FAMILY_IDS.items() if f != "ldraw"}
 EXTRA = [p for p in map(parts.extra_part, parts.CLASSIFIER_EXTRA) if p.hulls]
@@ -28,15 +26,8 @@ def _json(part):
     return json.loads((parts.LDRAW_DIR / f"{part.name.split('_', 1)[1]}.json").read_text())
 
 
-def _generator():
-    spec = importlib.util.spec_from_file_location("ldraw_parts", GENERATOR)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)  # stdlib at import; coacd only inside a run
-    return module
-
-
 def test_every_json_part_loads_with_its_rules():
-    gen = _generator()
+    gen = load_script(GENERATOR)
     catalog_ids = tuple(i for ids in parts.LDRAW_FAMILY_IDS.values() for i in ids)
     assert tuple(gen.PARTS) == catalog_ids + tuple(_json(p)["id"] for p in EXTRA)
     assert {p.name for p in parts.catalog(("ldraw",))[29:]} == {
@@ -65,7 +56,7 @@ def test_every_json_part_loads_with_its_rules():
 def test_every_ms7f_part_loads_with_its_rules():
     """MS7f design section 7: graspable (at most 45 mm across its footprint's short side), the
     H2 mass floored, the generator's closing axes, at most MAX_HULLS hulls inside the box."""
-    gen = _generator()
+    gen = load_script(GENERATOR)
     for family, ids in {**MS7F, "extra": ()}.items():
         members = EXTRA if family == "extra" else parts.catalog((family,))[29:]
         if family != "extra":

@@ -251,7 +251,7 @@ def test_the_mix_adds_each_extra_frame_once_with_the_corpus_meta_and_the_roll_wr
 
 def test_an_extra_root_with_other_features_is_refused(tmp_path):
     make, cfg = _mix_maker(tmp_path, other_features=True)
-    with pytest.raises(RuntimeError, match="other features"):
+    with pytest.raises(ValueError, match="other features"):
         tm.masked(make, None, tm.CONTEXT_NORM, ("/b1",))(cfg)
     assert cfg.dataset.root == tmp_path
 
