@@ -6,8 +6,9 @@ import json
 
 import pytest
 
+from helpers import load_script
 from maker_arm_lab.core import dagger_loop, loop, perception
-from test_ms7f_stack import ROOT, _gate_argv, _load, ge
+from test_ms7f_stack import _gate_argv, ge
 from test_perceived_loop import _rollout, _served, _teacher_scene, _thin_snap_scene
 from test_snap_closed import _Blind
 from test_thin_snap import _same
@@ -98,7 +99,7 @@ def test_the_rollout_refuses_the_switch_without_perceived(monkeypatch):
 def test_the_clients_refuse_the_switch_where_no_serving_loop_reads_it(
     script, argv, message, capsys
 ):
-    module = _load(ROOT / "scripts" / f"{script}.py")
+    module = load_script(script)
     with pytest.raises(SystemExit) as exit_info:
         module.main(argv + ["--heap_k", "3", "--desk_boxes", "4", "--stall_end"])
     assert exit_info.value.code == 2

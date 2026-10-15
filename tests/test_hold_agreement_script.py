@@ -1,18 +1,15 @@
 """scripts/hold_agreement.py on a tiny synthetic payload and trace: one token line per exit."""
 
 import gzip
-import importlib.util
 import json
 import subprocess
 import sys
-from pathlib import Path
 
+from helpers import ROOT, load_script
 from maker_arm_lab.core import hold
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "hold_agreement.py"
-_spec = importlib.util.spec_from_file_location("_hold_agreement", SCRIPT)
-script = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(script)
+SCRIPT = ROOT / "scripts" / "hold_agreement.py"
+script = load_script(SCRIPT)
 
 
 def _trace() -> list[list]:

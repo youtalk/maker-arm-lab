@@ -2,15 +2,14 @@
 TorchScript model drives the box, the passenger response opens the jaws only over the tray
 interior, the stand-in's draws stay paired, and no decision reads the truth."""
 
-import importlib.util
 import math
-from pathlib import Path
 from typing import List, Tuple  # noqa: UP035 -- TorchScript reads the typing names
 
 import numpy as np
 import pytest
 import torch
 
+from helpers import load_script
 from maker_arm_lab.core import layout, loop, parts, perception
 from maker_arm_lab.core.eval_loop import EvalFailure
 from test_mj_heap_oracle import _place
@@ -36,7 +35,6 @@ SWITCHES = {
     "part_failures": True,
     "park_done": True,
 }
-SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 BRIGHT = 255  # the stub's overhead frame; a cameras-off env serves black wrist frames
 
 
@@ -358,9 +356,7 @@ def test_no_decision_reads_the_truth_under_the_classifier(tmp_path, monkeypatch)
 
 
 def _usage(script: str, argv: list[str], capsys) -> str:
-    spec = importlib.util.spec_from_file_location(script, SCRIPTS / f"{script}.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_script(script)
     with pytest.raises(SystemExit) as exit_info:
         module.main(argv)
     assert exit_info.value.code == 2

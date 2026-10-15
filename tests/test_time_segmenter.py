@@ -1,18 +1,16 @@
 """MS5 design P1: the segmenter timing bench's pure parts (the model runs only on the Thor)."""
 
 import ast
-import importlib.util
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 import numpy as np
 
-SCRIPT = Path(__file__).resolve().parents[1] / "perception_stack" / "time_segmenter.py"
-spec = importlib.util.spec_from_file_location("time_segmenter", SCRIPT)
-time_segmenter = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(time_segmenter)
+from helpers import ROOT, load_script
+
+SCRIPT = ROOT / "perception_stack" / "time_segmenter.py"
+time_segmenter = load_script(SCRIPT)
 
 
 def test_grid_prompts_are_n_single_points_inside_the_image():

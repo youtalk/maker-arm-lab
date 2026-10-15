@@ -8,10 +8,11 @@ import numpy as np
 import pytest
 import torch
 
+from helpers import load_script
 from maker_arm_lab.core import desk_boxes, loop, parts, perception
 from maker_arm_lab.core.eval_loop import EvalFailure
 from test_classifier_loop import SWITCHES, _classifier, _scene, _usage
-from test_ms7f_stack import ROOT, _gate_argv, _load, ge
+from test_ms7f_stack import _gate_argv, ge
 from test_perceived_loop import _rollout, _served
 from test_run_gate_eval import _heap_payload
 from test_thin_snap import _same
@@ -167,7 +168,7 @@ def test_the_client_parses_the_guards_and_the_vote_the_supervisor_forwards(tmp_p
     cmd = ge._eval_command(cfg, draw)
     assert all(cmd.count(flag) == 1 for flag in trio), cmd
     assert cmd[cmd.index("--vote_weights") + 1] == str(path)
-    client = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    client = load_script("mj_eval_heap")
     args = client.parse_args(cmd[cmd.index("scripts/mj_eval_heap.py") + 1 :])
     assert args.carry_guard and args.overhang_guard and args.class_views and args.vote == vote
     switches = ge.loop_switches(cfg.client_flags)

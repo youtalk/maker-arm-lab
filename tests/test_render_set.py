@@ -1,8 +1,6 @@
 """scripts/mj_render_set.py (MS7f design section 6.4): the token contract, and on a small heap
 driven by the teacher, labels that equal the truth of the scene at each view."""
 
-import importlib.util
-import pathlib
 import random
 import subprocess
 import sys
@@ -11,17 +9,11 @@ import mujoco
 import numpy as np
 import pytest
 
+from helpers import ROOT, load_script
 from maker_arm_lab.core import parts
 
-SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "mj_render_set.py"
+SCRIPT = ROOT / "scripts" / "mj_render_set.py"
 FAMILIES = ("round", "ldraw", "flat")
-
-
-def _load():
-    spec = importlib.util.spec_from_file_location(SCRIPT.stem, SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _can_render() -> bool:
@@ -46,7 +38,7 @@ def test_the_ms7f_scene_switches_parse_and_the_serving_ones_refuse():
     base = ["--out_dir", "/tmp/x", "--heap_k", "150", "--tray", "--desk_boxes", "8"]
     base += ["--box_draw", "8", "--release_lean"]
     on = ["--categories", "--deep_tray", "--box_empty", "--abandon_cycle", "--pile_pgs"]
-    args = _load().parse_args(base + on)
+    args = load_script(SCRIPT).parse_args(base + on)
     assert args.categories and args.deep_tray and args.box_empty and args.abandon_cycle
     assert args.pile_pgs
     for extra in (["--classifier", "m.pt"], ["--passenger_drop"], ["--book_miss"]):
@@ -62,7 +54,7 @@ def test_the_ms7f_scene_switches_parse_and_the_serving_ones_refuse():
 
 def test_pile_pgs_reaches_the_env(monkeypatch, tmp_path):
     # A physics switch the env never sees would read as a no-op render.
-    module = _load()
+    module = load_script(SCRIPT)
     seen = {}
 
     def env(*args, **kwargs):
@@ -76,7 +68,7 @@ def test_pile_pgs_reaches_the_env(monkeypatch, tmp_path):
 
 
 def test_mix_extra_replaces_the_share_it_is_given():
-    mix = _load().mix_extra
+    mix = load_script(SCRIPT).mix_extra
     parts, extra = list(range(200)), ["x", "y"]
     assert mix(parts, extra, 0.0, random.Random(1)) == parts
     assert set(mix(parts, extra, 1.0, random.Random(1))) == {"x", "y"}
@@ -87,7 +79,7 @@ def test_mix_extra_replaces_the_share_it_is_given():
 
 
 def test_tilt_reads_the_part_axis_from_world_up():
-    tilt = _load()._tilt
+    tilt = load_script(SCRIPT)._tilt
     c = np.cos(np.pi / 4)
     assert tilt((1.0, 0.0, 0.0, 0.0)) == 0.0
     assert tilt((0.0, 0.0, 0.0, 1.0)) == 0.0  # a turn about z leaves it upright
@@ -99,7 +91,7 @@ def test_tilt_reads_the_part_axis_from_world_up():
 def test_the_render_set_labels_equal_the_truth(tmp_path, monkeypatch):
     """Every row names a part of the heap with its own category and split side, each overhead
     view aims at its part, and each wrist view's part is the one up in the jaws."""
-    render = _load()
+    render = load_script(SCRIPT)
     args = render.parse_args(
         [
             "--out_dir",

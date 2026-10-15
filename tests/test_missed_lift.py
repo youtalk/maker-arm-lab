@@ -7,9 +7,9 @@ import json
 import numpy as np
 import pytest
 
+from helpers import load_script
 from maker_arm_lab.core import loop, oracle, parts
 from test_classifier_loop import BRIGHT, _classifier
-from test_ms7f_stack import ROOT, _load
 from test_perceived_loop import _rollout, _served, _teacher_scene, _wall_band_scene
 from test_snap_closed import _Blind
 from test_thin_snap import _same
@@ -129,7 +129,7 @@ def test_the_rollout_refuses_the_switch_without_the_tray_or_perceived(monkeypatc
 def test_the_clients_refuse_the_switch_where_no_serving_loop_reads_it(
     script, argv, message, capsys
 ):
-    module = _load(ROOT / "scripts" / f"{script}.py")
+    module = load_script(script)
     base = ["--heap_k", "3", "--desk_boxes", "4", "--missed_lift"]
     with pytest.raises(SystemExit) as exit_info:
         module.main(argv + base)

@@ -2,7 +2,6 @@
 reuse of finished draws, and the token contract. The server and the eval processes are
 injected fakes; the real ones need a GPU."""
 
-import importlib.util
 import json
 import sys
 import threading
@@ -11,17 +10,10 @@ from pathlib import Path
 
 import pytest
 
-_spec = importlib.util.spec_from_file_location(
-    "_run_gate_eval", Path(__file__).resolve().parents[1] / "scripts/run_gate_eval.py"
-)
-ge = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(ge)
+from helpers import load_script
 
-_gd_spec = importlib.util.spec_from_file_location(
-    "_generate_dataset", Path(__file__).resolve().parents[1] / "scripts/generate_dataset.py"
-)
-gd = importlib.util.module_from_spec(_gd_spec)
-_gd_spec.loader.exec_module(gd)
+ge = load_script("run_gate_eval")
+gd = load_script("generate_dataset")
 
 CAMPAIGN_SEED = 20260907
 SELECTION_SEED = 20260917

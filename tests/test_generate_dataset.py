@@ -1,4 +1,3 @@
-import importlib.util
 import itertools
 import json
 import re
@@ -8,11 +7,9 @@ from pathlib import Path
 
 import pytest
 
-_spec = importlib.util.spec_from_file_location(
-    "_generate_dataset", Path(__file__).resolve().parents[1] / "scripts/generate_dataset.py"
-)
-gd = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(gd)
+from helpers import load_script
+
+gd = load_script("generate_dataset")
 
 
 def _raise(exc: BaseException):

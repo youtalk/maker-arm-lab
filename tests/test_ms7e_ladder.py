@@ -1,7 +1,6 @@
 """MS7e unseen-box ladder, the seen row (design section 8.3): a gate read on a recorded wave's
 own seeds draws, with held-out parts, the boxes that wave recorded in its env 0."""
 
-import importlib.util
 import json
 import random
 import shlex
@@ -12,17 +11,16 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from helpers import ROOT, load_script
 from maker_arm_lab.core.batch_loop import heap_classes, heap_parts
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj.env import MjLegoSortEnv
 
-ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-_spec = importlib.util.spec_from_file_location("_ge_ladder", ROOT / "scripts/run_gate_eval.py")
-ge = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(ge)
 import fleet
 import mj_eval_heap
+
+ge = load_script("run_gate_eval")
 
 RUN0, LAYOUT0 = 20284000, 20285000  # MS7e ledger R1, wave 1
 

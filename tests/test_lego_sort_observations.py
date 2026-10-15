@@ -14,16 +14,10 @@ observations.py directly by file path instead, bypassing the package
 hierarchy, so this test does not require gymnasium or isaaclab.
 """
 
-import importlib.util
-from pathlib import Path
+from helpers import ROOT, load_script
 
-_OBSERVATIONS_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "source/maker_arm_lab/tasks/manager_based/lego_sort/mdp/observations.py"
-)
-_spec = importlib.util.spec_from_file_location("_lego_sort_observations", _OBSERVATIONS_PATH)
-_observations = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_observations)
+_OBSERVATIONS_PATH = ROOT / "source/maker_arm_lab/tasks/manager_based/lego_sort/mdp/observations.py"
+_observations = load_script(_OBSERVATIONS_PATH)
 brick_color_ids = _observations.brick_color_ids
 
 

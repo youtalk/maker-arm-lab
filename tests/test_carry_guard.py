@@ -9,10 +9,11 @@ from typing import ClassVar
 import pytest
 import torch
 
+from helpers import load_script
 from maker_arm_lab.core import desk_boxes, grasp, loop, parts
 from maker_arm_lab.core.hold import MIN_EXCESS
 from test_classifier_loop import SWITCHES, _classifier, _scene
-from test_ms7f_stack import ROOT, _gate_argv, _load, ge
+from test_ms7f_stack import _gate_argv, ge
 from test_perceived_loop import ZERO, _carry_scene, _rollout, _served, _teacher_scene
 from test_run_gate_eval import _heap_payload
 from test_thin_snap import _same
@@ -405,7 +406,7 @@ def test_the_rollout_refuses_the_switch_without_perceived_or_with_the_passenger_
     ],
 )
 def test_the_client_refuses_the_switch_with_its_token(argv, message, capsys):
-    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    module = load_script("mj_eval_heap")
     with pytest.raises(SystemExit) as exit_info:
         module.main(argv + ["--heap_k", "3", "--desk_boxes", "4", "--carry_guard"])
     assert exit_info.value.code == 2
@@ -434,7 +435,7 @@ RETRY = ["--perceived", "--carry_guard", "--replan_on_switch", "--retry_noise_at
     ],
 )
 def test_the_client_refuses_a_bad_retry_noise_at_with_its_token(argv, message, capsys):
-    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    module = load_script("mj_eval_heap")
     with pytest.raises(SystemExit) as exit_info:
         module.main(HEAP + argv)
     assert exit_info.value.code == 2
@@ -443,7 +444,7 @@ def test_the_client_refuses_a_bad_retry_noise_at_with_its_token(argv, message, c
 
 
 def test_the_client_hands_the_retry_noise_at_to_the_rollout(monkeypatch, capsys):
-    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    module = load_script("mj_eval_heap")
     monkeypatch.setattr(module.policy_client, "ServerPolicy", lambda server: _Policy())
     real_env = module.MjLegoSortEnv
     monkeypatch.setattr(
@@ -490,7 +491,7 @@ def test_the_supervisor_forwards_the_retry_noise_at_and_splits_the_cache_on_it(t
 
 
 def test_the_client_hands_the_guard_margin_to_the_rollout(monkeypatch, capsys):
-    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    module = load_script("mj_eval_heap")
     with pytest.raises(SystemExit):
         module.main(HEAP + ["--perceived", "--guard_margin", "0.02"])
     assert "--guard_margin needs --carry_guard" in capsys.readouterr().out

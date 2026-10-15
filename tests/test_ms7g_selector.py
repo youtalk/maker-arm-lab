@@ -9,11 +9,12 @@ import math
 import pytest
 import torch
 
+from helpers import load_script
 from maker_arm_lab.core import grasp, layout, loop, parts
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from test_grasp import BRICK, IDENTITY, _heap
 from test_mj_heap_oracle import _place
-from test_ms7f_stack import ROOT, _gate_argv, _load
+from test_ms7f_stack import _gate_argv
 from test_perceived_loop import (
     CARRY_DROP,
     ZERO,
@@ -212,7 +213,7 @@ def test_the_rollout_refuses_the_switches_off_the_perceived_loop_or_the_tray(mon
 def test_the_client_refuses_the_switches_where_no_perceived_selector_reads_them(
     argv, message, capsys
 ):
-    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    module = load_script("mj_eval_heap")
     with pytest.raises(SystemExit) as exit_info:
         module.main(["--heap_k", "3", "--desk_boxes", "4"] + argv)
     assert exit_info.value.code == 2
@@ -269,7 +270,7 @@ def test_the_client_parses_the_three_ms7g_switches_the_supervisor_forwards(tmp_p
     assert all(cmd.count(flag) == 1 for flag in trio), cmd
     on = {name for name, value in ge.loop_switches(cfg.client_flags).items() if value is True}
     assert on == {"perceived", "carry_guard", "overhang_guard", "clear_first"}
-    client = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    client = load_script("mj_eval_heap")
     args = client.parse_args(cmd[cmd.index("scripts/mj_eval_heap.py") + 1 :])
     assert args.carry_guard and args.overhang_guard and args.clear_first
 

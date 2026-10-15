@@ -6,7 +6,6 @@ line on every exit path. The no-truth test with every ready MS7f switch on is
 ``test_perceived_loop.test_no_decision_reads_the_truth`` (``_ms7f_scene``)."""
 
 import ast
-import importlib.util
 import json
 import subprocess
 import sys
@@ -14,9 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from helpers import ROOT, load_script
 from maker_arm_lab.core import batch_loop
-
-ROOT = Path(__file__).resolve().parents[1]
 
 ON = {
     "categories": ["--categories", "--box_draw", "4"],
@@ -72,14 +70,7 @@ PROTOCOL_IMPORTS = {"io", "json", "numpy"}
 never torch or lerobot, because both venvs import it (MS7f design section 6.5)."""
 
 
-def _load(path: Path):
-    spec = importlib.util.spec_from_file_location(path.stem, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-ge = _load(ROOT / "scripts" / "run_gate_eval.py")
+ge = load_script("run_gate_eval")
 
 
 def test_every_ms7f_switch_has_an_on_value_here():
@@ -95,7 +86,7 @@ def test_a_client_refuses_a_switch_whose_behaviour_is_not_in_the_commit(
 ):
     if name in batch_loop.MS7F_READY | set(built):
         pytest.skip(f"--{name} is built on this commit")
-    module = _load(ROOT / "scripts" / f"{script}.py")
+    module = load_script(script)
     with pytest.raises(SystemExit) as exit_info:
         module.main(argv + ON[name])
     assert exit_info.value.code == 2
@@ -107,7 +98,7 @@ def test_a_client_refuses_a_switch_whose_behaviour_is_not_in_the_commit(
 @pytest.mark.parametrize("script, argv, token, built", CLIENTS)
 def test_a_client_hands_pile_pgs_to_the_env(script, argv, token, built, monkeypatch, tmp_path):
     # A physics switch the env never sees would read as a no-op run.
-    module = _load(ROOT / "scripts" / f"{script}.py")
+    module = load_script(script)
     seen = {}
 
     def env(*args, **kwargs):
@@ -239,7 +230,7 @@ def test_the_supervisor_refuses_a_heap_over_150(monkeypatch, capsys, tmp_path):
 
 def test_the_heap_client_refuses_abandon_cycle(capsys):
     # The recorder's switch: the heap loop already survives a rig abandon (takeover_failed).
-    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    module = load_script("mj_eval_heap")
     with pytest.raises(SystemExit) as exit_info:
         module.main(CLIENTS[0][1] + ["--abandon_cycle"])
     assert exit_info.value.code == 2

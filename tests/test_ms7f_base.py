@@ -4,14 +4,13 @@ S0 cycle intervals and the switch plumbing. With every MS7f switch off, every dr
 payload field equals MS7e's: the pinned values were computed from 29a36ef before the change."""
 
 import argparse
-import importlib.util
 import random
 from collections import Counter
-from pathlib import Path
 
 import pytest
 import torch
 
+from helpers import load_script
 from maker_arm_lab.core import batch_loop, checker, desk_boxes, loop, oracle, parts, perception
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
@@ -19,16 +18,8 @@ from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 
-ROOT = Path(__file__).resolve().parents[1]
 FAMILIES = ("round", "ldraw", "flat")
 PIN_HEAP = {"heap_k": 12, "parts_seed": 20260915, "parts_split": "all", "layout_seed": 7}
-
-
-def _load(name: str):
-    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _wave_env(num_envs=2, heap=None, **kw):
@@ -376,7 +367,7 @@ HEAP_BATCH = ["--out_dir", "/tmp/x", "--heap_k", "3", "--desk_boxes", "4"]
     ("mj_generate_batch", HEAP_BATCH, "BATCH_FAIL usage: "),
 ])  # fmt: skip
 def test_the_clients_refuse_categories_without_the_box_draw(name, argv, token, capsys):
-    script = _load(name)
+    script = load_script(name)
     with pytest.raises(SystemExit) as exit_info:
         script.main(argv + ["--categories"])
     assert exit_info.value.code == 2
@@ -475,7 +466,7 @@ def test_the_recorders_run_stats_carry_the_throughput_and_the_events():
 
 def test_the_clients_take_heaps_up_to_150_and_the_budget_scales_with_the_heap(capsys):
     assert batch_loop.MAX_HEAP_K == 150
-    heap = _load("mj_eval_heap")
+    heap = load_script("mj_eval_heap")
     args = heap.parse_args(["--heap_k", "150", "--oracle_driver"])
     assert args.cycle_budget == loop.cycle_budget(150) == 195
     assert loop.episode_length_s(195) == pytest.approx(7150.0)
@@ -483,7 +474,7 @@ def test_the_clients_take_heaps_up_to_150_and_the_budget_scales_with_the_heap(ca
         heap.main(["--heap_k", "151", "--oracle_driver"])
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 1 and out[0].startswith("EVAL_FAIL ") and "exceeds 150" in out[0]
-    batch = _load("mj_generate_batch")
+    batch = load_script("mj_generate_batch")
     base = ["--out_dir", "/tmp/x", "--heap_k"]
     assert batch.parse_args(base + ["50"]).cycle_budget == 50  # every MS7e corpus's budget
     assert batch.parse_args(base + ["0"]).cycle_budget == 50
