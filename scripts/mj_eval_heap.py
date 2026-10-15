@@ -384,6 +384,13 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         f"{GUARD_BOX_MARGIN_M}",
     )
     parser.add_argument(
+        "--release_handoff",
+        action="store_true",
+        help="MS7i R3A-1, with --carry_guard: a guard step with the pick point inside the served "
+        "box but within --guard_margin of its walls hands the carry to the rig at once "
+        "(loop.rim_handoff_due), which releases over the box centre",
+    )
+    parser.add_argument(
         "--pi05_prompt",
         action="store_true",
         help="MS7i Run A, with a pi0.5 server: send each env's subtask id with every request "
@@ -462,6 +469,8 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         parser.error("--guard_margin must be a finite margin of 0 m or more")
     if args.guard_margin != GUARD_BOX_MARGIN_M and not args.carry_guard:
         parser.error("--guard_margin needs --carry_guard")
+    if args.release_handoff and not args.carry_guard:
+        parser.error("--release_handoff needs --carry_guard")
     if args.classifier and not (args.perceived and args.categories):
         parser.error(
             "--classifier reads the categories on the perceived views: it needs --perceived and "
@@ -741,6 +750,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             guard_margin=args.guard_margin,
             record_all=args.record_all,
             pi05_prompt=args.pi05_prompt,
+            release_handoff=args.release_handoff,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
