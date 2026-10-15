@@ -47,7 +47,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 
@@ -237,7 +237,6 @@ class CampaignCfg:
     split_cycles: bool = False
     # With split_cycles: SETTLE frames kept on each source's first cycle (recipe design 5.3).
     lead_keep: int = 0
-    sidecar_dir: Path | None = None
 
 
 class Ledger:
@@ -837,8 +836,6 @@ def _convert_command(cfg: CampaignCfg, shard_path: Path) -> list[str]:
     ]
     if cfg.split_cycles:
         cmd.append("--split_cycles")
-        if cfg.sidecar_dir is not None:
-            cmd += ["--sidecar_dir", str(cfg.sidecar_dir)]
     if cfg.lead_keep:
         if not cfg.split_cycles:
             raise ValueError("lead_keep requires split_cycles")
@@ -929,39 +926,9 @@ def _make_real_run_convert(cfg: CampaignCfg) -> Callable[[Path], dict]:
 
 
 def _build_cfg(args: argparse.Namespace) -> CampaignCfg:
-    return CampaignCfg(
-        out_dir=args.out_dir,
-        dataset_root=args.dataset_root,
-        target=args.target,
-        attempts_per_run=args.attempts_per_run,
-        num_envs=args.num_envs,
-        seed=args.seed,
-        isaaclab_path=args.isaaclab_path,
-        max_wall_minutes=args.max_wall_minutes,
-        noise_scale=args.noise_scale,
-        start_pose_offset_rad=args.start_pose_offset_rad,
-        induce_prob=args.induce_prob,
-        induce_offset_weight=args.induce_offset_weight,
-        induce_offset_min=args.induce_offset_min,
-        induce_offset_max=args.induce_offset_max,
-        induce_noise_boost=args.induce_noise_boost,
-        randomize_pick_order=args.randomize_pick_order,
-        nearest_first_pick_order=args.nearest_first_pick_order,
-        hover_jitter_min=args.hover_jitter_min,
-        hover_jitter_max=args.hover_jitter_max,
-        episode_draws=args.episode_draws,
-        frame_jitter=args.frame_jitter,
-        keep_shards=args.keep_shards,
-        no_cameras=args.no_cameras,
-        context=args.context,
-        no_images=args.no_images,
-        backend=args.backend,
-        breaker_min_rate=None if args.breaker_min_rate < 0 else args.breaker_min_rate,
-        breaker_min_runs=args.breaker_min_runs,
-        split_cycles=args.split_cycles,
-        lead_keep=args.lead_keep,
-        sidecar_dir=args.sidecar_dir,
-    )
+    values = {f.name: getattr(args, f.name) for f in fields(CampaignCfg)}
+    values["breaker_min_rate"] = None if args.breaker_min_rate < 0 else args.breaker_min_rate
+    return CampaignCfg(**values)
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -1093,7 +1060,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=0,
         help="with --split_cycles: SETTLE frames kept on each source's first cycle",
     )
-    parser.add_argument("--sidecar_dir", type=Path, default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument(
@@ -1102,13 +1068,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=Path(os.environ.get("ISAACLAB_PATH", str(Path.home() / "src/IsaacLab"))),
     )
     args = parser.parse_args(argv)
-    if args.sidecar_dir is not None and not args.split_cycles:
-        # Mirrors convert_to_lerobot.py's own guard (parser.error there, ValueError in
-        # convert()) so the two entry points agree on which flag combinations are legal --
-        # without this, a bare --sidecar_dir with no --split_cycles would run this whole
-        # script to completion, exit 0, and produce no sidecars, silently defeating the
-        # only reason --sidecar_dir was passed.
-        parser.error("--sidecar_dir requires --split_cycles")
     if args.no_images and args.context is None:
         parser.error("--no_images needs --context")
     if args.no_cameras and not args.no_images:

@@ -662,4 +662,5 @@ def test_a_bad_sampling_value_fails_with_the_token(flags):
         check=False,
     )
     assert result.returncode == 2
-    assert result.stdout.strip().splitlines()[-1].startswith(f"SERVER_FAIL usage: {flags[0]}")
+    line = result.stdout.strip().splitlines()[-1]
+    assert line.startswith("SERVER_FAIL usage: ") and flags[0] in line

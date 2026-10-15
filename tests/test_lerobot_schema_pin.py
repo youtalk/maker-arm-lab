@@ -4,8 +4,6 @@ equal to the URDF's by reading the source text."""
 import re
 from pathlib import Path
 
-import pytest
-
 from maker_arm_lab.assets import urdf_prep
 
 CONVERT = Path(__file__).resolve().parents[1] / "lerobot_stack" / "convert_to_lerobot.py"
@@ -50,8 +48,6 @@ def test_the_converter_drops_the_corrective_phases_by_their_ids():
 
 
 def test_protocol_state_is_seven_wide():
-    if not PROTOCOL.exists():
-        pytest.skip("lerobot_stack/policy_protocol.py is ported by Task E2")
     assert '"state": ((7,), "float32")' in PROTOCOL.read_text()
 
 
@@ -98,7 +94,7 @@ def test_the_own_frames_labels_copy_the_subtasks_and_the_census_rules():
     assert set(boxes) == {"right_box", "wrong_box"}
 
 
-def test_run_a_s_phrases_follow_the_subtask_ids_and_the_task_is_derive_s():
+def test_run_a_s_phrases_follow_the_subtask_ids():
     from maker_arm_lab.core.hold import SUBTASKS
 
     text = (CONVERT.parent / "train_pi05.py").read_text()
@@ -111,6 +107,3 @@ def test_run_a_s_phrases_follow_the_subtask_ids_and_the_task_is_derive_s():
         "release": "release it",
     }
     assert phrases == tuple(meaning[name] for name in SUBTASKS)
-    task = re.compile(r'^TASK = "([^"]+)"', re.MULTILINE)
-    derive = (CONVERT.parent / "derive_vla_dataset.py").read_text()
-    assert task.search(text).group(1) == task.search(derive).group(1)

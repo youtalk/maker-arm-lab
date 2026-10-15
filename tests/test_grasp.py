@@ -307,7 +307,7 @@ def test_the_landing_gap_follows_the_grasp_width():
 # -- MS7a design, the tray: the wall term ------------------------------------------------------
 
 WALLS = grasp.tray_walls()
-(TX0, TX1), (TY0, TY1) = layout.tray_bounds()
+(TX0, _), (TY0, _) = layout.tray_bounds()
 TRAY_MID_X = layout.TRAY_CENTER[0]
 YAW_90 = torch.tensor([math.cos(math.pi / 4), 0.0, 0.0, math.sin(math.pi / 4)])
 

@@ -2,9 +2,7 @@
 interiors and poses in the env, the per-box grader, L1 and L9, the perceived box size, the
 resized floor and the switches."""
 
-import importlib.util
 import math
-import pathlib
 import random
 import sys
 
@@ -14,6 +12,7 @@ import numpy as np
 import pytest
 import torch
 
+from helpers import ROOT, load_script
 from maker_arm_lab.core import batch_loop, desk_boxes, parts, perception, stowed
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj.env import BOX_PARK_X, HEAP_PARK_X, MjLegoSortEnv
@@ -250,16 +249,6 @@ def test_the_perceiver_draws_each_boxs_size_after_every_pose():
     assert exact.box_sizes == tuple(sizes)
 
 
-BATCH = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "mj_generate_batch.py"
-
-
-def _load_batch():
-    spec = importlib.util.spec_from_file_location("mj_generate_batch", BATCH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 HEAP = ["--out_dir", "/tmp/x", "--heap_k", "3", "--tray", "--desk_boxes", "4"]
 
 
@@ -272,7 +261,7 @@ HEAP = ["--out_dir", "/tmp/x", "--heap_k", "3", "--tray", "--desk_boxes", "4"]
     ],
 )
 def test_the_recorder_refuses_a_box_draw_outside_b1_with_its_fail_token(argv, capsys):
-    batch = _load_batch()
+    batch = load_script("mj_generate_batch")
     with pytest.raises(SystemExit) as exit_info:
         batch.main(HEAP + argv)
     assert exit_info.value.code == 2
@@ -283,17 +272,17 @@ def test_the_recorder_refuses_a_box_draw_outside_b1_with_its_fail_token(argv, ca
 def test_the_box_draw_is_built_and_reaches_every_client():
     assert "box_draw" not in batch_loop.UNBUILT_SWITCHES
     assert "box_unseen" not in batch_loop.UNBUILT_SWITCHES
-    args = _load_batch().parse_args(HEAP + ["--box_draw", "6", "--box_unseen", "size"])
+    args = load_script("mj_generate_batch").parse_args(
+        HEAP + ["--box_draw", "6", "--box_unseen", "size"]
+    )
     assert (args.box_draw, args.box_unseen) == (6, "size")
-    root = pathlib.Path(__file__).resolve().parents[1] / "scripts"
+    root = ROOT / "scripts"
     for name in ("mj_eval_heap.py", "mj_generate_batch.py"):
         text = (root / name).read_text()
         assert "box_draw=args.box_draw" in text and "box_unseen=args.box_unseen" in text
     for name in (
         "mj_eval_heap.py",
         "mj_generate_batch.py",
-        "mj_dagger_heap.py",
-        "mj_inspect_heap.py",
         "mj_release_envelope_check.py",
     ):
         assert "box_sizes=env.desk_box_sizes[i]" in (root / name).read_text(), name

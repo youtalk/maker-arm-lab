@@ -1,23 +1,15 @@
 """The heap branch of mj_generate_batch.py (as source) and heap_yield_read.py (imported)."""
 
 import ast
-import importlib.util
 import json
-import pathlib
 
 import pytest
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+from helpers import ROOT, load_script
+
 BATCH = ROOT / "scripts" / "mj_generate_batch.py"
 READ = ROOT / "scripts" / "heap_yield_read.py"
 EVAL_HEAP = ROOT / "scripts" / "mj_eval_heap.py"
-
-
-def _load(path):
-    spec = importlib.util.spec_from_file_location(path.stem, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def test_the_batch_script_builds_the_heap_env_and_installs_the_heap_oracle():
@@ -35,7 +27,7 @@ def test_the_batch_script_builds_the_heap_env_and_installs_the_heap_oracle():
 
 
 def test_a_heap_batch_counts_written_episodes_not_only_fully_stowed_ones():
-    batch = _load(BATCH)
+    batch = load_script(BATCH)
     counters = {"exported": 0, "exported_written": 3}
     assert batch.exported_count(counters, heap=True) == 3
     # The six-brick path is unchanged: it still counts only fully-successful episodes.
@@ -56,7 +48,7 @@ def _meta(path, parts, episodes):
 
 
 def test_read_meta_aggregates_parts_cycles_and_families(tmp_path):
-    read = _load(READ)
+    read = load_script(READ)
     parts = ["brick_2x4", "plate_1x2", "slope_1x1"]
     a = _meta(
         tmp_path / "a.meta.json",
@@ -103,7 +95,7 @@ def test_read_meta_aggregates_parts_cycles_and_families(tmp_path):
 
 
 def test_main_prints_a_token_on_every_path(tmp_path, capsys):
-    read = _load(READ)
+    read = load_script(READ)
     good = _meta(
         tmp_path / "g.meta.json",
         ["brick_2x4"],
@@ -130,7 +122,7 @@ def test_main_prints_a_token_on_every_path(tmp_path, capsys):
 
 
 def test_mj_eval_heap_oracle_driver_prints_eval_ok_on_a_tiny_heap(tmp_path, capsys):
-    script = _load(EVAL_HEAP)
+    script = load_script(EVAL_HEAP)
     code = script.main(
         [
             "--num_envs",
@@ -159,21 +151,21 @@ def test_mj_eval_heap_oracle_driver_prints_eval_ok_on_a_tiny_heap(tmp_path, caps
 
 
 def test_mj_eval_heap_defaults_the_wall_cap_from_the_episode_length():
-    script = _load(EVAL_HEAP)
+    script = load_script(EVAL_HEAP)
     args = script.parse_args(["--heap_k", "50"])
     assert args.max_wall_minutes == pytest.approx(65 * script.CYCLE_STEP_BUDGET * 0.15 / 60)
     assert script.parse_args(["--heap_k", "50", "--max_wall_minutes", "7"]).max_wall_minutes == 7
 
 
 def test_mj_eval_heap_refuses_a_zero_heap_with_the_fail_token(capsys):
-    script = _load(EVAL_HEAP)
+    script = load_script(EVAL_HEAP)
     with pytest.raises(SystemExit):
         script.main(["--heap_k", "0", "--oracle_driver"])
     assert "EVAL_FAIL " in capsys.readouterr().out
 
 
 def test_mj_eval_heap_reports_a_bad_out_path_with_exactly_one_fail_token(tmp_path, capsys):
-    script = _load(EVAL_HEAP)
+    script = load_script(EVAL_HEAP)
     code = script.main(
         [
             "--num_envs",

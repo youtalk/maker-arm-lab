@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 
+from helpers import ROOT, load_script
 from maker_arm_lab.core import dagger_loop, hold, loop
 from maker_arm_lab.core.gate import policy_state
 from maker_arm_lab.mj.recorder import ShardRecorder
@@ -16,7 +17,6 @@ from maker_arm_lab.robots.frames import GRIPPER_OPEN_POS
 from test_heap_loop import SPREAD
 from test_mj_heap_oracle import _place
 from test_ms7f_dagger import ARGV, FAILURE, _wiring
-from test_ms7f_stack import ROOT, _load
 from test_perceived_loop import CARRY_DROP, _env_and_rig, _rollout, _served, _Still
 from test_perceived_loop import _teacher_scene as _teacher
 from test_thin_snap import _same
@@ -184,7 +184,7 @@ def test_the_client_wires_record_all_and_refuses_it_without_dagger_dir(
     off = _wiring(monkeypatch, ARGV + ["--dagger_dir", str(tmp_path)])
     assert off["env"]["record_all"] is False and off["rollout"]["record_all"] is False
     capsys.readouterr()
-    module = _load(EVAL_HEAP)
+    module = load_script(EVAL_HEAP)
     with pytest.raises(SystemExit) as exit_info:
         module.main(ARGV + ["--record_all"])
     assert exit_info.value.code == 2

@@ -11,8 +11,8 @@ import pathlib
 import pytest
 
 from maker_arm_lab.core import batch_loop, grasp, loop
-from test_perceived_loop import _rollout, _served, _snap_closed_scene, _thin_snap_scene
-from test_thin_snap import BRICK_ROW, PLATE_ROW, _same
+from test_perceived_loop import _rollout, _snap_closed_scene, _thin_snap_scene
+from test_thin_snap import BRICK_ROW, PLATE_ROW, _checked
 
 HOVER = 0.030
 """m: the policy's command over the row centre, the hover ``snap_shift`` has not lowered yet."""
@@ -62,12 +62,11 @@ def test_with_no_gap_or_an_open_one_every_snap_hold_is_todays():
 
 
 def _run(scene, monkeypatch, **switch):
-    """The scene's perceived rollout; returns the payload without its wall clock, what env 0
-    was served on every step, and the jaw gap of every ``snap_hold`` call with the rule's
-    width."""
+    """The scene's perceived rollout; returns the payload without its wall clock and the jaw gap
+    of every ``snap_hold`` call with the rule's width."""
     env, rig, policy, budget, switches = scene(monkeypatch)
     switches.pop("snap_closed", None)
-    served, calls = _served(env), []
+    calls = []
     real = loop.snap_hold
 
     def spy(cmd, pick, row, shift, descending, jaw_gap=None, **kwargs):
@@ -80,14 +79,7 @@ def _run(scene, monkeypatch, **switch):
     env.close()
     for key in ("wall_sec", "wall_sec_per_episode"):
         payload.pop(key)
-    return json.dumps(payload, sort_keys=True), served, calls
-
-
-def test_with_the_switch_off_every_step_and_payload_byte_is_mains(monkeypatch):
-    main, main_served, main_calls = _run(_thin_snap_scene, monkeypatch)
-    off, off_served, off_calls = _run(_thin_snap_scene, monkeypatch, snap_closed=False)
-    assert main_calls and {g for g, _ in main_calls} == {g for g, _ in off_calls} == {None}
-    assert off == main and _same(off_served, main_served)
+    return json.dumps(payload, sort_keys=True), calls
 
 
 class _Blind:
@@ -107,8 +99,9 @@ def test_a_pinch_the_detector_misses_is_forced_open_only_with_the_switch_off(mon
     with no cycle ending on a stow; under the switch the closed gap ends the hold, and the
     scene stows all 3 in 2 cycles."""
     monkeypatch.setattr(loop, "HoldDetector", _Blind)
-    off, _, _ = _run(_thin_snap_scene, monkeypatch, snap_closed=False)
-    on, _, calls = _run(_thin_snap_scene, monkeypatch, snap_closed=True)
+    off, off_calls = _run(_thin_snap_scene, monkeypatch, snap_closed=False)
+    assert off_calls and {g for g, _ in off_calls} == {None}  # off: no gap reaches snap_hold
+    on, calls = _run(_thin_snap_scene, monkeypatch, snap_closed=True)
     off, on = json.loads(off)["episodes"][0], json.loads(on)["episodes"][0]
 
     def held_open(ep):
@@ -120,16 +113,6 @@ def test_a_pinch_the_detector_misses_is_forced_open_only_with_the_switch_off(mon
     assert gaps and all(0.0 <= g <= 2.0 * grasp.OPEN_HALF_GAP + 1e-3 for g in gaps)
     assert any(g >= w + loop.SNAP_CLOSED_MARGIN for g, w in calls)  # landing open
     assert any(g < w + loop.SNAP_CLOSED_MARGIN for g, w in calls)  # closed on the part
-
-
-def _checked(argv):
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--desk_boxes", type=int, default=0)
-    parser.add_argument("--pick_snap", action="store_true")
-    batch_loop.add_ms7e_arguments(parser)
-    args = parser.parse_args(argv)
-    batch_loop.check_ms7e(parser, args)
-    return args
 
 
 def test_the_flag_needs_pick_snap_and_the_read_client_passes_it():

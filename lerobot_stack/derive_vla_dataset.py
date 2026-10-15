@@ -50,11 +50,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from policy_server import CONTEXT_ROLL, wrap_context_roll
-from train_pi05 import CODES
+from train_pi05 import CODES, TASK
 
 STATE = "observation.state"
 ENV = "observation.environment_state"
-TASK = "pick up the marked part and place it in its box"
 ROLL_NAME = "overhead_cam_roll"
 LABELS = ("label", "subtask")  # convert_to_lerobot --own_frames labeled: int8, one a frame
 

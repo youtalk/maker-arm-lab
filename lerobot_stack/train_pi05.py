@@ -29,7 +29,7 @@ import torch
 
 LEROBOT = "0.5.1"
 MIX_FLAG, PROMPTS_FLAG = "--mix=", "--prompt_codes"
-TASK = "pick up the marked part and place it in its box"  # derive_vla_dataset.TASK (test pins)
+TASK = "pick up the marked part and place it in its box"  # derive_vla_dataset imports it
 PHRASES = ("reach the marked part", "close on the part", "carry it to its box", "release it")
 """Run A's subtask phrases (MS7i design rev1 5.2) in the order of core.hold.SUBTASKS (test pins)."""
 TAGS = ("", " Advantage: positive", " Advantage: negative")  # by code % 3: untagged, +, -
@@ -110,23 +110,32 @@ class Mixed(torch.utils.data.Dataset):
         return item
 
 
+def root_datasets(make, cfg, corpus, roots: list) -> list:
+    """The datasets ``make`` (lerobot's ``make_dataset``) builds at ``roots``, ``cfg``'s own
+    root put back after; one with other features or fps than ``corpus`` is refused. train_masked
+    imports it too."""
+    main_root, data = cfg.dataset.root, []
+    try:
+        for root in roots:
+            cfg.dataset.root = root
+            data.append(make(cfg))
+    finally:
+        cfg.dataset.root = main_root
+    for root, d in zip(roots, data):
+        if d.meta.features != corpus.meta.features or d.fps != corpus.fps:
+            raise ValueError(f"the mix root {root} has other features or fps than the corpus")
+    return data
+
+
 def mixed_maker(make, mix: list, prompts: bool):
     """``make`` (lerobot's ``make_dataset``) for the corpus and for each (root, share) of
     ``mix``, as one ``Mixed``; with ``prompts``, each source's prompt codes too."""
 
     def make_dataset(cfg):
         corpus = make(cfg)
-        main_root, extras = cfg.dataset.root, []
-        try:
-            for root, share in mix:
-                cfg.dataset.root = root
-                extras.append((make(cfg), share))
-        finally:
-            cfg.dataset.root = main_root
-        for (ds, _), (root, _) in zip(extras, mix):
-            if ds.meta.features != corpus.meta.features or ds.fps != corpus.fps:
-                raise ValueError(f"the mix root {root} has other features or fps than the corpus")
-        sources = [corpus, *(d for d, _ in extras)]
+        data = root_datasets(make, cfg, corpus, [root for root, _ in mix])
+        extras = [(d, share) for d, (_, share) in zip(data, mix)]
+        sources = [corpus, *data]
         codes = [load_codes(d) for d in sources] if prompts else None
         out = Mixed(corpus, extras, codes)
         print(

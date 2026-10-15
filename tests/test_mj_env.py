@@ -19,6 +19,7 @@ from maker_arm_lab.core.quat import quat_apply
 from maker_arm_lab.core.stowed import per_brick_stowed
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.robots import frames
+from test_mj_heap_env import _can_render
 
 
 def _pick_point_xy(env, i: int) -> torch.Tensor:
@@ -147,15 +148,6 @@ def test_reset_of_one_env_leaves_the_other_alone(env):
     env.reset(env_ids=torch.tensor([0]))
     assert torch.equal(env.scene["brick_0"].data.root_pos_w[1], other)
     assert env.episode_length_buf[0] == 0 and env.episode_length_buf[1] == 1
-
-
-def _can_render() -> bool:
-    """False where no GL context can be made (CI runs with MUJOCO_GL=disable)."""
-    try:
-        mujoco.Renderer(mujoco.MjModel.from_xml_string("<mujoco/>"), 8, 8).close()
-    except Exception:  # noqa: BLE001 -- any GL failure means "skip the render test"
-        return False
-    return True
 
 
 @pytest.mark.skipif(not _can_render(), reason="no MuJoCo GL context on this host")

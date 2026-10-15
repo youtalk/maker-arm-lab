@@ -1,8 +1,6 @@
 """The MS7c corpus recorder (MS7c design section 7.1): the teacher acts on the truth, and the
 rig records the target row, the frozen marker and the box row from ``core.perception``."""
 
-import importlib.util
-import pathlib
 import random
 
 import h5py
@@ -10,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+from helpers import load_script
 from maker_arm_lab.core import grasp, oracle, perception
 from maker_arm_lab.core.heap_oracle import HeapOracle, target_context
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
@@ -18,7 +17,6 @@ from test_mj_desk_boxes import FIXED, _env
 from test_mj_heap_oracle import _place, _step
 
 RUN_SEED = 7
-BATCH = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "mj_generate_batch.py"
 # Every first grasp is offset, so each cycle fails its LIFT and REOPENs at least once.
 INDUCE = oracle.FailureInduction(
     prob=1.0, offset_weight=1.0, offset_range=(0.015, 0.025), noise_boost=5.0
@@ -239,13 +237,6 @@ def test_at_zero_scales_the_row_is_the_teachers_and_without_perceivers_nothing_c
     assert hidden[0] is False
 
 
-def _load_batch():
-    spec = importlib.util.spec_from_file_location("mj_generate_batch", BATCH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 HEAP = ["--out_dir", "/tmp/x", "--heap_k", "3"]
 
 
@@ -259,7 +250,7 @@ HEAP = ["--out_dir", "/tmp/x", "--heap_k", "3"]
     ],
 )
 def test_the_batch_script_refuses_a_bad_perceived_run_with_its_fail_token(argv, capsys):
-    batch = _load_batch()
+    batch = load_script("mj_generate_batch")
     with pytest.raises(SystemExit) as exit_info:
         batch.main(argv)
     assert exit_info.value.code == 2
@@ -268,7 +259,7 @@ def test_the_batch_script_refuses_a_bad_perceived_run_with_its_fail_token(argv, 
 
 
 def test_the_run_meta_records_the_perceived_switch_and_the_canonical_scales():
-    batch = _load_batch()
+    batch = load_script("mj_generate_batch")
     args = batch.parse_args(
         HEAP + ["--desk_boxes", "4", "--perceived", "--noise_scales", "all=0,heading=2"]
     )

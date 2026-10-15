@@ -9,11 +9,12 @@ from typing import ClassVar
 import pytest
 import torch
 
+from helpers import load_script
 from maker_arm_lab.core import desk_boxes, grasp, loop, parts
 from maker_arm_lab.core.hold import MIN_EXCESS
 from test_classifier_loop import SWITCHES, _classifier, _scene
-from test_ms7f_stack import ROOT, _gate_argv, _load, ge
-from test_perceived_loop import ZERO, _carry_scene, _rollout, _served, _teacher_scene
+from test_ms7f_stack import _gate_argv, ge
+from test_perceived_loop import ZERO, _carry_scene, _rollout, _run, _teacher_scene
 from test_run_gate_eval import _heap_payload
 from test_thin_snap import _same
 
@@ -73,32 +74,13 @@ def test_the_carry_release_height_clears_the_rim_from_the_holds_start():
     assert loop.carry_release_z(0.30, deep) == loop.CARRY_RELEASE_MAX_Z == 0.12
 
 
-def _run(scene, monkeypatch, **switch):
-    """The scene's perceived rollout: the payload without its wall clock, and what env 0 was
-    served on every step."""
-    env, rig, policy, budget, switches = scene(monkeypatch)
-    switches |= switch
-    served = _served(env)
-    payload = _rollout(env, rig, policy, budget=budget, perceived=True, **switches)
-    env.close()
-    for key in ("wall_sec", "wall_sec_per_episode"):
-        payload.pop(key)
-    return json.loads(json.dumps(payload, sort_keys=True)), served
-
-
-def test_with_the_switch_off_every_step_and_payload_byte_is_the_same(monkeypatch):
-    main, main_served = _run(_teacher_scene, monkeypatch)
-    off, off_served = _run(_teacher_scene, monkeypatch, carry_guard=False)
-    assert off == main and _same(off_served, main_served)
-    assert "carry_guard" not in off["inference"]["loop"]
-    rows = off["episodes"][0]["cycle_census"]
-    assert rows and not set(loop.CARRY_GUARD_CENSUS) & set(rows[0])
-
-
 def test_a_teacher_that_releases_inside_its_box_is_never_guarded(monkeypatch):
     """At zero perception noise the served box is the teacher's own, and its RELEASE opens over
     the box centre: the switch changes no step and no payload byte but its flag and its fields."""
     off, off_served = _run(_teacher_scene, monkeypatch, noise_scales=ZERO)
+    assert "carry_guard" not in off["inference"]["loop"]
+    rows = off["episodes"][0]["cycle_census"]
+    assert rows and not set(loop.CARRY_GUARD_CENSUS) & set(rows[0])
     on, on_served = _run(_teacher_scene, monkeypatch, noise_scales=ZERO, carry_guard=True)
     assert on["inference"]["loop"].pop("carry_guard") is True
     rows = on["episodes"][0]["cycle_census"]
@@ -405,7 +387,7 @@ def test_the_rollout_refuses_the_switch_without_perceived_or_with_the_passenger_
     ],
 )
 def test_the_client_refuses_the_switch_with_its_token(argv, message, capsys):
-    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    module = load_script("mj_eval_heap")
     with pytest.raises(SystemExit) as exit_info:
         module.main(argv + ["--heap_k", "3", "--desk_boxes", "4", "--carry_guard"])
     assert exit_info.value.code == 2
@@ -434,7 +416,7 @@ RETRY = ["--perceived", "--carry_guard", "--replan_on_switch", "--retry_noise_at
     ],
 )
 def test_the_client_refuses_a_bad_retry_noise_at_with_its_token(argv, message, capsys):
-    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    module = load_script("mj_eval_heap")
     with pytest.raises(SystemExit) as exit_info:
         module.main(HEAP + argv)
     assert exit_info.value.code == 2
@@ -443,7 +425,7 @@ def test_the_client_refuses_a_bad_retry_noise_at_with_its_token(argv, message, c
 
 
 def test_the_client_hands_the_retry_noise_at_to_the_rollout(monkeypatch, capsys):
-    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    module = load_script("mj_eval_heap")
     monkeypatch.setattr(module.policy_client, "ServerPolicy", lambda server: _Policy())
     real_env = module.MjLegoSortEnv
     monkeypatch.setattr(
@@ -490,7 +472,7 @@ def test_the_supervisor_forwards_the_retry_noise_at_and_splits_the_cache_on_it(t
 
 
 def test_the_client_hands_the_guard_margin_to_the_rollout(monkeypatch, capsys):
-    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    module = load_script("mj_eval_heap")
     with pytest.raises(SystemExit):
         module.main(HEAP + ["--perceived", "--guard_margin", "0.02"])
     assert "--guard_margin needs --carry_guard" in capsys.readouterr().out
@@ -538,40 +520,3 @@ def test_the_supervisor_forwards_the_guard_margin_and_splits_the_cache_on_it(tmp
     on = recorded | {"guard_margin": 0.02}
     assert hit(cfg, on) and not hit(plain, on)
     assert not hit(cfg, recorded | {"guard_margin": 0.03})
-
-
-def test_the_supervisor_forwards_the_switch_and_its_cache_key_records_it(tmp_path):
-    draw = ge.make_eval_draws(1, 1)[0]
-    argv = _gate_argv(tmp_path) + ["--gripper", "continuous", "--perceived"]
-    plain = ge._build_cfg(ge._parse_args(argv))
-    cfg = ge._build_cfg(ge._parse_args(argv + ["--carry_guard"]))
-    assert ge._eval_command(cfg, draw).count("--carry_guard") == 1
-    assert "--carry_guard" not in ge._eval_command(plain, draw)
-    base = {name: False for name in ge.LOOP_SWITCHES} | {"perceived": True}
-    base["noise_scales"] = ge.noise_scales_key("")
-    assert ge.loop_switches(cfg.client_flags) == base | {
-        "carry_guard": True,
-        "rake_cap": 0,
-        "retry_noise_at": 0,
-        "guard_margin": 0.010,
-    }
-    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
-    path = tmp_path / "eval_000.json"
-
-    def hit(gate, loop_block):
-        inference = {**served, "loop": loop_block}
-        payload = _heap_payload(draw, desk_boxes=4, gripper="continuous", inference=inference)
-        path.write_text(json.dumps(payload))
-        return ge._cached_payload(gate, draw) is not None
-
-    recorded = {k: v for k, v in base.items() if k != "carry_guard"}  # off: not recorded
-    assert hit(plain, recorded) and not hit(cfg, recorded)
-    assert hit(cfg, recorded | {"carry_guard": True}) and not hit(
-        plain, recorded | {"carry_guard": True}
-    )
-    for bad, message in (
-        (_gate_argv(tmp_path) + ["--carry_guard"], "--carry_guard needs --perceived"),
-        (argv + ["--carry_guard", "--passenger_drop"], "--carry_guard refuses --passenger_drop"),
-    ):
-        with pytest.raises(ValueError, match=message):
-            ge._build_cfg(ge._parse_args(bad))

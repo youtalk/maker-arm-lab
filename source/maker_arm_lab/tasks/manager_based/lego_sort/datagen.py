@@ -28,11 +28,6 @@ from . import mdp
 from .mdp.recorders import DatagenRecorderManagerCfg
 from .vision import LegoSortJointPosVisionEnvCfg
 
-# The quaternion helpers moved to core.quat (isaaclab-free) so the MuJoCo scene applies the
-# same camera jitter; the old private names stay as aliases for this module's own use.
-_quat_from_rpy_deg = quat_from_rpy_deg
-_compose_offset_rot = compose_offset_rot
-
 
 @configclass
 class LegoSortDatagenEnvCfg(LegoSortJointPosVisionEnvCfg):
@@ -99,7 +94,7 @@ class LegoSortDatagenEnvCfg(LegoSortJointPosVisionEnvCfg):
         if self.sun_intensity > 0.0:
             self.scene.sun = AssetBaseCfg(
                 prim_path="/World/sun",
-                init_state=AssetBaseCfg.InitialStateCfg(rot=_quat_from_rpy_deg(self.sun_rpy_deg)),
+                init_state=AssetBaseCfg.InitialStateCfg(rot=quat_from_rpy_deg(self.sun_rpy_deg)),
                 spawn=sim_utils.DistantLightCfg(intensity=self.sun_intensity),
             )
         self.scene.plane.spawn = sim_utils.GroundPlaneCfg(color=tuple(self.floor_color))
@@ -113,7 +108,7 @@ class LegoSortDatagenEnvCfg(LegoSortJointPosVisionEnvCfg):
             wrist.pos = tuple(p + d for p, d in zip(wrist.pos, self.wrist_cam_dpos))
             over = self.scene.overhead_cam.offset
             over.pos = tuple(p + d for p, d in zip(over.pos, self.overhead_cam_dpos))
-            over.rot = _compose_offset_rot(over.rot, self.overhead_cam_drot_deg)
+            over.rot = compose_offset_rot(over.rot, self.overhead_cam_drot_deg)
         else:
             self.scene.wrist_cam = None
             self.scene.overhead_cam = None

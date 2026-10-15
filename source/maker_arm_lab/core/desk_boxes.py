@@ -20,7 +20,7 @@ import random
 from collections.abc import Sequence
 
 from maker_arm_lab.core import layout
-from maker_arm_lab.core.grasp import Wall, polygon_distance
+from maker_arm_lab.core.grasp import Wall, convex_hull, polygon_distance
 from maker_arm_lab.core.parts import BASE_CLASSES, Part, part_class
 
 DESK_BOX_INTERIOR_ONE = (0.11, 0.11, 0.06)  # INITIAL: rung 1, one box takes all 50 parts
@@ -320,13 +320,9 @@ def corners(pose: Sequence[float], size: Sequence[float]) -> list[tuple[float, f
     ]
 
 
-def _cross(o, a, b) -> float:
-    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-
-
 def pick_corridor() -> list[tuple[float, float]]:
     """The convex hull of the arm base (a 16-gon of ARM_BASE_RADIUS) and the tray's outer
-    walls, counter-clockwise (Andrew's monotone chain)."""
+    walls, counter-clockwise."""
     (x0, x1), (y0, y1) = layout.tray_bounds()
     w = layout.TRAY_WALL
     points = [(x0 - w, y0 - w), (x1 + w, y0 - w), (x1 + w, y1 + w), (x0 - w, y1 + w)]
@@ -334,17 +330,7 @@ def pick_corridor() -> list[tuple[float, float]]:
         (ARM_BASE_RADIUS * math.cos(a), ARM_BASE_RADIUS * math.sin(a))
         for a in (2 * math.pi * k / 16 for k in range(16))
     ]
-    points = sorted(set(points))
-
-    def chain(seq):
-        out: list[tuple[float, float]] = []
-        for p in seq:
-            while len(out) >= 2 and _cross(out[-2], out[-1], p) <= 0.0:
-                out.pop()
-            out.append(p)
-        return out[:-1]
-
-    return chain(points) + chain(reversed(points))
+    return convex_hull(points)
 
 
 def band_x(n: int) -> tuple[float, float]:

@@ -8,12 +8,12 @@ import h5py
 import numpy as np
 import pytest
 
+from helpers import ROOT, load_script
 from maker_arm_lab.core import dagger_loop, loop, oracle, perception
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 from test_heap_loop import SPREAD
 from test_mj_heap_oracle import _place
-from test_ms7f_stack import ROOT, _load
 from test_perceived_loop import _env_and_rig, _rollout, _Still
 
 EVAL_HEAP = ROOT / "scripts" / "mj_eval_heap.py"
@@ -111,7 +111,7 @@ ARGV = [
 def _wiring(monkeypatch, argv) -> dict:
     """What the heap client hands the env, the rig and the rollout, with cameras off and a
     stand-in server and rollout."""
-    module = _load(EVAL_HEAP)
+    module = load_script(EVAL_HEAP)
     seen = {}
     real_env, real_rig = module.MjLegoSortEnv, module.OracleRig
 
@@ -163,7 +163,7 @@ def test_dagger_dir_records_the_failure_takeovers_with_the_loops_perception(
 
 
 def test_dagger_dir_refuses_the_oracle_driver_with_one_fail_token(capsys):
-    module = _load(EVAL_HEAP)
+    module = load_script(EVAL_HEAP)
     with pytest.raises(SystemExit) as exit_info:
         module.main(["--heap_k", "3", "--oracle_driver", "--dagger_dir", "/tmp/never"])
     assert exit_info.value.code == 2

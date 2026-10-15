@@ -16,19 +16,11 @@ from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 from test_mj_heap_oracle import _place
+from test_thin_snap import _checked
 
 PLATE = parts.by_name(["plate_1x2"])[0]
 OFF_WALL = 0.013
 """m: the plate's centre off the left wall of the 30 degree tray, at 30 degrees of yaw."""
-
-
-def _checked(argv):
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--gripper", default="binary")
-    batch_loop.add_ms7e_arguments(parser)
-    args = parser.parse_args(argv)
-    batch_loop.check_ms7e(parser, args)
-    return args
 
 
 def test_the_switch_needs_the_continuous_gripper_and_every_client_passes_it():

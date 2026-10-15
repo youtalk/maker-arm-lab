@@ -53,9 +53,12 @@ def test_the_jaws_stay_open_past_the_ms7d_floor_only_on_a_flat_row_under_the_swi
 
 
 def _checked(argv):
+    """``argv`` through the MS7e switches and ``batch_loop.check_ms7e``, on a parser with the
+    client flags the MS7e rules read."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--desk_boxes", type=int, default=0)
     parser.add_argument("--pick_snap", action="store_true")
+    parser.add_argument("--gripper", default="binary")
     batch_loop.add_ms7e_arguments(parser)
     args = parser.parse_args(argv)
     batch_loop.check_ms7e(parser, args)

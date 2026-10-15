@@ -9,22 +9,23 @@ import math
 import pytest
 import torch
 
+from helpers import load_script
 from maker_arm_lab.core import grasp, layout, loop, parts
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from test_grasp import BRICK, IDENTITY, _heap
 from test_mj_heap_oracle import _place
-from test_ms7f_stack import ROOT, _gate_argv, _load
+from test_ms7f_stack import _gate_argv
 from test_perceived_loop import (
     CARRY_DROP,
     ZERO,
     _env_and_rig,
     _rollout,
-    _served,
+    _run,
     _Still,
     _teacher_scene,
     _wall_band_scene,
 )
-from test_run_gate_eval import _heap_payload, ge
+from test_run_gate_eval import ge
 from test_thin_snap import _same
 
 STUD = parts.make_part("brick", 1, 1)
@@ -142,17 +143,6 @@ def _overhang_scene(monkeypatch):
     return env, rig, _Still(), 3, {"select_at_release": True, "noise_scales": ZERO}
 
 
-def _run(scene, monkeypatch, **switch):
-    """The scene's perceived rollout without its wall clock, and what env 0 was served."""
-    env, rig, policy, budget, switches = scene(monkeypatch)
-    served = _served(env)
-    payload = _rollout(env, rig, policy, budget=budget, perceived=True, **switches, **switch)
-    env.close()
-    for key in ("wall_sec", "wall_sec_per_episode"):
-        payload.pop(key)
-    return payload, served
-
-
 def test_the_loop_hands_clear_first_to_its_selector_and_not_to_the_teacher(monkeypatch):
     # The perceived selector knows no destination; the teacher policy's own rig ranks too.
     seen = set()
@@ -177,14 +167,6 @@ def test_the_guard_refuses_the_part_under_the_overhang_as_a_target(monkeypatch):
     assert on["perception"]["overhang_refusals"] == len(targets)
     assert on["inference"]["loop"]["overhang_guard"] is True
     assert "overhang_refusals" not in off["perception"]
-
-
-@pytest.mark.parametrize("scene", [_wall_band_scene, _overhang_scene])
-def test_with_both_switches_off_every_step_and_payload_byte_is_the_same(scene, monkeypatch):
-    base, base_served = _run(scene, monkeypatch)
-    off, off_served = _run(scene, monkeypatch, clear_first=False, overhang_guard=False)
-    assert json.dumps(off, sort_keys=True) == json.dumps(base, sort_keys=True)
-    assert _same(off_served, base_served)
     assert not {"clear_first", "overhang_guard"} & set(off["inference"]["loop"])
 
 
@@ -212,51 +194,12 @@ def test_the_rollout_refuses_the_switches_off_the_perceived_loop_or_the_tray(mon
 def test_the_client_refuses_the_switches_where_no_perceived_selector_reads_them(
     argv, message, capsys
 ):
-    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    module = load_script("mj_eval_heap")
     with pytest.raises(SystemExit) as exit_info:
         module.main(["--heap_k", "3", "--desk_boxes", "4"] + argv)
     assert exit_info.value.code == 2
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 1 and out[0].startswith("EVAL_FAIL") and message in out[0], out
-
-
-def test_the_supervisor_forwards_both_switches_and_keys_the_cache_on_them(tmp_path):
-    argv = ["--checkpoint", "ck", "--out_dir", str(tmp_path / "gate"), "--ledger", "l"]
-    argv += ["--threshold", "0.7", "--seed", "1"]
-    heap = ["--backend", "mujoco", "--heap_k", "50", "--tray", "--desk_boxes", "4"]
-    heap += ["--gripper", "continuous", "--perceived"]
-    draw = ge.make_eval_draws(1, 1)[0]
-    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
-    base = {name: False for name in ge.LOOP_SWITCHES} | {"perceived": True}
-    base["noise_scales"] = ge.noise_scales_key("")
-    path = tmp_path / "gate" / "eval_000.json"
-    path.parent.mkdir()
-
-    def hit(cfg, loop_block):
-        inference = {**served, "loop": loop_block}
-        payload = _heap_payload(
-            draw, tray=True, desk_boxes=4, gripper="continuous", inference=inference
-        )
-        path.write_text(json.dumps(payload))
-        return ge._cached_payload(cfg, draw) is not None
-
-    plain = ge._build_cfg(ge._parse_args(argv + heap))
-    assert not {f"--{name}" for name in ge.MS7G_SWITCHES} & set(ge._eval_command(plain, draw))
-    # A payload that predates the switches, or records them off by leaving them out, is off.
-    old = {k: v for k, v in base.items() if k not in ge.MS7G_SWITCHES}
-    assert hit(plain, base) and hit(plain, old)
-    for name in ge.MS7G_SWITCHES:
-        cfg = ge._build_cfg(ge._parse_args(argv + heap + [f"--{name}"]))
-        assert f"--{name}" in ge._eval_command(cfg, draw)
-        assert hit(cfg, old | {name: True}) and not hit(cfg, old)
-        assert not hit(plain, old | {name: True})
-        with pytest.raises(ValueError, match=f"--{name} needs --perceived"):
-            ge._build_cfg(ge._parse_args(argv + heap[:-1] + [f"--{name}"]))
-        with pytest.raises(ValueError, match=f"--{name} needs --heap_k"):
-            ge._build_cfg(ge._parse_args(argv + ["--backend", "isaac", f"--{name}"]))
-    no_tray = [a for a in heap if a != "--tray"]
-    with pytest.raises(ValueError, match="--overhang_guard reads the tray wall's overhang"):
-        ge._build_cfg(ge._parse_args(argv + no_tray + ["--overhang_guard"]))
 
 
 def test_the_client_parses_the_three_ms7g_switches_the_supervisor_forwards(tmp_path):
@@ -269,7 +212,7 @@ def test_the_client_parses_the_three_ms7g_switches_the_supervisor_forwards(tmp_p
     assert all(cmd.count(flag) == 1 for flag in trio), cmd
     on = {name for name, value in ge.loop_switches(cfg.client_flags).items() if value is True}
     assert on == {"perceived", "carry_guard", "overhang_guard", "clear_first"}
-    client = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    client = load_script("mj_eval_heap")
     args = client.parse_args(cmd[cmd.index("scripts/mj_eval_heap.py") + 1 :])
     assert args.carry_guard and args.overhang_guard and args.clear_first
 

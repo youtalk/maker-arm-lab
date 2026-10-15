@@ -10,6 +10,7 @@ import mujoco
 import pytest
 import torch
 
+from helpers import load_script
 from maker_arm_lab.core import batch_loop, desk_boxes, layout, loop, oracle, parts, perception
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.stowed import parts_resting_box
@@ -340,10 +341,8 @@ def test_book_miss_books_the_target_of_a_cycle_that_stowed_only_other_parts():
 
 def test_the_recorder_refuses_book_miss(capsys):
     # The rig that drives the recorder keeps its own failure memory: --book_miss is the loop's.
-    from test_ms7f_stack import ROOT, _load
-
     with pytest.raises(SystemExit) as exit_info:
-        _load(ROOT / "scripts" / "mj_generate_batch.py").main(
+        load_script("mj_generate_batch").main(
             ["--out_dir", "/tmp/x", "--heap_k", "3", "--desk_boxes", "4", "--book_miss"]
         )
     assert exit_info.value.code == 2

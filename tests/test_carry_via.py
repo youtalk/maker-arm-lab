@@ -21,6 +21,7 @@ from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import (
     carry_arc_point,
 )
 from test_mj_heap_oracle import _place
+from test_thin_snap import _checked
 
 BRICK = parts.make_part("brick", 2, 4)
 BACK = (-0.07, 0.19, 0.3)
@@ -159,15 +160,6 @@ def test_a_carry_that_clears_the_base_is_straight_under_the_switch(cycles):
     off, on = cycles[(FRONT, False)], cycles[(FRONT, True)]
     assert off["extend_min_radius"] >= CARRY_MIN_RADIUS_M
     assert [(p, q.tolist()) for p, q in off["steps"]] == [(p, q.tolist()) for p, q in on["steps"]]
-
-
-def _checked(argv):
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--desk_boxes", type=int, default=0)
-    batch_loop.add_ms7e_arguments(parser)
-    args = parser.parse_args(argv)
-    batch_loop.check_ms7e(parser, args)
-    return args
 
 
 def test_the_switch_needs_the_release_lean_and_every_client_passes_it():

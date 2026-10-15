@@ -1,22 +1,19 @@
 """MS5 design P7: the latency script's token contract and its ROI read."""
 
 import ast
-import importlib.util
 import io
 import os
 import signal
 import subprocess
 import sys
-from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "conduit_latency.py"
-spec = importlib.util.spec_from_file_location("conduit_latency", SCRIPT)
-conduit_latency = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(conduit_latency)
+from helpers import ROOT, load_script
+
+SCRIPT = ROOT / "scripts" / "conduit_latency.py"
+conduit_latency = load_script(SCRIPT)
 
 
 def _run(*args):

@@ -1,8 +1,7 @@
 """HDF5 shard writer with the layout ``lerobot_stack/convert_to_lerobot.py`` reads.
 
 One shard per generation run, ``data/demo_N`` per exported episode, the same datasets Isaac
-Lab's recorder wrote for MS1 and MS2 (the converter and ``extract_replay_bundle.py`` are the
-consumers and are unchanged):
+Lab's recorder wrote for MS1 and MS2 (the converter is the consumer and is unchanged):
 
     attrs: success (bool), num_samples (int)
     actions (T,7) f32            raw pre-clamp oracle command, column 6 the binary gripper

@@ -403,13 +403,6 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         "(loop.grace_hold)",
     )
     parser.add_argument(
-        "--frames_dir",
-        type=str,
-        default="",
-        help="dump env 0's wrist and overhead policy frames as PNGs here, every "
-        "loop.FRAME_EVERY steps of each cycle (forensics; needs the policy server)",
-    )
-    parser.add_argument(
         "--classifier_frames",
         type=str,
         default="",
@@ -555,20 +548,6 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
     return args
 
 
-def frame_writer(frames_dir: str):
-    """``loop.rollout``'s ``on_frame``: ``c<ordinal>_s<step>_<camera>.png`` under ``frames_dir``."""
-    from PIL import Image
-
-    root = Path(frames_dir)
-    root.mkdir(parents=True, exist_ok=True)
-
-    def write(ordinal: int, step: int, wrist, overhead) -> None:
-        for name, frame in (("wrist", wrist), ("overhead", overhead)):
-            Image.fromarray(frame).save(root / f"c{ordinal:03d}_s{step:04d}_{name}.png")
-
-    return write
-
-
 def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -> int:
     """``run`` is the rollout (``loop.rollout``, or the stretch runner's chain of them) and
     ``episode_s`` overrides the env's episode length; the tokens are ``parser_cls.token``'s."""
@@ -688,7 +667,6 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
                 if args.dagger_dir
                 else None
             ),
-            on_frame=frame_writer(args.frames_dir) if args.frames_dir else None,
             on_classify=recorder,
             select_at_release=args.select_at_release,
             replan_on_switch=args.replan_on_switch,

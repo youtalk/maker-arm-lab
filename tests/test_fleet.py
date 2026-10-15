@@ -1,7 +1,6 @@
 """CPU tests for scripts/fleet.py: the draw split, the stale payload refusal, the job status
 parse and the token contract. Every host here is the local one, so nothing touches the network."""
 
-import importlib.util
 import json
 import os
 import re
@@ -13,14 +12,11 @@ from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+from helpers import ROOT, load_script
+
 FLEET = ROOT / "scripts/fleet.py"
-_spec = importlib.util.spec_from_file_location("_fleet", FLEET)
-fleet = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(fleet)
-_ge_spec = importlib.util.spec_from_file_location("_ge", ROOT / "scripts/run_gate_eval.py")
-ge = importlib.util.module_from_spec(_ge_spec)
-_ge_spec.loader.exec_module(ge)
+fleet = load_script(FLEET)
+ge = load_script("run_gate_eval")
 
 
 @pytest.mark.parametrize(

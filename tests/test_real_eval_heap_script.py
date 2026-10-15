@@ -1,7 +1,6 @@
 """MS5 design sections 7 and 8: the real eval client's token contract, its hold and release."""
 
 import ast
-import importlib.util
 import io
 import json
 import math
@@ -9,19 +8,16 @@ import os
 import signal
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
+from helpers import ROOT, load_script
 from maker_arm_lab.real.rig import RigConfig, episode_sheet
 from real_fakes import FakeArm, FakeClock, make_env
 from test_perceived_loop import MS7D_ON
 
-REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "real_eval_heap.py"
-spec = importlib.util.spec_from_file_location("real_eval_heap", SCRIPT)
-real_eval_heap = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(real_eval_heap)
+SCRIPT = ROOT / "scripts" / "real_eval_heap.py"
+real_eval_heap = load_script(SCRIPT)
 ARGS = ["--sheet", "s.json", "--heap_k", "3", "--dilation", "0.5"]
 
 

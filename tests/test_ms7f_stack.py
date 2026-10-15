@@ -6,7 +6,6 @@ line on every exit path. The no-truth test with every ready MS7f switch on is
 ``test_perceived_loop.test_no_decision_reads_the_truth`` (``_ms7f_scene``)."""
 
 import ast
-import importlib.util
 import json
 import subprocess
 import sys
@@ -14,9 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from helpers import ROOT, load_script
 from maker_arm_lab.core import batch_loop
-
-ROOT = Path(__file__).resolve().parents[1]
 
 ON = {
     "categories": ["--categories", "--box_draw", "4"],
@@ -51,7 +49,13 @@ ON = {
 """Each MS7f switch at a value that is not its off value. A track that adds a switch adds it
 here too (the first test holds the table to ``MS7F_OFF``)."""
 CLIENTS = [
-    ("mj_eval_heap", ["--heap_k", "3", "--oracle_driver", "--desk_boxes", "4"], "EVAL_FAIL ", ()),
+    # The heap client refuses the recorder's two switches with its own reason, before the check.
+    (
+        "mj_eval_heap",
+        ["--heap_k", "3", "--oracle_driver", "--desk_boxes", "4"],
+        "EVAL_FAIL ",
+        ("end_at_done", "abandon_cycle"),
+    ),
     # The recorder's walk pace predates MS7f and is built there (the MS3 speed ladder).
     (
         "mj_generate_batch",
@@ -60,6 +64,8 @@ CLIENTS = [
         ("transport_speed",),
     ),
 ]
+"""Each client, its heap argv, its fail token and the switches it does not leave to
+``check_ms7f``."""
 NEW_SCRIPTS = [
     (ROOT / "scripts" / "mj_render_set.py", "RENDER_OK", "RENDER_FAIL"),
     (ROOT / "scripts" / "mj_stretch_run.py", "STRETCH_OK", "STRETCH_FAIL"),
@@ -72,14 +78,7 @@ PROTOCOL_IMPORTS = {"io", "json", "numpy"}
 never torch or lerobot, because both venvs import it (MS7f design section 6.5)."""
 
 
-def _load(path: Path):
-    spec = importlib.util.spec_from_file_location(path.stem, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-ge = _load(ROOT / "scripts" / "run_gate_eval.py")
+ge = load_script("run_gate_eval")
 
 
 def test_every_ms7f_switch_has_an_on_value_here():
@@ -88,26 +87,33 @@ def test_every_ms7f_switch_has_an_on_value_here():
     assert ge.MAX_HEAP_K == batch_loop.MAX_HEAP_K
 
 
-@pytest.mark.parametrize("name", list(ON))
-@pytest.mark.parametrize("script, argv, token, built", CLIENTS)
+@pytest.mark.parametrize("script, argv, token, own", CLIENTS)
 def test_a_client_refuses_a_switch_whose_behaviour_is_not_in_the_commit(
-    name, script, argv, token, built, capsys
+    script, argv, token, own, capsys, monkeypatch
 ):
-    if name in batch_loop.MS7F_READY | set(built):
-        pytest.skip(f"--{name} is built on this commit")
-    module = _load(ROOT / "scripts" / f"{script}.py")
-    with pytest.raises(SystemExit) as exit_info:
-        module.main(argv + ON[name])
-    assert exit_info.value.code == 2
-    out = capsys.readouterr().out.strip().splitlines()
-    assert len(out) == 1 and out[0].startswith(token), out
-    assert f"--{name} is not built on this commit" in out[0]
+    """The base commit's state, whatever the tracks have built since: no MS7f switch is ready.
+    ``check_ms7f`` binds ``MS7F_READY`` as its default and the recorder passes its own set, so
+    the client's call gets the empty set."""
+    module = load_script(script)
+    real = module.check_ms7f
+    monkeypatch.setattr(
+        module, "check_ms7f", lambda parser, args, ready=None: real(parser, args, frozenset())
+    )
+    for name, flags in ON.items():
+        if name in own:
+            continue
+        with pytest.raises(SystemExit) as exit_info:
+            module.main(argv + flags)
+        assert exit_info.value.code == 2, name
+        out = capsys.readouterr().out.strip().splitlines()
+        assert len(out) == 1 and out[0].startswith(token), out
+        assert f"--{name} is not built on this commit" in out[0]
 
 
-@pytest.mark.parametrize("script, argv, token, built", CLIENTS)
-def test_a_client_hands_pile_pgs_to_the_env(script, argv, token, built, monkeypatch, tmp_path):
+@pytest.mark.parametrize("script, argv, token, own", CLIENTS)
+def test_a_client_hands_pile_pgs_to_the_env(script, argv, token, own, monkeypatch, tmp_path):
     # A physics switch the env never sees would read as a no-op run.
-    module = _load(ROOT / "scripts" / f"{script}.py")
+    module = load_script(script)
     seen = {}
 
     def env(*args, **kwargs):
@@ -127,17 +133,17 @@ def _gate_argv(tmp_path: Path) -> list[str]:
     ]  # fmt: skip
 
 
-@pytest.mark.parametrize("name", list(ON))
 def test_the_supervisor_refuses_a_switch_whose_behaviour_is_not_in_the_commit(
-    name, monkeypatch, capsys, tmp_path
+    monkeypatch, capsys, tmp_path
 ):
-    if name in ge.MS7F_READY:
-        pytest.skip(f"--{name} is built on this commit")
+    """The base commit's state, whatever the tracks have built since: no MS7f switch is ready."""
+    monkeypatch.setattr(ge, "MS7F_READY", frozenset())
     monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
-    assert ge.main(_gate_argv(tmp_path) + ON[name]) == 2
-    out = capsys.readouterr()
-    assert out.out.strip().splitlines() == ["GATE_ERROR"]
-    assert f"--{name} is not built on this commit" in out.err
+    for name, flags in ON.items():
+        assert ge.main(_gate_argv(tmp_path) + flags) == 2, name
+        out = capsys.readouterr()
+        assert out.out.strip().splitlines() == ["GATE_ERROR"], name
+        assert f"--{name} is not built on this commit" in out.err
 
 
 def test_the_supervisor_forwards_every_ms7f_switch_and_its_cache_refuses_other_values(
@@ -153,6 +159,9 @@ def test_the_supervisor_forwards_every_ms7f_switch_and_its_cache_refuses_other_v
     block = ge.ms7f_block(cfg)
     for name, value in block.items():
         assert value != ge.MS7F_OFF[name], name
+        assert cmd.count(f"--{name}") == 1, name
+        one = ge._build_cfg(ge._parse_args(argv + ON[name]))
+        assert ge.ms7f_block(one) == ge.MS7F_OFF | {name: value}, name
         at = cmd.index(f"--{name}")
         if value is not True:
             assert cmd[at + 1] == str(value), name
@@ -239,7 +248,7 @@ def test_the_supervisor_refuses_a_heap_over_150(monkeypatch, capsys, tmp_path):
 
 def test_the_heap_client_refuses_abandon_cycle(capsys):
     # The recorder's switch: the heap loop already survives a rig abandon (takeover_failed).
-    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    module = load_script("mj_eval_heap")
     with pytest.raises(SystemExit) as exit_info:
         module.main(CLIENTS[0][1] + ["--abandon_cycle"])
     assert exit_info.value.code == 2

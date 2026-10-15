@@ -2,13 +2,11 @@
 in a row while the hold detector holds nothing and the cycle has lifted nothing ends as a failure,
 booked as a budget end. Off, every step and payload byte is what it was."""
 
-import json
-
 import pytest
 
+from helpers import load_script
 from maker_arm_lab.core import dagger_loop, loop, perception
-from test_ms7f_stack import ROOT, _gate_argv, _load, ge
-from test_perceived_loop import _rollout, _served, _teacher_scene, _thin_snap_scene
+from test_perceived_loop import _rollout, _run, _teacher_scene
 from test_snap_closed import _Blind
 from test_thin_snap import _same
 
@@ -29,30 +27,12 @@ def test_the_stall_end_rule():
     assert loop.closed_empty_count(n, grip_open=False, holding=True) == 0  # a hold
 
 
-def _run(scene, monkeypatch, **switch):
-    """The scene's perceived rollout: the payload without its wall clock, and what env 0 was
-    served on every step."""
-    env, rig, policy, budget, switches = scene(monkeypatch)
-    served = _served(env)
-    payload = _rollout(env, rig, policy, budget=budget, perceived=True, **switches, **switch)
-    env.close()
-    for key in ("wall_sec", "wall_sec_per_episode"):
-        payload.pop(key)
-    return json.loads(json.dumps(payload, sort_keys=True)), served
-
-
-def test_with_the_switch_off_every_step_and_payload_byte_is_mains(monkeypatch):
-    main, main_served = _run(_thin_snap_scene, monkeypatch)
-    off, off_served = _run(_thin_snap_scene, monkeypatch, stall_end=False)
-    assert off == main and _same(off_served, main_served)
-    assert "stall_end" not in off["inference"]["loop"]
-    assert "stall_end" not in off["episodes"][0]["cycle_reasons"]
-
-
 def test_a_cycle_that_holds_its_part_is_never_ended(monkeypatch):
     """The teacher scene: every cycle holds and lifts its part in the detector's eyes, so the
     switch changes no step and no payload byte but its own flag."""
     off, off_served = _run(_teacher_scene, monkeypatch)
+    assert "stall_end" not in off["inference"]["loop"]
+    assert "stall_end" not in off["episodes"][0]["cycle_reasons"]
     on, on_served = _run(_teacher_scene, monkeypatch, stall_end=True)
     assert on["inference"]["loop"].pop("stall_end") is True
     assert on == off and _same(on_served, off_served)
@@ -98,20 +78,9 @@ def test_the_rollout_refuses_the_switch_without_perceived(monkeypatch):
 def test_the_clients_refuse_the_switch_where_no_serving_loop_reads_it(
     script, argv, message, capsys
 ):
-    module = _load(ROOT / "scripts" / f"{script}.py")
+    module = load_script(script)
     with pytest.raises(SystemExit) as exit_info:
         module.main(argv + ["--heap_k", "3", "--desk_boxes", "4", "--stall_end"])
     assert exit_info.value.code == 2
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 1 and "_FAIL" in out[0] and message in out[0], out
-
-
-def test_the_supervisor_forwards_the_switch_and_its_cache_key_records_it(tmp_path):
-    assert ge.MS7F_OFF["stall_end"] is False and "stall_end" in ge.MS7F_READY
-    draw = ge.make_eval_draws(1, 1)[0]
-    argv = _gate_argv(tmp_path)
-    plain = ge._build_cfg(ge._parse_args(argv))
-    cfg = ge._build_cfg(ge._parse_args(argv + ["--stall_end"]))
-    assert ge.ms7f_block(cfg) == ge.MS7F_OFF | {"stall_end": True}
-    assert ge._eval_command(cfg, draw).count("--stall_end") == 1
-    assert "--stall_end" not in ge._eval_command(plain, draw)
