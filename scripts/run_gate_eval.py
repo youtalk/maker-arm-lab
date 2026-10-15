@@ -311,6 +311,49 @@ MS7G_SWITCHES = ("clear_first", "overhang_guard")
 """The MS7g selector switches (MS7g design 5.3 and 5.4), each forwarded to the MuJoCo heap client
 as its own flag; both need ``--perceived``. The client records one in the inference block only
 when it is on, so a payload with both off is one that predates them."""
+LOOP_FLAGS = {
+    "scripted_place": "MuJoCo heap only: the MS7a fallback read, forwarded to the heap client as "
+    "--scripted_place; a pass is reported as 'PASS (scripted place)'",
+    "scripted_rake": "MuJoCo heap only: forwarded to the heap client as --scripted_rake, which runs "
+    "the teacher's rake off a tray wall where the policy's loop finds no target",
+    "part_failures": "MuJoCo heap only: forwarded to the heap client as --part_failures, which "
+    "books a failed cycle against its part instead of its 5 cm cell",
+    "pick_snap": "MuJoCo heap only: forwarded to the heap client as --pick_snap, which moves the "
+    "commanded pick point onto the served row on the final approach",
+    "dwell_close": "MuJoCo heap only: forwarded to the heap client as --dwell_close, which closes "
+    "the jaws for a policy that waits at grasp height",
+    "adopt_held": "MuJoCo heap only: forwarded to the heap client as --adopt_held, which serves the "
+    "box of a lifted part that is not the target",
+    "rake_cap": "MuJoCo heap only: forwarded to the heap client as --rake_cap N, which lets the "
+    "loop rake one part up to N times; 0 keeps the teacher's cap",
+    "rake_crowd": "MuJoCo heap only: forwarded to the heap client as --rake_crowd, which lets a "
+    "rake start land the tips into a neighbour when no start is clear",
+    "park_done": "MuJoCo heap only: forwarded to the heap client as --park_done, which holds an "
+    "env whose episode has ended at its last command while the rest of the batch runs",
+    "rake_turn": "MuJoCo heap only: forwarded to the heap client as --rake_turn, which retries a "
+    "rake the rig declined at the teacher's next jaw headings",
+    "perceived": "MuJoCo heap only: forwarded to the heap client as --perceived (MS7c), whose "
+    "decisions read only the perceived state and the hold detector",
+    "noise_scales": "MuJoCo heap only, with --perceived: the perception knob scales, e.g. "
+    "'heading=2', forwarded in their canonical form; empty is every knob at 1, the nominal",
+    "contact_hold": "MuJoCo heap only, with --perceived: forwarded as --contact_hold, the fallback "
+    "whose serving rules read the contacts for their stop flag",
+    **{
+        name: f"MuJoCo heap only: forwarded to the heap client as --{name}, MS7d {lever}"
+        for name, lever in MS7D_LEVERS.items()
+    },
+    "carry_guard": "MuJoCo heap only, with --perceived: forwarded as --carry_guard (MS7g), the "
+    "guard on a lifted part's release and the rig's carry of a still one; refuses "
+    "--passenger_drop",
+}
+"""The heap loop's flags of this supervisor and their help, in the order they are forwarded to
+the heap client after the --client_flags; the ``MS7G_SWITCHES`` follow them. Each needs the
+MuJoCo heap. The two in ``LOOP_VALUES`` take a value, every other one is an on/off switch."""
+LOOP_VALUES = {
+    "rake_cap": {"type": int, "default": 0},
+    "noise_scales": {"type": str, "default": ""},
+}
+"""The argument type and default of the ``LOOP_FLAGS`` that take a value; 0 and "" are off."""
 LOOP_SWITCHES = (
     "select_at_release",
     "replan_on_switch",
@@ -318,19 +361,7 @@ LOOP_SWITCHES = (
     "squeeze_floor",
     "close_gate",
     "square_wrist",
-    "scripted_place",
-    "scripted_rake",
-    "part_failures",
-    "pick_snap",
-    "dwell_close",
-    "adopt_held",
-    "rake_crowd",
-    "park_done",
-    "rake_turn",
-    "perceived",
-    "contact_hold",
-    *MS7D_LEVERS,
-    "carry_guard",
+    *(name for name in LOOP_FLAGS if name not in LOOP_VALUES),
     *MS7G_SWITCHES,
     "pi05_prompt",
 )
@@ -1380,98 +1411,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="MuJoCo heap only: forwarded to the heap client, which leans the tray walls outward "
         "by this many degrees (0 is vertical)",
     )
-    parser.add_argument(
-        "--scripted_place",
-        action="store_true",
-        help="MuJoCo heap only: the MS7a fallback read, forwarded to the heap client as "
-        "--scripted_place; a pass is reported as 'PASS (scripted place)'",
-    )
-    parser.add_argument(
-        "--scripted_rake",
-        action="store_true",
-        help="MuJoCo heap only: forwarded to the heap client as --scripted_rake, which runs the "
-        "teacher's rake off a tray wall where the policy's loop finds no target",
-    )
-    parser.add_argument(
-        "--part_failures",
-        action="store_true",
-        help="MuJoCo heap only: forwarded to the heap client as --part_failures, which books a "
-        "failed cycle against its part instead of its 5 cm cell",
-    )
-    parser.add_argument(
-        "--pick_snap",
-        action="store_true",
-        help="MuJoCo heap only: forwarded to the heap client as --pick_snap, which moves the "
-        "commanded pick point onto the served row on the final approach",
-    )
-    parser.add_argument(
-        "--dwell_close",
-        action="store_true",
-        help="MuJoCo heap only: forwarded to the heap client as --dwell_close, which closes the "
-        "jaws for a policy that waits at grasp height",
-    )
-    parser.add_argument(
-        "--adopt_held",
-        action="store_true",
-        help="MuJoCo heap only: forwarded to the heap client as --adopt_held, which serves the "
-        "box of a lifted part that is not the target",
-    )
-    parser.add_argument(
-        "--rake_cap",
-        type=int,
-        default=0,
-        help="MuJoCo heap only: forwarded to the heap client as --rake_cap N, which lets the "
-        "loop rake one part up to N times; 0 keeps the teacher's cap",
-    )
-    parser.add_argument(
-        "--rake_crowd",
-        action="store_true",
-        help="MuJoCo heap only: forwarded to the heap client as --rake_crowd, which lets a rake "
-        "start land the tips into a neighbour when no start is clear",
-    )
-    parser.add_argument(
-        "--park_done",
-        action="store_true",
-        help="MuJoCo heap only: forwarded to the heap client as --park_done, which holds an env "
-        "whose episode has ended at its last command while the rest of the batch runs",
-    )
-    parser.add_argument(
-        "--rake_turn",
-        action="store_true",
-        help="MuJoCo heap only: forwarded to the heap client as --rake_turn, which retries a "
-        "rake the rig declined at the teacher's next jaw headings",
-    )
-    parser.add_argument(
-        "--perceived",
-        action="store_true",
-        help="MuJoCo heap only: forwarded to the heap client as --perceived (MS7c), whose "
-        "decisions read only the perceived state and the hold detector",
-    )
-    parser.add_argument(
-        "--noise_scales",
-        type=str,
-        default="",
-        help="MuJoCo heap only, with --perceived: the perception knob scales, e.g. 'heading=2', "
-        "forwarded in their canonical form; empty is every knob at 1, the nominal",
-    )
-    parser.add_argument(
-        "--contact_hold",
-        action="store_true",
-        help="MuJoCo heap only, with --perceived: forwarded as --contact_hold, the fallback "
-        "whose serving rules read the contacts for their stop flag",
-    )
-    for name, lever in MS7D_LEVERS.items():
+    for name, text in LOOP_FLAGS.items():
         parser.add_argument(
-            f"--{name}",
-            action="store_true",
-            help=f"MuJoCo heap only: forwarded to the heap client as --{name}, MS7d {lever}",
+            f"--{name}", help=text, **LOOP_VALUES.get(name, {"action": "store_true"})
         )
-    parser.add_argument(
-        "--carry_guard",
-        action="store_true",
-        help="MuJoCo heap only, with --perceived: forwarded as --carry_guard (MS7g), the guard on "
-        "a lifted part's release and the rig's carry of a still one; refuses --passenger_drop",
-    )
     parser.add_argument(
         "--families",
         type=str,
@@ -1707,32 +1650,15 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError(f"--pi05_still_open must be in [0, 1], got {still[2]}")
     if not 1.0 <= args.action_warp <= 3.0:  # the server's ACTION_WARP_MIN and ACTION_WARP_MAX
         raise ValueError(f"--action_warp must be in [1.0, 3.0], got {args.action_warp}")
-    if args.gripper != "binary" and (args.heap_k <= 0 or args.backend != "mujoco"):
+    heap = args.heap_k > 0 and args.backend == "mujoco"
+    if args.gripper != "binary" and not heap:
         # Only the MuJoCo heap client drives a continuous gripper (phase B design 5.4).
         raise ValueError("--gripper continuous needs --heap_k > 0 and --backend mujoco")
-    if args.scripted_place and (args.heap_k <= 0 or args.backend != "mujoco"):
-        raise ValueError("--scripted_place needs --heap_k > 0 and --backend mujoco")
-    if args.scripted_rake and (args.heap_k <= 0 or args.backend != "mujoco"):
-        raise ValueError("--scripted_rake needs --heap_k > 0 and --backend mujoco")
-    if args.part_failures and (args.heap_k <= 0 or args.backend != "mujoco"):
-        raise ValueError("--part_failures needs --heap_k > 0 and --backend mujoco")
-    if args.pick_snap and (args.heap_k <= 0 or args.backend != "mujoco"):
-        raise ValueError("--pick_snap needs --heap_k > 0 and --backend mujoco")
     if args.rake_cap < 0:
         raise ValueError(f"--rake_cap must be 0 (off) or a positive cap, got {args.rake_cap}")
-    for name in (
-        "dwell_close",
-        "adopt_held",
-        "rake_cap",
-        "rake_crowd",
-        "park_done",
-        "rake_turn",
-        "perceived",
-        *MS7D_LEVERS,
-        "carry_guard",
-        *MS7G_SWITCHES,
-    ):
-        if getattr(args, name) and (args.heap_k <= 0 or args.backend != "mujoco"):
+    for name in (*LOOP_FLAGS, *MS7G_SWITCHES):
+        # --noise_scales and --contact_hold need --perceived, which needs the heap.
+        if name not in ("noise_scales", "contact_hold") and getattr(args, name) and not heap:
             raise ValueError(f"--{name} needs --heap_k > 0 and --backend mujoco")
     perceived_only = [n for n in MS7D_LEVERS if n not in ("hold_force", "force_cap")]
     perceived_only += MS7G_SWITCHES
@@ -1746,8 +1672,16 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
     if args.perceived and (not args.desk_boxes or args.gripper != "continuous"):
         # The client's own usage error, before a server starts and every draw loses to it.
         raise ValueError("--perceived needs --desk_boxes and --gripper continuous")
-    scales = noise_scales_key(args.noise_scales) if args.noise_scales else ""
-    if args.desk_boxes and (args.heap_k <= 0 or args.backend != "mujoco" or args.desk_boxes < 0):
+    client_flags = shlex.split(args.client_flags)
+    for name in (*LOOP_FLAGS, *MS7G_SWITCHES):
+        value = getattr(args, name)
+        if name == "noise_scales" and value:
+            value = noise_scales_key(value)  # forwarded in the canonical form the client records
+        if value is True:
+            client_flags.append(f"--{name}")
+        elif value:
+            client_flags += [f"--{name}", str(value)]
+    if args.desk_boxes and (not heap or args.desk_boxes < 0):
         # Only the MuJoCo heap client builds desk boxes (MS7a design, desk boxes).
         raise ValueError("--desk_boxes needs a positive count, --heap_k > 0 and --backend mujoco")
     if args.tray_lean and not args.tray:
@@ -1769,9 +1703,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
     if args.snap_closed and not args.pick_snap:
         raise ValueError("--snap_closed ends pick_snap's landing hold: it needs --pick_snap")
     families = families_key(args.families)
-    if any(getattr(args, name) for name in MS7E_OFF) and (
-        args.heap_k <= 0 or args.backend != "mujoco"
-    ):
+    if any(getattr(args, name) for name in MS7E_OFF) and not heap:
         raise ValueError("the MS7e switches need --heap_k > 0 and --backend mujoco")
     unbuilt = [k for k in families if k not in READY_FAMILIES]
     if unbuilt:
@@ -1788,7 +1720,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
     for name, value in ms7f.items():
         if value == MS7F_OFF[name]:
             continue
-        if args.heap_k <= 0 or args.backend != "mujoco":
+        if not heap:
             raise ValueError(f"--{name} needs --heap_k > 0 and --backend mujoco")
         if name not in MS7F_READY:
             # The client's own usage error (MS7f design section 12.2), before a server starts.
@@ -1869,23 +1801,7 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         snap_closed=args.snap_closed,
         seen_seeds=args.seen_seeds,
         ms7f=ms7f,
-        client_flags=tuple(shlex.split(args.client_flags))
-        + (("--scripted_place",) if args.scripted_place else ())
-        + (("--scripted_rake",) if args.scripted_rake else ())
-        + (("--part_failures",) if args.part_failures else ())
-        + (("--pick_snap",) if args.pick_snap else ())
-        + (("--dwell_close",) if args.dwell_close else ())
-        + (("--adopt_held",) if args.adopt_held else ())
-        + (("--rake_cap", str(args.rake_cap)) if args.rake_cap else ())
-        + (("--rake_crowd",) if args.rake_crowd else ())
-        + (("--park_done",) if args.park_done else ())
-        + (("--rake_turn",) if args.rake_turn else ())
-        + (("--perceived",) if args.perceived else ())
-        + (("--noise_scales", scales) if scales else ())
-        + (("--contact_hold",) if args.contact_hold else ())
-        + tuple(f"--{name}" for name in MS7D_LEVERS if getattr(args, name))
-        + (("--carry_guard",) if args.carry_guard else ())
-        + tuple(f"--{name}" for name in MS7G_SWITCHES if getattr(args, name)),
+        client_flags=tuple(client_flags),
     )
 
 
