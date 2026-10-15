@@ -1,8 +1,9 @@
-# MS7i: local rounds, round 1
+# MS7i: local rounds, rounds 1 and 2
 
-Date: 2026-10-15. Status: final for round 1. This report uses the ledger through its entry of
-11:58 on 2026-10-15. Round 1 runs from 10-13 to 10-19. Both tracks ended round 1 before a checked
-read, so no read is pending. Only the choice of the round 2 levers is open (section 7).
+Date: 2026-10-15. Status: final for rounds 1 and 2. This report uses the ledger through its entry
+of 14:09 on 2026-10-15. Round 1 ran from 10-13 to 10-15, and both of its tracks ended before a
+checked read. The owner chose the round 2 levers on 10-15, and round 2 ended the same day (section
+9). Only the choice of the round 3 levers is open (section 9.5).
 
 The design of MS7i is revision 3 of the design document of 2026-10-13. The owner started the run on
 it with /goal at about 11:35 on 2026-10-13. This report cites the design as "spec section N" and
@@ -26,7 +27,7 @@ ledger. The policies and drivers:
 - Run A and Run B are the two π0.5 fine-tunes of Track V (section 6).
 
 Own frames are the frames that a driver policy served itself. Takeovers are the frames of the
-scripted teacher when it takes over a cycle.
+scripted teacher in the cycles that it takes over.
 
 The measures. A correct stow, the rate and the held-out row keep their MS7f definitions (MS7f
 report section 1.3):
@@ -101,6 +102,11 @@ hour at an SE of 6.99. So Run B is faster at the same correct total.
 A probe of the carry-guard margin found no lever (section 5.6). Section 7 lists the round 2 levers
 for the owner.
 
+In round 2 (section 9), Track V paused, and Track ACT measured the release of ACT-C with a new
+census field. ACT-C opens 7.5 mm nearer the far wall and 6 mm farther to the side than S, on every
+release. Its extra losses past the far wall follow that position (+30 against S) more than the
+speed of the arm (+9). So the round 3 lever aims at the position of the release (section 9.5).
+
 ## 2. The bars and the candidate path
 
 Spec section 4.2 sets the path of a candidate, and IR2 restates it. The same path holds for both
@@ -131,7 +137,7 @@ equals the runs of p 100 to 149. At 11:59 no earlier ledger or payload held a se
 1. Screen. The candidate reads the screen draws. Its reference is h_S_scr, 2533 correct stows.
 2. Re-read. The best screen of each track reads draws 20 to 39. HD32 (4) picks the best screen:
    the correct total first, then the rate. S reads the same draws once, as i_S_d2039. The
-   candidate goes on only if its total there is not under the total of S.
+   candidate goes on only with a total there that is not under the total of S.
 3. Checked read. The candidate reads the checked seed, beside i_S_chk on the same draws. Each
    track reads at most one checked read a round. The candidate must meet all four bars of the
    table below.
@@ -193,8 +199,8 @@ IR4 sets the drivers:
 | Machine B, RTX 5080 | V, one π0.5 server | 10 | 50-74 | 25 |
 | Machine C, RTX A2000, aarch64 | B, one CUDA ACT server a lane | 18 | 100-149 | 50 |
 
-- Both drivers run in DAgger mode. The teacher takes over a cycle when one of the six MS7f wave 3
-  triggers fires. The teacher uses the trims of HD60 (1).
+- Both drivers run in DAgger mode. One of the six MS7f wave 3 triggers
+  makes the teacher take over a cycle. The teacher uses the trims of HD60 (1).
 - Machine C ran 18 lanes, not the 20 of IR4. An ACT server holds 390 MiB of the A2000, and an EGL
   client holds 186 MiB. So 18 lanes need about 10.4 GB (14:44).
 - Every frame from Machine C comes from aarch64 physics. A lane plays V at 21 to 26 steps a second
@@ -297,8 +303,8 @@ The roots of each track:
   frames). Section 5.1 gives their share of the mix.
 
 IR5 also asks for the share of own frames whose served action a serving rule changed. It comes
-from `obs/policy_action`. A frame counts as changed if a joint target moved more than 1e-6 rad
-from the policy's action, or if the gripper column differs. The labels behind the table come from
+from `obs/policy_action`. A frame counts as changed with a joint target more than 1e-6 rad from
+the policy's action, or with a different gripper column. The labels behind the table come from
 `own_labels()` at f20db17, and they match the conversion on 64 of 64 shards
 (`i/tables/served_share/served_share.md`).
 
@@ -385,7 +391,7 @@ narrows that (section 4.4).
 Rule (IR6): each round samples 40 cycles a driver, 10 for each pair of segment and label, and 20
 corpus episodes. A sampler renders each as a sheet of 6 frames, and two judge subagents read the
 sheets. If more than 10 % disagree with their labels, the rule changes. The audit then runs again
-before any upload or training. The judges also confirm that each negative window ends at its event.
+before any upload or training. The judges also check that each negative window ends at its event.
 
 | round | time | sample seed | shards | code | disagree | result |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -411,9 +417,9 @@ before any upload or training. The judges also confirm that each negative window
 | --- | --- | --- | --- |
 | (1) | 17:06, 6f70f55 | The loss event needs a release that puts the part in no box. | In 7 V shards, 174 of 210 loss events sat in stowed cycles, 148 of them 0 to 4 frames before the release. The opening jaws let the part go while the command still read closed. |
 | (2) | 17:06, 6f70f55 | A positive carry needs its first open at most RELEASE_LEAD = 10 steps before the census release. | The census release lags the first open by 1 to 4 steps. 15 % of the positive carries opened earlier, over the tray or in a tremble, and closed again. |
-| (3) | 17:06, `feat/ms7i-prompt` 8dcc189, now 538ad33 | A teacher episode is positive only if it reaches a carry and then a release with no close after it. Otherwise it is untagged. | The corpus half of round 1 disagreed on 6 of 20. Teacher episodes with no carry, opens over the tray after a lift and an episode that starts held all read positive. |
+| (3) | 17:06, `feat/ms7i-prompt` 8dcc189, now 538ad33 | A teacher episode is positive only with a carry and then a release with no close after it. Otherwise it is untagged. | The corpus half of round 1 disagreed on 6 of 20. Teacher episodes with no carry, opens over the tray after a lift and an episode that starts held all read positive. |
 | (4) | 17:43, 177d3e1 | A re-open needs a close of REOPEN_MIN_CLOSED = 3 steps or more that came before the first carry frame. | On 3 shards, 311 of 536 re-open events came after a 1-frame close and 99 after a 2-frame close. The command flickered around the width plus 4 mm. 221 came after the carry start. |
-| (5) | 18:22, f20db17 | The grasp and carry segments are positive only if the census hold (`first_held_at`) began by the first carry frame. | In the 5 round 3 shards, 78 of 507 cycles with positives read the carry before the hold. Round 3's V00 is one: the cycle starts closed, reads carry at step 30 and holds at step 159. |
+| (5) | 18:22, f20db17 | The grasp and carry segments are positive only with a census hold (`first_held_at`) that began by the first carry frame. | In the 5 round 3 shards, 78 of 507 cycles with positives read the carry before the hold. Round 3's V00 is one: the cycle starts closed, reads carry at step 30 and holds at step 159. |
 
 - Rule change (3) splits the corpus episodes. 69.0 % are clean, with 46.6 % of the frames. 16.7 %
   have no carry, 12.9 % regrasp after the release and 1.4 % have no release.
@@ -506,9 +512,9 @@ for these differences.
 
 ### 5.4 The re-read of 400k
 
-Rule (IR2 step 2): the candidate goes on only if its total on draws 20 to 39 is not under that of
-i_S_d2039, 2526. `reread_best.sh` started i_C400_d2039 at 03:52, on 10 lanes of Machine B and 10 of
-Machine A.
+Rule (IR2 step 2): the candidate goes on only with a total on draws 20 to 39 that is not under
+that of i_S_d2039, 2526. `reread_best.sh` started i_C400_d2039 at 03:52, on 10 lanes of Machine B and
+10 of Machine A.
 
 | read | correct of 3000 | rate | held-out row | cycles a stowed part | lifted_lost cycles | first close off the target |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -574,7 +580,7 @@ H1, a serving rule. Serve ACT-C with `--guard_margin 0.020` (HD63, MS7h report s
 20 mm margin keeps the jaws closed until the pick point is 20 mm inside every wall. After a stall
 of 15 steps the loop hands the carry to the rig. On the 30k save of V over 7 heaps, 0.020 read +31
 against its 0.010 twin, at a paired SE of 12.9. The core count is 42 for ACT-C 400k and 21 for S.
-So the gain on this screen is at most about 21 parts, if ACT-C falls to the count of S. If the arm
+If ACT-C falls to the count of S, the gain on this screen is at most about 21 parts. If the arm
 still moves outward at the open, a wider margin only moves the release point. Then the probe will
 show no gain. A margin change alters the serving of S, which decision I8 keeps fixed. So it needs
 the owner.
@@ -600,8 +606,8 @@ over the 40 heaps, D is +42 at a paired SE of 35.2, which is 1.19 SE. So the mar
 on this evidence. On the screen, one heap (draw 12, +19) gave half of the gain.
 
 With ACT-C, the margin holds more carries until the budget ends (207 cycles against 147), and
-more parts end lost (250 against 202). So ACT-C does not carry the part deeper into the box when
-the guard holds the jaws.
+more parts end lost (250 against 202). So with the jaws held by the guard, ACT-C does not
+carry the part deeper into the box.
 
 H2, the training length. The far-side trait belongs to the F9n recipe at 400k to 600k, not to the
 frames of B. For F9n the core count falls with training: 41 at 400k, 30 at 600k and 25 at 800k.
@@ -714,8 +720,8 @@ The jaw table of the same reads:
 - Run B 6k is the only save over the rate bar of 200 an hour, at 208.95.
 - 8k is the better save of Run A: 856 against 850. 6k is the better save of Run B: 862 against 853.
 
-The 20-heap screen of Run A 8k pools i_VA8k_s1 and i_VA8k_d719, which read draws 7 to 19 on 10
-lanes of Machine A (22:50 on 10-14). `reads/i_VA8k_scr` holds links to both reads.
+The 20-heap screen of Run A 8k pools i_VA8k_s1 and i_VA8k_d719. i_VA8k_d719 read draws 7 to 19
+on 10 lanes of Machine A (22:50 on 10-14). `reads/i_VA8k_scr` holds links to both reads.
 
 | read | correct of 3000 | rate | held-out row | steps a cycle | D against h_S_scr, paired SE | rate gap, SE |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -726,10 +732,10 @@ Run A 8k fails the screen. It stows 2471 against 2533, and its rate of 178.50 is
 200 an hour. On the screen its first close misses the target in 0.198 of the stowed cycles,
 against 0.068 for S. So Run A does not enter the candidate path.
 
-The 20-heap screen of Run B 6k pools i_VB6k_s1 and i_VB6k_d719, which read draws 7 to 19 on 10
-lanes of Machine A from 08:51 to 11:57 on 10-15 (`reads/i_VB6k_scr`). The rule of the screen,
-restated in the ledger at 11:58 before the number: 2550 or more correct of 3000, 200 or more stows
-an hour, a held-out row of 0.80 or more, and D > 0 against h_S_scr.
+The 20-heap screen of Run B 6k pools i_VB6k_s1 and i_VB6k_d719 (`reads/i_VB6k_scr`).
+i_VB6k_d719 read draws 7 to 19 on 10 lanes of Machine A from 08:51 to 11:57 on 10-15. The rule
+of the screen, restated in the ledger at 11:58 before the number: 2550 or more correct of 3000,
+200 or more stows an hour, a held-out row of 0.80 or more, and D > 0 against h_S_scr.
 
 | read | correct of 3000 | rate | held-out row | steps a cycle | D against h_S_scr, paired SE | rate gap, SE |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -742,8 +748,8 @@ only. So Run B does not enter the candidate path, and Track V ends round 1 at th
 ### 6.4 Where the fine-tunes lose time
 
 A read-only subagent split the steps of Run A by cycle phase (`i/vla/analysis/run_a_loss.md`,
-03:50 on 10-15). Retry mode starts when the jaws hold nothing and the pick point stays almost still
-over the tray for 20 steps. Then the server adds arm noise until the cycle ends. In this section
+03:50 on 10-15). Retry mode starts after 20 steps with empty jaws and the pick point almost still
+over the tray. Then the server adds arm noise until the cycle ends. In this section
 that state is the hover. S has no retry mode.
 
 1. The hover is the new behavior. Run A 8k enters retry mode in 37.7 % of its cycles on draws 0 to
@@ -825,18 +831,18 @@ Run A 8k is the base (`i/vla/i_VB6k_scr_vs_VA8k.s1.txt`, 11:58 on 10-15). Neithe
 ## 7. Round 2 levers
 
 The owner chooses the levers of round 2 after this report (spec section 4.1). This list gives each
-lever with its evidence.
+lever with its evidence. Section 9.1 gives the choice of the owner.
 
 1. The subtask rule. Under the round 1 rule, 16.7 % of the corpus episodes (4,003) never read a
    carry. A study measured why (`i/tables/subtask_r2/subtask_r2.md`). Its truth proxy is the
    teacher's release over the box. In 2,411 of these episodes (10.1 % of the corpus) no carry is
    the right reading: 1,882 failed lifts, 526 with no lift and 3 with no close. Only 1,592
-   (6.6 %) are real misses: a thin grip under the 3 mm gap floor (719), a close wider than the
-   served row (405, of which 63 % on the first close), a cycle split after the lift (404) and a
-   soft grip (64). So the ledger's first reading, "mostly regrasps on a wider axis", was wrong.
-   Two variants stay on the perceived boundary. V1 lets a gap under 3 mm grip when it is at least
-   1.0 mm over the command. It raises the corpus carry share from 83.3 % to 86.4 % and the
-   positive share from 69.0 % to 71.8 %, and it changes 1.18 % of the own-frame labels. V2 adds a
+   (6.6 %) are real misses. 719 are a thin grip under the 3 mm gap floor. 405 are a close wider
+   than the served row, 63 % of them on the first close. 404 are a cycle split after the lift, and
+   64 are a soft grip. So the ledger's first reading, "mostly regrasps on a wider axis", was wrong.
+   Two variants stay on the perceived boundary. V1 lets a gap under 3 mm grip with at least 1.0 mm
+   over the command. It raises the corpus carry share from 83.3 % to 86.4 % and the positive
+   share from 69.0 % to 71.8 %. It changes 1.18 % of the own-frame labels. V2 adds a
    close threshold from the close's own command and a rise from the desk for a held start. It
    reads 89.6 % carry and 74.4 % positive, and it changes 3.00 % of the own-frame labels. Neither
    reads a carry in a corpus episode with no lift. The raw shards behind the final roots stay on
@@ -866,15 +872,133 @@ lever with its evidence.
 
 ## 8. The code
 
-The code of record is on four pushed branches. None of them is in main. `feat/ms7i-vla-dagger`
-stacks on 4f0d095, which is in main ce97325. The first three are draft PRs #194, #195 and #196 in
-stack #198. ACT-C trained from `feat/ms7i-act-mix` 87b320a. Its commit, cherry-picked onto main
-with the same diff as b4e8ac5, is draft PR #197. The launchers, the conversion pipeline and the
-audit tools are outside the repository, in `~/data/maker-arm-ms7/i/bin/`.
+The code of round 1 is in main. The owner merged PRs #194, #195 and #196 (stack #198) and #197 at
+12:48 on 10-15. `feat/ms7i-vla-dagger` stacks on 4f0d095, which is in main ce97325. ACT-C trained
+from `feat/ms7i-act-mix` 87b320a. Its commit, cherry-picked onto main with the same diff as
+b4e8ac5, is PR #197. The launchers, the conversion pipeline and the audit tools are outside the
+repository, in `~/data/maker-arm-ms7/i/bin/`. Section 9.2 gives the code of round 2.
 
 | branch | tip | base | what it adds |
 | --- | --- | --- | --- |
 | `feat/ms7i-vla-dagger` (#194) | 61763a8 | 4f0d095 | `dagger_vla.py` converts DAgger takeover shards into the π0.5 dataset format with the corpus statistics. `train_pi05.py --dagger_root` and `colab_dagger.sh` fine-tune π0.5 on a corpus and DAgger mix, and the converter gains `--drop_reopen_lead`. |
 | `feat/ms7i-own-frames` (#195) | f20db17 | 61763a8 | `--record_all` records every frame with its cycle, its subtask and the census extras, and `core/hold.py` gains the subtask function. `convert_to_lerobot.py --own_frames` joins each cycle to its census row and writes the IR5 labels with rule changes (1), (2), (4) and (5). |
-| `feat/ms7i-prompt` (#196) | 538ad33 | f20db17 | The optional prompt id on the wire, the prompt of each request in `pi05_server.py` with no forced replan, and `--pi05_prompt`. `train_pi05.py` trains on an N-source mix with a prompt code for each frame and the 20 % tag drop, and `prompt_codes.py` writes the teacher tags of rule change (3). |
+| `feat/ms7i-prompt` (#196) | 538ad33 | f20db17 | The optional prompt id on the wire, the prompt of each request in `pi05_server.py` with no forced replan, and `--pi05_prompt`. `train_pi05.py` trains on an N-source mix with a prompt code for each frame and the 20 % tag drop. `prompt_codes.py` writes the teacher tags of rule change (3). |
 | `feat/ms7i-act-mix` (#197 as b4e8ac5) | 87b320a | 61763a8 | `train_masked.py --extra_root` appends extra roots to the corpus, capped by `--extra_max_share` (0.3). Without the switch it reproduces the F9n recipe byte for byte. |
+
+## 9. Round 2: where ACT-C opens the jaws
+
+### 9.1 The choice of the owner
+
+The owner chose the round 2 levers at 12:39 on 10-15, after the round 1 report (PR #199):
+
+- Track V pauses in round 2 (V-c). No compute units were bought.
+- Track ACT measures before it trains again. An observation-only census field records where the
+  pick point is and how fast it moves at the release. Then ACT-C 400k and S read the screen draws
+  again. The result picks the round 3 lever.
+
+### 9.2 The release census
+
+PR #200 (`feat/ms7i-release-census` 8cb8807, merged at 13:42 on 10-15) adds four fields to each
+row of the cycle census. The loop sets them at the step and the point of `release_place`. Without
+a release, they are None.
+
+| field | what it holds |
+| --- | --- |
+| `release_xyz` | the FK pick point, in m, in the frame of the box poses |
+| `release_vel` | its velocity over the last control step, in m/s |
+| `release_box` | the served box (`Cycle.box`), an index into the boxes of the episode |
+| `release_box_xy` | the point in the true frame of that box, in m |
+
+No switch, no random draw and no decision reads the fields. The pinned-payload test of ledger rule
+G4 passes with the four fields removed, so the rest of each payload stays the same. The reads ran
+from worktree 7i-r1 at 8cb8807. From e7dc7ae, the revision of the round 1 reads, to 8cb8807, only
+the converter, the prompt codes and these census lines changed.
+
+### 9.3 The rule
+
+Rule R2A-1, entered at 12:41 before any number:
+
+- The core set of a read is the set of section 5.5. It holds the lifted_lost cycles with no guard
+  step and the end reason placed, whose part rests on the desk past the far wall.
+- d_far is the distance from the release point to the far interior wall, along the carry
+  direction. The carry direction runs from the tray center (0.195, 0) to the box center.
+- v_out is the velocity of the pick point along the same direction.
+- The references come from the stowed releases of S over the right box: the 10th percentile of
+  d_far and the 90th percentile of v_out.
+- A core release is NEAR with a d_far under that 10th percentile. It is MOVING with a v_out over
+  that 90th percentile.
+- E_near and E_move are the counts of ACT-C minus the counts of S. An E_move of 10 or more, and
+  not under E_near, picks a speed lever. An E_near of 10 or more, and over E_move, picks a position
+  lever. With both under 10, the fields do not explain the losses.
+
+`i/act/analysis/release_split.py` applies the rule. On the round 1 screens, its core count gives
+42 and 21, as in section 5.5.
+
+### 9.4 The reads
+
+i_C400_rc_scr read on 10 lanes of Machine B from 12:58 to 13:47. i_S_rc_scr read on 10 lanes of
+Machine A from 12:58 to 14:06. Both read seed 20307000, draws 0 to 19, with the switches and the
+classifier of S.
+
+| read | policy | correct of 3000 | rate | held-out row | D against i_S_rc_scr, paired SE | lifted_lost | core |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| i_C400_rc_scr | ACT-C 400k | 2466 | 382.00 | 592 of 744, 0.7957 | -70, 28.8 | 237 | 73 |
+| i_S_rc_scr | S | 2536 | 359.48 | 588 of 744, 0.7903 | | 208 | 25 |
+
+S reads 2536, against 2533 on the round 1 screen. ACT-C reads 2466 against 2512, and its core
+count rises from 42 to 73. A read does not replay a heap exactly, and the core count comes in
+bursts: ACT-C 600k had 16 in one heap. So the rule takes each read as a fresh sample.
+
+The references from the 2310 stowed releases of S are a d_far of 0.0351 m and a v_out of
+0.0106 m/s.
+
+| set | releases | NEAR | MOVING | both | neither |
+| --- | --- | --- | --- | --- | --- |
+| core, ACT-C | 73 | 30 | 10 | 4 | 37 |
+| core, S | 25 | 0 | 1 | 0 | 24 |
+| stowed, ACT-C | 2225 | 749, 33.7 % | 225, 10.1 % | 69 | 1320 |
+| stowed, S | 2310 | 230, 10.0 % | 231, 10.0 % | 33 | 1882 |
+
+E_near is +30 and E_move is +9. So rule R2A-1 picks a position lever.
+
+The medians over the stowed releases:
+
+| measure | ACT-C | S |
+| --- | --- | --- |
+| d_far | 0.0395 m | 0.0470 m |
+| distance from the box center, across the carry direction | 0.0099 m | 0.0038 m |
+| shortest distance to an interior wall | 0.0291 m | 0.0342 m |
+| speed | 0.021 m/s | 0.008 m/s |
+| v_out | -0.006 m/s | 0.000 m/s |
+| height over the box floor | 0.0955 m | 0.0941 m |
+
+- ACT-C opens off the box center on every release, not only on the losses. It opens 7.5 mm nearer
+  the far wall and 6 mm farther to the side than S.
+- It still moves at the open, at 21 mm/s against 8 mm/s, but mostly back toward the tray. So an
+  outward speed does not throw the parts.
+- Bricks are 61 of the 73 core losses of ACT-C and 22 of the 25 of S. Bricks are 39 % of the
+  stowed releases of ACT-C.
+- The fields explain 36 of the 73 core losses. The other 37 open at a median of 30 mm from the
+  nearest wall, against 34 mm for the stowed releases of S.
+
+`i/act/analysis/release_split.out.txt` holds the full output, with the height, the category and
+the per-heap counts.
+
+### 9.5 Round 3 levers
+
+The owner chooses the levers of round 3. Each lever below aims at the position of the release.
+
+1. P-a, a centered release in the serving. The jaws open only with the pick point inside a zone
+   around the box center. At an open outside the zone, the loop hands the place to the rig at
+   once. The rig moves the part to the center and opens. The zone uses the perceived box pose,
+   so the rule stays on the perceived boundary. It changes the serving of S, so it needs the
+   owner. The H1 probe of section 5.6 is evidence against a plain wider margin. There, ACT-C held
+   more carries to the budget, because the policy did not move the part inward. P-a moves the part
+   with the rig and does not wait for the policy. The test: ACT-C 400k and S each read the screen
+   with the switch, against their reads of section 9.4.
+2. P-b, the release census of ACT-C 800k. Its round 1 core count was 29, the lowest of the three
+   saves, but its correct total was the lowest too (section 5.6). One read of the screen shows
+   whether its release sits nearer the center. A centered release with no gain in correct stows
+   says that the position does not bind the total.
+3. P-c, a stop of Track ACT. ACT-C reads under S on all three 20-heap pairs without a switch: D =
+   -21, -62 and -70. MS7i then waits for the real arm.
