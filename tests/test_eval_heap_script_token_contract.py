@@ -13,21 +13,10 @@ import pytest
 
 from helpers import load_script
 from maker_arm_lab.core import batch_loop, parts
+from test_grasp_script_token_contract import _module_scope_calls
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "mj_eval_heap.py"
-
-
-def _module_scope_calls(tree):
-    found = set()
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            continue
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Call):
-                func = sub.func
-                found.add(func.id if isinstance(func, ast.Name) else getattr(func, "attr", ""))
-    return found
 
 
 def test_tokens_are_printed_inside_main_and_nothing_risky_runs_at_module_scope():

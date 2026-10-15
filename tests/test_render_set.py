@@ -5,23 +5,15 @@ import random
 import subprocess
 import sys
 
-import mujoco
 import numpy as np
 import pytest
 
 from helpers import ROOT, load_script
 from maker_arm_lab.core import parts
+from test_mj_heap_env import _can_render
 
 SCRIPT = ROOT / "scripts" / "mj_render_set.py"
 FAMILIES = ("round", "ldraw", "flat")
-
-
-def _can_render() -> bool:
-    try:
-        mujoco.Renderer(mujoco.MjModel.from_xml_string("<mujoco/>"), 8, 8).close()
-    except Exception:  # noqa: BLE001 -- any GL failure means "skip the render test"
-        return False
-    return True
 
 
 def test_usage_errors_print_the_fail_token():

@@ -12,7 +12,7 @@ import pytest
 
 from maker_arm_lab.core import batch_loop, grasp, loop
 from test_perceived_loop import _rollout, _snap_closed_scene, _thin_snap_scene
-from test_thin_snap import BRICK_ROW, PLATE_ROW
+from test_thin_snap import BRICK_ROW, PLATE_ROW, _checked
 
 HOVER = 0.030
 """m: the policy's command over the row centre, the hover ``snap_shift`` has not lowered yet."""
@@ -113,16 +113,6 @@ def test_a_pinch_the_detector_misses_is_forced_open_only_with_the_switch_off(mon
     assert gaps and all(0.0 <= g <= 2.0 * grasp.OPEN_HALF_GAP + 1e-3 for g in gaps)
     assert any(g >= w + loop.SNAP_CLOSED_MARGIN for g, w in calls)  # landing open
     assert any(g < w + loop.SNAP_CLOSED_MARGIN for g, w in calls)  # closed on the part
-
-
-def _checked(argv):
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--desk_boxes", type=int, default=0)
-    parser.add_argument("--pick_snap", action="store_true")
-    batch_loop.add_ms7e_arguments(parser)
-    args = parser.parse_args(argv)
-    batch_loop.check_ms7e(parser, args)
-    return args
 
 
 def test_the_flag_needs_pick_snap_and_the_read_client_passes_it():

@@ -5,13 +5,13 @@ the shard."""
 import random
 
 import h5py
-import numpy as np
 
 from maker_arm_lab.core import dagger_loop as dl
 from maker_arm_lab.core import oracle
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
+from test_heap_loop import _HoldPolicy
 
 
 def _reason(**overrides):
@@ -78,21 +78,6 @@ def test_each_trigger_fires_on_its_condition_only():
         )
         == "close_far"
     )
-
-
-class _HoldPolicy:
-    def __init__(self):
-        self.context_dim = 0
-        self.policy_id = "fake:hold"
-        self.n_action_steps = 1
-        self.inference = {}
-        self.action_space = "absolute"
-
-    def step(self, state, wrist, overhead, context=None, anchor=None):
-        action = np.zeros((state.shape[0], 7), dtype=np.float32)
-        action[:, :6] = state[:, :6]
-        action[:, 6] = 1.0
-        return action
 
 
 def test_a_still_policy_is_taken_over_twice_and_only_takeovers_are_recorded(tmp_path):
