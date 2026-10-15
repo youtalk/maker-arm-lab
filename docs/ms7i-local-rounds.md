@@ -1,9 +1,8 @@
 # MS7i: local rounds, round 1
 
-Date: 2026-10-15. Status: draft. This draft uses the ledger through its entry of 03:26 on
-2026-10-15. Round 1 runs from 10-13 to 10-19. The collection, the labels, the audit, the S
-reference reads, Track ACT and Run A are final for round 1. Run B and the choice of the round 2
-levers are pending. Each pending item has a line that starts with "Pending:".
+Date: 2026-10-15. Status: final for round 1. This report uses the ledger through its entry of
+11:58 on 2026-10-15. Round 1 runs from 10-13 to 10-19. Both tracks ended round 1 before a checked
+read, so no read is pending. Only the choice of the round 2 levers is open (section 7).
 
 The design of MS7i is revision 3 of the design document of 2026-10-13. The owner started the run on
 it with /goal at about 11:35 on 2026-10-13. This report cites the design as "spec section N" and
@@ -86,11 +85,21 @@ The reads of round 1 so far:
 | i_C400_d2039 | ACT-C 400k | 20307000, 20-39 | 2464 | 373.63 | 613 of 801, 0.7653 | -62, 33.7 |
 | i_S_chk | S | 20307600, 0-19 | 2535 | 366.93 | 597 of 763, 0.7824 | |
 | i_VA8k_scr | Run A 8k | 20307000, 0-19 | 2471 | 178.50 | 587 of 744, 0.7890 | -62, 26.2 |
+| i_VB6k_scr | Run B 6k | 20307000, 0-19 | 2449 | 205.74 | 568 of 744, 0.7634 | -84, 35.6 |
 
-Run A of Track V failed its screen (section 6). Its better save, 8k, stowed 2471 against 2533 for
-S, at 178.50 an hour against the bar of 200. Its first close misses the target more often than
-that of its 30k start. Run B trains now. A probe of the carry-guard margin found no lever (section
-5.6). Section 7 lists the round 2 levers for the owner.
+Track V ended its round 1 path at the screen (section 6). Both runs failed. The better save of Run
+A, 8k, stowed 2471 against 2533 for S, at 178.50 an hour against the bar of 200. The better save of
+Run B, 6k, stowed 2449 at 205.74 an hour, with a held-out row of 0.7634 against the bar of 0.80.
+The second account ran out of compute units before the 8k save of Run B.
+
+No save of either run beats its 30k start on draws 0 to 6. Both fine-tunes bring a new hover: the
+arm stops over the tray with empty jaws, in 29 to 44 % of the cycles against 7.2 % for the start
+(section 6.4). The served prompt does not cause it, and the training frames hold no copied
+stillness. Run B against Run A on the screen: D = -22 at a paired SE of 28.5, and +27.24 stows an
+hour at an SE of 6.99. So Run B is faster at the same correct total.
+
+A probe of the carry-guard margin found no lever (section 5.6). Section 7 lists the round 2 levers
+for the owner.
 
 ## 2. The bars and the candidate path
 
@@ -717,8 +726,18 @@ Run A 8k fails the screen. It stows 2471 against 2533, and its rate of 178.50 is
 200 an hour. On the screen its first close misses the target in 0.198 of the stowed cycles,
 against 0.068 for S. So Run A does not enter the candidate path.
 
-Pending: the 20-heap screen of Run B 6k. i_VB6k_d719 reads draws 7 to 19 on 10 lanes of
-Machine A since 08:51 on 10-15.
+The 20-heap screen of Run B 6k pools i_VB6k_s1 and i_VB6k_d719, which read draws 7 to 19 on 10
+lanes of Machine A from 08:51 to 11:57 on 10-15 (`reads/i_VB6k_scr`). The rule of the screen,
+restated in the ledger at 11:58 before the number: 2550 or more correct of 3000, 200 or more stows
+an hour, a held-out row of 0.80 or more, and D > 0 against h_S_scr.
+
+| read | correct of 3000 | rate | held-out row | steps a cycle | D against h_S_scr, paired SE | rate gap, SE |
+| --- | --- | --- | --- | --- | --- | --- |
+| i_VB6k_scr | 2449, 0.816 | 205.74 | 568 of 744, 0.7634 | 371.4 | -84, 35.6 | -163.72, 11.23 |
+| h_S_scr | 2533, 0.8443 | 369.46 | 581 of 744, 0.7809 | 228.7 | | |
+
+Run B 6k fails the screen on the correct total, the held-out row and D. It passes the rate bar
+only. So Run B does not enter the candidate path, and Track V ends round 1 at the screen.
 
 ### 6.4 Where the fine-tunes lose time
 
@@ -781,13 +800,32 @@ served reach then slows under the stall speed of the retry trigger.
 
 ### 6.5 Run A against Run B
 
-Pending: D between the best saves of Run A and Run B on the 20-heap screen, and on draws 20 to 39
-if both re-read.
+IR7 compares the better saves of the two runs on the 20-heap screen. Run B 6k is the candidate and
+Run A 8k is the base (`i/vla/i_VB6k_scr_vs_VA8k.s1.txt`, 11:58 on 10-15). Neither run re-read draws
+20 to 39, so this is the only comparison.
+
+| measure | Run B 6k | Run A 8k | S |
+| --- | --- | --- | --- |
+| correct of 3000 | 2449 | 2471 | 2533 |
+| rate | 205.74 | 178.50 | 369.46 |
+| held-out row | 0.7634 | 0.7890 | 0.7809 |
+| cycles | 3461 | 3661 | 3238 |
+| cycles that end at the budget | 488 | 697 | 143 |
+| first close off the target, stowed cycles | 0.158 | 0.198 | 0.068 |
+| lifted_lost cycles | 258 | 313 | 183 |
+| carry-guard steps | 11422 | 13164 | 5744 |
+
+- D(Run B, Run A) = -22 at a paired SE of 28.5, -0.77 SE. The two runs stow the same number of
+  parts within the noise.
+- The rate gap is +27.24 an hour at an SE of 6.99, +3.90 SE. Run B is faster. It has 209 fewer
+  cycles that end at the budget, and its first close misses the target less often.
+- The run without the prompt and with only the positive own frames is the faster one. The
+  comparison cannot split the two causes, because the runs differ in both.
 
 ## 7. Round 2 levers
 
-The owner chooses the levers of round 2 after this report (spec section 4.1). This draft list gives
-each lever with its evidence so far.
+The owner chooses the levers of round 2 after this report (spec section 4.1). This list gives each
+lever with its evidence.
 
 1. The subtask rule. Under the round 1 rule, 16.7 % of the corpus episodes (4,003) never read a
    carry. A study measured why (`i/tables/subtask_r2/subtask_r2.md`). Its truth proxy is the
@@ -813,10 +851,10 @@ each lever with its evidence so far.
    42, 45 and 29, at 400k, 600k and 800k. The correct total of ACT-C does not rise with it: 2512,
    2502 and 2498. No ACT-C save beats S on the screen.
 4. The Track V recipe. No save of round 1 beats its 30k start (section 6.3), and both runs add the
-   hover (section 6.4). Run B reads better than Run A at both saves: 853 and 862 correct at 189.33
-   and 208.95 an hour, against 850 and 856 at 160.01 and 181.23. The second account has no compute
-   units left. Each run below needs about 59 compute units on an A100, 8.7 h at 6.77 an hour, which
-   the owner buys.
+   hover (section 6.4). On the screen, Run B stows as many parts as Run A and is faster: D = -22 at
+   a paired SE of 28.5, and +27.24 an hour at +3.90 SE (section 6.5). So V-a starts from the
+   recipe of Run B. The second account has no compute units left. Each run below needs about 59
+   compute units on an A100, 8.7 h at 6.77 an hour, which the owner buys.
    - V-a, the test of H4: the recipe of Run B without the own frames before the first close. Their
      draws go to the corpus. The prediction: the retry share falls toward the 7.2 % of the start,
      most of all in the hovers that start before a close.
@@ -831,8 +869,8 @@ each lever with its evidence so far.
 The code of record is on four pushed branches. None of them is in main. `feat/ms7i-vla-dagger`
 stacks on 4f0d095, which is in main ce97325. The first three are draft PRs #194, #195 and #196 in
 stack #198. ACT-C trained from `feat/ms7i-act-mix` 87b320a. Its commit, cherry-picked onto main
-with the same diff as b4e8ac5, is draft PR #197. The launchers, the conversion pipeline and the audit
-tools are outside the repository, in `~/data/maker-arm-ms7/i/bin/`.
+with the same diff as b4e8ac5, is draft PR #197. The launchers, the conversion pipeline and the
+audit tools are outside the repository, in `~/data/maker-arm-ms7/i/bin/`.
 
 | branch | tip | base | what it adds |
 | --- | --- | --- | --- |
