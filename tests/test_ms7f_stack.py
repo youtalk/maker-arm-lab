@@ -49,7 +49,13 @@ ON = {
 """Each MS7f switch at a value that is not its off value. A track that adds a switch adds it
 here too (the first test holds the table to ``MS7F_OFF``)."""
 CLIENTS = [
-    ("mj_eval_heap", ["--heap_k", "3", "--oracle_driver", "--desk_boxes", "4"], "EVAL_FAIL ", ()),
+    # The heap client refuses the recorder's two switches with its own reason, before the check.
+    (
+        "mj_eval_heap",
+        ["--heap_k", "3", "--oracle_driver", "--desk_boxes", "4"],
+        "EVAL_FAIL ",
+        ("end_at_done", "abandon_cycle"),
+    ),
     # The recorder's walk pace predates MS7f and is built there (the MS3 speed ladder).
     (
         "mj_generate_batch",
@@ -58,6 +64,8 @@ CLIENTS = [
         ("transport_speed",),
     ),
 ]
+"""Each client, its heap argv, its fail token and the switches it does not leave to
+``check_ms7f``."""
 NEW_SCRIPTS = [
     (ROOT / "scripts" / "mj_render_set.py", "RENDER_OK", "RENDER_FAIL"),
     (ROOT / "scripts" / "mj_stretch_run.py", "STRETCH_OK", "STRETCH_FAIL"),
@@ -79,24 +87,31 @@ def test_every_ms7f_switch_has_an_on_value_here():
     assert ge.MAX_HEAP_K == batch_loop.MAX_HEAP_K
 
 
-@pytest.mark.parametrize("name", list(ON))
-@pytest.mark.parametrize("script, argv, token, built", CLIENTS)
+@pytest.mark.parametrize("script, argv, token, own", CLIENTS)
 def test_a_client_refuses_a_switch_whose_behaviour_is_not_in_the_commit(
-    name, script, argv, token, built, capsys
+    script, argv, token, own, capsys, monkeypatch
 ):
-    if name in batch_loop.MS7F_READY | set(built):
-        pytest.skip(f"--{name} is built on this commit")
+    """The base commit's state, whatever the tracks have built since: no MS7f switch is ready.
+    ``check_ms7f`` binds ``MS7F_READY`` as its default and the recorder passes its own set, so
+    the client's call gets the empty set."""
     module = load_script(script)
-    with pytest.raises(SystemExit) as exit_info:
-        module.main(argv + ON[name])
-    assert exit_info.value.code == 2
-    out = capsys.readouterr().out.strip().splitlines()
-    assert len(out) == 1 and out[0].startswith(token), out
-    assert f"--{name} is not built on this commit" in out[0]
+    real = module.check_ms7f
+    monkeypatch.setattr(
+        module, "check_ms7f", lambda parser, args, ready=None: real(parser, args, frozenset())
+    )
+    for name, flags in ON.items():
+        if name in own:
+            continue
+        with pytest.raises(SystemExit) as exit_info:
+            module.main(argv + flags)
+        assert exit_info.value.code == 2, name
+        out = capsys.readouterr().out.strip().splitlines()
+        assert len(out) == 1 and out[0].startswith(token), out
+        assert f"--{name} is not built on this commit" in out[0]
 
 
-@pytest.mark.parametrize("script, argv, token, built", CLIENTS)
-def test_a_client_hands_pile_pgs_to_the_env(script, argv, token, built, monkeypatch, tmp_path):
+@pytest.mark.parametrize("script, argv, token, own", CLIENTS)
+def test_a_client_hands_pile_pgs_to_the_env(script, argv, token, own, monkeypatch, tmp_path):
     # A physics switch the env never sees would read as a no-op run.
     module = load_script(script)
     seen = {}
@@ -118,17 +133,17 @@ def _gate_argv(tmp_path: Path) -> list[str]:
     ]  # fmt: skip
 
 
-@pytest.mark.parametrize("name", list(ON))
 def test_the_supervisor_refuses_a_switch_whose_behaviour_is_not_in_the_commit(
-    name, monkeypatch, capsys, tmp_path
+    monkeypatch, capsys, tmp_path
 ):
-    if name in ge.MS7F_READY:
-        pytest.skip(f"--{name} is built on this commit")
+    """The base commit's state, whatever the tracks have built since: no MS7f switch is ready."""
+    monkeypatch.setattr(ge, "MS7F_READY", frozenset())
     monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
-    assert ge.main(_gate_argv(tmp_path) + ON[name]) == 2
-    out = capsys.readouterr()
-    assert out.out.strip().splitlines() == ["GATE_ERROR"]
-    assert f"--{name} is not built on this commit" in out.err
+    for name, flags in ON.items():
+        assert ge.main(_gate_argv(tmp_path) + flags) == 2, name
+        out = capsys.readouterr()
+        assert out.out.strip().splitlines() == ["GATE_ERROR"], name
+        assert f"--{name} is not built on this commit" in out.err
 
 
 def test_the_supervisor_forwards_every_ms7f_switch_and_its_cache_refuses_other_values(
