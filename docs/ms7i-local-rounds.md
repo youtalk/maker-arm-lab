@@ -651,14 +651,24 @@ Run B trains on the positive own frames only, with the original prompt. Its own-
   loss of 0.034 at step 200.
 - The run started at 21:28:24 on 10-14. The preflight read the normalizer statistics of Run A, a
   longest prompt of 114 tokens and a pad share of 0.1331.
+- The second account ran out of compute units at about step 7600 (05:45 on 10-15). The loss
+  read 0.030 at step 7500. So Run B has no 8k save.
+
+Deviation IR7-B6, entered before any Run B number: Run B's two saves are keep 4000 and the rolling
+save 006000. The 6k save stands in for 8k in the choice of the better save and in D(Run A, Run B).
+The last 2,000 steps run at the tail of the cosine schedule, and Run A moved by only +6 correct
+stows from 4k to 8k. No compute units beyond the 146 of the spec were bought.
 
 The pad share of Run B is twice that of Run A. A pad row is an action row past the end of an
 episode, and the pad mask leaves it out of the loss. The positive own episodes of Run B are
 shorter, 167 frames on average against 250 for `own_a`. So more of their frames lie within 50
 steps of an episode end.
 
-Pending: the 4k and 8k saves of Run B. The CLI authorization of the CPU runtime ran out between
-23:26 on 10-14 and 01:26 on 10-15. So the fetch waits for the owner to authorize the CLI again.
+The CLI authorization of the CPU runtime ran out between 23:26 on 10-14 and 01:26 on 10-15, and the
+runtime died. The owner authorized the CLI again and mounted the Drive in a new runtime at 05:38 on
+10-15. Then the fetch of both saves started.
+
+Pending: the reads of the 4k and 6k saves of Run B.
 
 ### 6.3 The stage-1 reads
 
@@ -705,7 +715,42 @@ against 0.068 for S. So Run A does not enter the candidate path.
 
 Pending: the stage-1 reads of Run B and the screen of its better save.
 
-### 6.4 Run A against Run B
+### 6.4 Where Run A loses time
+
+A read-only subagent split the steps of Run A by cycle phase (`i/vla/analysis/run_a_loss.md`,
+03:50 on 10-15). Retry mode starts when the jaws hold nothing and the pick point stays almost still
+over the tray for 20 steps. Then the server adds arm noise until the cycle ends. In this section
+that state is the hover. S has no retry mode.
+
+1. The hover is the new behavior. Run A 8k enters retry mode in 37.7 % of its cycles on draws 0 to
+   6, against 7.2 % for the twin. 55 % of its hovers start before any grasp close. Retry cycles
+   take 605 steps on average and stow a part 42 % of the time. 80 % of the cycles that end at the
+   budget are retry cycles, against 21 % for the twin.
+2. The extra steps come before the hold. Run A 8k spends 13,038 more steps a heap than the twin.
+   55 % of them fall between the first close and the detected hold, and 28 % in the reach.
+3. Run A fails more grasps, but it does not lose more lifted parts. It has 9.3 more cycles a heap
+   that end at the budget and 9.0 more closes that miss. It has only 1.6 more lifted_lost cycles.
+   On real grasp closes, the first close misses the target in 0.126 of the stowed cycles, against
+   0.072 for the twin and 0.030 for S.
+
+The own frames of `own_a` hold few hovers: 3.1 % of V's own cycles on Machine A entered retry
+mode. So the first suspect was the served prompt. The H3 probe tested it, with its rule at 03:50
+and its result at 05:46 on 10-15. Rule, entered before its number: Run A 8k reads draws 0 to 6
+without `--pi05_prompt`, so the server sends the plain task text. A retry share under 15 % blames the served prompt. A share of 30 % or
+more says that the weights hover without it.
+
+| read | correct of 1050 | rate | cycles in retry mode | first close off the target |
+| --- | --- | --- | --- | --- |
+| i_VA8k_np_s1, without the prompt | 864 | 179.51 | 36.4 % | 0.197 |
+| i_VA8k_s1, with the prompt | 856 | 181.23 | 37.7 % | 0.182 |
+| i_VA4k_s1, with the prompt | 850 | 160.01 | 43.9 % | 0.212 |
+| the twin | 885 | 228.20 | 7.2 % | 0.119 |
+
+The share stays at 36.4 %, so the weights hover without the prompt. The served prompt does not
+cause the hover. Run B never trained with the prompt, so its reads tell whether the mix of the
+fine-tune causes it.
+
+### 6.5 Run A against Run B
 
 Pending: D between the best saves of Run A and Run B on the 20-heap screen, and on draws 20 to 39
 if both re-read.
