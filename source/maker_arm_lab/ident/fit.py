@@ -318,14 +318,19 @@ def hold_model(t, q, dq, ddq, tau, kp, kd, hold_steps: int | None):
     return q_mean, v_mean, a_mean, drive
 
 
-def load_free_motion(
-    path: Path, hold_steps: int | None = HOLD_STEPS, segment_prefix: str | None = None
+def free_motion_ticks(
+    path: Path, columns: Sequence[str] = (), segment_prefix: str | None = None
 ) -> dict:
-    """The free-motion samples of one session log: ``q``, ``dq``, ``ddq``, ``tau`` (N, 6) and
-    the counts behind them, through ``hold_model``. With ``segment_prefix``, only the ticks
-    inside a ``traj`` segment whose label (the plan's file name) starts with it: ``exc_`` the
-    held-out excitations, ``static_`` the static poses (``scripts/real_excitation.py``); an
-    ``approach`` walk never counts."""
+    """Every tick of one session log, with the free-motion rule ``fit`` uses on it: ``t`` (N,),
+    ``q``, ``dq``, ``tau``, ``kp``, ``kd`` and ``ddq`` (N, 6), ``free`` (N,) the ticks with a
+    tracking row whose gate is 1, not clamped and outside every prompt segment, ``valid``
+    (N,) the ticks whose ``ddq`` (a centred moving average of ``SMOOTH_TICKS`` of dq, then a
+    centred difference) spans only regular steps, ``regular`` (N - 1,) the steps within half a
+    period of the median, ``segments`` the log's segment rows and ``attrs`` its revisions.
+    ``columns`` names more root columns to return as they are (``temp``, ...). With
+    ``segment_prefix``, ``free`` keeps only the ticks inside a ``traj`` segment whose label
+    (the plan's file name) starts with it: ``exc_`` the held-out excitations, ``static_`` the
+    static poses (``scripts/real_excitation.py``); an ``approach`` walk never counts."""
     path = Path(path)
     with h5py.File(path, "r") as f:
         t = f["t"][:]
@@ -336,6 +341,7 @@ def load_free_motion(
         gate = f["trk/gate"][:]
         segments = f["segments"][:]
         attrs = {k: _decode(f.attrs[k]) for k in ("lab_revision", "sdk_revision") if k in f.attrs}
+        extra = {k: f[k][:] for k in columns}
     if clamped.ndim > 1:
         clamped = clamped.any(axis=1)
     n = t.shape[0]
@@ -359,10 +365,12 @@ def load_free_motion(
     half = SMOOTH_TICKS // 2
     valid = np.zeros(n, dtype=bool)
     ddq = np.zeros_like(dq)
-    if n > SMOOTH_TICKS + 2:
-        step = np.diff(t)
+    step = np.diff(t)
+    regular = np.zeros(step.shape, dtype=bool)
+    if n >= 2:
         dt = float(np.median(step))
         regular = np.abs(step - dt) < 0.5 * dt
+    if n > SMOOTH_TICKS + 2:
         kernel = np.ones(SMOOTH_TICKS) / SMOOTH_TICKS
         smooth = np.stack([np.convolve(dq[:, j], kernel, mode="same") for j in range(ARM_DOF)], 1)
         ddq[1:-1] = (smooth[2:] - smooth[:-2]) / (t[2:] - t[:-2])[:, None]
@@ -371,19 +379,54 @@ def load_free_motion(
         bad = np.concatenate([[0], np.cumsum(~regular)])
         ok = (bad[span:] - bad[:-span]) == 0  # steps i - half - 1 .. i + half, for i = half + 1..
         valid[half + 1 : half + 1 + ok.size] = ok
-    q, dq, ddq, tau = hold_model(t, q, dq, ddq, tau, kp, kd, hold_steps)
-    use = free & valid
+    return {
+        "t": t,
+        "q": q,
+        "dq": dq,
+        "tau": tau,
+        "kp": kp,
+        "kd": kd,
+        "ddq": ddq,
+        "free": free,
+        "valid": valid,
+        "regular": regular,
+        "segments": segments,
+        "attrs": attrs,
+        **extra,
+    }
+
+
+def free_motion_rows(ticks: dict, hold_steps: int | None = HOLD_STEPS) -> tuple:
+    """``hold_model`` of ``free_motion_ticks``' ticks and the rows ``fit`` uses: ``(q, dq,
+    ddq, tau, use)`` with ``use`` a mask over the returned rows. Row k is tick k (``hold_steps``
+    None) or the hold from tick k to tick k + 1."""
+    k = ticks
+    q, dq, ddq, tau = hold_model(
+        k["t"], k["q"], k["dq"], k["ddq"], k["tau"], k["kp"], k["kd"], hold_steps
+    )
+    use = k["free"] & k["valid"]
     if hold_steps is not None:  # row k is the hold from sample k to sample k + 1
-        use = use[:-1] & valid[1:]
+        use = use[:-1] & k["valid"][1:]
+    return q, dq, ddq, tau, use
+
+
+def load_free_motion(
+    path: Path, hold_steps: int | None = HOLD_STEPS, segment_prefix: str | None = None
+) -> dict:
+    """The free-motion samples of one session log: ``q``, ``dq``, ``ddq``, ``tau`` (N, 6) and
+    the counts behind them, through ``hold_model``; ``segment_prefix`` as for
+    ``free_motion_ticks``."""
+    ticks = free_motion_ticks(path, segment_prefix=segment_prefix)
+    q, dq, ddq, tau, use = free_motion_rows(ticks, hold_steps)
     return {
         "q": q[use],
         "dq": dq[use],
         "ddq": ddq[use],
         "tau": tau[use],
-        "ticks": int(n),
-        "free": int(free.sum()),
+        "ticks": int(ticks["t"].shape[0]),
+        "free": int(ticks["free"].sum()),
         "samples": int(use.sum()),
-        "attrs": attrs,
+        "attrs": ticks["attrs"],
     }
 
 

@@ -32,11 +32,24 @@ def _factory(bodies):
 
 
 def write_session_log(
-    path, t, q, dq, tau, *, gate=None, clamped=None, segments=(), grip=0.0, kp=None, kd=None
+    path,
+    t,
+    q,
+    dq,
+    tau,
+    *,
+    gate=None,
+    clamped=None,
+    segments=(),
+    grip=0.0,
+    kp=None,
+    kd=None,
+    temp=None,
 ):
     """A session log (``real.telemetry``) of six-wide q, dq and tau rows at times ``t``, with a
     gripper column and a tracking row per tick, as ``real_session.py`` writes one. ``kp`` and
-    ``kd`` (six) are the commanded gains, zero by default."""
+    ``kd`` (six) are the commanded gains, zero by default. ``temp`` (N, 6) are the arm motors'
+    temperatures, 30 degC by default."""
     n = len(t)
 
     def gains(g):
@@ -55,7 +68,7 @@ def write_session_log(
         "q": seven(q, grip),
         "dq": seven(dq, 0.0),
         "tau": seven(tau, 0.0),
-        "temp": np.full((n, 7), 30.0),
+        "temp": np.full((n, 7), 30.0) if temp is None else seven(temp, 30.0),
         "fault_bits": np.zeros((n, 7), dtype=np.uint16),
         "feedback_age": np.zeros((n, 7)),
         "cmd_pos": seven(q, grip),
