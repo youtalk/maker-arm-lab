@@ -21,8 +21,8 @@ data asks for. A fixed nominal prior goes wrong when the arm differs from it: th
 ``m`` and ``m c`` while the ridge holds the inertia about the joint origin, and the inertia
 about the center of mass that results is no body's (the first review's repro: truth 1.25x the
 URDF masses read unphysical, and the ridge growth that followed put the error into j2's
-armature, 8x). So the prior is moved to the solution and the solve repeated
-(``consistent_prior``): the prior takes the solution's ``m`` and ``m c`` and the nominal
+armature, 8x). So the prior is moved to the solution and the solve repeated a fixed
+``PRIOR_PASSES`` times (``consistent_prior``): the prior takes the solution's ``m`` and ``m c`` and the nominal
 inertia shape about the center of mass, scaled to the solution's inertia, so the directions
 the data does not see follow a physical body. Friction and armature are non-negative (and
 ``fs >= fc``): a parameter the solve drives negative is held at zero and the rest solved
@@ -84,10 +84,20 @@ MAX_GROWTHS = 5
 RIDGE_GROWTH = 10.0
 PRIOR_MIN_RATIO = 0.1
 """The smallest scale of the nominal inertia the prior pulls toward."""
-PRIOR_ITERATIONS = 30
-PRIOR_TOL = 1e-9
-"""The consistent prior's fixed point: it stops when it moves less than this fraction of every
-parameter's scale."""
+PRIOR_PASSES = 6  # INITIAL: session 3
+"""How many solves the fit makes, the first toward the nominal parameters and each later one
+toward ``consistent_prior`` of the one before. The count is part of the regularization, not a
+convergence cap: every pass moves the anchor to the data, so more passes take more of the
+URDF's bias out of the directions the data sees (on noise-free 1.25x masses j2's armature
+reads 0.0406, 0.0326, 0.0333, 0.0330, 0.0327 for 1, 2, 3, 4, 6 passes, j5's 0.0137, 0.0121,
+0.0113, 0.0110, 0.0108) and let the weakly seen directions drift further with the noise (the
+first review round's 30 to 1000 passes moved link_004's mass by 15 %). From six to eight
+passes the noisy 1.25x read moves by under 3 % (a test pins it); session 3 reads the same
+table on the arm's data."""
+PRIOR_TOL = 1e-2
+"""``report["prior_converged"]``: one more pass would move the prior by less than this
+fraction of every parameter's scale. A diagnostic only; the fit always makes
+``PRIOR_PASSES`` passes."""
 FRICTION_RIDGE = 1e-9
 """The friction and armature columns' ridge, relative to each column's own squared norm: only
 enough to keep a column the data never excites (a joint that never moved) at zero."""
@@ -260,7 +270,7 @@ def excitation_condition(
     stribeck_v: float = STRIBECK_GRID[1],
     eps: float = EPS_GRID[1],
     dyn_factory: Factory = default_factory,
-) -> tuple[float, int]:
+) -> tuple[float, int, list]:
     """``condition_number`` of the regressor the fit would stack from ``trajs`` (each with
     ``q``, ``dq`` and ``ddq``), every ``stride``-th sample, the friction columns at one point
     of the grids. Returns ``condition_number``'s triple."""
@@ -433,18 +443,17 @@ def consistent_prior(p: np.ndarray, nominal_bodies: Sequence[Body]) -> np.ndarra
 
 
 def _solve_consistent(ata, aty, d, theta0, constrained, nominal_bodies, scale):
-    """``_solve`` with the rigid-body prior moved to ``consistent_prior`` of each solution
-    until it moves less than ``PRIOR_TOL`` of every parameter's ``scale`` (at most
-    ``PRIOR_ITERATIONS`` solves). Returns the solution, the held indices, the solve count."""
+    """``PRIOR_PASSES`` ridge solves, the first toward ``theta0`` and each later one toward
+    ``consistent_prior`` of the solution before it. Returns the last solution, its held
+    indices, and ``last_step``: how far (in fractions of ``scale``) one more pass would move
+    the prior."""
     prior = theta0.copy()
-    for it in range(1, PRIOR_ITERATIONS + 1):
+    x, held = _solve(ata, aty, d, prior, constrained)
+    for _ in range(PRIOR_PASSES - 1):
+        prior[:N_RIGID] = consistent_prior(x[:N_RIGID], nominal_bodies)
         x, held = _solve(ata, aty, d, prior, constrained)
-        moved = consistent_prior(x[:N_RIGID], nominal_bodies)
-        step = float(np.max(np.abs(moved - prior[:N_RIGID]) / scale))
-        prior[:N_RIGID] = moved
-        if step < PRIOR_TOL:
-            break
-    return x, held, it
+    step = np.abs(consistent_prior(x[:N_RIGID], nominal_bodies) - prior[:N_RIGID]) / scale
+    return x, held, float(np.max(step))
 
 
 def _solve(ata, aty, d, theta0, constrained):
@@ -500,7 +509,7 @@ def fit(
     growths = np.zeros(ARM_DOF, dtype=int)
     while True:
         lam_b = lam * RIDGE_GROWTH ** np.repeat(growths, PARAMS_PER_BODY)
-        best = None
+        best, skipped = None, []
         for key, (ata, aty) in systems.items():
             d = np.concatenate(
                 [
@@ -508,14 +517,23 @@ def fit(
                     FRICTION_RIDGE * np.maximum(np.diag(ata)[N_RIGID:], 1e-12),
                 ]
             )
-            x, held, solves = _solve_consistent(
-                ata, aty, d, theta0, constrained, nominal_bodies, param_scale(p0)
-            )
-            sse = float(energy - 2.0 * x @ aty + x @ ata @ x)
+            try:
+                with np.errstate(over="ignore", invalid="ignore"):
+                    x, held, last_step = _solve_consistent(
+                        ata, aty, d, theta0, constrained, nominal_bodies, param_scale(p0)
+                    )
+                    sse = float(energy - 2.0 * x @ aty + x @ ata @ x)
+            except np.linalg.LinAlgError:
+                x, sse, last_step = np.full(1, np.nan), np.nan, np.nan
+            if not (np.isfinite(x).all() and np.isfinite(sse) and np.isfinite(last_step)):
+                skipped.append(key)  # an overflow at this grid point: it cannot be chosen
+                continue
             sse_of[key] = sse
             if best is None or sse < best[0]:
-                best = (sse, key, x, held, solves)
-        sse, (eps, vs), x, held, solves = best
+                best = (sse, key, x, held, last_step)
+        if best is None:
+            raise IdentError(f"no grid point gave a finite solution ({len(skipped)} skipped)")
+        sse, (eps, vs), x, held, last_step = best
         bodies = bodies_from_params(x[:N_RIGID])
         bad = [b for b in range(ARM_DOF) if not physical([bodies[b]])]
         if not bad:
@@ -544,7 +562,10 @@ def fit(
         "lam": [float(lam * RIDGE_GROWTH**g) for g in growths],
         "hold_steps": hold_steps,
         "ridge_growths": [int(g) for g in growths],
-        "prior_solves": solves,
+        "prior_passes": PRIOR_PASSES,
+        "prior_last_step": last_step,
+        "prior_converged": bool(last_step < PRIOR_TOL),
+        "grid_skipped": [f"eps {k[0]} vs {k[1]}" for k in skipped],
         "eps": eps,
         "stribeck_v": vs,
         "grid_sse": {f"eps {k[0]} vs {k[1]}": v for k, v in sse_of.items()},

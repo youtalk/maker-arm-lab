@@ -379,14 +379,8 @@ def _payload_bodies():
     return bodies
 
 
-@pytest.mark.parametrize(
-    "truth",
-    [dm.scaled(dm.urdf_bodies(), 1.25), dm.scaled(dm.urdf_bodies(), 0.8), _payload_bodies()],
-    ids=["mass_1.25", "mass_0.8", "payload"],
-)
-def test_the_fit_recovers_an_arm_that_differs_from_the_urdf(truth, tmp_path):
-    """Review round 1: a fixed URDF prior turned these bodies unphysical and the ridge growth
-    that followed put the error into j2's armature. Nominal stays the URDF, logs noise-free."""
+def _mismatch(truth, root, noise=0.0):
+    """The known model with ``truth`` bodies and three soft-limit excitations as logs."""
     model = maker_arm_rs.Dynamics(
         tuple(dm.MOUNT_RPY),
         dm.chain_links(dm.ARM_JOINT_NAMES),
@@ -398,9 +392,25 @@ def test_the_fit_recovers_an_arm_that_differs_from_the_urdf(truth, tmp_path):
     trajs = excitation.design_excitation(
         np.random.default_rng(11), SIM, excitation.EXCITE_CENTER, count=3, amplitude_rad=None
     )
-    logs = [synthetic_log(tmp_path / f"e{k}.h5", model, tr) for k, tr in enumerate(trajs)]
+    logs = [
+        synthetic_log(root / f"e{k}.h5", model, tr, noise=noise, seed=k)
+        for k, tr in enumerate(trajs)
+    ]
+    return model, logs
+
+
+@pytest.mark.parametrize(
+    "truth",
+    [dm.scaled(dm.urdf_bodies(), 1.25), dm.scaled(dm.urdf_bodies(), 0.8), _payload_bodies()],
+    ids=["mass_1.25", "mass_0.8", "payload"],
+)
+def test_the_fit_recovers_an_arm_that_differs_from_the_urdf(truth, tmp_path):
+    """Review round 1: a fixed URDF prior turned these bodies unphysical and the ridge growth
+    that followed put the error into j2's armature. Nominal stays the URDF, logs noise-free."""
+    model, logs = _mismatch(truth, tmp_path)
     res = fit.fit(logs, dm.urdf_bodies(), hold_steps=None)
     assert fit.physical(res.bodies) and res.report["ridge_growths"] == [0] * 6
+    assert res.report["grid_skipped"] == []
     # joint 1's armature shares its column with link_002's inertia about the same axis: only
     # their sum is in the data, and the prior splits it
     arm = np.asarray(res.armature)
@@ -421,6 +431,46 @@ def test_the_fit_recovers_an_arm_that_differs_from_the_urdf(truth, tmp_path):
         t_true = np.asarray(model.inverse(q, dq, ddq))
         t_fit = np.asarray(ident.inverse(q, dq, ddq))
         assert np.abs(t_fit - t_true).max() < 0.02 * max(np.abs(t_true).max(), 0.1), q
+
+
+def test_the_prior_passes_are_a_fixed_count_and_settle_by_it(tmp_path, monkeypatch):
+    """Review round 2: an iteration toward a fixed point never reached its tolerance and its
+    answer moved with the cap. The fit makes PRIOR_PASSES passes and says how far one more
+    would move the prior; on noisy 1.25x masses two more passes move the armature and the
+    viscous terms by under 3 %."""
+    _, logs = _mismatch(dm.scaled(dm.urdf_bodies(), 1.25), tmp_path, noise=0.2)
+    res = fit.fit(logs, dm.urdf_bodies(), hold_steps=None)
+    rep = res.report
+    assert rep["prior_passes"] == fit.PRIOR_PASSES == 6
+    assert math.isfinite(rep["prior_last_step"]) and rep["prior_last_step"] >= 0.0
+    assert rep["prior_converged"] == (rep["prior_last_step"] < fit.PRIOR_TOL)
+    monkeypatch.setattr(fit, "PRIOR_PASSES", 8)
+    more = fit.fit(logs, dm.urdf_bodies(), hold_steps=None)
+    assert more.report["prior_passes"] == 8
+    assert np.allclose(more.armature, res.armature, rtol=0.03), (more.armature, res.armature)
+    visc = [f[1] for f in res.friction]
+    assert np.allclose([f[1] for f in more.friction], visc, rtol=0.03)
+    assert np.allclose(more.torque_sigma, res.torque_sigma, rtol=1e-3)
+
+
+def test_a_grid_point_without_a_finite_solution_is_skipped(synthetic, monkeypatch):
+    _, _, _, logs = synthetic
+    real = fit._solve_consistent
+    calls = []
+
+    def poisoned(*args):
+        calls.append(1)
+        x, held, step = real(*args)
+        return (x * np.nan, held, step) if len(calls) == 1 else (x, held, step)
+
+    monkeypatch.setattr(fit, "_solve_consistent", poisoned)
+    res = fit.fit(logs[:1], dm.urdf_bodies(), hold_steps=None)
+    first = f"eps {fit.EPS_GRID[0]} vs {fit.STRIBECK_GRID[0]}"
+    assert res.report["grid_skipped"] == [first] and first not in res.report["grid_sse"]
+    assert np.isfinite(res.armature).all() and fit.physical(res.bodies)
+    monkeypatch.setattr(fit, "_solve_consistent", lambda *a: (real(*a)[0] * np.nan, [], 0.0))
+    with pytest.raises(fit.IdentError, match="finite"):
+        fit.fit(logs[:1], dm.urdf_bodies(), hold_steps=None)
 
 
 # --- the bench plant ----------------------------------------------------------------------

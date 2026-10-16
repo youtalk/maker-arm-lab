@@ -127,7 +127,13 @@ def run(args) -> dict:
         }
 
     res, chosen = read(args.hold_steps)
-    reads = {"none": read(None)[1] if args.hold_steps is not None else chosen}
+    if args.hold_steps is None:
+        reads = {"none": chosen}
+    else:
+        try:
+            reads = {"none": read(None)[1]}
+        except Failure as err:  # a diagnostic read: its failure must not lose the chosen fit
+            reads = {"none": {"hold_steps": None, "failed": err.detail}}
     reads[str(args.hold_steps).lower()] = chosen
     body = {
         **{k: chosen[k] for k in ("hold_steps", "rms_ident", "rms_urdf", "pass")},

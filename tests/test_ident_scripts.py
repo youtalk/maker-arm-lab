@@ -178,6 +178,30 @@ def test_the_ident_script_writes_the_model_and_applies_the_held_out_rule(ident_l
     assert data["provenance"]["hold_steps"] == 0
 
 
+def test_a_failed_diagnostic_read_does_not_lose_the_chosen_fit(
+    ident_logs, tmp_path, monkeypatch, capsys
+):
+    from maker_arm_lab.ident import fit
+
+    real = fit.fit
+
+    def fit_or_fail(*args, hold_steps, **kw):
+        if hold_steps is None:
+            raise fit.IdentError("the diagnostic read fails")
+        return real(*args, hold_steps=hold_steps, **kw)
+
+    monkeypatch.setattr(fit, "fit", fit_or_fail)
+    logs, held = ident_logs
+    out, report = tmp_path / "ident.json", tmp_path / "report.json"
+    argv = ["--logs", *map(str, logs), "--heldout", *map(str, held), *HOLD]
+    code = load_script(IDENT).main([*argv, "--out", str(out), "--report", str(report)])
+    tokens = [x for x in capsys.readouterr().out.splitlines() if x.startswith(TOKENS)]
+    assert code == 0 and len(tokens) == 1 and tokens[0].startswith("IDENT_OK")
+    reads = json.loads(report.read_text())["reads"]
+    assert "diagnostic read fails" in reads["none"]["failed"] and reads["0"]["pass"] is True
+    assert out.exists()
+
+
 def test_the_ident_script_needs_a_hold_model(ident_logs, tmp_path):
     logs, held = ident_logs
     out, report = tmp_path / "ident.json", tmp_path / "report.json"
