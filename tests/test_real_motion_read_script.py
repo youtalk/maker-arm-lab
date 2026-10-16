@@ -18,6 +18,7 @@ METRICS = (
     "tracking_rms",
     "stop_sway",
     "hold_jitter",
+    "hold_drift",
     "free_residual_rms",
     "yield_free_mm",
     "yield_push_mm",
@@ -102,7 +103,7 @@ def test_the_full_read_writes_every_metric(tmp_path):
     code, tokens, err = _run([*args, "--pairs_out", pairs, "--out", out])
     assert code == 0 and len(tokens) == 1 and tokens[0].startswith("MOTION_READ_OK"), err
     body = json.loads(out.read_text())
-    assert body["schema"] == "maker-arm-lab/motion-read/2"
+    assert body["schema"] == "maker-arm-lab/motion-read/3"
     assert body["overhead_pose"] == {"pos": [0.0, 0.0, 0.0], "quat": [1.0, 0.0, 0.0, 0.0]}
     assert body["log_meta"]["lab_revision"] == "test" and body["latency_ms"] == 91.0
     assert set(body["metrics"]) == set(METRICS)

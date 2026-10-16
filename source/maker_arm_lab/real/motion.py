@@ -24,6 +24,11 @@ upper bound of the largest distance between two tip positions).
 - ``stop_sway``: peak to peak of ``q`` over a stop after a least-squares line is removed.
 - ``hold_jitter``: standard deviation of ``q`` over a hold after its first ``SETTLE_S``. It
   removes no trend: a creep through the hold counts as jitter.
+- ``hold_drift``: per joint, the absolute difference between the mean ``q`` over the last
+  ``DRIFT_WINDOW_S`` of a hold and the mean over the first ``DRIFT_WINDOW_S`` after its
+  ``SETTLE_S`` (rad; tip: the distance between the two mean FK pick points, mm), pooled as the
+  largest over the holds: the bring-up's "a 60 s hold drifts under 2 mrad" rule reads it. A
+  hold shorter than ``SETTLE_S`` plus two windows reads NaN.
 - ``free_residual_rms``: RMS of the observer's ``r`` over the free rows of the whole log
   (N m): tracked, ``gate == 1``, not clamped and outside every prompt, as ``ident.fit``
   reads free motion.
@@ -88,10 +93,12 @@ about the still tag's noise variance."""
 MAX_GAP_S = 0.02  # INITIAL: session 2
 """The largest gap between two loop rows (or a row and the window's edge) a stop read accepts:
 four ticks at 200 Hz."""
+DRIFT_WINDOW_S = 1.0
+"""The two windows a hold drift read compares (the bring-up rule's 1 s means)."""
 CONTROL_HZ = 200.0
 MOTION_KINDS = ("traj", "approach")
 """The segments that move the arm: a stop window ends where the next one starts."""
-TIP_METRICS = ("tracking_rms", "stop_sway", "hold_jitter")
+TIP_METRICS = ("tracking_rms", "stop_sway", "hold_jitter", "hold_drift")
 
 
 @dataclass(frozen=True)
@@ -314,6 +321,29 @@ def hold_jitter(log, seg: Segment, settle_s: float = SETTLE_S) -> np.ndarray:
     return q.std(axis=0)
 
 
+def _drift_rows(log: MotionLog, seg: Segment, settle_s: float, window_s: float):
+    start = seg.start_t + settle_s
+    if seg.end_t - start < 2.0 * window_s:
+        return None, None
+    first = log.q[_window(log, start, start + window_s)]
+    last = log.q[_window(log, seg.end_t - window_s, seg.end_t)]
+    if first.shape[0] == 0 or last.shape[0] == 0:
+        return None, None
+    return first, last
+
+
+def hold_drift(
+    log, seg: Segment, settle_s: float = SETTLE_S, window_s: float = DRIFT_WINDOW_S
+) -> np.ndarray:
+    """(6,) ``|mean q over the last window_s - mean q over the first window_s after the
+    settle|`` of hold ``seg``, rad; NaN for a hold too short for two windows."""
+    log = _as_log(log)
+    first, last = _drift_rows(log, seg, settle_s, window_s)
+    if first is None:
+        return _nan6()
+    return np.abs(last.mean(axis=0) - first.mean(axis=0))
+
+
 def free_mask(log) -> np.ndarray:
     """(N,) the free-motion rows: tracked, ``gate == 1``, not clamped, outside every prompt
     (its end row included)."""
@@ -396,6 +426,11 @@ def tip_value(metric: str, log, seg: Segment, ik, settle_s: float = SETTLE_S) ->
         if q.shape[0] < 2:
             return math.nan
         per_axis = points(ik, q).std(axis=0)
+    elif metric == "hold_drift":
+        first, last = _drift_rows(log, seg, settle_s, DRIFT_WINDOW_S)
+        if first is None:
+            return math.nan
+        per_axis = np.abs(points(ik, last).mean(axis=0) - points(ik, first).mean(axis=0))
     else:
         raise ValueError(f"no tip pool for {metric!r}; one of {TIP_METRICS}")
     return float(1e3 * np.linalg.norm(per_axis))
@@ -530,11 +565,13 @@ def flex_share(
 
 # --- the whole read ---------------------------------------------------------------------
 
-SCHEMA = "maker-arm-lab/motion-read/2"
+SCHEMA = "maker-arm-lab/motion-read/3"
+"""/3 (2026-10-16) adds ``hold_drift``."""
 UNITS = {
     "tracking_rms": {"joints": "rad", "tip": "mm"},
     "stop_sway": {"joints": "rad", "tip": "mm"},
     "hold_jitter": {"joints": "rad", "tip": "mm"},
+    "hold_drift": {"joints": "rad", "tip": "mm"},
     "free_residual_rms": {"joints": "N m", "tip": None},
     "yield_free_mm": {"joints": "rad", "tip": "mm"},
     "yield_push_mm": {"joints": "rad", "tip": "mm"},
@@ -549,6 +586,7 @@ POOLING = {
     "tracking_rms": "rms over every tracked transport row",
     "stop_sway": "mean over the stops",
     "hold_jitter": "mean over the holds",
+    "hold_drift": "max over the holds",
     "free_residual_rms": "rms over the free rows of the log",
     "yield_free_mm": "max over the transports, stops and holds",
     "yield_push_mm": "max over the prompts",
@@ -562,6 +600,7 @@ POOLED_FROM = {
     "tracking_rms": ("tracking_rms", ("traj",)),
     "stop_sway": ("stop_sway", ("stop",)),
     "hold_jitter": ("hold_jitter", ("hold",)),
+    "hold_drift": ("hold_drift", ("hold",)),
     "yield_free_mm": ("yield_mm", ("traj", "stop", "hold")),
     "yield_push_mm": ("yield_mm", ("prompt",)),
     "drag_free": ("drag_resistance", ("traj", "stop", "hold")),
@@ -594,7 +633,7 @@ def _value(joints=None, tip=None) -> dict:
 def _pool(name: str, stack: np.ndarray, weights: np.ndarray):
     if name == "tracking_rms":
         return np.sqrt(np.nansum(weights[:, None] * stack**2, axis=0) / weights.sum())
-    if name in ("yield_free_mm", "yield_push_mm", "drag_free", "drag_push"):
+    if name in ("hold_drift", "yield_free_mm", "yield_push_mm", "drag_free", "drag_push"):
         return np.nanmax(stack, axis=0)
     return np.nanmean(stack, axis=0)
 
@@ -680,6 +719,9 @@ def read(
             reads["hold_jitter"] = _value(
                 hold_jitter(log, seg), tip_value("hold_jitter", log, seg, ik)
             )
+            reads["hold_drift"] = _value(
+                hold_drift(log, seg), tip_value("hold_drift", log, seg, ik)
+            )
         reads["yield_mm"] = _value(yield_offset(log, seg), yield_mm(log, seg, ik))
         reads["drag_resistance"] = _value(drag_resistance(log, seg))
         detail.append(entry)
@@ -738,6 +780,7 @@ def read(
             "flex_tag_var_floor_mm2": FLEX_TAG_VAR_FLOOR_MM2,
             "stop_window_s": STOP_WINDOW_S,
             "settle_s": SETTLE_S,
+            "drift_window_s": DRIFT_WINDOW_S,
         },
         "metrics": metrics,
         "segments": detail,

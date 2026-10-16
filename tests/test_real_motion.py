@@ -14,6 +14,7 @@ from maker_arm_lab.real.motion import (
     drag_resistance,
     flex_share,
     free_residual_rms,
+    hold_drift,
     hold_jitter,
     hold_pairs,
     segments,
@@ -426,3 +427,33 @@ def test_the_read_carries_the_log_attrs(tmp_path, ik):
     log = motion.load_log(write_log(tmp_path / "s.h5", t, q))
     meta = motion.read(log, ik)["log_meta"]
     assert meta["lab_revision"] == "test" and meta["dropped"] == 0 and meta["records"] == {}
+
+
+def test_hold_drift_reads_the_creep_from_the_first_to_the_last_second(tmp_path, ik):
+    t, q = still(6.0)
+    q[:, 2] += 0.0005 * t  # 0.5 mrad/s: 2 mrad from the window at 1-2 s to the one at 5-6 s
+    q[t < 1.0, 4] += 0.05  # the settle moves a joint, the drift read skips it
+    rng = np.random.default_rng(2)
+    q[:, 0] += rng.normal(0.0, 1e-5, t.shape[0])
+    log = motion.load_log(write_log(tmp_path / "s.h5", t, q, segments=[(0.0, 6.0, "hold", "")]))
+    seg = segments(log)[0]
+    drift = hold_drift(log, seg)
+    assert drift[2] == pytest.approx(0.002, rel=1e-3)
+    assert drift[0] < 1e-5 and np.allclose(drift[[1, 3, 4, 5]], 0.0, atol=1e-12)
+    tip = motion.tip_value("hold_drift", log, seg, ik)
+    first, last = (pick_point(ik, POSE + [0.0, 0.0, d, 0.0, 0.0, 0.0]) for d in (0.00075, 0.00275))
+    assert tip == pytest.approx(1e3 * np.linalg.norm(last - first), rel=0.02)
+    # a hold too short for two windows after its settle reads nothing
+    assert np.isnan(hold_drift(log, motion.Segment("hold", 0.0, 2.9, "", 0))).all()
+
+
+def test_the_read_pools_the_hold_drift_as_the_largest(tmp_path, ik):
+    t, q = still(10.0)
+    q[t >= 5.0, 1] += 0.0002 * (t[t >= 5.0] - 5.0)  # the second hold creeps 0.6 mrad
+    segs = [(0.0, 5.0, "hold", ""), (5.0, 10.0, "hold", "")]
+    body = motion.read(write_log(tmp_path / "s.h5", t, q, segments=segs), ik)
+    assert body["schema"] == "maker-arm-lab/motion-read/3"
+    drift = body["metrics"]["hold_drift"]
+    assert drift["count"] == 2 and drift["joints"][1] == pytest.approx(0.0006, rel=1e-3)
+    assert drift["tip"] > 0.0 and body["units"]["hold_drift"] == {"joints": "rad", "tip": "mm"}
+    assert "max" in body["pooling"]["hold_drift"]

@@ -20,11 +20,11 @@ tag log is given, ``{"schema", "log", "tag_log", "latency_ms", "pairs": [{"q", "
 "start_t", "end_t", "label", "n_q", "n_tag"}]}``, the input of the sensing plan's
 ``register_base``. No output file is ever overwritten.
 
-The output JSON (``--out``, schema ``maker-arm-lab/motion-read/2``):
+The output JSON (``--out``, schema ``maker-arm-lab/motion-read/3``; /3 adds ``hold_drift``):
 
 - ``metrics``: name -> ``{"joints": [6] | null, "tip": float | null, "count": int,
-  "excluded": int}`` for ``tracking_rms``, ``stop_sway``, ``hold_jitter``,
-  ``free_residual_rms``, ``yield_free_mm`` (transports, stops and holds: must read 0),
+  "excluded": int}`` for ``tracking_rms``, ``stop_sway``, ``hold_jitter``, ``hold_drift``
+  (the largest over the holds: the bring-up's 2 mrad rule), ``free_residual_rms``, ``yield_free_mm`` (transports, stops and holds: must read 0),
   ``yield_push_mm`` (prompts, the push tests), ``drag_free``, ``drag_push``, ``tip_sway`` and
   ``flex_share``. ``joints`` is one value per arm joint in URDF order (``link_002_joint`` ..
   ``link_007_joint``), ``tip`` the value pooled at the tip, ``count`` the segments behind it
@@ -35,14 +35,16 @@ The output JSON (``--out``, schema ``maker-arm-lab/motion-read/2``):
   variances.
 - ``units``: name -> ``{"joints": unit | null, "tip": unit | null}`` (rad, mm, N m, fraction).
 - ``pooling``: name -> how ``metrics`` pools the segments (rms over rows, mean, max, sum).
-- ``limits``: ``max_gap_s``, ``flex_tag_var_floor_mm2``, ``stop_window_s``, ``settle_s``.
+- ``limits``: ``max_gap_s``, ``flex_tag_var_floor_mm2``, ``stop_window_s``, ``settle_s``,
+  ``drift_window_s``.
 - ``segments``: one entry per read window in time order, ``{"index", "kind", "label",
   "start_t", "end_t", "rows", "tracked_rows", "missing_ticks", "max_gap_s", "gap_excluded",
   "reads": {name: {"joints", "tip"}}}``, plus ``"flex": {"resid_var_mm2", "tag_var_mm2"}`` on
   a stop with the tip side. ``kind`` is ``traj``, ``stop``, ``hold`` or ``prompt``,
   ``index`` the row in the log's ``segments`` (a stop: its transport's). Every segment reads
   ``yield_mm`` and ``drag_resistance``; a transport ``tracking_rms``; a stop ``stop_sway``
-  and the tip side's ``tip_sway`` and ``flex_share``; a hold ``hold_jitter``.
+  and the tip side's ``tip_sway`` and ``flex_share``; a hold ``hold_jitter`` and
+  ``hold_drift``.
 - ``tip_side``: ``{"available", "reason", "tag_world"}``; ``tag_world`` is ``rig_overhead``
   or ``logged_pos``.
 - ``overhead_pose``: ``{"pos", "quat"}`` the read used (``rig_overhead``), else null.
