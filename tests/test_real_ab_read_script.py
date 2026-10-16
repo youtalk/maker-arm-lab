@@ -52,16 +52,17 @@ def motion_read(
     hold_joints=None,
     labels=("a.npz", "b.npz"),
 ):
-    """A ``maker-arm-lab/motion-read/2`` read with the pooled tip values given (mm), the
+    """A ``maker-arm-lab/motion-read/3`` read with the pooled tip values given (mm), the
     free residual on every joint (N m), 0.001 rad on every motor joint (``hold_joints`` six
     for ``hold_jitter``), and one traj segment per label."""
     six = [0.001] * 6
     return {
-        "schema": "maker-arm-lab/motion-read/2",
+        "schema": "maker-arm-lab/motion-read/3",
         "metrics": {
             "tracking_rms": _metric(six, tracking),
             "stop_sway": _metric(six, stop),
             "hold_jitter": _metric(six if hold_joints is None else hold_joints, hold),
+            "hold_drift": _metric(six, 0.05),
             "free_residual_rms": _metric(None if residual is None else [residual] * 6),
             "yield_free_mm": _metric(six, yield_free),
             "yield_push_mm": _metric(six, yield_push),

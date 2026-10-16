@@ -9,7 +9,7 @@ three motion reads of the same fixed trajectory set.
 
 Arm 1 is the tracking controller with neither layer, arm 2 adds the observer compensation
 (``dob``), arm 3 adds the learned residual (the MLP) to arm 2. Each ``--armN`` is a
-``scripts/real_motion_read.py`` output (schema ``maker-arm-lab/motion-read/2``). The three must
+``scripts/real_motion_read.py`` output (schema ``maker-arm-lab/motion-read/3``). The three must
 read the same fixed trajectory set: the labels of their ``traj`` segments must match as
 multisets, or the read refuses.
 
@@ -23,8 +23,8 @@ multisets, or the read refuses.
 (``TARGET_UNITS``). Every listed metric is lower-is-better, and a target is met when the arm's
 target value is at most it. The target value is section 5's side of the metric
 (``TARGET_POOL``): a motor metric reads the largest of its six ``joints`` values, so every
-joint must meet it (``tracking_rms``, ``stop_sway``, ``hold_jitter`` in rad,
-``free_residual_rms`` in N m), the contact drag the same (``drag_free``, ``drag_push``, N m,
+joint must meet it (``tracking_rms``, ``stop_sway``, ``hold_jitter``, ``hold_drift`` in
+rad, ``free_residual_rms`` in N m), the contact drag the same (``drag_free``, ``drag_push``, N m,
 the table's "largest resistance torque"), and a tip or contact metric reads its pooled
 ``tip`` (``tip_sway`` mm, ``flex_share`` fraction, ``yield_free_mm`` mm). At least one target
 is needed; a metric outside ``TARGET_METRICS`` (``yield_push_mm`` is a bar, not a target)
@@ -77,12 +77,13 @@ import os
 import traceback
 from pathlib import Path
 
-IN_SCHEMA = "maker-arm-lab/motion-read/2"
+IN_SCHEMA = "maker-arm-lab/motion-read/3"
 OUT_SCHEMA = "maker-arm-lab/ab-read/1"
 METRICS = (
     "tracking_rms",
     "stop_sway",
     "hold_jitter",
+    "hold_drift",
     "free_residual_rms",
     "yield_free_mm",
     "yield_push_mm",
@@ -96,6 +97,7 @@ TIP_METRICS = (
     "tracking_rms",
     "stop_sway",
     "hold_jitter",
+    "hold_drift",
     "yield_free_mm",
     "yield_push_mm",
     "tip_sway",
@@ -108,6 +110,7 @@ TARGET_POOL = {
     "tracking_rms": "joints_max",
     "stop_sway": "joints_max",
     "hold_jitter": "joints_max",
+    "hold_drift": "joints_max",
     "free_residual_rms": "joints_max",
     "yield_free_mm": "tip",
     "drag_free": "joints_max",
@@ -120,6 +123,7 @@ TARGET_UNITS = {
     "tracking_rms": "rad",
     "stop_sway": "rad",
     "hold_jitter": "rad",
+    "hold_drift": "rad",
     "free_residual_rms": "N m",
     "yield_free_mm": "mm",
     "drag_free": "N m",
