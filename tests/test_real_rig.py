@@ -89,3 +89,39 @@ def test_a_sheet_usage_error_prints_the_fail_token():
     out = subprocess.run([sys.executable, str(SCRIPT)], capture_output=True, text=True, check=False)
     last = out.stdout.strip().splitlines()[-1]
     assert out.returncode == 2 and last.startswith("SHEET_FAIL ")
+
+
+def test_the_reduced_profile_scales_the_caps_and_applies_the_calibration():
+    base = rig.load_profile()
+    config = rig.RigConfig(
+        caps={"tau_max": [0.5] * 7, "kp": [0.25] * 7, "kd": [1.0] * 7},
+        calibration={"direction": [-1.0] + [1.0] * 6, "offset": [0.1] * 7},
+    )
+    p = rig.reduced_profile(config)
+    for j, b in zip(p["joints"], base["joints"]):
+        assert j["tau_max"] == pytest.approx(0.5 * b["tau_max"])
+        assert j["kp"] == pytest.approx(0.25 * b["kp"]) and j["kd"] == b["kd"]
+        assert j["offset"] == 0.1
+    assert p["joints"][0]["direction"] == -1.0 and p["joints"][1]["direction"] == 1.0
+    assert rig.reduced_profile(rig.RigConfig()) == base
+
+
+@pytest.mark.parametrize(
+    ("caps", "match"),
+    [
+        ({"kp": [1.5] + [1.0] * 6}, r"caps\.kp\[0\]"),
+        ({"kd": [0.0] * 7}, r"caps\.kd\[0\]"),
+        ({"tau_max": [0.5] * 6}, "7"),
+        ({"q_hi": [0.5] * 7}, "q_hi"),
+    ],
+)
+def test_a_cap_outside_the_unit_interval_is_refused(caps, match):
+    with pytest.raises(ValueError, match=match):
+        rig.reduced_profile(rig.RigConfig(caps=caps))
+
+
+def test_the_rig_json_round_trips_caps_and_calibration(tmp_path):
+    config = rig.RigConfig(caps={"kp": [0.5] * 7}, calibration={"offset": [0.0] * 7})
+    path = tmp_path / "rig.json"
+    path.write_text(config.to_json())
+    assert rig.RigConfig.from_json(path) == config

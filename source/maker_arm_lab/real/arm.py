@@ -103,14 +103,16 @@ class SdkArm:
         self.rt = None if rt is None else (int(rt[0]), int(rt[1]))
 
     @classmethod
-    def connect(cls, interface: str, dynamics, **kwargs) -> SdkArm:
+    def connect(cls, interface: str, dynamics, profile: dict | None = None, **kwargs) -> SdkArm:
         """``interface`` "sim" is the SDK's built-in simulator, anything else a SocketCAN
-        interface such as "can0" or "vcan0"."""
+        interface such as "can0" or "vcan0". ``profile`` (a reduced ``maker_arm_rs.profile()``,
+        ``real.rig.reduced_profile``) reaches both the arm and the ``Tracking`` controller; the
+        SDK refuses one that loosens a limit with ValueError before it connects."""
         if interface == "sim":
-            arm = maker_arm_rs.Arm.sim()
+            arm = maker_arm_rs.Arm.sim(profile)
         else:
-            arm = maker_arm_rs.Arm.socketcan(interface)
-        return cls(arm, dynamics, **kwargs)
+            arm = maker_arm_rs.Arm.socketcan(interface, profile)
+        return cls(arm, dynamics, profile=profile, **kwargs)
 
     def start(self) -> ArmReading:
         """Enable, start tracking and wait for the loop's first snapshot.
@@ -150,8 +152,17 @@ class SdkArm:
     def push(self, due: float, dt: float, row: Sequence[float]) -> None:
         self.tracking.push(float(due), float(dt), [[float(v) for v in row]])
 
+    def push_rows(self, t0: float, dt: float, rows: Sequence[Sequence[float]]) -> None:
+        """Rows k of ``rows`` (six joints and the gripper motor angle) due at ``t0 + k dt``."""
+        self.tracking.push(float(t0), float(dt), [[float(v) for v in row] for row in rows])
+
     def telemetry(self) -> dict | None:
         return self.tracking.telemetry()
+
+    def drain(self) -> tuple[dict | None, dict]:
+        """Every tick since the last drain: the loop's columns (``Arm.drain``, None with no
+        loop) and the controller's (``Tracking.drain``). Join them on ``t`` and ``tick_t``."""
+        return self.arm.drain(), self.tracking.drain()
 
     def hold(self) -> None:
         """Swap in the SDK's hold at the current pose (torque stays on).

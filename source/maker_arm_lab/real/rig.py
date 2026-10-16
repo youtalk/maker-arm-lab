@@ -24,8 +24,13 @@ from pathlib import Path
 
 from maker_arm_lab.core import cameras, desk_boxes
 from maker_arm_lab.core.parts import BASE_CLASSES
+from maker_arm_lab.core.profile import load_profile
 
 NUM_BOXES = 4
+NUM_MOTORS = 7
+"""Six arm joints and the gripper, the order of ``maker_arm_rs.profile()["joints"]``."""
+CAP_KEYS = ("tau_max", "kp", "kd")
+CALIBRATION_KEYS = ("direction", "offset")
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,13 @@ class RigConfig:
     tracking_params: dict = field(default_factory=lambda: {"tau_th": [2.0] * 6})  # INITIAL: A1
     tray_lean_deg: float = 30.0
     desk_z: float = 0.0
+    caps: dict | None = None
+    """The session's reduced caps: ``{"tau_max": [7], "kp": [7], "kd": [7]}``, each a scale in
+    (0, 1] of ``maker_arm_rs.profile()``'s per-joint value (``reduced_profile``). None, or a
+    key left out, keeps the profile's value. The exposure steps of the MS5 sessions set it."""
+    calibration: dict | None = None
+    """The motor to URDF map: ``{"direction": [7], "offset": [7]}``, joint = direction *
+    (motor - offset). None keeps the profile's identity map (session 2 measures it)."""
 
     @classmethod
     def from_json(cls, path) -> RigConfig:
@@ -63,6 +75,47 @@ class RigConfig:
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
+
+
+def _seven(name: str, values) -> list[float]:
+    if isinstance(values, (str, bytes)) or len(values) != NUM_MOTORS:
+        raise ValueError(f"{name} needs {NUM_MOTORS} values, got {values!r}")
+    out = []
+    for i, v in enumerate(values):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError(f"{name}[{i}] = {v!r} is not a finite number")
+        out.append(float(v))
+    return out
+
+
+def reduced_profile(rig: RigConfig) -> dict:
+    """``maker_arm_rs.profile()`` with the rig's ``caps`` scaling each joint's ``tau_max``,
+    ``kp`` and ``kd`` and its ``calibration`` setting each joint's ``direction`` and
+    ``offset``. A scale outside (0, 1] or an unknown key raises ValueError naming it (a group
+    that is not an object, TypeError); the SDK
+    checks the result again when the arm connects (``Arm.sim``, ``Arm.socketcan``)."""
+    profile = load_profile()
+    joints = profile["joints"]
+    for group, allowed, value in (
+        ("caps", CAP_KEYS, rig.caps),
+        ("calibration", CALIBRATION_KEYS, rig.calibration),
+    ):
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            raise TypeError(f"{group} must be an object, got {value!r}")
+        unknown = sorted(set(value) - set(allowed))
+        if unknown:
+            raise ValueError(f"{group} has unknown keys {unknown}; allowed {list(allowed)}")
+    for key, scales in (rig.caps or {}).items():
+        for i, s in enumerate(_seven(f"caps.{key}", scales)):
+            if not 0.0 < s <= 1.0:
+                raise ValueError(f"caps.{key}[{i}] = {s} is outside (0, 1]")
+            joints[i][key] = float(joints[i][key]) * s
+    for key, values in (rig.calibration or {}).items():
+        for i, v in enumerate(_seven(f"calibration.{key}", values)):
+            joints[i][key] = v
+    return profile
 
 
 def fold_box_yaw(yaw: float) -> float:

@@ -3,6 +3,7 @@
 import math
 import time
 
+import maker_arm_rs
 import numpy as np
 import pytest
 
@@ -70,3 +71,27 @@ def test_the_sdk_arm_starts_pushes_holds_and_stops_on_the_sdk_simulator():
     finally:
         sdk.stop()
     assert sdk.read() is None or sdk.read().state != "enabled"
+
+
+def test_the_sdk_arm_connects_with_a_reduced_profile_and_sends_its_gains():
+    profile = maker_arm_rs.profile()
+    for j in profile["joints"]:
+        j["kp"] *= 0.5
+    sdk = real_arm.SdkArm.connect("sim", dm.dynamics(dm.urdf_bodies()), profile=profile)
+    try:
+        sdk.start()
+        time.sleep(0.2)
+        ticks, trk = sdk.drain()
+        assert len(ticks["t"]) > 10 and len(trk["tick_t"]) > 10
+        cap = np.array([j["kp"] for j in profile["joints"]])
+        assert (np.asarray(ticks["cmd_kp"]) <= cap + 1e-9).all()
+    finally:
+        sdk.stop()
+
+
+def test_a_raised_profile_is_refused_before_the_sdk_arm_connects():
+    profile = maker_arm_rs.profile()
+    profile["joints"][2]["tau_max"] *= 2.0
+    with pytest.raises(ValueError, match=r"joints\[2\]\.tau_max"):
+        real_arm.SdkArm.connect("can-does-not-exist", dm.dynamics(dm.urdf_bodies()),
+                                profile=profile)  # fmt: skip
