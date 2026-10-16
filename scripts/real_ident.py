@@ -1,21 +1,29 @@
 """Identify the arm's model from excitation session logs (MS5 control plan task 7) and apply
 the pre-registered identification rule on held-out logs.
 
-    .venv/bin/python scripts/real_ident.py \\
-        --logs ~/data/maker-arm-ms5/logs/s3_exc_0{0..7}.h5 \\
-        --heldout ~/data/maker-arm-ms5/logs/s3_exc_0{8,9}.h5 \\
+    .venv/bin/python scripts/real_ident.py --hold_steps 0 \\
+        --logs ~/data/maker-arm-ms5/logs/s3_fit.h5 \\
+        --heldout ~/data/maker-arm-ms5/logs/s3_heldout.h5 \\
         --out ~/data/maker-arm-ms5/ident.json --report ~/data/maker-arm-ms5/ident_report.json
+
+``--logs`` are the session logs of ``real_excitation.py``'s ``plan_fit.json`` and
+``--heldout`` those of its ``plan_heldout.json`` (the held-out excitations and the static
+poses), each read whole.
 
 The fit is ``ident.fit.fit`` on the free-motion samples of ``--logs``, ridge least squares
 toward the URDF bodies. ``--out`` is the model file (``core.dynamics_model.from_ident`` reads
 it; ``real_session.py --dynamics IDENT.json`` runs it). The rule (MS5 revision section 8.3):
 on the ``--heldout`` logs the identified model's residual RMS is lower than the URDF model's
-on every joint. ``--report`` holds both RMS vectors, the verdict and the fit's report. Neither
-file is ever overwritten.
+on every joint. ``--hold_steps`` (``ident.fit.HOLD_STEPS``: how the motor's PD law runs
+through a held command) has no default: its real-arm value is unverified until session 3, and
+it moves the identified viscous term by about ``kp T / 2``. The token and the model use the
+chosen value; ``--report`` carries the fit, both RMS vectors and the verdict under ``none``
+and under the chosen value, and the fit's report. The report is written first, then the
+model; neither file is ever overwritten.
 
-It prints exactly one ``IDENT_OK {rms_ident, rms_urdf, pass}`` (``pass`` false is still a
-finished read) or ``IDENT_FAIL {reason, detail}`` line on every exit path and exits through
-``os._exit``.
+It prints exactly one ``IDENT_OK {hold_steps, rms_ident, rms_urdf, pass}`` (``pass`` false is
+still a finished read) or ``IDENT_FAIL {reason, detail}`` line on every exit path and exits
+through ``os._exit``.
 """
 
 import argparse
@@ -59,8 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report", required=True, help="the report JSON to create")
     parser.add_argument("--lam", type=float, default=1e-3, help="the ridge weight")
     parser.add_argument(
-        "--hold_steps", type=_hold_steps, default="0",
-        help="ident.fit.HOLD_STEPS: 0 continuous (default), n steps, or 'none'",
+        "--hold_steps", type=_hold_steps, required=True,
+        help="ident.fit.HOLD_STEPS: 0 continuous, n steps, or 'none' (no default)",
     )  # fmt: skip
     return parser
 
@@ -97,37 +105,46 @@ def run(args) -> dict:
     shared = sorted({str(p.resolve()) for p in logs} & {str(p.resolve()) for p in heldout})
     if shared:
         raise Failure("logs", f"a held-out log is also fitted: {shared}")
-    try:
-        res = fit.fit(logs, dm.urdf_bodies(), lam=args.lam, hold_steps=args.hold_steps)
-        rms_ident = fit.residual_rms(heldout, res.dynamics(), hold_steps=args.hold_steps)
-        rms_urdf = fit.residual_rms(
-            heldout, dm.dynamics(dm.urdf_bodies()), hold_steps=args.hold_steps
-        )
-    except fit.IdentError as err:
-        raise Failure("fit", str(err)) from err
-    verdict = all(i < u for i, u in zip(rms_ident, rms_urdf))
-    out.parent.mkdir(parents=True, exist_ok=True)
-    res.to_json(
-        out, provenance={"lab_revision": lab_revision(), "heldout": [str(h) for h in heldout]}
-    )
+    urdf_model = dm.dynamics(dm.urdf_bodies())
+
+    def read(hold_steps):
+        try:
+            res = fit.fit(logs, dm.urdf_bodies(), lam=args.lam, hold_steps=hold_steps)
+            rms_ident = fit.residual_rms(heldout, res.dynamics(), hold_steps=hold_steps)
+            rms_urdf = fit.residual_rms(heldout, urdf_model, hold_steps=hold_steps)
+        except fit.IdentError as err:
+            raise Failure("fit", f"hold_steps {hold_steps}: {err}") from err
+        verdict = all(i < u for i, u in zip(rms_ident, rms_urdf))
+        return res, {
+            "hold_steps": hold_steps,
+            "rms_ident": rms_ident,
+            "rms_urdf": rms_urdf,
+            "pass": verdict,
+            "armature": res.armature,
+            "friction": res.friction,
+            "torque_sigma": res.torque_sigma,
+            "fit": {k: v for k, v in res.report.items() if k != "provenance"},
+        }
+
+    res, chosen = read(args.hold_steps)
+    reads = {"none": read(None)[1] if args.hold_steps is not None else chosen}
+    reads[str(args.hold_steps).lower()] = chosen
     body = {
-        "rms_ident": rms_ident,
-        "rms_urdf": rms_urdf,
-        "pass": verdict,
+        **{k: chosen[k] for k in ("hold_steps", "rms_ident", "rms_urdf", "pass")},
         "rule": "held-out residual RMS of the identified model below the URDF model's on every "
         "joint (MS5 revision section 8.3)",
         "logs": [str(p) for p in logs],
         "heldout": [str(h) for h in heldout],
         "ident": str(out),
-        "armature": res.armature,
-        "friction": res.friction,
-        "torque_sigma": res.torque_sigma,
-        "fit": {k: v for k, v in res.report.items() if k != "provenance"},
+        "reads": reads,
     }
     report.parent.mkdir(parents=True, exist_ok=True)
     with open(report, "x") as f:
         json.dump(body, f, indent=2)
-    return {"rms_ident": rms_ident, "rms_urdf": rms_urdf, "pass": verdict}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    prov = {"lab_revision": lab_revision(), "heldout": [str(h) for h in heldout]}
+    res.to_json(out, provenance={**prov, "hold_steps": args.hold_steps})
+    return {k: chosen[k] for k in ("hold_steps", "rms_ident", "rms_urdf", "pass")}
 
 
 def main(argv=None) -> int:

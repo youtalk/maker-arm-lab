@@ -19,6 +19,7 @@ from test_ident import _true_model, synthetic_log
 EXCITE = ROOT / "scripts" / "real_excitation.py"
 IDENT = ROOT / "scripts" / "real_ident.py"
 TOKENS = ("EXCITE_OK", "EXCITE_FAIL", "IDENT_OK", "IDENT_FAIL")
+HOLD = ["--hold_steps", "0"]
 REAL_CENTER = [1.0, -1.1, 7.5, 1.1, 1.5, 2.0]
 """A center inside the real profile's windows (still its motor-frame numbers, ruling R20) that
 keeps the arm clear of the desk."""
@@ -55,32 +56,46 @@ def test_the_scripts_print_one_fail_line_on_a_usage_error(script, fail):
     assert _payload(tokens[0])["reason"] == "usage"
 
 
-def test_the_excitation_script_writes_ten_files_and_a_session_plan(tmp_path):
+def test_the_excitation_script_writes_a_fit_plan_and_a_held_out_plan(tmp_path):
     out = tmp_path / "exc"
     args = ["--rig", _rig(tmp_path), "--seed", 5, "--count", 10, "--center", *REAL_CENTER]
     code, tokens, err = _run(EXCITE, [*args, "--out_dir", out])
     assert code == 0 and len(tokens) == 1 and tokens[0].startswith("EXCITE_OK"), err
     payload = _payload(tokens[0])
     assert 1.0 <= payload["cond"] <= 200.0
+    # the columns the condition number leaves out are named, with their residuals
+    assert payload["dropped"] == len(payload["dropped_columns"]) > 0
+    assert all(isinstance(n, str) and r >= 0.0 for n, r in payload["dropped_columns"])
     names = sorted(p.name for p in out.glob("exc_*.npz"))
     assert names == [f"exc_{k:02d}.npz" for k in range(10)]
-    plan = json.loads((out / "plan.json").read_text())
-    kinds = [next(iter(seg)) for seg in plan["segments"]]
-    assert kinds[0] == "hold" and kinds[-1] == "hold" and kinds.count("traj") == 10
-    assert plan["excitation"]["heldout"] == ["exc_08.npz", "exc_09.npz"]
-    assert plan["excitation"]["min_clearance_m"] >= 0.05
-    # the plan loads under the rig's profile: every file passes check_traj there
+    statics = [f"static_{k:02d}.npz" for k in range(3)]
+    assert payload["fit"] == names[:8]
+    assert payload["heldout"] == ["exc_08.npz", "exc_09.npz", *statics]
     profile = core_profile.load_profile()
-    segments = session.load_plan(out / "plan.json", profile)
-    assert [s["label"] for s in segments if s["kind"] == "traj"] == names
+    for plan_name, want in (
+        ("plan_fit.json", names[:8]),
+        ("plan_heldout.json", payload["heldout"]),
+    ):
+        plan = json.loads((out / plan_name).read_text())
+        kinds = [next(iter(seg)) for seg in plan["segments"]]
+        assert kinds[0] == "hold" and kinds[-1] == "hold"
+        assert plan["excitation"]["min_clearance_m"] >= 0.05
+        # each plan loads under the rig's profile: every file passes check_traj there
+        segments = session.load_plan(out / plan_name, profile)
+        assert [s["label"] for s in segments if s["kind"] == "traj"] == want
+    assert not (out / "plan.json").exists()
     with np.load(out / "exc_00.npz") as data:
         assert set(data.files) >= {"t", "q", "grip", "dq", "ddq", "a", "b"}
         assert np.allclose(data["dq"][[0, -1]], 0.0)
+    for name in statics:  # a static pose is one row held at rest
+        with np.load(out / name) as data:
+            assert np.ptp(data["q"], axis=0).max() == 0.0 and data["t"][-1] == 3.0
     # the same seed draws the same files
     again = tmp_path / "again"
     _run(EXCITE, [*args, "--out_dir", again])
-    with np.load(out / "exc_09.npz") as a, np.load(again / "exc_09.npz") as b:
-        assert np.array_equal(a["q"], b["q"])
+    for name in ("exc_09.npz", "static_02.npz"):
+        with np.load(out / name) as a, np.load(again / name) as b:
+            assert np.array_equal(a["q"], b["q"])
 
 
 def test_the_excitation_script_refuses_a_poorly_conditioned_set(tmp_path, monkeypatch, capsys):
@@ -112,10 +127,11 @@ def test_the_excitation_script_refuses_a_swing_into_the_desk(tmp_path):
 def test_the_excitation_script_never_overwrites_a_file(tmp_path):
     out = tmp_path / "exc"
     out.mkdir()
-    (out / "plan.json").write_text("{}")
+    (out / "plan_heldout.json").write_text("{}")
     code, tokens, _ = _run(EXCITE, ["--rig", _rig(tmp_path), "--seed", 5, "--out_dir", out])
     assert code == 1 and len(tokens) == 1 and _payload(tokens[0])["reason"] == "exists"
-    assert (out / "plan.json").read_text() == "{}"
+    assert (out / "plan_heldout.json").read_text() == "{}"
+    assert not list(out.glob("*.npz"))
 
 
 @pytest.fixture(scope="module")
@@ -140,27 +156,43 @@ def test_the_ident_script_writes_the_model_and_applies_the_held_out_rule(ident_l
     logs, held = ident_logs
     out, report = tmp_path / "ident.json", tmp_path / "report.json"
     code, tokens, err = _run(
-        IDENT, ["--logs", *logs, "--heldout", *held, "--out", out, "--report", report]
+        IDENT, ["--logs", *logs, "--heldout", *held, "--out", out, "--report", report, *HOLD]
     )
     assert code == 0 and len(tokens) == 1 and tokens[0].startswith("IDENT_OK"), err
     payload = _payload(tokens[0])
-    assert payload["pass"] is True
+    assert payload["pass"] is True and payload["hold_steps"] == 0
     assert len(payload["rms_ident"]) == len(payload["rms_urdf"]) == 6
     assert all(i < u for i, u in zip(payload["rms_ident"], payload["rms_urdf"]))
     rep = json.loads(report.read_text())
     assert rep["pass"] is True and rep["heldout"] == [str(h) for h in held]
-    assert rep["rms_ident"] == payload["rms_ident"]
+    assert rep["rms_ident"] == payload["rms_ident"] and rep["hold_steps"] == 0
+    # the report carries the read under no hold model next to the chosen one
+    assert set(rep["reads"]) == {"none", "0"}
+    assert rep["reads"]["none"]["hold_steps"] is None
+    assert rep["reads"]["0"]["rms_ident"] == payload["rms_ident"]
+    assert len(rep["reads"]["none"]["armature"]) == 6
     dyn = dm.from_ident(out)
     assert len(dyn.friction([0.3] * 6)) == 6
     data = json.loads(out.read_text())
     assert data["provenance"]["logs"] == [str(p) for p in logs]
+    assert data["provenance"]["hold_steps"] == 0
+
+
+def test_the_ident_script_needs_a_hold_model(ident_logs, tmp_path):
+    logs, held = ident_logs
+    out, report = tmp_path / "ident.json", tmp_path / "report.json"
+    code, tokens, _ = _run(
+        IDENT, ["--logs", *logs, "--heldout", *held, "--out", out, "--report", report]
+    )
+    assert code == 2 and _payload(tokens[0])["reason"] == "usage"
+    assert "hold_steps" in _payload(tokens[0])["detail"] and not report.exists()
 
 
 def test_the_ident_script_fails_on_a_missing_log(tmp_path):
     out, report = tmp_path / "ident.json", tmp_path / "report.json"
     missing = tmp_path / "missing.h5"
     code, tokens, _ = _run(
-        IDENT, ["--logs", missing, "--heldout", missing, "--out", out, "--report", report]
+        IDENT, ["--logs", missing, "--heldout", missing, "--out", out, "--report", report, *HOLD]
     )
     assert code == 1 and len(tokens) == 1 and tokens[0].startswith("IDENT_FAIL")
     assert _payload(tokens[0])["reason"] == "logs" and not out.exists()
@@ -171,7 +203,7 @@ def test_the_ident_script_never_overwrites_its_output(ident_logs, tmp_path):
     out, report = tmp_path / "ident.json", tmp_path / "report.json"
     out.write_text("{}")
     code, tokens, _ = _run(
-        IDENT, ["--logs", *logs, "--heldout", *held, "--out", out, "--report", report]
+        IDENT, ["--logs", *logs, "--heldout", *held, "--out", out, "--report", report, *HOLD]
     )
     assert code == 1 and _payload(tokens[0])["reason"] == "exists"
     assert out.read_text() == "{}"

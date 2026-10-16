@@ -12,14 +12,22 @@ the armature are linear too: per joint the columns ``tanh(dq / eps)`` (fc), ``dq
 ``exp(-(dq / vs)^2) tanh(dq / eps)`` (fs - fc) and ``ddq`` (armature). ``vs`` comes from
 ``STRIBECK_GRID`` and ``eps`` from ``EPS_GRID``, the pair with the lowest residual.
 
-The solve is ridge least squares toward the nominal (URDF) parameters: a rigid-body parameter
-moved by its own scale costs ``lam`` times the summed squared torque, so a direction the data
-cannot see (a body's inertia about an axis its joint never turns, or joint 1's armature
-against link 1's inertia about the same axis) stays at the nominal value and the friction and
-armature columns, which carry almost no ridge, take what the data asks for. Friction and
-armature are non-negative (and ``fs >= fc``): a parameter the solve drives negative is held at
-zero and the rest solved again. If the bodies come out unphysical the ridge grows by 10, at
-most ``MAX_GROWTHS`` times.
+The solve is ridge least squares toward a prior that starts at the nominal (URDF)
+parameters: a rigid-body parameter moved by its own scale costs ``lam`` times the summed
+squared torque, so a direction the data cannot see (a body's inertia about an axis its joint
+never turns, or joint 1's armature against link_002's inertia about the same axis) stays at
+the prior and the friction and armature columns, which carry almost no ridge, take what the
+data asks for. A fixed nominal prior goes wrong when the arm differs from it: the data moves
+``m`` and ``m c`` while the ridge holds the inertia about the joint origin, and the inertia
+about the center of mass that results is no body's (the first review's repro: truth 1.25x the
+URDF masses read unphysical, and the ridge growth that followed put the error into j2's
+armature, 8x). So the prior is moved to the solution and the solve repeated
+(``consistent_prior``): the prior takes the solution's ``m`` and ``m c`` and the nominal
+inertia shape about the center of mass, scaled to the solution's inertia, so the directions
+the data does not see follow a physical body. Friction and armature are non-negative (and
+``fs >= fc``): a parameter the solve drives negative is held at zero and the rest solved
+again. A body that still comes out unphysical gets its own ridge grown by 10 (the others
+keep theirs), at most ``MAX_GROWTHS`` times.
 
 Only free-motion samples enter: the controller's gate is 1 (``trk/gate``, joined on ``t ==
 trk/tick_t``), the command was not clamped, and the tick is outside every prompt segment.
@@ -64,11 +72,22 @@ HOLD_STEPS: int | None = 0  # INITIAL: session 3
 """How the motor runs its PD law through a held command, for ``hold_model``: 0 continuously
 (the real motor's fast inner loop), ``n`` in n integration steps (the bench: 5), None not at
 all (a log whose torque is the instantaneous torque at its own sample, as a synthetic one).
-Session 3 checks the assumption under it: the reply's torque is the one the motor applies
-at the start of the hold that follows it."""
+The assumption under it, that the reply's torque is the one the motor applies at the start of
+the hold that follows it, is unverified on the real arm. Session 3 checks it with a
+constant-velocity sweep of one joint at two ``kp`` caps (ddq = 0, so the hold correction is
+``kp v T / 2`` and nothing else depends on ``kp``): with the right ``HOLD_STEPS`` the fitted
+viscous term is the same at both caps; with ``None`` it moves by ``(kp_1 - kp_2) T / 2``.
+``scripts/real_ident.py`` takes ``--hold_steps`` with no default and reports the fit under
+both ``none`` and the chosen value."""
 SMOOTH_TICKS = 9
 MAX_GROWTHS = 5
 RIDGE_GROWTH = 10.0
+PRIOR_MIN_RATIO = 0.1
+"""The smallest scale of the nominal inertia the prior pulls toward."""
+PRIOR_ITERATIONS = 30
+PRIOR_TOL = 1e-9
+"""The consistent prior's fixed point: it stops when it moves less than this fraction of every
+parameter's scale."""
 FRICTION_RIDGE = 1e-9
 """The friction and armature columns' ridge, relative to each column's own squared norm: only
 enough to keep a column the data never excites (a joint that never moved) at zero."""
@@ -194,17 +213,30 @@ def friction_columns(
     return out
 
 
-def condition_number(a: np.ndarray, tol: float = COND_TOL) -> tuple[float, int]:
+RIGID_NAMES = ("m", "mcx", "mcy", "mcz", "Ixx", "Ixy", "Ixz", "Iyy", "Iyz", "Izz")
+FRICTION_NAMES = ("coulomb", "viscous", "stribeck", "armature")
+COLUMN_NAMES = tuple(
+    [f"{link}.{n}" for link in dynamics_model.ARM_LINKS for n in RIGID_NAMES]
+    + [f"j{j + 1}.{n}" for j in range(ARM_DOF) for n in FRICTION_NAMES]
+)
+"""The fit's 84 columns, in order."""
+
+
+def condition_number(a: np.ndarray, tol: float = COND_TOL) -> tuple[float, int, list]:
     """The condition number of the base columns of ``a`` (M, K), each scaled to unit norm,
-    and how many there are. The base columns are picked greedily (Gram-Schmidt with column
-    pivoting); a column within ``tol`` of the span of those kept is a combination of them,
-    as some rigid-body parameters always are, and is left out."""
+    how many there are, and the columns left out as ``(index, residual)``, largest residual
+    first. The base columns are picked greedily (Gram-Schmidt with column pivoting); a column
+    within ``tol`` of the span of those kept is a combination of them, as some rigid-body
+    parameters always are, and is left out (a column the data never reaches has residual 0).
+    A residual well above the rounding level (1e-8) is a weakly excited direction that the
+    reported condition number does not show."""
     norms = np.linalg.norm(a, axis=0)
     keep = np.flatnonzero(norms > 1e-9 * norms.max())  # a column the data never reaches
     an = a[:, keep] / norms[keep]
     r = np.linalg.qr(an, mode="r")
     x = r.copy()
     sel: list[int] = []
+    res = np.linalg.norm(x, axis=0)
     for _ in range(x.shape[1]):
         res = np.linalg.norm(x, axis=0)
         res[sel] = 0.0
@@ -214,7 +246,11 @@ def condition_number(a: np.ndarray, tol: float = COND_TOL) -> tuple[float, int]:
         sel.append(k)
         u = x[:, k] / res[k]
         x -= np.outer(u, u @ x)
-    return float(np.linalg.cond(r[:, sel])), len(sel)
+    res = np.linalg.norm(x, axis=0)
+    dropped = [(int(keep[i]), float(res[i])) for i in range(keep.size) if i not in sel]
+    dropped += [(int(i), 0.0) for i in range(a.shape[1]) if i not in set(keep.tolist())]
+    dropped.sort(key=lambda d: -d[1])
+    return float(np.linalg.cond(r[:, sel])), len(sel), dropped
 
 
 def excitation_condition(
@@ -227,7 +263,7 @@ def excitation_condition(
 ) -> tuple[float, int]:
     """``condition_number`` of the regressor the fit would stack from ``trajs`` (each with
     ``q``, ``dq`` and ``ddq``), every ``stride``-th sample, the friction columns at one point
-    of the grids."""
+    of the grids. Returns ``condition_number``'s triple."""
     p0 = linear_params(nominal_bodies)
     q, dq, ddq = (np.concatenate([tr[k][::stride] for tr in trajs]) for k in ("q", "dq", "ddq"))
     yr = regressor(dyn_factory, p0, q, dq, ddq).reshape(-1, N_RIGID)
@@ -357,7 +393,8 @@ class IdentResult:
             "provenance": prov,
             "report": {k: v for k, v in self.report.items() if k != "provenance"},
         }
-        Path(path).write_text(json.dumps(data, indent=2) + "\n")
+        with open(path, "x") as f:  # an ident file is never overwritten
+            f.write(json.dumps(data, indent=2) + "\n")
 
 
 def sdk_revision() -> str:
@@ -367,6 +404,47 @@ def sdk_revision() -> str:
         return json.loads(raw or "{}").get("vcs_info", {}).get("commit_id", "unknown")
     except importlib.metadata.PackageNotFoundError:
         return "unknown"
+
+
+def consistent_prior(p: np.ndarray, nominal_bodies: Sequence[Body]) -> np.ndarray:
+    """(60,) the prior for the next solve, from the solution ``p``: per body its own ``m``
+    and ``m c``, and the nominal inertia about the center of mass scaled to the solution's
+    (the projection of the solution's inertia about ``c = (m c) / m`` onto the nominal one,
+    at least ``PRIOR_MIN_RATIO``), placed at ``c``. Whatever ``m > 0`` and ``c`` the data
+    chooses, the inertia the prior pulls toward is a physical body's. A body with ``m <= 0``
+    gets its nominal parameters."""
+    p = np.asarray(p, dtype=np.float64).reshape(ARM_DOF, PARAMS_PER_BODY)
+    out = linear_params(nominal_bodies).reshape(ARM_DOF, PARAMS_PER_BODY)
+    for b, (m_nom, c_nom, i_nom) in enumerate(nominal_bodies):
+        m = p[b, 0]
+        if not (np.isfinite(m) and m > 0.0):
+            continue
+        c = p[b, 1:4] / m
+        i_n = np.asarray(i_nom, dtype=np.float64)
+        row = p[b, 4:]
+        i_fit = np.array(
+            [[row[0], row[1], row[2]], [row[1], row[3], row[4]], [row[2], row[4], row[5]]]
+        ) - _skew_term(m, c)
+        ratio = float(np.sum(i_fit * i_n) / np.sum(i_n * i_n))
+        i_o = max(ratio, PRIOR_MIN_RATIO) * i_n + _skew_term(m, c)
+        out[b, 0:4] = p[b, 0:4]
+        out[b, 4:] = [i_o[0, 0], i_o[0, 1], i_o[0, 2], i_o[1, 1], i_o[1, 2], i_o[2, 2]]
+    return out.reshape(-1)
+
+
+def _solve_consistent(ata, aty, d, theta0, constrained, nominal_bodies, scale):
+    """``_solve`` with the rigid-body prior moved to ``consistent_prior`` of each solution
+    until it moves less than ``PRIOR_TOL`` of every parameter's ``scale`` (at most
+    ``PRIOR_ITERATIONS`` solves). Returns the solution, the held indices, the solve count."""
+    prior = theta0.copy()
+    for it in range(1, PRIOR_ITERATIONS + 1):
+        x, held = _solve(ata, aty, d, prior, constrained)
+        moved = consistent_prior(x[:N_RIGID], nominal_bodies)
+        step = float(np.max(np.abs(moved - prior[:N_RIGID]) / scale))
+        prior[:N_RIGID] = moved
+        if step < PRIOR_TOL:
+            break
+    return x, held, it
 
 
 def _solve(ata, aty, d, theta0, constrained):
@@ -418,29 +496,36 @@ def fit(
             ata = np.block([[rr, fr_.T], [fr_, f.T @ f]])
             systems[(eps, vs)] = (ata, np.concatenate([ry, f.T @ y]))
     sse_of: dict[tuple[float, float], float] = {}
-    for growth in range(MAX_GROWTHS + 1):
-        lam_g = lam * RIDGE_GROWTH**growth
+    scale2 = param_scale(p0) ** 2
+    growths = np.zeros(ARM_DOF, dtype=int)
+    while True:
+        lam_b = lam * RIDGE_GROWTH ** np.repeat(growths, PARAMS_PER_BODY)
         best = None
         for key, (ata, aty) in systems.items():
             d = np.concatenate(
                 [
-                    lam_g * energy / param_scale(p0) ** 2,
+                    lam_b * energy / scale2,
                     FRICTION_RIDGE * np.maximum(np.diag(ata)[N_RIGID:], 1e-12),
                 ]
             )
-            x, held = _solve(ata, aty, d, theta0, constrained)
+            x, held, solves = _solve_consistent(
+                ata, aty, d, theta0, constrained, nominal_bodies, param_scale(p0)
+            )
             sse = float(energy - 2.0 * x @ aty + x @ ata @ x)
             sse_of[key] = sse
             if best is None or sse < best[0]:
-                best = (sse, key, x, held)
-        sse, (eps, vs), x, held = best
+                best = (sse, key, x, held, solves)
+        sse, (eps, vs), x, held, solves = best
         bodies = bodies_from_params(x[:N_RIGID])
-        if physical(bodies):
+        bad = [b for b in range(ARM_DOF) if not physical([bodies[b]])]
+        if not bad:
             break
-    else:
-        raise IdentError(
-            f"the bodies are not physical after {MAX_GROWTHS} ridge growths (lam {lam_g:g})"
-        )
+        if (growths[bad] >= MAX_GROWTHS).any():
+            raise IdentError(
+                f"bodies {bad} are not physical after {MAX_GROWTHS} ridge growths "
+                f"(lam {lam * RIDGE_GROWTH**MAX_GROWTHS:g})"
+            )
+        growths[bad] += 1
     fr = x[N_RIGID:].reshape(ARM_DOF, FRICTION_COLUMNS)
     friction = [
         (float(fc), float(fv), float(eps), float(fc + dfs), float(vs)) for fc, fv, dfs, _ in fr
@@ -449,22 +534,24 @@ def fit(
     a = np.concatenate([yr, friction_columns(dq, ddq, vs, eps).reshape(-1, n_fric)], axis=1)
     resid = (a @ x - y).reshape(-1, ARM_DOF)
     sigma = np.sqrt(np.mean(resid**2, axis=0))
-    cond, rank = condition_number(a[:: max(1, a.shape[0] // 60000)])
+    cond, rank, dropped = condition_number(a[:: max(1, a.shape[0] // 60000)])
     report = {
         "samples": samples,
         "per_log": [
             {"log": str(p), "ticks": d["ticks"], "free": d["free"], "samples": d["samples"]}
             for p, d in zip(logs, data)
         ],
-        "lam": lam_g,
+        "lam": [float(lam * RIDGE_GROWTH**g) for g in growths],
         "hold_steps": hold_steps,
-        "ridge_growths": growth,
+        "ridge_growths": [int(g) for g in growths],
+        "prior_solves": solves,
         "eps": eps,
         "stribeck_v": vs,
         "grid_sse": {f"eps {k[0]} vs {k[1]}": v for k, v in sse_of.items()},
         "held_at_zero": [int(i - N_RIGID) for i in held],
         "cond": cond,
         "base_columns": rank,
+        "dropped_columns": [[COLUMN_NAMES[i], r] for i, r in dropped],
         "provenance": {
             "logs": [str(p) for p in logs],
             "log_revisions": [d["attrs"] for d in data],

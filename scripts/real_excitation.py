@@ -1,20 +1,25 @@
 """Design the identification excitations for a session (MS5 control plan task 7): ``count``
 Fourier trajectories about a center pose (``ident.excitation``), each checked as the session
-will check it, and the session plan that runs them.
+will check it, and the two session plans that run them.
 
     .venv/bin/python scripts/real_excitation.py --rig ~/data/maker-arm-ms5/rig.json \\
         --seed S --count 10 --out_dir ~/data/maker-arm-ms5/plans/exc_S
 
 It writes ``exc_00.npz`` .. ``exc_NN.npz`` (``t``, ``q``, ``grip`` for ``real_session.py``,
-and ``dq``, ``ddq``, ``a``, ``b``, ``q0``, ``wf_hz``) and ``plan.json``: a hold, then each
-trajectory, then a hold (the session's minimum-jerk approach walks the arm between them at
-rest). The profile is the rig's reduced one (``real.rig.reduced_profile``). Every trajectory
-must pass ``real.session.check_traj``, keep every moving link origin of the bench plant's
-arm at least ``MIN_CLEARANCE_M`` above the rig's desk, and the stacked regressor's condition
-number (``ident.fit.excitation_condition``) must be at most ``COND_MAX``. Nothing is written
-unless every check passes, and no file is ever overwritten. The pre-registered held-out set
-is the last two files of a seed (``exc_08`` and ``exc_09`` for ``--count 10``); the plan
-records it.
+and ``dq``, ``ddq``, ``a``, ``b``, ``q0``, ``wf_hz``), ``static_00.npz`` .. ``static_02.npz``
+(a pose of the held-out excitations held ``STATIC_S`` at rest) and two session plans, each a
+hold, its files, a hold (the session's minimum-jerk approach walks the arm between them at
+rest): ``plan_fit.json`` runs every excitation but the last two, ``plan_heldout.json`` runs
+the last two (``exc_08`` and ``exc_09`` for ``--count 10``, the pre-registered held-out set,
+MS5 revision section 8.3) and the static poses. Each plan is its own session and so its own
+log: ``real_ident.py --logs`` takes the fit plan's logs and ``--heldout`` the held-out
+plan's, whole files. The profile is the rig's reduced one (``real.rig.reduced_profile``).
+Every file must pass ``real.session.check_traj``, the excitations must keep every moving link
+origin of the bench plant's arm at least ``MIN_CLEARANCE_M`` above the rig's desk, and the
+fit excitations' stacked regressor must have a condition number (``ident.fit
+.excitation_condition``) of at most ``COND_MAX``; the token names the columns that number
+leaves out (``dropped_columns``, with the residual of each). Nothing is written unless every
+check passes, and no file is ever overwritten.
 
 It prints exactly one ``EXCITE_OK {cond, ...}`` or ``EXCITE_FAIL {reason, detail}`` line on
 every exit path and exits through ``os._exit``.
@@ -36,6 +41,11 @@ MIN_CLEARANCE_M = 0.05  # INITIAL: session 3
 HOLD_S = 5.0
 HELDOUT = 2
 """The last two excitations of a seed are the held-out set (MS5 revision section 8.3)."""
+STATIC_POSES = 3
+STATIC_S = 3.0
+"""The held-out plan also holds this many poses for this long, for 8.3's static part."""
+PLAN_FIT = "plan_fit.json"
+PLAN_HELDOUT = "plan_heldout.json"
 
 
 class Failure(Exception):
@@ -90,6 +100,19 @@ def min_clearance(trajs, desk_z: float, stride: int = 5) -> float:
     return low - desk_z
 
 
+def static_poses(rng, trajs, count: int, seconds: float, dt: float) -> list[dict]:
+    """``count`` held poses for the held-out plan, each a row drawn at random from the held-out
+    excitations (so inside their limits and clearance), held ``seconds`` at rest."""
+    out = []
+    for k in range(count):
+        traj = trajs[k % len(trajs)]
+        row = traj["q"][int(rng.integers(traj["q"].shape[0]))]
+        n = round(seconds / dt) + 1
+        t = [i * dt for i in range(n)]
+        out.append({"t": t, "q": [list(row)] * n, "grip": [float(traj["grip"][0])] * n})
+    return out
+
+
 def run(args) -> dict:
     import numpy as np
 
@@ -106,7 +129,10 @@ def run(args) -> dict:
         raise Failure("usage", f"--count must be at least {HELDOUT + 1}, got {args.count}")
     out = Path(args.out_dir).expanduser()
     names = [f"exc_{k:02d}.npz" for k in range(args.count)]
-    taken = [n for n in [*names, "plan.json"] if (out / n).exists()]
+    statics = [f"static_{k:02d}.npz" for k in range(STATIC_POSES)]
+    fit_names, held_names = names[:-HELDOUT], names[-HELDOUT:]
+    files = [*names, *statics, PLAN_FIT, PLAN_HELDOUT]
+    taken = [n for n in files if (out / n).exists()]
     if taken:
         raise Failure("exists", f"{out} already holds {taken}; nothing is ever overwritten")
     rig_path = Path(args.rig).expanduser()
@@ -115,15 +141,20 @@ def run(args) -> dict:
         profile = reduced_profile(rig)
     except (OSError, ValueError, TypeError) as err:
         raise Failure("rig", f"{rig_path}: {err}") from err
+    rng = np.random.default_rng(args.seed)
     try:
         trajs = excitation.design_excitation(
-            np.random.default_rng(args.seed), profile, args.center, count=args.count,
+            rng, profile, args.center, count=args.count,
             wf_hz=args.wf_hz, harmonics=args.harmonics, v_scale=args.v_scale,
             duration_s=args.duration_s, amplitude_rad=args.amplitude,
         )  # fmt: skip
     except ValueError as err:
         raise Failure("design", str(err)) from err
-    for name, traj in zip(names, trajs):
+    holds = [
+        {k: np.asarray(v, dtype=np.float64) for k, v in h.items()}
+        for h in static_poses(rng, trajs[-HELDOUT:], STATIC_POSES, STATIC_S, session.DT)
+    ]
+    for name, traj in zip([*names, *statics], [*trajs, *holds]):
         try:
             session.check_traj(traj, profile)
         except ValueError as err:
@@ -133,36 +164,48 @@ def run(args) -> dict:
         raise Failure(
             "desk", f"a link comes {clearance:.3f} m from the desk, under {MIN_CLEARANCE_M} m"
         )
-    cond, rank = fit.excitation_condition(trajs, dm.urdf_bodies())
+    cond, rank, dropped = fit.excitation_condition(trajs[:-HELDOUT], dm.urdf_bodies())
+    weak = [[fit.COLUMN_NAMES[i], r] for i, r in dropped]
     if not cond <= COND_MAX:
         raise Failure("cond", f"the stacked regressor's condition number {cond:.1f} > {COND_MAX}")
     out.mkdir(parents=True, exist_ok=True)
-    for name, traj in zip(names, trajs):
+    for name, traj in zip([*names, *statics], [*trajs, *holds]):
         np.savez(out / name, **{k: np.asarray(v) for k, v in traj.items()})
-    plan = {
-        "segments": [{"hold": HOLD_S}, *({"traj": n} for n in names), {"hold": HOLD_S}],
-        "excitation": {
-            "seed": args.seed,
-            "count": args.count,
-            "center": list(args.center),
-            "amplitude_rad": args.amplitude,
-            "wf_hz": args.wf_hz,
-            "harmonics": args.harmonics,
-            "v_scale": args.v_scale,
-            "duration_s": args.duration_s,
-            "cond": cond,
-            "base_columns": rank,
-            "min_clearance_m": clearance,
-            "heldout": names[-HELDOUT:],
-        },
+    meta = {
+        "seed": args.seed,
+        "count": args.count,
+        "center": list(args.center),
+        "amplitude_rad": args.amplitude,
+        "wf_hz": args.wf_hz,
+        "harmonics": args.harmonics,
+        "v_scale": args.v_scale,
+        "duration_s": args.duration_s,
+        "cond": cond,
+        "base_columns": rank,
+        "dropped_columns": weak,
+        "min_clearance_m": clearance,
+        "fit": fit_names,
+        "heldout": [*held_names, *statics],
     }
-    with open(out / "plan.json", "x") as f:
-        json.dump(plan, f, indent=2)
+    plans = {
+        PLAN_FIT: fit_names,
+        PLAN_HELDOUT: [*held_names, *statics],
+    }
+    for plan_name, segs in plans.items():
+        plan = {
+            "segments": [{"hold": HOLD_S}, *({"traj": n} for n in segs), {"hold": HOLD_S}],
+            "excitation": {**meta, "plan": plan_name},
+        }
+        with open(out / plan_name, "x") as f:
+            json.dump(plan, f, indent=2)
     return {
         "cond": cond,
         "base_columns": rank,
-        "files": len(names),
-        "heldout": names[-HELDOUT:],
+        "dropped": len(weak),
+        "dropped_columns": weak,
+        "plans": list(plans),
+        "fit": fit_names,
+        "heldout": [*held_names, *statics],
         "min_clearance_m": clearance,
         "out_dir": str(out),
     }
