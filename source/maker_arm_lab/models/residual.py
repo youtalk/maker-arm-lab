@@ -102,7 +102,8 @@ def build_dataset(
     docstring), the logs in order and each in time. A row is kept only when its whole history
     window lies in one run of regular ticks inside one segment: a window across a tick gap or
     a segment boundary is not the motion the SDK would have seen (it restarts its history at
-    a gap). ``info``, if given, receives the counts: per log and in total the ``candidates``
+    a gap). The step rule is ``fit``'s (within half a period of the median), stricter than the
+    SDK's ``GAP_S`` (20 ms), so the lab drops some rows the SDK still evaluates. ``info``, if given, receives the counts: per log and in total the ``candidates``
     (the rows ``fit`` uses), the ``rows`` kept, and the rows dropped for ``no_history`` (too
     close to the log's start), ``straddled`` (a gap or a boundary) and ``non_finite`` (a
     non-finite input or target), and ``t`` (N,) the time of each kept row's tick."""
@@ -247,10 +248,13 @@ def train(
 ) -> tuple[ResidualMlp, dict]:
     """Adam on the normalized X and Y in shuffled minibatches. The validation rows are the
     last ``val_share`` of the rows (``build_dataset`` keeps them in time order), the
-    normalization comes from the training rows alone, and the model kept is the one of the
-    epoch with the lowest validation loss. The report holds per joint the train and
-    validation RMSE and the zero model's (no residual) validation RMSE, in N m, the
-    normalization (``stats``) and the rows past ``X_BOUND``."""
+    ``history`` rows before them are dropped (``embargo``: a window of a training row never
+    reaches into the validation rows' ticks), the normalization comes from the training rows
+    alone, and the model kept is the one of the epoch with the lowest validation loss. The
+    report holds per joint the train and validation RMSE and the zero model's (no residual)
+    validation RMSE, in N m, the normalization (``stats``) and the rows past ``X_BOUND``. The
+    validation rows chose the epoch, so ``val_rmse`` is on the selection set, not a held-out
+    read: a held-out read needs logs the training never saw."""
     X = np.asarray(X, dtype=np.float64)
     Y = np.asarray(Y, dtype=np.float64)
     history = history_of(X.shape[1])
@@ -260,7 +264,11 @@ def train(
     n_val = round(val_share * n)
     if not 1 <= n_val < n:
         raise ValueError(f"{n} rows leave no train or no validation split at {val_share}")
-    n_train = n - n_val
+    # the embargo: the last ``history`` training rows are dropped, so no input window holds
+    # ticks of both splits
+    n_train = n - n_val - history
+    if n_train < 1:
+        raise ValueError(f"{n} rows leave no train split after the {history}-row embargo")
     stats = fit_stats(X[:n_train], Y[:n_train], history)
 
     def norm(x, y):
@@ -269,7 +277,7 @@ def train(
         return torch.from_numpy(xn), torch.from_numpy(yn)
 
     xt, yt = norm(X[:n_train], Y[:n_train])
-    xv, yv = norm(X[n_train:], Y[n_train:])
+    xv, yv = norm(X[n - n_val :], Y[n - n_val :])
     torch.manual_seed(seed)
     gen = torch.Generator().manual_seed(seed)
     model = ResidualMlp(X.shape[1], hidden)
@@ -291,12 +299,13 @@ def train(
             best_loss, best_epoch, best_state = val, epoch, copy.deepcopy(model.state_dict())
     model.load_state_dict(best_state)
     model.eval()
-    y_train, y_val = Y[:n_train], Y[n_train:]
+    y_train, y_val = Y[:n_train], Y[n - n_val :]
     report = {
         "history": history,
         "rows": n,
         "n_train": n_train,
         "n_val": n_val,
+        "embargo": history,
         "epochs": int(epochs),
         "best_epoch": best_epoch,
         "seed": int(seed),
@@ -304,7 +313,7 @@ def train(
         "hidden": [int(h) for h in hidden],
         "batch_size": int(batch_size),
         "train_rmse": _rmse(predict(model, stats, X[:n_train]) - y_train),
-        "val_rmse": _rmse(predict(model, stats, X[n_train:]) - y_val),
+        "val_rmse": _rmse(predict(model, stats, X[n - n_val :]) - y_val),
         "zero_rmse": _rmse(y_val),
         "zero_train_rmse": _rmse(y_train),
         "y_std": [float(v) for v in stats["y_std"]],
@@ -312,7 +321,7 @@ def train(
         "x_std_floored": int((stats["x_std"] == input_floor(history)).sum()),
         "beyond_x_bound": {
             "train": beyond_bound(X[:n_train], stats),
-            "val": beyond_bound(X[n_train:], stats),
+            "val": beyond_bound(X[n - n_val :], stats),
         },
         "stats": {k: [float(v) for v in a] for k, a in stats.items()},
     }

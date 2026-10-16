@@ -235,7 +235,7 @@ def test_a_learnable_residual_is_learned():
     X, Y = _synthetic(lambda dq, temp: 0.3 * np.tanh(dq / 0.05) + 0.01 * (temp - 40))
     model, rep = residual.train(X, Y)
     assert all(v < 0.3 * z for v, z in zip(rep["val_rmse"], rep["zero_rmse"])), rep
-    assert rep["n_val"] == 600 and rep["n_train"] == 2400
+    assert rep["n_val"] == 600 and rep["n_train"] == 2400 - 4 and rep["embargo"] == 4
     assert 0 <= rep["best_epoch"] < 300
     assert next(model.parameters()).dtype == torch.float64
 
@@ -263,6 +263,48 @@ def test_the_input_scale_is_floored_and_the_far_rows_are_counted():
 def test_train_refuses_an_input_that_is_not_a_history():
     with pytest.raises(ValueError):
         residual.train(np.zeros((100, 20)), np.zeros((100, 6)))
+
+
+def _sdk_residual(spec, model, t, q, dq, temp):
+    """The SDK's ``tau_res`` per tick: every tick fed to ``Tracking.update`` in order."""
+    trk = maker_arm_rs.Tracking(model, residual=spec)
+    out = []
+    for k in range(len(t)):
+        trk.update(float(t[k]), [*q[k], 0.0], [*dq[k], 0.0], [0.0] * 7, [*map(float, temp[k]), 0.0])
+        out.append(trk.telemetry()["tau_res"])
+    return np.asarray(out), trk.telemetry()["residual_skips"]
+
+
+def test_the_sdk_reads_the_same_window_as_the_dataset(tmp_path):
+    model, tr = _model(), _traj()
+    temp = _temps(len(tr["t"]))
+    log = _log(tmp_path / "a.h5", model, tr, temp=temp)
+    info = {}
+    X, Y = residual.build_dataset([log], model, 4, hold_steps=None, info=info)
+    torch.manual_seed(0)
+    net = residual.ResidualMlp(residual.n_inputs(4), hidden=(16,))
+    stats = residual.fit_stats(X, Y, 4)
+    stats["y_std"] = np.full(6, 0.5)  # a visible output; out_max 100 never clamps it
+    spec = residual.export(net, stats, 4, [100.0] * 6, tmp_path / "m.json")
+    sdk, _ = _sdk_residual(spec, model, tr["t"], tr["q"], tr["dq"], temp)
+    k = np.searchsorted(tr["t"], info["t"])
+    want = residual.predict(net, stats, X)
+    assert len(k) > 900 and np.abs(sdk[k] - want).max() < 1e-9
+    assert np.abs(sdk[k + 1] - want).max() > 1e-4  # one tick off is visible
+
+
+def test_x_bound_is_the_sdks():
+    net = residual.ResidualMlp(residual.n_inputs(1), hidden=(4,))
+    n_in = residual.n_inputs(1)
+    stats = {"x_mean": np.zeros(n_in), "x_std": np.ones(n_in), "y_mean": np.zeros(6)}
+    stats["y_std"] = np.ones(6)
+    spec = residual.residual_spec(net, stats, 1, [1.0] * 6)  # no floors: unit scale
+    model = _model()
+    for value, skips in ((residual.X_BOUND, 0), (residual.X_BOUND + 1e-9, 1)):
+        q = np.zeros((1, 6))
+        q[0, 2] = value
+        _, got = _sdk_residual(spec, model, [0.0], q, np.zeros((1, 6)), np.zeros((1, 6)))
+        assert got == skips, value
 
 
 # --- the script ---------------------------------------------------------------------------
@@ -323,7 +365,8 @@ def test_the_train_script_learns_a_residual_and_never_overwrites(tmp_path):
     maker_arm_rs.Tracking(model, residual=spec)
     report = json.loads(rep.read_text())
     assert report["hold_steps"] is None  # read from the ident file
-    assert report["dataset"]["rows"] == report["train"]["n_train"] + report["train"]["n_val"]
+    split = report["train"]
+    assert report["dataset"]["rows"] == split["n_train"] + split["embargo"] + split["n_val"]
     assert "beyond_x_bound" in report["train"] and report["provenance"]["ident"] == str(ident)
     before = out.read_text()
     code, tokens, _ = _run([*args, "--epochs", "1"])
