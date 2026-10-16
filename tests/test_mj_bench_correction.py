@@ -1,6 +1,8 @@
 """MS5 control plan task 11: the two correction layers on the tracking bench, the observer
 compensation (``dob``) and the learned residual, before either reaches the arm."""
 
+import copy
+
 import maker_arm_rs
 import numpy as np
 import pytest
@@ -10,6 +12,7 @@ from maker_arm_lab.core import profile as core_profile
 from maker_arm_lab.ident import excitation
 from maker_arm_lab.mj import bench
 from maker_arm_lab.models import residual
+from maker_arm_lab.real import rig
 from test_ident import BENCH_HOLD, bench_runs
 
 SIM = core_profile.sim_profile()
@@ -41,7 +44,19 @@ def plan():
 PUSHES = [(0.0, 0.0, DT, plan())]
 
 
-def make(k_o, dob, dob_f, tau_th=TAU_TH):
+def capped(scale):
+    """The simulator's profile at a reduced cap ``scale`` on every joint's kp and kd, as
+    ``real.rig.reduced_profile`` scales a rig's caps."""
+    profile = copy.deepcopy(SIM)
+    for joint in profile["joints"]:
+        joint["kp"] *= scale
+        joint["kd"] *= scale
+    return profile
+
+
+def make(k_o, dob, dob_f, tau_th=TAU_TH, scale=1.0):
+    """The controller of the sweep; at a cap ``scale`` below 1 the gains are scaled and the
+    error clamp follows ruling R33 (``real.rig.capped_e_max``)."""
     params = {
         "contact": True,
         "k_o": k_o,
@@ -50,7 +65,9 @@ def make(k_o, dob, dob_f, tau_th=TAU_TH):
         "dob": dob,
         "dob_f": dob_f,
     }
-    return maker_arm_rs.Tracking(EXACT, params=params, profile=SIM)
+    if scale != 1.0:
+        params["e_max"] = rig.capped_e_max([scale] * 7)
+    return maker_arm_rs.Tracking(EXACT, params=params, profile=capped(scale))
 
 
 def envelope(q, start_s, end_s):
@@ -126,6 +143,77 @@ def test_the_compensation_stays_stable_across_the_sweep():
         assert growth <= GROWTH_MAX, (k_o, dob_f, tau_th, growth)
         assert wander <= DOB_WANDER_MAX, (k_o, dob_f, tau_th, wander)
     print("(k_o, dob_f, tau_th): (growth, wander vs dob off, saturated share)", rows)
+
+
+CAP_SCALES = (0.5, 0.25)
+"""The reduced caps of the first powered sessions: kp and kd scaled, e_max by R33."""
+REDUCED_ENVELOPE_MAX = 0.05  # INITIAL: session 6 reads the real hold at reduced caps
+"""rad: the largest last-second peak to peak a dob run at a reduced cap may read on the bench.
+A runaway loop leaves it; today's wander does not (see the test)."""
+
+
+def test_the_compensation_at_reduced_caps_is_bounded_and_recorded():
+    """The sweep's 3 x 3 points at tau_th 0.5 N m at the cap scales 0.5 and 0.25 (ruling R33's
+    e_max). Recorded, with only a runaway bound asserted (``REDUCED_ENVELOPE_MAX``): at
+    reduced gains the profile-gain bars do not hold. Today's reads (bench, seed 0): at 0.5 the
+    growth is 0.45 to 1.19 and the wander 2.7 to 5.3 times the dob-off run's (1.5 mrad); at
+    0.25 the growth is 0.41 to 3.37 and the wander 3.3 to 9.2 times the dob-off run's (2.2
+    mrad), last-second envelopes 7 to 20 mrad, and a 15 s hold wanders 5 to 33 mrad per second
+    without a trend. The final hold error still falls with dob: 4.6 -> 2.3 to 3.4 mrad at 0.5,
+    13.9 -> 3.8 to 8.9 mrad at 0.25."""
+    plant = bench.build_plant()
+    rows = {}
+    for scale in CAP_SCALES:
+        off = bench.run(
+            plant, "A", list(POSE), PUSHES, DURATION_S,
+            tracking=make(50.0, False, 5.0, TAU_TH, scale),
+        )  # fmt: skip
+        reference = envelope(off.q, DURATION_S - 1.0, DURATION_S)
+        rows[(scale, "off")] = (round(1e3 * reference, 2), round(1e3 * hold_error(off), 2))
+        for k_o in (25.0, 50.0, 100.0):
+            for dob_f in (2.0, 5.0, 10.0):
+                trace = bench.run(
+                    plant, "A", list(POSE), PUSHES, DURATION_S,
+                    tracking=make(k_o, True, dob_f, TAU_TH, scale),
+                )  # fmt: skip
+                assert np.isfinite(trace.q).all()
+                last = envelope(trace.q, DURATION_S - 1.0, DURATION_S)
+                growth = envelope(trace.q, 4.5, 5.0) / envelope(trace.q, 3.5, 4.0)
+                rows[(scale, k_o, dob_f)] = (
+                    round(growth, 3),
+                    round(last / reference, 2),
+                    round(1e3 * last, 2),
+                    round(1e3 * hold_error(trace), 2),
+                )
+                assert last <= REDUCED_ENVELOPE_MAX, (scale, k_o, dob_f, last)
+    print("(scale, k_o, dob_f): (growth, wander vs dob off, last envelope mrad, hold mrad)", rows)
+
+
+MASS_ERROR = 0.65
+"""The model's mass share of the plant's in the caps test: a light model leaves the spring to
+carry a third of gravity."""
+
+
+def test_a_reduced_kp_with_the_scaled_error_clamp_holds_a_light_model():
+    """Ruling R33 on the bench: rung A, 3 s hold at the excitation center, the URDF bodies at
+    0.65 of their mass as the model, kp and kd at 0.25 of the simulator profile's. With the
+    profile's e_max (0.03 rad) the spring gives at most kp e_max and the arm sinks: j2 reads
+    1556 mrad from the start (it runs to its stop), j3 974, j4 274. With e_max = 0.03 / 0.25
+    the drift stays at 37, 46 and 43 mrad. Only the bounded case is asserted."""
+    light = dm.dynamics(dm.scaled(dm.urdf_bodies(), MASS_ERROR))
+    plant = bench.build_plant()
+    rows = [[*POSE, bench.grip_value()]]
+    drift = {}
+    for name, e_max in (("profile", None), ("r33", rig.capped_e_max([0.25] * 7))):
+        params = {"contact": True, "tau_th": [2.0] * 6}
+        if e_max is not None:
+            params["e_max"] = e_max
+        tracking = maker_arm_rs.Tracking(light, params=params, profile=capped(0.25))
+        trace = bench.run(plant, "A", list(POSE), [(0.0, 0.0, DT, rows)], 3.0, tracking=tracking)
+        drift[name] = np.abs(trace.q - POSE).max(axis=0)
+    print("drift mrad: profile e_max", np.round(1e3 * drift["profile"], 1))
+    print("drift mrad: R33 e_max", np.round(1e3 * drift["r33"], 1))
+    assert drift["r33"].max() < 0.08, drift["r33"]
 
 
 def test_the_compensation_lowers_the_hold_error_under_unmodeled_friction():
