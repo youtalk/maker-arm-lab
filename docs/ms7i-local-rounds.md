@@ -1,9 +1,10 @@
-# MS7i: local rounds, rounds 1 to 3
+# MS7i: local rounds, rounds 1 to 4
 
-Date: 2026-10-15. Status: final for rounds 1 to 3. This report uses the ledger through its entry
-of 16:32 on 2026-10-15. Round 1 ran from 10-13 to 10-15, and both of its tracks ended before a
-checked read. The owner chose the levers of rounds 2 and 3 on 10-15, and both rounds ended the same
-day (sections 9 and 10). Only the choice of the round 4 levers is open (section 10.5).
+Date: 2026-10-15. Status: final for rounds 1 to 4. This report uses the ledger through its entry
+of 20:33 on 2026-10-15. Round 1 ran from 10-13 to 10-15, and both of its tracks ended before a
+checked read. The owner chose the levers of rounds 2 to 4 on 10-15, and all three rounds ended the
+same day (sections 9 to 11). Track V paused in round 2, and Track ACT ended in round 4. Only the
+owner's choice of the next step is open (section 11.5).
 
 The design of MS7i is revision 3 of the design document of 2026-10-13. The owner started the run on
 it with /goal at about 11:35 on 2026-10-13. This report cites the design as "spec section N" and
@@ -108,8 +109,11 @@ release. Its extra losses past the far wall follow that position (+30 against S)
 speed of the arm (+9). So the round 3 lever aims at the position of the release (section 9.5).
 
 In round 3 (section 10), a new switch hands an off-center release to the rig. ACT-C with it gains
-+41 at 1.35 paired SE, under the bar of 2 SE, and still reads under S. No candidate of MS7i passed a
-screen in rounds 1 to 3.
++41 at 1.35 paired SE, under the bar of 2 SE, and still reads under S.
+
+In round 4 (section 11), ACT-C 800k with the switch passed the screen by 1 part: 2551 against the
+bar of 2550. On the fresh draws 20 to 39 it read 2498 against 2526 for S, so it stopped at the
+re-read. No candidate of MS7i reached a checked read in rounds 1 to 4.
 
 ## 2. The bars and the candidate path
 
@@ -1087,3 +1091,98 @@ The owner chooses the levers of round 4.
    real arm. On the screen the gain was only +9, so the check will likely fail.
 3. Q-c, a study of where else ACT-C loses parts to S. A read-only subagent splits the 38 parts of
    the round 3 pair by cycle class and phase, as section 5.5 did for round 1. It needs no new read.
+
+## 11. Round 4: the later saves with the switch
+
+### 11.1 Where ACT-C still loses parts
+
+The owner chose Q-c first, a study with no new read. A read-only subagent split the 38 parts of
+the round 3 pair (`i/act/analysis/gap_r3.md`). Its totals reproduce the four reads and both D
+values. The sources split the lost parts with no remainder.
+
+| source of a lost part | ACT-C | S | ACT-C minus S | round 2, ACT-C minus S |
+| --- | --- | --- | --- | --- |
+| a carry that the census missed | 66 | 39 | +27 | +18 |
+| the carry of another part | 37 | 20 | +17 | +6 |
+| still moving in the own box at the end | 21 | 14 | +7 | +12 |
+| an own cycle into a wrong box | 184 | 179 | +5 | -39 |
+| a missed grasp with no carry | 11 | 12 | -1 | |
+| never targeted or held | 105 | 110 | -5 | +16 |
+| lifted and lost | 69 | 81 | -12 | +57 |
+
+- A carry that the census missed is a close_miss or held_no_lift cycle whose jaws still carried
+  the part after a lift. ACT-C makes 446 such carries, against 359 to 372 for S. The count is a
+  trait of the 400k save. ACT-C 600k makes 325.
+- The switch removed the lifted and lost source: +57 in round 2, -12 in round 3.
+- No episode reached its budget, so time explains none of the 38 parts.
+- Flat parts (-24) and special parts (-21) carry the gap. Bricks gain +5 with the switch, against
+  -25 without it.
+
+### 11.2 The rule and the screens
+
+The owner chose R4-a: the 600k and 800k saves of ACT-C with the switch of round 3. Rule R4A-1,
+entered before any number:
+
+- Both saves read the screen with `--guard_margin 0.025 --release_handoff`.
+- The better save, by the correct total and then the rate, is a candidate only with all the screen
+  bars against h_S_scr: 2550 or more, 200 or more an hour, a held-out row of 0.80 or more, and
+  D > 0.
+- A candidate re-reads draws 20 to 39 with the switch, against i_S_d2039 (2526). Then it reads the
+  checked seed 20307600 against i_S_chk (2535).
+- Without a candidate, Track ACT ends in MS7i.
+
+i_C600_ch_scr read on 10 lanes of Machine B from 18:48 to 19:37. i_C800_ch_scr read on 10 lanes of
+Machine A from 18:48 to 19:54.
+
+| read | correct of 3000 | rate | held-out row | D against h_S_scr, paired SE | D against its round 1 screen, paired SE |
+| --- | --- | --- | --- | --- | --- |
+| i_C600_ch_scr, 600k with the switch | 2528 | 355.16 | 592 of 744, 0.7957 | -5, 25.9 | +26, 37.6 |
+| i_C800_ch_scr, 800k with the switch | 2551 | 379.48 | 597 of 744, 0.8024 | +18, 28.0 | +53, 28.8 |
+
+ACT-C 800k with the switch meets every screen bar. The margins are thin: 1 part over 2550 and
+0.0024 over the held-out bar. So it is a candidate, and it goes to the re-read.
+
+### 11.3 The re-read
+
+i_C800_ch_d2039 read draws 20 to 39 with the switch, on 10 lanes of Machine B and 10 of Machine A,
+from 19:57 to 20:33.
+
+| read | correct of 3000 | rate | held-out row | D against i_S_d2039, paired SE |
+| --- | --- | --- | --- | --- |
+| i_C800_ch_d2039, 800k with the switch | 2498 | 374.11 | 641 of 801, 0.8002 | -28, 25.3 |
+| i_S_d2039, S | 2526 | 360.92 | 642 of 801, 0.8015 | |
+
+2498 is under 2526, so the candidate stops. The checked seed 20307600 stays unused by a candidate.
+Over the screen and the re-read, the 40 heaps give D = +18 - 28 = -10. The screen pass was the
+pick of the better save among two, by 1 part. The re-read on fresh draws did its job.
+
+By rule R4A-1, Track ACT ends in MS7i.
+
+### 11.4 Where MS7i stands
+
+| round | lever | best read | result |
+| --- | --- | --- | --- |
+| 1 | ACT-C, Run A, Run B | ACT-C 400k 2512 on the screen | stopped at the re-read, D -62 |
+| 2 | the release census | | a position lever, NEAR +30 |
+| 3 | the centered release | ACT-C 400k 2507 | +41 at 1.35 SE, under S |
+| 4 | the later saves with the switch | ACT-C 800k 2551 on the screen | stopped at the re-read, D -28 |
+
+- No policy of MS7i beats S. ACT-C pairs with an S read on the same draws and serving nine times.
+  It reads under S in eight of them. Round 1 gives -21, -31 and -35 on the screens and -62 on the
+  re-read. Round 2 gives -70, round 3 gives -38, and round 4 gives -17 and -28. The one pair over S,
+  +6, is the round 4 screen that picked the 800k save.
+- Two measured losses stay open: a carry that the census missed (+27 at 400k, a trait that fades
+  with training) and the carry of another part (+17, mostly flat parts).
+- The switch of round 3 moves ACT-C by +41 and +53 against its own reads without it. It moves S by
+  only +9. PR #202 holds it, ready for review.
+- Track V has no compute units. The 30k start of π0.5 reads under S (section 6).
+
+### 11.5 The next step
+
+The owner chooses:
+
+1. A pause of MS7i until the real arm arrives. This report closes the local rounds.
+2. A round 5 on the carry of another part: a rider rule that works with the carry guard
+   (`passenger_drop` refuses it now). The source is +17 at 2.0 SE in round 3, but only +6 in
+   round 2.
+3. A check of the switch for S on draws 20 to 39, as a serving lever for the real arm.
