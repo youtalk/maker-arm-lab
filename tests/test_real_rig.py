@@ -186,3 +186,9 @@ def test_an_explicit_error_clamp_wins_only_up_to_the_scaled_one():
 def test_the_error_clamp_rule_reads_the_kp_scale_of_a_given_profile():
     assert rig.capped_e_max([0.5] * 7) == pytest.approx([0.06] * 6)
     assert rig.capped_e_max(None) == [rig.E_MAX_DEFAULT_RAD] * 6
+def test_the_gripper_map_round_trips_through_the_rig_json(tmp_path):
+    config = rig.RigConfig(gripper_map=(0.03, 0.065))
+    path = tmp_path / "rig.json"
+    path.write_text(config.to_json())
+    assert rig.RigConfig.from_json(path).gripper_map == (0.03, 0.065)
+    assert rig.RigConfig().gripper_map is None

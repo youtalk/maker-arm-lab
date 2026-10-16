@@ -61,6 +61,8 @@ FRICTION_COLUMNS = 4
 """Per joint: Coulomb, viscous, Stribeck static excess (fs - fc), armature."""
 DELTA = 1e-4
 """The regressor's step, as a fraction of each parameter's scale."""
+K_DEADBAND = 4.0  # INITIAL: written in docs/ms5-foundations.md before session 5
+"""The admittance deadband as a multiple of the observer's free-motion residual RMS."""
 STRIBECK_GRID = (0.02, 0.05, 0.1)
 """rad/s: the Stribeck velocities the fit tries."""
 EPS_GRID = (0.005, 0.01, 0.02, 0.05)  # INITIAL: session 3
@@ -604,3 +606,18 @@ def residual_rms(
     if n == 0:
         raise IdentError("no free-motion samples in the logs")
     return [float(v) for v in np.sqrt(sq / n)]
+
+
+def deadband(r_free: np.ndarray, multiple: float = K_DEADBAND) -> list[float]:
+    """Per joint, N m: ``multiple`` times the RMS of the observer's residual ``r_free`` (rows
+    of ``ARM_DOF`` joints) over free motion, the level below which the yield admittance does
+    not react. Raises ValueError for an empty or non-finite ``r_free`` or a ``multiple`` that
+    is not a positive number."""
+    r = np.asarray(r_free, dtype=np.float64)
+    if r.ndim != 2 or r.shape[0] == 0 or r.shape[1] != ARM_DOF:
+        raise ValueError(f"r_free needs shape (N > 0, {ARM_DOF}), got {r.shape}")
+    if not np.isfinite(r).all():
+        raise ValueError("r_free must be finite")
+    if not (np.isfinite(multiple) and multiple > 0.0):
+        raise ValueError(f"multiple must be positive, got {multiple!r}")
+    return [float(v) for v in multiple * np.sqrt(np.mean(r**2, axis=0))]

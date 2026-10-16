@@ -26,6 +26,25 @@ def test_jaw_fraction_inverts_the_provisional_transmission_and_clips():
     assert real_arm.jaw_fraction(profile, g["q_lo"] - 0.5) == 0.0
 
 
+def test_the_gripper_map_replaces_the_provisional_one():
+    profile = sim_profile()
+    g = profile["joints"][6]
+    a, b = 0.03, 0.065  # m per rad, m: the gap at angle 0
+    full = a * g["q_hi"] + b
+    mid = 0.5 * (g["q_lo"] + g["q_hi"])
+    got = real_arm.jaw_fraction(profile, mid, gripper_map=(a, b))
+    assert got == pytest.approx((a * mid + b) / full)
+    assert real_arm.jaw_fraction(profile, g["q_hi"], gripper_map=(a, b)) == pytest.approx(1.0)
+    assert real_arm.jaw_fraction(profile, g["q_hi"] + 1.0, gripper_map=(a, b)) == 1.0
+    assert real_arm.jaw_fraction(profile, g["q_lo"] - 5.0, gripper_map=(a, b)) == 0.0
+    # without the map the provisional line stays
+    assert real_arm.jaw_fraction(profile, mid) == real_arm.jaw_fraction(
+        profile, mid, gripper_map=None
+    )
+    with pytest.raises(ValueError, match="open limit"):
+        real_arm.jaw_fraction(profile, mid, gripper_map=(a, -1.0))
+
+
 def test_the_pick_jacobian_predicts_a_small_motion():
     ik = GlobalIK()
     jac = real_arm.pick_jacobian(ik, HOME)

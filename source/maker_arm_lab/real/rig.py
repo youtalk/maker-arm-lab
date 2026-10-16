@@ -70,6 +70,10 @@ class RigConfig:
     """The motor to URDF map: ``{"direction": [7], "offset": [7]}``, joint = direction *
     (motor - offset). None keeps the profile's identity map (session 2 measures it). Only the
     identity is accepted until the profile's limits are re-expressed in joint coordinates."""
+    gripper_map: tuple[float, float] | None = None
+    """The gripper's motor angle to jaw gap line, ``gap = a * angle + b`` in m, from the
+    caliper (``scripts/real_gripper_map.py``). None keeps the provisional map of
+    ``core.profile`` (``real.arm.jaw_fraction``)."""
 
     @classmethod
     def from_json(cls, path) -> RigConfig:

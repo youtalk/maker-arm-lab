@@ -364,7 +364,9 @@ class RealEnv:
     def _refresh(self, reading) -> None:
         self._check_arm(reading)
         self._reading = reading
-        per_jaw = jaw_fraction(self.profile, reading.gripper) * GRIPPER_OPEN_POS
+        per_jaw = (
+            jaw_fraction(self.profile, reading.gripper, self.rig.gripper_map) * GRIPPER_OPEN_POS
+        )
         data = self.scene["robot"].data
         data.joint_pos[0] = torch.tensor([*reading.q, per_jaw, per_jaw])
         data.joint_vel[0, :6] = torch.tensor(reading.dq)

@@ -18,7 +18,15 @@ from test_ident import _true_model, synthetic_log
 
 EXCITE = ROOT / "scripts" / "real_excitation.py"
 IDENT = ROOT / "scripts" / "real_ident.py"
-TOKENS = ("EXCITE_OK", "EXCITE_FAIL", "IDENT_OK", "IDENT_FAIL")
+GRIPPER = ROOT / "scripts" / "real_gripper_map.py"
+TOKENS = (
+    "EXCITE_OK",
+    "EXCITE_FAIL",
+    "IDENT_OK",
+    "IDENT_FAIL",
+    "GRIPPER_MAP_OK",
+    "GRIPPER_MAP_FAIL",
+)
 HOLD = ["--hold_steps", "0"]
 REAL_CENTER = [1.0, -1.1, 7.5, 1.1, 1.5, 2.0]
 """A center inside the real profile's windows (still its motor-frame numbers, ruling R20) that
@@ -49,7 +57,9 @@ def _rig(tmp_path, **fields):
     return path
 
 
-@pytest.mark.parametrize("script,fail", [(EXCITE, "EXCITE_FAIL"), (IDENT, "IDENT_FAIL")])
+@pytest.mark.parametrize(
+    "script,fail", [(EXCITE, "EXCITE_FAIL"), (IDENT, "IDENT_FAIL"), (GRIPPER, "GRIPPER_MAP_FAIL")]
+)
 def test_the_scripts_print_one_fail_line_on_a_usage_error(script, fail):
     code, tokens, _ = _run(script, ["--no_such_flag"])
     assert code == 2 and len(tokens) == 1 and tokens[0].startswith(fail)
@@ -231,3 +241,90 @@ def test_the_ident_script_never_overwrites_its_output(ident_logs, tmp_path):
     )
     assert code == 1 and _payload(tokens[0])["reason"] == "exists"
     assert out.read_text() == "{}"
+
+
+def _gripper_run(tmp_path, answer, extra=(), rig_out="rig_out.json", **rig_fields):
+    """Run the gripper map script on the simulator; ``answer(angle_rad, n_asked)`` is the text
+    typed for each prompt, written once the prompt has printed."""
+    import re
+
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "AMENT_PREFIX_PATH")}
+    args = ["--rig", _rig(tmp_path, **rig_fields), "--angles", 4, "--interface", "sim"]
+    args += ["--rig_out", tmp_path / rig_out, "--release", "now", *extra]
+    proc = subprocess.Popen(
+        [sys.executable, str(GRIPPER), *map(str, args)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    asked, angle, err = 0, None, []
+    try:
+        proc.stdin.write("1000\n")  # typed ahead of the first question: dropped
+        proc.stdin.flush()
+        while True:
+            line = proc.stderr.readline()
+            if not line:
+                break
+            err.append(line)
+            found = re.search(r"angle (-?\d+\.\d+) rad", line)
+            if found:
+                angle = float(found.group(1))
+            if "then Enter" in line:
+                asked += 1
+                proc.stdin.write(answer(angle, asked) + "\n")
+                proc.stdin.flush()
+        proc.wait(timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    tokens = [x for x in proc.stdout.read().splitlines() if x.startswith(TOKENS)]
+    return proc.returncode, tokens, "".join(err), asked
+
+
+def test_the_gripper_map_script_fits_the_caliper_line_and_writes_the_rig(tmp_path):
+    a, b = 0.025, 0.0523  # m per rad, m: 61 mm at the profile's open limit
+
+    def caliper(angle, n):
+        return "abc" if n == 2 else f"{1000.0 * (a * angle + b):.3f}"
+
+    code, tokens, err, asked = _gripper_run(tmp_path, caliper, calibration=None)
+    assert code == 0 and len(tokens) == 1 and tokens[0].startswith("GRIPPER_MAP_OK"), err
+    assert asked == 5  # four angles and the re-prompt after "abc"
+    out = _payload(tokens[0])
+    assert out["a"] == pytest.approx(a, rel=1e-3) and out["b"] == pytest.approx(b, rel=1e-3)
+    assert out["rms_mm"] < 0.01
+    q_hi = core_profile.load_profile()["joints"][6]["q_hi"]
+    assert out["full_gap_mm"] == pytest.approx(1000.0 * (a * q_hi + b), rel=1e-3)
+    written = json.loads((tmp_path / "rig_out.json").read_text())
+    assert written["gripper_map"] == pytest.approx([out["a"], out["b"]])
+    assert json.loads((tmp_path / "rig.json").read_text()).get("gripper_map") is None
+
+
+def test_the_gripper_map_script_never_overwrites_a_rig(tmp_path):
+    (tmp_path / "rig_out.json").write_text("{}")
+    code, tokens, err, asked = _gripper_run(tmp_path, lambda angle, n: "50")
+    assert code == 1 and len(tokens) == 1 and tokens[0].startswith("GRIPPER_MAP_FAIL"), err
+    assert _payload(tokens[0])["reason"] == "rig_out_exists" and asked == 0
+    assert (tmp_path / "rig_out.json").read_text() == "{}"
+
+
+def test_the_gripper_map_script_fails_on_a_line_that_does_not_open(tmp_path):
+    code, tokens, err, _ = _gripper_run(tmp_path, lambda angle, n: "50")  # a flat line
+    assert code == 1 and len(tokens) == 1 and tokens[0].startswith("GRIPPER_MAP_FAIL"), err
+    assert _payload(tokens[0])["reason"] == "fit"
+    assert not (tmp_path / "rig_out.json").exists()
+
+
+def test_the_gripper_map_script_ends_with_the_input_holding_the_arm(tmp_path):
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "AMENT_PREFIX_PATH")}
+    args = ["--rig", _rig(tmp_path), "--angles", 3, "--interface", "sim"]
+    args += ["--rig_out", tmp_path / "o.json"]
+    out = subprocess.run(
+        [sys.executable, str(GRIPPER), *map(str, args)],
+        capture_output=True, text=True, env=env, input="", timeout=120, check=False,
+    )  # fmt: skip
+    tokens = [x for x in out.stdout.splitlines() if x.startswith(TOKENS)]
+    assert out.returncode == 1 and len(tokens) == 1, out.stderr
+    assert _payload(tokens[0])["reason"] == "end_of_input"

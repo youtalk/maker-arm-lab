@@ -45,13 +45,25 @@ class ArmReading:
     fault: str | None
 
 
-def jaw_fraction(profile: dict, angle: float) -> float:
-    """The jaw opening fraction of gripper motor angle ``angle``, clipped to [0, 1]: the inverse
-    of ``core.profile.gripper_angle``. INITIAL: A1 replaces both with the measured
-    transmission (MS5 design section 6)."""
+def jaw_fraction(
+    profile: dict, angle: float, gripper_map: tuple[float, float] | None = None
+) -> float:
+    """The jaw opening fraction of gripper motor angle ``angle``, clipped to [0, 1].
+
+    Without ``gripper_map`` it inverts ``core.profile.gripper_angle``'s provisional linear
+    map (INITIAL: the gripper map script replaces it). With ``gripper_map = (a, b)``, the
+    caliper line ``gap = a * angle + b`` (m, the full gap between the jaws), the fraction is
+    the gap over the gap at the open limit, the profile gripper's ``q_hi`` put through the
+    same line. ValueError if that gap is not positive."""
     g = profile["joints"][_profile.GRIPPER_INDEX]
     lo, hi = float(g["q_lo"]), float(g["q_hi"])
-    return min(1.0, max(0.0, (float(angle) - lo) / (hi - lo)))
+    if gripper_map is None:
+        return min(1.0, max(0.0, (float(angle) - lo) / (hi - lo)))
+    a, b = float(gripper_map[0]), float(gripper_map[1])
+    full = a * hi + b
+    if not full > 0.0:
+        raise ValueError(f"the gripper map gives a gap of {full} m at the open limit {hi} rad")
+    return min(1.0, max(0.0, (a * float(angle) + b) / full))
 
 
 def pick_point(ik, q) -> np.ndarray:

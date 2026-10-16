@@ -568,3 +568,13 @@ def test_the_fit_recovers_viscous_friction_on_a_plant_whose_friction_is_the_mode
     viscous = [f[1] for f in res.friction]
     assert all(abs(v - bench.VISCOUS_NMS) / bench.VISCOUS_NMS < 0.30 for v in viscous), viscous
     assert all(abs(a - ARM_ARMATURE) / ARM_ARMATURE < 0.10 for a in res.armature), res.armature
+
+
+def test_the_deadband_is_the_multiple_of_the_free_motion_rms():
+    r = np.random.default_rng(0).normal(0, 0.1, (20000, 6))
+    assert fit.deadband(r, 4.0) == pytest.approx([0.4] * 6, rel=0.03)
+    assert fit.deadband(r) == pytest.approx([0.1 * fit.K_DEADBAND] * 6, rel=0.03)
+    with pytest.raises(ValueError):
+        fit.deadband(np.zeros((0, 6)))
+    with pytest.raises(ValueError):
+        fit.deadband(np.full((3, 6), np.nan))

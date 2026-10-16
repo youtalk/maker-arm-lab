@@ -336,17 +336,11 @@ def signal_label(signum) -> str:
     return "Ctrl-C (SIGINT)" if signum == signal.SIGINT else name
 
 
-def main(argv=None) -> int:
-    """Run one session. Ctrl-C, SIGTERM and SIGHUP end the session (``interrupted``, the
-    signal in the detail): during the setup by an exception, once the log exists by a flag
-    the run polls, so no log write is cut short. From then on, through the hold, the token
-    and the release prompt, any of them only says the arm still holds: an escaping
-    ``KeyboardInterrupt`` (or the default SIGTERM and SIGHUP, which kill the process) would
-    skip the token and ``os._exit``, and dropping the SDK arm at interpreter exit disables
-    the motors without the typed ``RELEASE``."""
-    args = build_parser().parse_args(argv)
-    world: dict = {}
-    phase = ["setup"]
+def make_sigint_handler(world: dict, phase: list):
+    """The handler of a powered script for Ctrl-C, SIGTERM and SIGHUP (``SIGNALS``, installed
+    by ``install_signal_handlers``): an exception during ``setup``, a flag
+    (``world["interrupted"]``, the signal's label) during ``session``, and a note only from
+    then on. The gripper map script shares it."""
 
     def on_signal(signum, frame):
         label = signal_label(signum)
@@ -365,12 +359,35 @@ def main(argv=None) -> int:
         text = f"{label}: {note if world.get('enabled') else 'the session is closing'}.\n"
         os.write(2, text.encode())
 
-    previous = {s: signal.signal(s, on_signal) for s in SIGNALS}
+    return on_signal
+
+
+def install_signal_handlers(handler) -> dict:
+    """``handler`` for every one of ``SIGNALS``; returns the handlers it replaced."""
+    return {s: signal.signal(s, handler) for s in SIGNALS}
+
+
+def restore_signal_handlers(previous: dict) -> None:
+    for s, handler in previous.items():
+        signal.signal(s, handler)
+
+
+def main(argv=None) -> int:
+    """Run one session. Ctrl-C, SIGTERM and SIGHUP end the session (``interrupted``, the
+    signal in the detail): during the setup by an exception, once the log exists by a flag
+    the run polls, so no log write is cut short. From then on, through the hold, the token
+    and the release prompt, any of them only says the arm still holds: an escaping
+    ``KeyboardInterrupt`` (or the default SIGTERM and SIGHUP, which kill the process) would
+    skip the token and ``os._exit``, and dropping the SDK arm at interpreter exit disables
+    the motors without the typed ``RELEASE``."""
+    args = build_parser().parse_args(argv)
+    world: dict = {}
+    phase = ["setup"]
+    previous = install_signal_handlers(make_sigint_handler(world, phase))
     try:
         return _run(args, world, phase)
     finally:
-        for s, handler in previous.items():
-            signal.signal(s, handler)
+        restore_signal_handlers(previous)
 
 
 def _run(args, world: dict, phase: list) -> int:
