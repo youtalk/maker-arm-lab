@@ -19,37 +19,50 @@ multisets, or the read refuses.
      "bars": {"yield_free_max_mm": 0.5, "yield_push_min_mm": 2.0}}
 
 ``targets`` is the jitter targets table of session 3 (MS5 revision section 8.5,
-``docs/ms5-foundations.md`` section 5): metric -> a number in the metric's compared unit (see
-below). Every listed metric is lower-is-better, and a target is met when the arm's value is at
-most it. At least one target is needed; a metric outside ``TARGET_METRICS`` (``yield_push_mm``
-is a bar, not a target) refuses the file. ``bars`` holds the pre-registered yield bars of
-``docs/ms5-foundations.md`` section 4, both required, nothing else allowed: the free motion
-yields at most ``yield_free_max_mm`` and a 5 N push at least ``yield_push_min_mm``.
+``docs/ms5-foundations.md`` section 5): metric -> a number in the unit section 5 gives it
+(``TARGET_UNITS``). Every listed metric is lower-is-better, and a target is met when the arm's
+target value is at most it. The target value is section 5's side of the metric
+(``TARGET_POOL``): a motor metric reads the largest of its six ``joints`` values, so every
+joint must meet it (``tracking_rms``, ``stop_sway``, ``hold_jitter`` in rad,
+``free_residual_rms`` in N m), the contact drag the same (``drag_free``, ``drag_push``, N m,
+the table's "largest resistance torque"), and a tip or contact metric reads its pooled
+``tip`` (``tip_sway`` mm, ``flex_share`` fraction, ``yield_free_mm`` mm). At least one target
+is needed; a metric outside ``TARGET_METRICS`` (``yield_push_mm`` is a bar, not a target)
+refuses the file. ``bars`` holds the pre-registered yield bars of ``docs/ms5-foundations.md``
+section 4, both required, nothing else allowed: the free motion yields at most
+``yield_free_max_mm`` and a 5 N push at least ``yield_push_min_mm``.
 
-The compared value of a metric is its pooled ``tip`` value when the metric has one
-(``TIP_METRICS``), else a pool of its six ``joints`` values: the RMS over the joints for
-``free_residual_rms``, the largest for ``drag_free`` and ``drag_push``. A null tip, null
-joints or any null joint is a missing value.
+The compared value of a metric, which the ``no_worse``, ``lower`` and bar checks and
+``table`` read, is its pooled ``tip`` value when the metric has one (``TIP_METRICS``), else a
+pool of its six ``joints`` values: the RMS over the joints for ``free_residual_rms``, the
+largest for ``drag_free`` and ``drag_push``. A null tip, null joints or any null joint is a
+missing value.
 
 The rule, for arm 2 against arm 1 (layer ``dob``) and arm 3 against arm 2 (layer ``mlp``),
 every check must pass:
 
-- ``target``: per target, the arm's value is at most it.
-- ``free_yield``: the arm's ``yield_free_mm`` is at most ``yield_free_max_mm``.
+- ``target``: per target, the arm's target value is at most it.
+- ``free_yield``: the arm's ``yield_free_mm`` is at most ``yield_free_max_mm``. This is the
+  free-motion bar of ``docs/ms5-foundations.md`` section 4, an extra criterion: section 6's
+  list does not name it.
 - ``no_worse``: the arm's ``tracking_rms`` and ``tip_sway`` are at most the arm before it's,
   with no tolerance.
 - ``push_yield``: the arm's ``yield_push_mm`` is at least ``yield_push_min_mm`` (it must still
-  hold with the compensation on).
+  hold with the compensation on). ``yield_push_mm`` is the motion read's max over the prompts,
+  so the bar passes when any one prompt yields that far.
 - ``lower`` (``mlp`` only): the arm's ``free_residual_rms`` is below arm 2's.
 
 A missing value on either side fails its check with the reason ``missing``; it never passes
 silently. Both layers are judged regardless of the other's verdict and both are reported:
 ``adopted.mlp`` is as computed even when ``dob`` was rejected (the owner reads it then). A
-rejected layer is a result, recorded with the reasons, and still ends in ``AB_OK``.
+rejected layer is a result, recorded with the reasons, and still ends in ``AB_OK``. Section
+6's timing bar (``update()`` p99 at most 100 us on the Thor) is not judged here: it is read
+separately with ``scripts/track_timing.py``.
 
 The output JSON (``--out``, never overwritten, schema ``maker-arm-lab/ab-read/1``):
 ``inputs`` (the four paths), ``targets``, ``bars``, ``table`` (metric -> ``{"arm1", "arm2",
-"arm3"}`` compared values, null when missing), ``layers`` (``dob`` and ``mlp``: ``{"arm",
+"arm3"}`` compared values, null when missing), ``target_table`` (the same for the target
+values of ``TARGET_METRICS``), ``layers`` (``dob`` and ``mlp``: ``{"arm",
 "against", "adopted", "checks": [{"check", "metric", "value", "ref", "pass", "reason"}]}``,
 ``reason`` one of ``met``, ``failed``, ``missing``) and ``adopted`` (``{"dob", "mlp"}``).
 
@@ -91,8 +104,32 @@ TIP_METRICS = (
 """The metrics with a pooled tip value (``real.motion.UNITS``' non-null ``tip``, pinned)."""
 JOINT_POOL = {"free_residual_rms": "rms", "drag_free": "max", "drag_push": "max"}
 """How a joints-only metric pools its six values into the compared one."""
-TARGET_METRICS = tuple(m for m in METRICS if m != "yield_push_mm")
-"""The metrics a target may name: every one lower-is-better."""
+TARGET_POOL = {
+    "tracking_rms": "joints_max",
+    "stop_sway": "joints_max",
+    "hold_jitter": "joints_max",
+    "free_residual_rms": "joints_max",
+    "yield_free_mm": "tip",
+    "drag_free": "joints_max",
+    "drag_push": "joints_max",
+    "tip_sway": "tip",
+    "flex_share": "tip",
+}
+"""The value a target compares against: the largest joint, or the pooled tip."""
+TARGET_UNITS = {
+    "tracking_rms": "rad",
+    "stop_sway": "rad",
+    "hold_jitter": "rad",
+    "free_residual_rms": "N m",
+    "yield_free_mm": "mm",
+    "drag_free": "N m",
+    "drag_push": "N m",
+    "tip_sway": "mm",
+    "flex_share": "fraction",
+}
+"""The unit of a target, section 5's."""
+TARGET_METRICS = tuple(TARGET_POOL)
+"""The metrics a target may name: every one lower-is-better (all but ``yield_push_mm``)."""
 BARS = ("yield_free_max_mm", "yield_push_min_mm")
 NO_WORSE = ("tracking_rms", "tip_sway")
 ARMS = ("arm1", "arm2", "arm3")
@@ -203,6 +240,19 @@ def value(read: dict, metric: str) -> float | None:
     return max(float(v) for v in joints)
 
 
+def target_value(read: dict, metric: str) -> float | None:
+    """The value a target of ``metric`` compares against (``TARGET_POOL``), None when
+    missing."""
+    entry = read["metrics"][metric]
+    if TARGET_POOL[metric] == "tip":
+        tip = entry.get("tip")
+        return float(tip) if _finite(tip) else None
+    joints = entry.get("joints")
+    if not isinstance(joints, list) or not joints or not all(_finite(v) for v in joints):
+        return None
+    return max(float(v) for v in joints)
+
+
 def _check(check: str, metric: str, val, ref, ok) -> dict:
     if val is None or ref is None:
         passed, reason = False, "missing"
@@ -222,7 +272,8 @@ def _check(check: str, metric: str, val, ref, ok) -> dict:
 def judge(layer: str, arm: dict, before: dict, targets: dict, bars: dict) -> list[dict]:
     """The checks of one layer, ``arm`` against ``before``."""
     checks = [
-        _check("target", m, value(arm, m), t, lambda v, r: v <= r) for m, t in targets.items()
+        _check("target", m, target_value(arm, m), t, lambda v, r: v <= r)
+        for m, t in targets.items()
     ]
     checks.append(
         _check(
@@ -262,6 +313,7 @@ def run(args) -> dict:
     if not (sets["arm1"] == sets["arm2"] == sets["arm3"]):
         raise Failure("trajectory_set", f"the reads differ in their traj labels: {sets}")
     table = {m: {arm: value(reads[arm], m) for arm in ARMS} for m in METRICS}
+    target_table = {m: {arm: target_value(reads[arm], m) for arm in ARMS} for m in TARGET_METRICS}
     layers, adopted = {}, {}
     for layer, arm, against in LAYERS:
         checks = judge(layer, reads[arm], reads[against], targets, bars)
@@ -278,6 +330,7 @@ def run(args) -> dict:
         "targets": targets,
         "bars": bars,
         "table": table,
+        "target_table": target_table,
         "layers": layers,
         "adopted": adopted,
     }

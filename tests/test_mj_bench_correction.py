@@ -41,32 +41,24 @@ def plan():
 PUSHES = [(0.0, 0.0, DT, plan())]
 
 
-def make(k_o, dob, dob_f):
+def make(k_o, dob, dob_f, tau_th=TAU_TH):
     params = {
         "contact": True,
         "k_o": k_o,
         "f_y": F_Y,
-        "tau_th": [TAU_TH] * 6,
+        "tau_th": [tau_th] * 6,
         "dob": dob,
         "dob_f": dob_f,
     }
     return maker_arm_rs.Tracking(EXACT, params=params, profile=SIM)
 
 
-def envelope(q, *, last_s=None, first_hold_s=None):
-    """The peak-to-peak of the joint error over a window, the largest over the joints. The
-    target is constant over both windows, so the error's peak-to-peak is q's. ``last_s``: the
-    last seconds of the run; ``first_hold_s``: the last seconds of the first hold (its start
-    is the controller's own start-up)."""
-    if (last_s is None) == (first_hold_s is None):
-        raise ValueError("give one of last_s and first_hold_s")
+def envelope(q, start_s, end_s):
+    """The peak-to-peak of the joint error over ``[start_s, end_s)``, the largest over the
+    joints. The windows read lie inside a hold, where the target is constant, so the error's
+    peak-to-peak is q's."""
     q = np.asarray(q)
-    if last_s is not None:
-        window = q[-round(last_s / DT) :]
-    else:
-        end = round(HOLD_S / DT)
-        window = q[end - round(first_hold_s / DT) : end]
-    return float(np.ptp(window, axis=0).max())
+    return float(np.ptp(q[round(start_s / DT) : round(end_s / DT)], axis=0).max())
 
 
 def hold_error(trace, last_s=1.0):
@@ -87,24 +79,60 @@ def test_the_bench_trace_carries_the_correction_telemetry():
     assert b0.tau_dob is None and b0.tau_res is None
 
 
+GROWTH_MAX = 1.05
+"""The second hold's envelope over 4.5-5 s may exceed the one over 3.5-4 s by at most 5 %: a
+loop that rings up after the transport fails, one that settles or wanders in place passes."""
+DOB_WANDER_MAX = 8.0  # INITIAL: session 6 reads the real hold
+"""How many times the dob-off run's last-second envelope the dob run's may be. The bench sweep
+reads 2.6 to 5.2 times (5.5 at tau_th 2.0): the compensation chases the 0.2 N m torque noise and
+the plant's unmodelled friction and armature in r, hard enough to break the stiction that holds
+the dob-off arm still (its first hold reads 0.0 mrad peak to peak, the dob runs 3.9 to 6.8
+mrad). The bar catches a wander that grows past today's, not today's."""
+SATURATED = 0.9
+"""A tick whose |tau_dob| is at least this share of tau_th on some joint counts as clamped."""
+SWEEP = [(k_o, dob_f, TAU_TH) for k_o in (25.0, 50.0, 100.0) for dob_f in (2.0, 5.0, 10.0)]
+SWEEP.append((50.0, 5.0, 2.0))
+"""The 3 x 3 sweep at tau_th 0.5 N m, and one point at 2.0 N m, where the clamp is far out of
+reach: the loop is stable without the clamp bounding it."""
+
+
 def test_the_compensation_stays_stable_across_the_sweep():
-    # Bench plant, rung A, tau_th 0.5 N m, hold 2 s then one 1 s transport then hold 2 s.
+    """Bench plant, rung A, hold 2 s then one 1 s transport then hold 2 s. Two checks per
+    point: (a) no growth inside the second hold (``GROWTH_MAX``), and (b) the last second's
+    envelope against the dob-off run's at the same tau_th (``DOB_WANDER_MAX``). The reference
+    is not the first hold with dob on, which the compensation itself inflates. Each point also
+    records the share of ticks with |tau_dob| at ``SATURATED`` x tau_th or more on some joint:
+    0 to 0.4 %, largest |tau_dob| 0.375 to 0.47 N m, so the clamp does not bound these runs,
+    and the tau_th 2.0 point reads like its 0.5 twin. Today's reads: growth 0.47 to 1.004 (the
+    tightest is k_o 100, dob_f 2 Hz), wander 2.6 to 5.2 times the dob-off run's."""
     plant = bench.build_plant()
-    ratios = {}
-    for k_o in (25.0, 50.0, 100.0):
-        for dob_f in (2.0, 5.0, 10.0):
-            trace = bench.run(
-                plant, "A", list(POSE), PUSHES, DURATION_S, tracking=make(k_o, True, dob_f)
-            )
-            assert np.isfinite(trace.q).all()
-            last = envelope(trace.q, last_s=1.0)
-            first = envelope(trace.q, first_hold_s=1.0)
-            ratios[(k_o, dob_f)] = last / first
-            assert last <= first * 1.05, (k_o, dob_f, last, first)
-    print("envelope ratios", {k: round(v, 3) for k, v in ratios.items()})
+    reference = {}
+    for tau_th in sorted({p[2] for p in SWEEP}):
+        off = bench.run(
+            plant, "A", list(POSE), PUSHES, DURATION_S, tracking=make(50.0, False, 5.0, tau_th)
+        )
+        reference[tau_th] = envelope(off.q, DURATION_S - 1.0, DURATION_S)
+        assert reference[tau_th] > 0.0
+    rows = {}
+    for k_o, dob_f, tau_th in SWEEP:
+        trace = bench.run(
+            plant, "A", list(POSE), PUSHES, DURATION_S, tracking=make(k_o, True, dob_f, tau_th)
+        )
+        assert np.isfinite(trace.q).all()
+        growth = envelope(trace.q, 4.5, 5.0) / envelope(trace.q, 3.5, 4.0)
+        wander = envelope(trace.q, DURATION_S - 1.0, DURATION_S) / reference[tau_th]
+        saturated = float((np.abs(trace.tau_dob) >= SATURATED * tau_th).any(axis=1).mean())
+        rows[(k_o, dob_f, tau_th)] = (round(growth, 3), round(wander, 2), saturated)
+        assert growth <= GROWTH_MAX, (k_o, dob_f, tau_th, growth)
+        assert wander <= DOB_WANDER_MAX, (k_o, dob_f, tau_th, wander)
+    print("(k_o, dob_f, tau_th): (growth, wander vs dob off, saturated share)", rows)
 
 
 def test_the_compensation_lowers_the_hold_error_under_unmodeled_friction():
+    """The plant with 0.15 N m more dry friction on every joint than any model of it, k_o 50,
+    dob_f 5 Hz, f_y 1.5 Hz (not the SDK's 2.0, see ``F_Y``). The RMS distance to the target
+    over the last second reads 4.16 mrad without dob and 1.68 with it (seed 0; seeds 1 and 2
+    read 4.21 / 2.71 and 4.29 / 2.28)."""
     plant = bench.build_plant(extra_coulomb=0.15)
     errors = {}
     for dob in (False, True):
@@ -112,6 +140,22 @@ def test_the_compensation_lowers_the_hold_error_under_unmodeled_friction():
         errors[dob] = hold_error(trace)
     print("hold error rad: without dob", errors[False], "with dob", errors[True])
     assert errors[True] < errors[False], errors
+
+
+def test_the_compensation_on_the_default_plant_is_recorded():
+    """The companion read on the plant whose friction is only the bench's (``COULOMB_NM``),
+    same settings (f_y 1.5 Hz). Here the compensation does not help: the final hold error reads
+    1.05 to 1.09 mrad without dob and 1.6 to 2.3 with it (seeds 0 to 2), and dob adds hold
+    wander (the sweep's ``DOB_WANDER_MAX``). Recorded, not asserted in its direction: pinning a
+    defect would fail the day a better compensation fixes it. The test checks that both reads
+    are finite and stay under 5 mrad, and prints them."""
+    plant = bench.build_plant()
+    errors = {}
+    for dob in (False, True):
+        trace = bench.run(plant, "A", list(POSE), PUSHES, DURATION_S, tracking=make(50.0, dob, 5.0))
+        errors[dob] = hold_error(trace)
+    print("default plant hold error rad: without dob", errors[False], "with dob", errors[True])
+    assert all(np.isfinite(e) and e < 0.005 for e in errors.values()), errors
 
 
 @pytest.fixture(scope="module")

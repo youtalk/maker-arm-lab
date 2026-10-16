@@ -14,7 +14,8 @@ from helpers import ROOT, load_script
 SCRIPT = ROOT / "scripts" / "real_ab_read.py"
 TOKENS = ("AB_OK", "AB_FAIL")
 BARS = {"yield_free_max_mm": 0.5, "yield_push_min_mm": 2.0}
-TARGETS = {"hold_jitter": 0.05, "stop_sway": 0.3, "free_residual_rms": 0.2}
+TARGETS = {"hold_jitter": 0.002, "stop_sway": 0.005, "free_residual_rms": 0.2, "tip_sway": 0.5}
+"""In section 5's units: rad for the motor metrics, N m for the residual, mm at the tip."""
 
 
 def _run(args, timeout=60):
@@ -48,17 +49,19 @@ def motion_read(
     yield_free=0.1,
     yield_push=3.0,
     tip_sway=0.25,
+    hold_joints=None,
     labels=("a.npz", "b.npz"),
 ):
     """A ``maker-arm-lab/motion-read/2`` read with the pooled tip values given (mm), the
-    free residual on every joint (N m), and one traj segment per label."""
+    free residual on every joint (N m), 0.001 rad on every motor joint (``hold_joints`` six
+    for ``hold_jitter``), and one traj segment per label."""
     six = [0.001] * 6
     return {
         "schema": "maker-arm-lab/motion-read/2",
         "metrics": {
             "tracking_rms": _metric(six, tracking),
             "stop_sway": _metric(six, stop),
-            "hold_jitter": _metric(six, hold),
+            "hold_jitter": _metric(six if hold_joints is None else hold_joints, hold),
             "free_residual_rms": _metric(None if residual is None else [residual] * 6),
             "yield_free_mm": _metric(six, yield_free),
             "yield_push_mm": _metric(six, yield_push),
@@ -136,17 +139,31 @@ def test_the_ab_read_rejects_a_layer_that_breaks_the_push_yield(tmp_path):
 
 def test_a_layer_must_meet_every_target_and_be_no_worse(tmp_path):
     arm1 = motion_read(tracking=0.8, tip_sway=0.25)
-    arm2 = motion_read(tracking=0.81, hold=0.06)  # worse tracking, a target missed
+    arm2 = motion_read(tracking=0.81, tip_sway=0.6)  # worse tracking, a target missed
     arm3 = motion_read(tracking=0.81, residual=0.15)  # not lower than arm 2's
     code, token, out = _ab(tmp_path, arm1, arm2, arm3)
     assert code == 0 and _payload(token)["adopted"] == {"dob": False, "mlp": False}
     body = json.loads(out.read_text())
     dob, mlp = _failed(body, "dob"), _failed(body, "mlp")
     assert dob[("no_worse", "tracking_rms")] == "failed"
-    assert dob[("target", "hold_jitter")] == "failed"
-    assert dob[("no_worse", "tip_sway")] == "met"
+    assert dob[("target", "tip_sway")] == "failed"
+    assert dob[("target", "hold_jitter")] == "met"
     assert mlp[("lower", "free_residual_rms")] == "failed"
     assert mlp[("no_worse", "tracking_rms")] == "met"
+
+
+def test_a_motor_target_reads_the_largest_joint_in_rad(tmp_path):
+    # 9 mm of hold jitter at the tip does not matter to a rad target; one joint over it does.
+    arm2 = motion_read(hold=9.0)
+    arm3 = motion_read(residual=0.10, hold_joints=[0.001] * 5 + [0.003])
+    code, token, out = _ab(tmp_path, motion_read(), arm2, arm3)
+    assert code == 0 and _payload(token)["adopted"] == {"dob": True, "mlp": False}
+    body = json.loads(out.read_text())
+    (hold,) = [c for c in body["layers"]["mlp"]["checks"] if c["metric"] == "hold_jitter"]
+    assert hold["value"] == pytest.approx(0.003) and hold["ref"] == 0.002
+    assert not hold["pass"] and hold["reason"] == "failed"
+    assert body["target_table"]["hold_jitter"]["arm3"] == pytest.approx(0.003)
+    assert body["table"]["hold_jitter"]["arm2"] == 9.0  # the tip value, for the record
 
 
 def test_a_missing_value_fails_its_check_and_never_passes(tmp_path):
@@ -225,3 +242,7 @@ def test_the_metric_copies_match_the_motion_read():
     assert mod.IN_SCHEMA == motion.SCHEMA
     assert set(mod.TIP_METRICS) == {m for m, u in motion.UNITS.items() if u["tip"] is not None}
     assert set(mod.JOINT_POOL) == set(mod.METRICS) - set(mod.TIP_METRICS)
+    assert set(mod.TARGET_POOL) == set(mod.TARGET_UNITS) == set(mod.METRICS) - {"yield_push_mm"}
+    for metric, pool in mod.TARGET_POOL.items():
+        side = "tip" if pool == "tip" else "joints"
+        assert mod.TARGET_UNITS[metric] == motion.UNITS[metric][side], metric
