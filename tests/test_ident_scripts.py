@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import numpy as np
 import pytest
@@ -328,3 +329,64 @@ def test_the_gripper_map_script_ends_with_the_input_holding_the_arm(tmp_path):
     tokens = [x for x in out.stdout.splitlines() if x.startswith(TOKENS)]
     assert out.returncode == 1 and len(tokens) == 1, out.stderr
     assert _payload(tokens[0])["reason"] == "end_of_input"
+
+
+def test_the_gripper_map_script_refuses_a_real_interface_before_connect(tmp_path):
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "AMENT_PREFIX_PATH")}
+    args = ["--rig", _rig(tmp_path), "--angles", 3, "--interface", "vcan0"]
+    args += ["--rig_out", tmp_path / "o.json", "--release", "now"]
+    out = subprocess.run(
+        [sys.executable, str(GRIPPER), *map(str, args)],
+        capture_output=True, text=True, env=env, input="", timeout=120, check=False,
+    )  # fmt: skip
+    tokens = [x for x in out.stdout.splitlines() if x.startswith(TOKENS)]
+    assert out.returncode == 1 and len(tokens) == 1, out.stderr
+    payload = _payload(tokens[0])
+    assert payload["reason"] == "joint_frame" and "motor frame" in payload["detail"]
+    assert not (tmp_path / "o.json").exists()
+
+
+def test_the_gripper_map_script_runs_the_scaled_error_clamp(tmp_path, monkeypatch):
+    gripper = load_script(GRIPPER)
+    rig = _rig(tmp_path, caps={"kp": [0.5] * 7})
+    args = gripper.build_parser().parse_args(
+        ["--rig", str(rig), "--angles", "3", "--interface", "sim", "--rig_out", "x.json"]
+    )
+    assert gripper.prepare(args)["params"]["e_max"] == pytest.approx([0.06] * 6)
+
+
+def test_sigterm_at_a_gripper_question_holds_the_arm_and_prints_one_token(tmp_path):
+    import signal
+
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "AMENT_PREFIX_PATH")}
+    args = ["--rig", _rig(tmp_path), "--angles", 3, "--interface", "sim"]
+    args += ["--rig_out", tmp_path / "o.json"]
+    proc = subprocess.Popen(
+        [sys.executable, str(GRIPPER), *map(str, args)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        err = []
+        while True:
+            line = proc.stderr.readline()
+            assert line, "".join(err)
+            err.append(line)
+            if "then Enter" in line:
+                break
+        proc.send_signal(signal.SIGTERM)
+        line = proc.stdout.readline()
+        assert line.startswith("GRIPPER_MAP_FAIL"), "".join(err)
+        assert _payload(line)["reason"] == "interrupted" and "SIGTERM" in _payload(line)["detail"]
+        time.sleep(0.3)
+        assert proc.poll() is None  # the arm holds until the operator types RELEASE
+        proc.stdin.write("RELEASE\n")
+        proc.stdin.flush()
+        assert proc.wait(timeout=30) == 1
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert [x for x in proc.stdout.read().splitlines() if x.startswith(TOKENS)] == []

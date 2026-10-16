@@ -77,14 +77,31 @@ class RigConfig:
 
     @classmethod
     def from_json(cls, path) -> RigConfig:
+        """The rig at ``path``. ValueError for an unknown key or a ``gripper_map`` that is
+        not two finite numbers with a nonzero slope."""
         data = json.loads(Path(path).read_text())
         unknown = set(data) - {f.name for f in fields(cls)}
         if unknown:
             raise ValueError(f"unknown rig keys {sorted(unknown)}")
+        if data.get("gripper_map") is not None:
+            check_gripper_map(data["gripper_map"])
         return cls(**{k: tuple(v) if isinstance(v, list) else v for k, v in data.items()})
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
+
+
+def check_gripper_map(value) -> tuple[float, float]:
+    """``gap = a * angle + b`` as ``(a, b)``; ValueError unless both are finite numbers and
+    ``a != 0`` (a flat line cannot be inverted to a command, ``real.arm.gripper_angle_of``)."""
+    if isinstance(value, (str, bytes)) or not hasattr(value, "__len__") or len(value) != 2:
+        raise ValueError(f"gripper_map needs [a, b], got {value!r}")
+    for i, v in enumerate(value):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError(f"gripper_map[{i}] = {v!r} is not a finite number")
+    if value[0] == 0:
+        raise ValueError("gripper_map has slope a = 0: the line cannot be inverted")
+    return float(value[0]), float(value[1])
 
 
 def _seven(name: str, values) -> list[float]:

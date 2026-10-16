@@ -20,8 +20,12 @@ angles, gaps_mm}`` or ``GRIPPER_MAP_FAIL {reason, detail}`` line on every exit p
 through ``os._exit``. The arm session is ``scripts/real_session.py``'s: a failure (a fault,
 Ctrl-C, an exception, the end of input at a question) holds the arm, and the motors are
 disabled only on the operator's typed ``RELEASE`` or at the end of input (``--release
-prompt``, the default) or at once (``--release now``, for tests). A person stands at the
-e-stop.
+prompt``, the default) or at once (``--release now``, for tests). Ctrl-C, SIGTERM and SIGHUP
+take the session's path (``real_session.make_sigint_handler``). The gripper moves only through
+the tracking controller, so ruling R32 refuses a real interface (anything but ``sim``) before
+connect while the rig's calibration is the identity (``real_session.check_real_interface``,
+which also refuses a non-terminal input there, ruling R34); the controller's ``e_max`` follows
+the caps (ruling R33, ``real.rig.session_tracking_params``). A person stands at the e-stop.
 """
 
 import argparse
@@ -29,7 +33,6 @@ import dataclasses
 import json
 import math
 import os
-import signal
 import sys
 import traceback
 from pathlib import Path
@@ -72,7 +75,8 @@ class NullLog:
     """The session machinery's log surface, with nothing kept: a gripper map is not logged."""
 
     def __init__(self):
-        self.ticks = self.dropped = 0
+        self.ticks = self.dropped = self.late_ticks = 0
+        self.max_interval_s = 0.0
 
     def append(self, ticks, tracking, mono_ns=None) -> None:
         if ticks and ticks.get("t"):
@@ -123,7 +127,7 @@ def parse_gap_mm(text: str) -> float | None:
 def prepare(args) -> dict:
     """Everything short of the arm, checked. Raises SessionFailure."""
     from maker_arm_lab.core import dynamics_model as dm
-    from maker_arm_lab.real.rig import RigConfig, reduced_profile
+    from maker_arm_lab.real.rig import RigConfig, reduced_profile, session_tracking_params
 
     fail = real_session.SessionFailure
     rig_path = Path(args.rig).expanduser()
@@ -135,6 +139,12 @@ def prepare(args) -> dict:
         profile = reduced_profile(rig)
     except (TypeError, ValueError) as err:
         raise fail("profile", str(err)) from err
+    interface = args.interface or rig.can_interface
+    rs.check_real_interface(interface, "tracking")
+    try:
+        params = session_tracking_params(rig, dict(rig.tracking_params))
+    except (TypeError, ValueError) as err:
+        raise fail("params", str(err)) from err
     if args.angles < 2:
         raise fail("angles", f"--angles needs at least 2, got {args.angles}")
     out_path = Path(args.rig_out).expanduser()
@@ -145,13 +155,12 @@ def prepare(args) -> dict:
     hi -= real_session.TRAJ_MARGIN_RAD
     if not lo < hi:
         raise fail("profile", f"the gripper range {lo}..{hi} rad is empty")
-    interface = args.interface or rig.can_interface
     rt = None if interface == "sim" or rig.rt is None else (int(rig.rt[0]), int(rig.rt[1]))
     return {
         "rig": rig,
         "profile": profile,
         "dynamics": dm.dynamics(dm.urdf_bodies()),
-        "params": dict(rig.tracking_params),
+        "params": params,
         "interface": interface,
         "rt": rt,
         "out_path": out_path,
@@ -241,7 +250,8 @@ def _run(args, world: dict, phase: list) -> int:
         token = "GRIPPER_MAP_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail})
         code = 1
     except KeyboardInterrupt:
-        token = "GRIPPER_MAP_FAIL " + json.dumps({"reason": "interrupted", "detail": "Ctrl-C"})
+        detail = world.get("signal", "Ctrl-C (SIGINT)")
+        token = "GRIPPER_MAP_FAIL " + json.dumps({"reason": "interrupted", "detail": detail})
         code = 1
     except Exception as err:  # noqa: BLE001 -- any uncaught error must still print a token
         detail = f"{err}\n{traceback.format_exc()}"
@@ -258,11 +268,11 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     world: dict = {}
     phase = ["setup"]
-    previous = signal.signal(signal.SIGINT, rs.make_sigint_handler(world, phase))
+    previous = rs.install_signal_handlers(rs.make_sigint_handler(world, phase))
     try:
         return _run(args, world, phase)
     finally:
-        signal.signal(signal.SIGINT, previous)
+        rs.restore_signal_handlers(previous)
 
 
 if __name__ == "__main__":

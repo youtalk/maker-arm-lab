@@ -698,6 +698,8 @@ def test_sigterm_and_sighup_hold_the_arm_and_print_one_token(tmp_path, signum):
     assert _tokens(proc.stdout.read()) == []
     with h5py.File(log) as f:
         assert f["t"].shape[0] >= 0.9 * HZ * 1.5
+
+
 def _ident_file(tmp_path, armature=0.02):
     from maker_arm_lab.core import dynamics_model as dm
 
@@ -719,13 +721,14 @@ def test_an_ident_file_is_the_controllers_model_and_is_logged(tmp_path, monkeypa
     ident = _ident_file(tmp_path)
     seen = {}
 
-    def connect(interface, dynamics, profile, params, rt):
+    def connect(interface, dynamics, profile, params, rt, controller):
         seen["dynamics"] = dynamics
         raise ValueError("stop here")
 
     monkeypatch.setattr(real_session, "connect_arm", connect)
     plan = _plan(tmp_path, [{"hold": 0.2}])
     argv = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--dynamics", str(ident)]
+    argv += ["--interface", "sim"]
     code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--release", "now"])
     assert code == 1 and _payload(_tokens(capsys.readouterr().out)[0])["reason"] == "profile"
     args = ([0.1] * 6, [0.3] * 6, [1.0] * 6)
@@ -758,7 +761,18 @@ def test_a_bad_ident_file_prints_session_fail_before_connect(tmp_path, monkeypat
     plan = _plan(tmp_path, [{"hold": 0.2}])
     for dynamics in (str(bad), str(tmp_path / "missing.json")):
         argv = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--dynamics", dynamics]
+        argv += ["--interface", "sim"]
         code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--release", "now"])
         payload = _payload(_tokens(capsys.readouterr().out)[0])
         assert code == 1 and payload["reason"] == "dynamics" and dynamics in payload["detail"]
     assert not (tmp_path / "s.h5").exists()
+
+
+def test_the_hold_controller_refuses_an_ident_model(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(real_session, "connect_arm", _never_connect)
+    plan = _plan(tmp_path, [{"hold": 0.2}])
+    argv = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--interface", "sim"]
+    argv += ["--dynamics", str(_ident_file(tmp_path)), "--controller", "hold"]
+    code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--release", "now"])
+    payload = _payload(_tokens(capsys.readouterr().out)[0])
+    assert code == 1 and payload["reason"] == "dynamics" and "no model" in payload["detail"]
