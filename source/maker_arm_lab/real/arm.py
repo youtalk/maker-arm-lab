@@ -145,10 +145,15 @@ class SdkArm:
         profile: dict | None = None,
         params: dict | None = None,
         rt=None,
+        residual: dict | None = None,
     ):
+        """``residual`` is the SDK's learned residual dict (``models.residual.export``), None
+        for none."""
         self.arm = arm
         self.profile = profile if profile is not None else maker_arm_rs.profile()
-        self.tracking = maker_arm_rs.Tracking(dynamics, params=params, profile=self.profile)
+        self.tracking = maker_arm_rs.Tracking(
+            dynamics, params=params, profile=self.profile, residual=residual
+        )
         self.rt = None if rt is None else (int(rt[0]), int(rt[1]))
 
     @classmethod

@@ -649,7 +649,7 @@ def test_a_real_hold_session_on_a_terminal_reaches_the_arm(tmp_path, monkeypatch
     arm = FakeSdk()
     seen = {}
 
-    def connect(interface, dynamics, profile, params, rt, controller):
+    def connect(interface, dynamics, profile, params, rt, controller, residual=None):
         seen.update(interface=interface, controller=controller, dynamics=dynamics)
         return arm
 
@@ -721,7 +721,7 @@ def test_an_ident_file_is_the_controllers_model_and_is_logged(tmp_path, monkeypa
     ident = _ident_file(tmp_path)
     seen = {}
 
-    def connect(interface, dynamics, profile, params, rt, controller):
+    def connect(interface, dynamics, profile, params, rt, controller, residual=None):
         seen["dynamics"] = dynamics
         raise ValueError("stop here")
 
@@ -776,3 +776,71 @@ def test_the_hold_controller_refuses_an_ident_model(tmp_path, monkeypatch, capsy
     code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--release", "now"])
     payload = _payload(_tokens(capsys.readouterr().out)[0])
     assert code == 1 and payload["reason"] == "dynamics" and "no model" in payload["detail"]
+
+
+def _residual_file(tmp_path, name="residual.json", **change):
+    """A small exported residual model (``models.residual.export``) of history 2."""
+    import torch
+
+    from maker_arm_lab.models import residual
+
+    torch.manual_seed(0)
+    n_in = residual.n_inputs(2)
+    stats = {
+        "x_mean": np.zeros(n_in),
+        "x_std": np.full(n_in, 10.0),  # the sim's 35 degC and its q stay inside X_BOUND
+        "y_mean": np.zeros(6),
+        "y_std": np.full(6, 0.01),
+    }
+    path = tmp_path / name
+    spec = residual.export(residual.ResidualMlp(n_in, hidden=(8,)), stats, 2, None, path)
+    if change:
+        path.unlink()
+        path.write_text(json.dumps({**spec, **change}))
+    return path
+
+
+def test_a_sim_session_with_a_residual_model_runs_it_and_records_it(tmp_path):
+    model = _residual_file(tmp_path)
+    plan = _plan(tmp_path, [{"hold": 0.3}])
+    log = tmp_path / "s.h5"
+    code, tokens, err = _run(
+        ["--rig", _rig(tmp_path), "--plan", plan, "--interface", "sim", "--log", log]
+        + ["--residual", model],
+        stdin="RELEASE\n",
+    )
+    assert code == 0 and tokens[0].startswith("SESSION_OK"), err
+    with h5py.File(log) as f:
+        assert f.attrs["residual"] == str(model)
+        assert json.loads(f.attrs["residual_model"]) == json.loads(model.read_text())
+        tau_res = f["trk/tau_res"][:]
+        skips = f["trk/residual_skips"][:]
+    # the first tick fills the history of two, then the model acts on every tick
+    assert np.all(np.abs(tau_res[5:]).max(axis=1) > 0.0) and skips[-1] <= 2
+
+
+def test_a_session_without_a_residual_records_none(tmp_path):
+    plan = _plan(tmp_path, [{"hold": 0.2}])
+    log = tmp_path / "s.h5"
+    code, _, err = _run(
+        ["--rig", _rig(tmp_path), "--plan", plan, "--interface", "sim", "--log", log],
+        stdin="RELEASE\n",
+    )
+    assert code == 0, err
+    with h5py.File(log) as f:
+        assert f.attrs["residual"] == "" and json.loads(f.attrs["residual_model"]) is None
+        assert not np.any(f["trk/tau_res"][:])
+
+
+def test_a_bad_residual_model_prints_session_fail_before_connect(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(real_session, "connect_arm", _never_connect)
+    unknown = _residual_file(tmp_path, "unknown.json", y_mean=[0.0] * 6)
+    short = _residual_file(tmp_path, "short.json", history=3)  # 2-tick layers, 3-tick history
+    plan = _plan(tmp_path, [{"hold": 0.2}])
+    for model in (unknown, short, tmp_path / "missing.json"):
+        argv = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--residual", str(model)]
+        argv += ["--interface", "sim"]
+        code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--release", "now"])
+        payload = _payload(_tokens(capsys.readouterr().out)[0])
+        assert code == 1 and payload["reason"] == "residual" and str(model) in payload["detail"]
+    assert not (tmp_path / "s.h5").exists()

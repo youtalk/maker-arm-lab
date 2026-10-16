@@ -13,23 +13,27 @@ rig's ``caps`` and ``calibration`` make the profile (``real.rig.reduced_profile`
 ``rt`` the loop's SCHED_FIFO priority and core (not on the simulator). ``--dynamics`` is the
 controller's model: ``urdf`` (the default) or the path of an identification file
 (``scripts/real_ident.py``, read by ``core.dynamics_model.from_ident``); the log records the
-choice and the file's content. ``tracking_params`` gets ``e_max`` by ruling R33
-(``real.rig.session_tracking_params``): the error clamp widens as the caps cut kp, so the
-spring's most torque, kp * e_max, stays the profile's.
+choice and the file's content. ``--residual MODEL.json`` adds the learned residual torque
+(``scripts/real_residual_train.py``, the SDK's residual dict) to the controller; the log
+records its path and content (attrs ``residual`` and ``residual_model``). ``tracking_params``
+gets ``e_max`` by ruling R33 (``real.rig.session_tracking_params``): the error clamp widens as
+the caps cut kp, so the spring's most torque, kp * e_max, stays the profile's.
 
 ``--controller tracking`` (the default) runs ``maker_arm_rs.Tracking`` with the model;
 ``--controller hold`` runs the SDK's hold controller (``real.arm.SdkHoldArm``: no model, PD at
-the start pose, the drain still logged) and refuses a plan with a ``traj`` segment and a
-``--dynamics`` other than ``urdf``. Ruling R32: on a real interface (anything but ``sim``) the
-tracking controller is refused before connect while the rig's calibration is the identity,
-the only one ``reduced_profile`` accepts: the model works in URDF joint coordinates, the
-identity feeds it the motor frame's angles. A real session also refuses an input that is not a
-terminal (ruling R34): the end of input releases the arm, so a pipe that ends would let it go.
+the start pose, the drain still logged) and refuses a plan with a ``traj`` segment, a
+``--dynamics`` other than ``urdf`` and a ``--residual``. Ruling R32: on a real interface
+(anything but ``sim``) the tracking controller is refused before connect while the rig's
+calibration is the identity, the only one ``reduced_profile`` accepts: the model works in URDF
+joint coordinates, the identity feeds it the motor frame's angles. A real session also refuses
+an input that is not a terminal (ruling R34): the end of input releases the arm, so a pipe
+that ends would let it go.
 
 The plan format is ``real.session``'s docstring. Every check that can fail (the rig, the
 profile, the controller and the interface, the plan, each trajectory's ``check_traj``, the
-ident file, the log path) runs before the arm is enabled; the SDK checks the profile again
-when it connects. The script never writes the rig JSON and never overwrites a log.
+ident file, the residual model, the log path) runs before the arm is enabled; the SDK checks
+the profile again when it connects. The script never writes the rig JSON and never overwrites
+a log.
 
 It prints exactly one ``SESSION_OK {segments, ticks, dropped, faults, ...}`` or
 ``SESSION_FAIL {reason, detail}`` line on every exit path and exits through ``os._exit``. A
@@ -90,6 +94,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--dynamics", default=URDF, help="'urdf' or the path of an ident JSON (real_ident.py)"
     )
     parser.add_argument("--params", default="", help="JSON of tracking parameters to override")
+    parser.add_argument(
+        "--residual", default="", help="a residual model JSON (real_residual_train.py)"
+    )
     parser.add_argument("--release", choices=("prompt", "now"), default="prompt")
     parser.add_argument(
         "--controller",
@@ -179,7 +186,7 @@ def prepare(args) -> dict:
         if not isinstance(override, dict):
             raise fail("params", f"{args.params}: the file must hold an object")
         params.update(override)
-    dynamics, ident = None, None
+    dynamics, ident, residual = None, None, None
     if tracking:
         try:
             params = session_tracking_params(rig, params)
@@ -199,9 +206,19 @@ def prepare(args) -> dict:
             maker_arm_rs.Tracking(dynamics, params=params, profile=profile)
         except (TypeError, ValueError) as err:
             raise fail("params", str(err)) from err
+        if args.residual:
+            residual_path = Path(args.residual).expanduser()
+            try:
+                residual = json.loads(residual_path.read_text())
+                # The SDK refuses a malformed model (a missing or unknown key, a shape) here.
+                maker_arm_rs.Tracking(dynamics, params=params, profile=profile, residual=residual)
+            except (OSError, ValueError, TypeError) as err:
+                raise fail("residual", f"{args.residual}: {err}") from err
     else:
         if args.dynamics != URDF:
             raise fail("dynamics", f"{args.dynamics}: the hold controller runs no model")
+        if args.residual:
+            raise fail("residual", f"{args.residual}: the hold controller runs no model")
         params = None
     if not tracking:
         dynamics_label = "none"
@@ -223,6 +240,8 @@ def prepare(args) -> dict:
         "tracking_params": params,
         "dynamics": dynamics_label,
         "dynamics_ident": ident,
+        "residual": str(Path(args.residual).expanduser()) if args.residual else "",
+        "residual_model": residual,
         "interface": interface,
         "rt": rt,
         "control_hz": real_session.CONTROL_HZ,
@@ -236,6 +255,7 @@ def prepare(args) -> dict:
         "params": params,
         "dynamics": dynamics,
         "controller": args.controller,
+        "residual": residual,
         "interface": interface,
         "rt": rt,
         "log_path": log_path,
@@ -243,15 +263,19 @@ def prepare(args) -> dict:
     }
 
 
-def connect_arm(interface: str, dynamics, profile: dict, params, rt, controller="tracking"):
-    """The SDK arm, connected and not enabled: ``SdkArm`` (tracking) or ``SdkHoldArm``
-    (hold). The SDK refuses a loosened profile here with ValueError, and a bad parameter set
-    when it builds the controller."""
+def connect_arm(
+    interface: str, dynamics, profile: dict, params, rt, controller="tracking", residual=None
+):
+    """The SDK arm, connected and not enabled: ``SdkArm`` (tracking, with ``residual`` if
+    given) or ``SdkHoldArm`` (hold). The SDK refuses a loosened profile here with ValueError,
+    and a bad parameter set or residual model when it builds the controller."""
     from maker_arm_lab.real.arm import SdkArm, SdkHoldArm
 
     if controller == "hold":
         return SdkHoldArm.connect(interface, profile=profile, rt=rt)
-    return SdkArm.connect(interface, dynamics, profile=profile, params=params, rt=rt)
+    return SdkArm.connect(
+        interface, dynamics, profile=profile, params=params, rt=rt, residual=residual
+    )
 
 
 def hold_on_controller(sdk) -> bool:
@@ -402,7 +426,7 @@ def _run(args, world: dict, phase: list) -> int:
             try:
                 world["arm"] = connect_arm(
                     ready["interface"], ready["dynamics"], ready["profile"], ready["params"],
-                    ready["rt"], ready["controller"],
+                    ready["rt"], ready["controller"], residual=ready["residual"],
                 )  # fmt: skip
             except ValueError as err:
                 raise real_session.SessionFailure("profile", str(err)) from err
