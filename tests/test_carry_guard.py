@@ -393,7 +393,7 @@ def test_the_rollout_and_the_client_refuse_the_release_handoff_without_the_guard
         _rollout(env, rig, policy, budget=budget, perceived=True, release_handoff=True)
     env.close()
     assert err.value.reason == "release_handoff"
-    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    module = load_script("mj_eval_heap")
     with pytest.raises(SystemExit) as exit_info:
         module.main(HEAP + ["--perceived", "--release_handoff"])
     assert exit_info.value.code == 2
@@ -598,7 +598,7 @@ def test_the_supervisor_forwards_the_guard_margin_and_splits_the_cache_on_it(tmp
 def test_the_release_handoff_reaches_the_rollout_and_splits_the_supervisors_cache(
     tmp_path, monkeypatch, capsys
 ):
-    module = _load(ROOT / "scripts" / "mj_eval_heap.py")
+    module = load_script("mj_eval_heap")
     monkeypatch.setattr(module.policy_client, "ServerPolicy", lambda server: _Policy())
     real_env = module.MjLegoSortEnv
     monkeypatch.setattr(
