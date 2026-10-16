@@ -328,6 +328,79 @@ def test_a_margin_past_the_boxs_half_width_guards_the_teachers_centre_release(mo
         assert err.value.reason == "guard_margin", kwargs
 
 
+def test_only_a_guard_step_on_the_rim_band_hands_the_carry_off_at_once():
+    margin = 0.025
+    rim, deep, out = _at(0.045 - 0.020, 0.0), _at(0.0, 0.0), _at(0.0, 0.040)
+    assert loop.rim_handoff_due(True, True, rim, BOX, SIZE, margin)
+    for on, guarded, xy in (
+        (True, True, deep),  # deep enough: the guard lets the jaws open
+        (True, True, out),  # off the interior: the guard holds the jaws to its stall
+        (True, False, rim),  # no guard step, or a pending vote's
+        (False, True, rim),  # the switch off
+    ):
+        assert loop.rim_handoff_due(on, guarded, xy, BOX, SIZE, margin) is False, (on, guarded)
+
+
+def _without_rim(payload: dict) -> dict:
+    """The payload less the switch's flag and census field."""
+    assert payload["inference"]["loop"].pop("release_handoff") is True
+    for row in payload["episodes"][0]["cycle_census"]:
+        row.pop("release_handoff")
+    return payload
+
+
+def test_a_release_on_the_rim_band_goes_to_the_rig_at_once(monkeypatch):
+    """At zero noise the teacher opens over its box centre. Under a 0.2 m margin each such open is
+    a rim step: off, the guard holds it GUARD_STALL_STEPS steps before the stall hands the part to
+    the rig; on, the first rim step hands it over, the rig places it, and the episode ends
+    all_stowed during the last carry. At the default margin the centre is deep, so the switch
+    changes no step and no payload byte but its own two."""
+    switches = {"noise_scales": ZERO, "carry_guard": True}
+    off, _ = _run(_teacher_scene, monkeypatch, **switches, guard_margin=0.2)
+    on, _ = _run(_teacher_scene, monkeypatch, **switches, guard_margin=0.2, release_handoff=True)
+    assert "release_handoff" not in off["inference"]["loop"]
+    off_handed = [row for row in off["episodes"][0]["cycle_census"] if row["handoff"]]
+    assert off_handed and all(row["guard_steps"] >= loop.GUARD_STALL_STEPS for row in off_handed)
+    assert "release_handoff" not in off_handed[0]
+    ep = on["episodes"][0]
+    rows = ep["cycle_census"]
+    assert all(row["release_handoff"] and row["guard_steps"] == 1 for row in rows), rows
+    assert all(row["guard_rim_steps"] == 1 for row in rows)
+    assert [row["handoff"] for row in rows] == ["placed"] * (len(rows) - 1) + ["carrying"]
+    assert ep["done_reason"] == "all_stowed"
+    assert ep["bricks_stowed"] > off["episodes"][0]["bricks_stowed"]
+    assert on["inference"]["loop"]["release_handoff"] is True
+    base, base_served = _run(_teacher_scene, monkeypatch, **switches)
+    same, same_served = _run(_teacher_scene, monkeypatch, **switches, release_handoff=True)
+    assert not any(row["release_handoff"] for row in same["episodes"][0]["cycle_census"])
+    assert _without_rim(same) == base and _same(same_served, base_served)
+
+
+def test_a_drop_off_every_box_keeps_the_stall_with_the_switch_on(monkeypatch):
+    """The carry scene's teacher opens away from every box: no rim step, so the guard holds each
+    open to its stall as without the switch, and only the switch's two payload entries differ."""
+    off, off_served = _run(_carry_scene, monkeypatch)
+    on, on_served = _run(_carry_scene, monkeypatch, release_handoff=True)
+    assert not any(row["release_handoff"] for row in on["episodes"][0]["cycle_census"])
+    assert _without_rim(on) == off and _same(on_served, off_served)
+
+
+def test_the_rollout_and_the_client_refuse_the_release_handoff_without_the_guard(
+    monkeypatch, capsys
+):
+    env, rig, policy, budget, _ = _teacher_scene(monkeypatch)
+    with pytest.raises(loop.EvalFailure) as err:
+        _rollout(env, rig, policy, budget=budget, perceived=True, release_handoff=True)
+    env.close()
+    assert err.value.reason == "release_handoff"
+    module = load_script("mj_eval_heap")
+    with pytest.raises(SystemExit) as exit_info:
+        module.main(HEAP + ["--perceived", "--release_handoff"])
+    assert exit_info.value.code == 2
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1 and out[0].startswith("EVAL_FAIL ") and "--carry_guard" in out[0], out
+
+
 def test_a_pending_vote_serves_no_box_so_the_part_goes_where_the_vote_moves_it(
     tmp_path, monkeypatch
 ):
@@ -520,3 +593,84 @@ def test_the_supervisor_forwards_the_guard_margin_and_splits_the_cache_on_it(tmp
     on = recorded | {"guard_margin": 0.02}
     assert hit(cfg, on) and not hit(plain, on)
     assert not hit(cfg, recorded | {"guard_margin": 0.03})
+
+
+def test_the_release_handoff_reaches_the_rollout_and_splits_the_supervisors_cache(
+    tmp_path, monkeypatch, capsys
+):
+    module = load_script("mj_eval_heap")
+    monkeypatch.setattr(module.policy_client, "ServerPolicy", lambda server: _Policy())
+    real_env = module.MjLegoSortEnv
+    monkeypatch.setattr(
+        module, "MjLegoSortEnv", lambda *a, **k: real_env(*a, **{**k, "cameras": False})
+    )
+    seen = []
+
+    def run(env, rig, policy, **kwargs):
+        seen.append(kwargs)
+        return {}
+
+    guard = ["--perceived", "--carry_guard", "--guard_margin", "0.025"]
+    for argv, on in ((guard + ["--release_handoff"], True), (guard, False)):
+        assert module.main(HEAP + argv, run=run) == 0
+        assert capsys.readouterr().out.strip().splitlines()[-1].startswith("EVAL_OK ")
+        assert seen.pop()["release_handoff"] is on
+    draw = ge.make_eval_draws(1, 1)[0]
+    argv = _gate_argv(tmp_path) + ["--gripper", "continuous", "--perceived", "--carry_guard"]
+    plain = ge._build_cfg(ge._parse_args(argv + ["--client_flags=--guard_margin 0.025"]))
+    flags = "--client_flags=--guard_margin 0.025 --release_handoff"
+    cfg = ge._build_cfg(ge._parse_args(argv + [flags]))
+    cmd = ge._eval_command(cfg, draw)
+    assert cmd[cmd.index("--guard_margin") + 2] == "--release_handoff"
+    assert "--release_handoff" not in ge._eval_command(plain, draw)
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    path = tmp_path / "eval_000.json"
+
+    def hit(gate, loop_block):
+        inference = {**served, "loop": loop_block}
+        payload = _heap_payload(draw, desk_boxes=4, gripper="continuous", inference=inference)
+        path.write_text(json.dumps(payload))
+        return ge._cached_payload(gate, draw) is not None
+
+    recorded = ge.loop_switches(plain.client_flags)
+    assert recorded.pop("release_handoff") is False  # off: not recorded
+    assert hit(plain, recorded) and not hit(cfg, recorded)
+    on = recorded | {"release_handoff": True}
+    assert hit(cfg, on) and not hit(plain, on)
+
+
+def test_the_supervisor_forwards_the_switch_and_its_cache_key_records_it(tmp_path):
+    draw = ge.make_eval_draws(1, 1)[0]
+    argv = _gate_argv(tmp_path) + ["--gripper", "continuous", "--perceived"]
+    plain = ge._build_cfg(ge._parse_args(argv))
+    cfg = ge._build_cfg(ge._parse_args(argv + ["--carry_guard"]))
+    assert ge._eval_command(cfg, draw).count("--carry_guard") == 1
+    assert "--carry_guard" not in ge._eval_command(plain, draw)
+    base = {name: False for name in ge.LOOP_SWITCHES} | {"perceived": True}
+    base["noise_scales"] = ge.noise_scales_key("")
+    assert ge.loop_switches(cfg.client_flags) == base | {
+        "carry_guard": True,
+        "rake_cap": 0,
+        "retry_noise_at": 0,
+        "guard_margin": 0.010,
+    }
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None}
+    path = tmp_path / "eval_000.json"
+
+    def hit(gate, loop_block):
+        inference = {**served, "loop": loop_block}
+        payload = _heap_payload(draw, desk_boxes=4, gripper="continuous", inference=inference)
+        path.write_text(json.dumps(payload))
+        return ge._cached_payload(gate, draw) is not None
+
+    recorded = {k: v for k, v in base.items() if k != "carry_guard"}  # off: not recorded
+    assert hit(plain, recorded) and not hit(cfg, recorded)
+    assert hit(cfg, recorded | {"carry_guard": True}) and not hit(
+        plain, recorded | {"carry_guard": True}
+    )
+    for bad, message in (
+        (_gate_argv(tmp_path) + ["--carry_guard"], "--carry_guard needs --perceived"),
+        (argv + ["--carry_guard", "--passenger_drop"], "--carry_guard refuses --passenger_drop"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            ge._build_cfg(ge._parse_args(bad))

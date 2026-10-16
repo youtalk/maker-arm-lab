@@ -364,11 +364,12 @@ LOOP_SWITCHES = (
     *(name for name in LOOP_FLAGS if name not in LOOP_VALUES),
     *MS7G_SWITCHES,
     "pi05_prompt",
+    "release_handoff",
 )
 """The heap loop's protocol switches (core.loop.rollout); the client records them in the
-payload's inference block under "loop", and the cache matches on them. ``carry_guard`` (MS7g)
-and ``pi05_prompt`` (MS7i) are recorded only when on, so a payload without one ran with it
-off."""
+payload's inference block under "loop", and the cache matches on them. ``carry_guard`` (MS7g),
+``pi05_prompt`` and ``release_handoff`` (MS7i) are recorded only when on, so a payload without
+one ran with it off. ``release_handoff`` reaches the client through --client_flags."""
 LOOP_SETTINGS = ("rake_cap", "retry_noise_at")
 """The heap loop's integer settings, recorded and matched like the switches; 0 is off.
 ``retry_noise_at`` (MS7h) reaches the client through --client_flags, as --replan_on_switch does,

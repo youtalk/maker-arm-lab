@@ -263,6 +263,17 @@ but within M. The pi0.5 policy's releases over the right box end on its rim (22 
 policy's 7) or on the desk within 3 cm of a box (24 against 16) more often, and a wider margin
 holds the jaws until the point is deeper. The ``inference`` block records M only off its default.
 
+``release_handoff`` (MS7i R3A-1, with ``carry_guard``; off by default) hands the carry to the rig
+at the guard's first rim step. When the guard holds an open command closed, no vote pending, with
+the FK pick point inside the served box's perceived interior but within ``guard_margin`` of its
+walls (``rim_handoff_due``, a ``guard_rim_steps`` step), the next step hands the carry to the rig
+(``_hand_off``) as a stall does, with no stall wait; the rig releases over the box centre. The ACT
+policy opens off the centre near a wall, and many of those parts land on the desk past the far
+wall; a wider margin alone held the jaws, the policy did not move the part inward, and the carry
+ran to its budget. Every other guard step is served as before. The census rows then carry
+``release_handoff``, whether this rule asked for the cycle's handoff; the ``inference`` block
+records the switch only when on.
+
 ``record_all`` (MS7i, with a policy, desk boxes, the continuous gripper, a served target row
 and an env built with ``record_all``) records every frame of the episode, the policy's, a
 handoff's and a rake's too, not only a takeover's. On each step it computes each live env's
@@ -1307,6 +1318,10 @@ class Cycle:
     # step the row entered retry mode, None while it has not.
     retry_noise: bool = False
     retry_at: int | None = None
+    # MS7i ``release_handoff`` (None and unexported without it): whether the rule asked for the
+    # cycle's handoff, and whether the last guard step was one of its rim steps.
+    release_handoff: bool | None = None
+    rim_due: bool = False
     scene: object = None
     record_all: bool = False  # MS7i ``record_all``: the row exports ``OWN_FRAMES_CENSUS``
 
@@ -1629,6 +1644,19 @@ def in_box_interior(xy, pose, size, margin: float = 0.0) -> bool:
     return (
         abs(c * dx + s * dy) <= size[0] / 2 - margin
         and abs(c * dy - s * dx) <= size[1] / 2 - margin
+    )
+
+
+def rim_handoff_due(on: bool, guarded: bool, xy, pose, size, margin: float) -> bool:
+    """``release_handoff`` (MS7i R3A-1): does a step hand the carry to the rig at once? With the
+    switch ``on``, a step the guard held an open command closed (``guarded``: a lifted hold, no
+    class vote pending) with the FK pick point ``xy`` inside the interior of the served box at
+    ``pose`` of interior ``size``, but not ``margin`` inside it, does. Pure."""
+    return (
+        on
+        and guarded
+        and in_box_interior(xy, pose, size)
+        and not in_box_interior(xy, pose, size, margin)
     )
 
 
@@ -2195,7 +2223,9 @@ steps, those over the served box's rim band, those inside the served box while a
 pending (held by the vote rule alone), the rig carry's outcome (None: no handoff;
 "placed", "lifted_lost", "failed", "declined", or "carrying" when the episode ended during it)
 and whether an empty air stall opened the jaws and failed the cycle. ``retry_noise_at`` (MS7h)
-adds ``retry_at`` beside them, there only with that switch on: the cycle step retry mode began."""
+adds ``retry_at`` beside them, there only with that switch on: the cycle step retry mode began.
+``release_handoff`` (MS7i) adds ``release_handoff`` the same way: whether its rim rule asked for
+the cycle's handoff."""
 OWN_FRAMES_CENSUS = ("box", "last_held_at", "release_at")
 """``record_all``'s fields in a ``cycle_census`` row (MS7i), there only with the switch on: the
 box served at the cycle's end, and the steps into the cycle at the last contact-held step and
@@ -2377,6 +2407,7 @@ def rollout(
     guard_margin: float = GUARD_BOX_MARGIN_M,
     record_all: bool = False,
     pi05_prompt: bool = False,
+    release_handoff: bool = False,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -2448,6 +2479,7 @@ def rollout(
     continuous gripper, a served target row and the env's recorder with ``record_all``.
     ``pi05_prompt`` (MS7i) is the module docstring's; it needs a policy and a served target row,
     and with it on the policy's ``step`` takes ``prompt``, the (num_envs,) int16 subtask ids.
+    ``release_handoff`` (MS7i) is the module docstring's; it needs ``carry_guard``.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -2559,6 +2591,10 @@ def rollout(
         raise EvalFailure("guard_margin", "must be a finite margin of 0 m or more")
     if guard_margin != GUARD_BOX_MARGIN_M and not carry_guard:
         raise EvalFailure("guard_margin", "is carry_guard's margin: it needs carry_guard")
+    if release_handoff and not carry_guard:
+        raise EvalFailure(
+            "release_handoff", "hands carry_guard's rim steps to the rig: it needs carry_guard"
+        )
     if perceived:
         if policy is None:
             raise EvalFailure("perceived", "serves a policy; the oracle driver reads the truth")
@@ -2779,6 +2815,8 @@ def rollout(
         switches["pi05_prompt"] = True
     if guard_margin != GUARD_BOX_MARGIN_M:
         switches["guard_margin"] = float(guard_margin)
+    if release_handoff:
+        switches["release_handoff"] = True
     if clear_first:
         switches["clear_first"] = True
     if overhang_guard:
@@ -3059,6 +3097,8 @@ def rollout(
                 st.opening = False  # ``passenger_drop`` and ``carry_guard``'s stall_open
                 if carry_guard:
                     st.cycle.guard_steps, st.cycle.scene = 0, scene
+                if release_handoff:
+                    st.cycle.release_handoff = False
                 if retry_noise_at:  # each cycle starts out of retry mode (retry_at None)
                     st.cycle.retry_noise = True
                 if classifier is not None:
@@ -3165,9 +3205,10 @@ def rollout(
                         continue
                     # The stall (MS7g design 5.2): the census's air stall for AIR_STALL_STEPS
                     # steps of this cycle (it ran at least as long as the cycle is old), or a
-                    # guard held for GUARD_STALL_STEPS. A held part goes to the rig once a
-                    # pending class vote has set its box; with none held the jaws open and the
-                    # cycle fails at its target (F1).
+                    # guard held for GUARD_STALL_STEPS, or under ``release_handoff`` the last
+                    # step's rim guard step. A held part goes to the rig once a pending class vote
+                    # has set its box; with none held the jaws open and the cycle fails at its
+                    # target (F1).
                     if c.retry_at is None and retry_noise_due(
                         stalls[i].run, retry_noise_at, d.holding
                     ):
@@ -3175,7 +3216,10 @@ def rollout(
                         replan[i] = True  # the next step forwards this row at the retry noise
                     air = stalls[i].stalled and step - c.start_step >= AIR_STALL_STEPS
                     voting = c.vote is not None or c.lift_view is not None
-                    if d.holding and (air or c.guard_run >= GUARD_STALL_STEPS) and not voting:
+                    due = air or c.guard_run >= GUARD_STALL_STEPS or c.rim_due
+                    if d.holding and due and not voting:
+                        if c.rim_due:
+                            c.release_handoff = True
                         _hand_off(st, rig, i, d, float(gaps[i]))
                     elif air and not d.holding:
                         c.stall_open = True
@@ -3327,6 +3371,11 @@ def rollout(
                     c.guard_steps += 1
                     c.guard_vote_steps += voting and deep
                     c.guard_rim_steps += not voting and in_box_interior(picks[i][:2], pose, size)
+                # ``release_handoff``: a rim step hands the carry to the rig on the next step.
+                guarded = kept is not None and not voting
+                c.rim_due = rim_handoff_due(
+                    release_handoff, guarded, picks[i][:2], pose, size, guard_margin
+                )
         for i, st in enumerate(states):
             if st.opening:
                 action_cpu[i, 6] = 2.0 * GRIPPER_OPEN_POS  # ``passenger_drop``: let both go
@@ -3976,6 +4025,8 @@ def _book_census(st: EnvState, cycle: Cycle, reason: str) -> None:
         row |= {k: getattr(cycle, k) for k in CARRY_GUARD_CENSUS}
     if cycle.retry_noise:  # ``retry_noise_at``, beside ``CARRY_GUARD_CENSUS``
         row["retry_at"] = cycle.retry_at
+    if cycle.release_handoff is not None:  # ``release_handoff``, beside it too
+        row["release_handoff"] = cycle.release_handoff
     if cycle.record_all:
         row |= {k: getattr(cycle, k) for k in OWN_FRAMES_CENSUS}
     st.census.append({k: _rounded(v) for k, v in row.items()})

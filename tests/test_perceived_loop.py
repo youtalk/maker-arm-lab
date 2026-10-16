@@ -1273,6 +1273,14 @@ def _carry_scene(monkeypatch):
     return env, rig, policy, budget, switches | {"carry_guard": True}
 
 
+def _rim_scene(monkeypatch):
+    """The teacher scene under ``carry_guard`` with MS7i ``release_handoff`` and a 0.2 m margin:
+    each open over the box centre is a rim step, which hands the carry to the rig at once."""
+    env, rig, policy, budget, switches = _teacher_scene(monkeypatch)
+    rim = {"carry_guard": True, "guard_margin": 0.2, "release_handoff": True}
+    return env, rig, policy, budget, switches | rim
+
+
 def test_a_box_draw_episode_records_its_boxes(monkeypatch):
     """The census rebuilds each drawn box from the episode record (MS7e ledger R11)."""
     env, rig, policy, budget, switches = _box_draw_scene(monkeypatch)
@@ -1366,6 +1374,7 @@ def test_every_ms7d_switch_at_once_runs_the_teacher_scene_to_its_end(monkeypatch
         _snap_closed_scene,
         _stall_end_scene,
         _carry_scene,
+        _rim_scene,
         _ms7f_scene,
         _ms7g_selector_scene,
     ],
@@ -1385,7 +1394,8 @@ def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):
     and the action, and end the same cycles the same way. The teacher scene lifts and places
     parts through the serving rules' stop flag; the rake scene runs a rake takeover, and the
     carry scene the rig's perceived carry (MS7g ``carry_guard``), whose rig must read neither
-    ``snapshot``, the contacts, a part's pose nor its pinch either.
+    ``snapshot``, the contacts, a part's pose nor its pinch either. The rim scene hands that
+    carry over on a rim step (MS7i ``release_handoff``).
     """
     env, rig, policy, budget, switches = scene(monkeypatch)
     switches |= ms7d
@@ -1432,6 +1442,10 @@ def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):
         assert "placed" in ep["cycle_reasons"] and first["perception"]["lifts_classified"] > 0
     if scene is _stall_end_scene and not ms7d:  # the MS7d levers place every cycle there
         assert "stall_end" in ep["cycle_reasons"], ep
+    if scene is _rim_scene:
+        rim = [(row["release_handoff"], row["handoff"]) for row in ep["cycle_census"]]
+        assert (True, "placed") in rim, rim
+        assert rim == [(r["release_handoff"], r["handoff"]) for r in blind_ep["cycle_census"]]
     if scene is _carry_scene:
         assert "placed" in {row["handoff"] for row in ep["cycle_census"]}, ep["cycle_census"]
         guard = [[row[k] for k in loop.CARRY_GUARD_CENSUS] for row in ep["cycle_census"]]
