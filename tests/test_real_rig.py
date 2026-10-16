@@ -133,3 +133,56 @@ def test_the_rig_json_round_trips_caps_and_calibration(tmp_path):
     path = tmp_path / "rig.json"
     path.write_text(config.to_json())
     assert rig.RigConfig.from_json(path) == config
+
+
+def _caps_rig(kp):
+    return rig.RigConfig(caps={"tau_max": [0.5] * 7, "kp": kp, "kd": [0.5] * 7})
+
+
+def test_the_default_error_clamp_is_the_sdks():
+    import maker_arm_rs
+
+    from maker_arm_lab.core import dynamics_model as dm
+    from maker_arm_lab.core import profile as core_profile
+
+    profile = core_profile.load_profile()
+    mid = [0.5 * (j["q_lo"] + j["q_hi"]) for j in profile["joints"]]
+    tracking = maker_arm_rs.Tracking(dm.dynamics(dm.urdf_bodies()), profile=profile)
+    tracking.push(0.0, 0.005, [mid])
+    q = list(mid)
+    q[1] += 0.3
+    for k in range(400):
+        out = tracking.update(k * 0.005, q, [0.0] * 7, [0.0] * 7)
+    assert q[1] - out[1][0] == pytest.approx(rig.E_MAX_DEFAULT_RAD)
+
+
+def test_reduced_kp_widens_the_error_clamp_so_the_spring_ceiling_holds():
+    kp = [0.25, 0.25, 0.5, 1.0, 0.5, 0.25, 0.25]
+    params = rig.session_tracking_params(_caps_rig(kp), {"tau_th": [2.0] * 6})
+    assert params["tau_th"] == [2.0] * 6
+    assert params["e_max"] == pytest.approx([0.03 / s for s in kp[:6]])
+    profile = rig.reduced_profile(_caps_rig(kp))
+    full = rig.load_profile()
+    for j in range(6):
+        ceiling = profile["joints"][j]["kp"] * params["e_max"][j]
+        assert ceiling == pytest.approx(full["joints"][j]["kp"] * rig.E_MAX_DEFAULT_RAD)
+
+
+def test_no_caps_set_the_default_error_clamp_explicitly():
+    params = rig.session_tracking_params(rig.RigConfig(), {})
+    assert params["e_max"] == [rig.E_MAX_DEFAULT_RAD] * 6
+
+
+def test_an_explicit_error_clamp_wins_only_up_to_the_scaled_one():
+    caps = _caps_rig([0.25] * 7)
+    tight = [0.05, 0.12, 0.03, 0.1, 0.1, 0.1]
+    assert rig.session_tracking_params(caps, {"e_max": tight})["e_max"] == tight
+    with pytest.raises(ValueError, match=r"e_max\[1\]"):
+        rig.session_tracking_params(caps, {"e_max": [0.05, 0.13, 0.03, 0.1, 0.1, 0.1]})
+    with pytest.raises(ValueError, match="e_max"):
+        rig.session_tracking_params(caps, {"e_max": 0.05})
+
+
+def test_the_error_clamp_rule_reads_the_kp_scale_of_a_given_profile():
+    assert rig.capped_e_max([0.5] * 7) == pytest.approx([0.06] * 6)
+    assert rig.capped_e_max(None) == [rig.E_MAX_DEFAULT_RAD] * 6

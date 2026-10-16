@@ -30,6 +30,11 @@ NUM_BOXES = 4
 NUM_MOTORS = 7
 """Six arm joints and the gripper, the order of ``maker_arm_rs.profile()["joints"]``."""
 CAP_KEYS = ("tau_max", "kp", "kd")
+"""The profile keys ``caps`` scales. The error clamp ``e_max`` follows kp (``capped_e_max``)."""
+ARM_DOF = 6
+E_MAX_DEFAULT_RAD = 0.03
+"""The SDK's default error clamp per arm joint (``TrackingParams::default().e_max``,
+INITIAL there); ``tests/test_real_rig.py`` pins it to the SDK's behaviour."""
 CALIBRATION_KEYS = ("direction", "offset")
 
 
@@ -91,7 +96,8 @@ def _seven(name: str, values) -> list[float]:
 
 def reduced_profile(rig: RigConfig) -> dict:
     """``maker_arm_rs.profile()`` with the rig's ``caps`` scaling each joint's ``tau_max``,
-    ``kp`` and ``kd`` and its ``calibration`` setting each joint's ``direction`` and
+    ``kp`` and ``kd`` (the controller's ``e_max`` follows kp: ``session_tracking_params``) and
+    its ``calibration`` setting each joint's ``direction`` and
     ``offset``, which for now must be the identity (direction 1, offset 0): the profile's
     limits are still the motor frame's. A scale outside (0, 1], a non-identity calibration or
     an unknown key raises ValueError naming it (a group
@@ -127,6 +133,53 @@ def reduced_profile(rig: RigConfig) -> dict:
                 )
             joints[i][key] = v
     return profile
+
+
+def _kp_scales(caps: dict | None) -> list[float]:
+    if caps is not None and not isinstance(caps, dict):
+        raise TypeError(f"caps must be an object, got {caps!r}")
+    if not caps or "kp" not in caps:
+        return [1.0] * NUM_MOTORS
+    scales = _seven("caps.kp", caps["kp"])
+    for i, s in enumerate(scales):
+        if not 0.0 < s <= 1.0:
+            raise ValueError(f"caps.kp[{i}] = {s} is outside (0, 1]")
+    return scales
+
+
+def capped_e_max(kp_scales: Sequence[float] | None) -> list[float]:
+    """The error clamp per arm joint that keeps the spring ceiling ``kp * e_max`` at the
+    profile's (ruling R33): ``E_MAX_DEFAULT_RAD / kp_scale``. A reduced kp alone would also
+    cut the most torque the spring can add to the gravity feed-forward, by the same scale, and
+    an arm whose model is light then sags to its limit (at kp 0.25 the bench's j2 ran 1.5 rad
+    with the model's mass at 0.65 of the plant's). The reduced ``tau_max`` still bounds the
+    command. None: the profile's kp (scale 1)."""
+    scales = [1.0] * NUM_MOTORS if kp_scales is None else list(kp_scales)
+    return [E_MAX_DEFAULT_RAD / float(s) for s in scales[:ARM_DOF]]
+
+
+def session_tracking_params(rig: RigConfig, params: dict) -> dict:
+    """``params`` (the rig's ``tracking_params`` with any override) with ``e_max`` set by
+    ruling R33 from the rig's ``caps.kp`` (``capped_e_max``). An explicit ``e_max`` (six
+    values) wins only where it does not exceed that; past it, ValueError naming the joint."""
+    out = dict(params)
+    cap = capped_e_max(_kp_scales(rig.caps))
+    if "e_max" not in out:
+        out["e_max"] = cap
+        return out
+    given = out["e_max"]
+    if isinstance(given, (str, bytes)) or not hasattr(given, "__len__") or len(given) != ARM_DOF:
+        raise ValueError(f"e_max needs {ARM_DOF} values, got {given!r}")
+    for j, (v, c) in enumerate(zip(given, cap)):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError(f"e_max[{j}] = {v!r} is not a finite number")
+        if v > c * (1.0 + 1e-12):
+            raise ValueError(
+                f"e_max[{j}] = {v} exceeds {c:.6g} rad, {E_MAX_DEFAULT_RAD} over the joint's kp "
+                "scale: past it the spring could push more than the profile's kp * e_max"
+            )
+    out["e_max"] = [float(v) for v in given]
+    return out
 
 
 def fold_box_yaw(yaw: float) -> float:

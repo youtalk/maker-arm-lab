@@ -15,8 +15,11 @@ loop row and no tracking row).
 that drain's last loop record) pair per drain, to put host-stamped data (camera frames) on the
 SDK clock. The attrs carry what the session was run with (JSON for anything but a scalar or a
 string), the operator's ``records``, and the running totals ``dropped`` = ``dropped_loop`` +
-``dropped_trk`` of ticks the 4000-tick rings lost between drains. The file is flushed after
-every write, so a session that dies keeps every drain before it.
+``dropped_trk`` of ticks the 4000-tick rings lost between drains, and the tick-gap reads of
+the drained loop ``t`` (consecutive rows, across drains too): ``max_interval_s``, the largest
+gap, and ``late_ticks``, the gaps over ``LATE_FACTOR`` tick periods. The bring-up's "no
+dropped tick" rule reads ``dropped`` and ``late_ticks``. The file is flushed after every
+write, so a session that dies keeps every drain before it.
 """
 
 from __future__ import annotations
@@ -31,6 +34,10 @@ import h5py
 import numpy as np
 
 TRACKING_GROUP = "trk"
+TICK_PERIOD_S = 0.005
+"""The SDK loop's period (200 Hz, ``maker_arm_rs.profile()["control_rate_hz"]``)."""
+LATE_FACTOR = 1.5
+"""A gap between consecutive drained ticks over this many periods counts as a late tick."""
 DTYPES = {"tick": np.int64, "clamped": np.bool_, "fault_bits": np.uint16}
 """Columns that are not float64."""
 SEGMENT_DTYPE = np.dtype(
@@ -61,8 +68,12 @@ def _attr(value):
 class TelemetryLog:
     """One session's log at ``path``, which must not exist yet: a log is never overwritten."""
 
-    def __init__(self, path: Path, attrs: dict):
+    def __init__(self, path: Path, attrs: dict, period_s: float = TICK_PERIOD_S):
         self.path = Path(path)
+        self.period_s = float(period_s)
+        self.max_interval_s = 0.0
+        self.late_ticks = 0
+        self._last_t: float | None = None
         self._f = h5py.File(self.path, "x")
         for name, value in attrs.items():
             self._f.attrs[name] = _attr(value)
@@ -86,6 +97,20 @@ class TelemetryLog:
         self._f.attrs["dropped"] = self.dropped
         self._f.attrs["dropped_loop"] = self.dropped_loop
         self._f.attrs["dropped_trk"] = self.dropped_trk
+        self._f.attrs["max_interval_s"] = self.max_interval_s
+        self._f.attrs["late_ticks"] = self.late_ticks
+
+    def _read_intervals(self, t) -> None:
+        t = np.asarray(t, dtype=np.float64)
+        if self._last_t is not None:
+            t = np.concatenate([[self._last_t], t])
+        self._last_t = float(t[-1])
+        if t.shape[0] < 2:
+            return
+        gaps = np.diff(t)
+        self.max_interval_s = max(self.max_interval_s, float(gaps.max()))
+        late = gaps > LATE_FACTOR * self.period_s + 1e-9
+        self.late_ticks += int(np.count_nonzero(late))
 
     def _append_rows(self, group: h5py.Group, columns: dict) -> int:
         """Append one drain's columns to ``group``; returns the row count."""
@@ -135,6 +160,8 @@ class TelemetryLog:
         n = self._append_rows(self._f, ticks)
         self._append_rows(self._f[TRACKING_GROUP], tracking)
         self.ticks += n
+        if n:
+            self._read_intervals(ticks["t"])
         self.dropped_loop += int(ticks.get("dropped", 0))
         self.dropped_trk += int(tracking.get("dropped", 0))
         self._write_totals()

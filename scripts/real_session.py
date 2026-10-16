@@ -11,14 +11,29 @@ to HDF5 (``real.telemetry``).
 rig's ``caps`` and ``calibration`` make the profile (``real.rig.reduced_profile``), its
 ``tracking_params`` the controller's parameters (``--params PARAMS.json`` overrides keys), its
 ``rt`` the loop's SCHED_FIFO priority and core (not on the simulator). ``--dynamics urdf`` is
-the controller's model. The plan format is ``real.session``'s docstring. Every check that can
-fail (the rig, the profile, the plan, each trajectory's ``check_traj``, the log path) runs
-before the arm is enabled; the SDK checks the profile again when it connects. The script never
-writes the rig JSON and never overwrites a log.
+the controller's model. ``tracking_params`` gets ``e_max`` by ruling R33
+(``real.rig.session_tracking_params``): the error clamp widens as the caps cut kp, so the
+spring's most torque, kp * e_max, stays the profile's.
+
+``--controller tracking`` (the default) runs ``maker_arm_rs.Tracking`` with the model;
+``--controller hold`` runs the SDK's hold controller (``real.arm.SdkHoldArm``: no model, PD at
+the start pose, the drain still logged) and refuses a plan with a ``traj`` segment. Ruling R32:
+on a real interface (anything but ``sim``) the tracking controller is refused before connect
+while the rig's calibration is the identity, the only one ``reduced_profile`` accepts: the
+model works in URDF joint coordinates, the identity feeds it the motor frame's angles. A real
+session also refuses an input that is not a terminal (ruling R34): the end of input releases
+the arm, so a pipe that ends would let it go.
+
+The plan format is ``real.session``'s docstring. Every check that can fail (the rig, the
+profile, the controller and the interface, the plan, each trajectory's ``check_traj``, the log
+path) runs before the arm is enabled; the SDK checks the profile again when it connects. The
+script never writes the rig JSON and never overwrites a log.
 
 It prints exactly one ``SESSION_OK {segments, ticks, dropped, faults, ...}`` or
 ``SESSION_FAIL {reason, detail}`` line on every exit path and exits through ``os._exit``. A
-failure (a fault, a lost controller, Ctrl-C, an exception) holds the arm first and drains the
+failure (a fault, a lost controller, Ctrl-C, SIGTERM or SIGHUP, an exception) holds the arm
+first: a tracking controller that still runs keeps its gravity feed-forward and holds its
+current target; otherwise the SDK's hold takes over. It and drains the
 last ticks into the log. With the token printed, the motors are disabled only on the
 operator's typed ``RELEASE`` or end of input (``--release prompt``, the default) or at once
 (``--release now``, for tests): a release makes the arm go limp. After a finished plan the
@@ -43,6 +58,16 @@ sys.path.insert(0, str(ROOT / "source"))
 from maker_arm_lab.real import session as real_session
 
 DYNAMICS = ("urdf",)
+CONTROLLERS = ("tracking", "hold")
+SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+"""Each one ends a session the same way: the hold, one token, the release prompt."""
+JOINT_FRAME_DETAIL = (
+    "the tracking controller's model (gravity G(q), FK) works in URDF joint coordinates, but "
+    "with the identity calibration it reads the motor frame's angles, and the profile's limits "
+    "are the motor frame's too (j3 [3.882, 7.955] rad against the URDF's [0, 3.14]; j5 and j6 "
+    "disjoint); until maker-arm-rs re-expresses the limits through direction and offset "
+    "(ruling R32, open), a real session runs only --controller hold"
+)
 
 
 class TokenArgumentParser(argparse.ArgumentParser):
@@ -62,7 +87,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dynamics", choices=DYNAMICS, default="urdf")
     parser.add_argument("--params", default="", help="JSON of tracking parameters to override")
     parser.add_argument("--release", choices=("prompt", "now"), default="prompt")
+    parser.add_argument(
+        "--controller",
+        choices=CONTROLLERS,
+        default="tracking",
+        help="tracking (the model) or hold (the SDK's PD hold, no model)",
+    )
     return parser
+
+
+def check_real_interface(interface: str, controller: str) -> None:
+    """Rulings R32 and R34, before connect: on a real interface the tracking controller is
+    refused (``joint_frame``) and so is an input that is not a terminal (``stdin``). The
+    gripper map script shares it."""
+    if interface == "sim":
+        return
+    if controller == "tracking":
+        raise real_session.SessionFailure("joint_frame", JOINT_FRAME_DETAIL)
+    try:
+        tty = sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, OSError, ValueError):
+        tty = False
+    if not tty:
+        raise real_session.SessionFailure(
+            "stdin",
+            f"a session on {interface} needs a terminal on stdin: the end of input releases "
+            "the arm, so a pipe or a file that ends would disable the motors unasked",
+        )
 
 
 def lab_revision() -> str:
@@ -86,7 +137,7 @@ def prepare(args) -> dict:
     import maker_arm_rs
 
     from maker_arm_lab.core import dynamics_model as dm
-    from maker_arm_lab.real.rig import RigConfig, reduced_profile
+    from maker_arm_lab.real.rig import RigConfig, reduced_profile, session_tracking_params
     from maker_arm_lab.real.telemetry import sdk_revision
 
     fail = real_session.SessionFailure
@@ -99,11 +150,22 @@ def prepare(args) -> dict:
         profile = reduced_profile(rig)
     except (TypeError, ValueError) as err:
         raise fail("profile", str(err)) from err
+    interface = args.interface or rig.can_interface
+    check_real_interface(interface, args.controller)
     plan_path = Path(args.plan).expanduser()
     try:
         segments = real_session.load_plan(plan_path, profile)
     except (OSError, ValueError) as err:
         raise fail("plan", f"{plan_path}: {err}") from err
+    tracking = args.controller == "tracking"
+    if not tracking:
+        trajs = [i for i, seg in enumerate(segments) if seg["kind"] == "traj"]
+        if trajs:
+            raise fail(
+                "plan",
+                f"{plan_path}: segment {trajs[0]} is a traj; the hold controller cannot track "
+                "a trajectory (it holds the start pose)",
+            )
     params = dict(rig.tracking_params)
     if args.params:
         try:
@@ -113,16 +175,23 @@ def prepare(args) -> dict:
         if not isinstance(override, dict):
             raise fail("params", f"{args.params}: the file must hold an object")
         params.update(override)
-    dynamics = dm.dynamics(dm.urdf_bodies())
-    try:
-        # A throwaway controller: the SDK checks the parameters when it builds one.
-        maker_arm_rs.Tracking(dynamics, params=params, profile=profile)
-    except (TypeError, ValueError) as err:
-        raise fail("params", str(err)) from err
+    dynamics = None
+    if tracking:
+        try:
+            params = session_tracking_params(rig, params)
+        except (TypeError, ValueError) as err:
+            raise fail("params", str(err)) from err
+        dynamics = dm.dynamics(dm.urdf_bodies())
+        try:
+            # A throwaway controller: the SDK checks the parameters when it builds one.
+            maker_arm_rs.Tracking(dynamics, params=params, profile=profile)
+        except (TypeError, ValueError) as err:
+            raise fail("params", str(err)) from err
+    else:
+        params = None
     log_path = Path(args.log).expanduser()
     if log_path.exists():
         raise fail("log_exists", f"{log_path} exists; a session log is never overwritten")
-    interface = args.interface or rig.can_interface
     rt = None if interface == "sim" or rig.rt is None else (int(rig.rt[0]), int(rig.rt[1]))
     attrs = {
         "rig": asdict(rig),
@@ -130,8 +199,9 @@ def prepare(args) -> dict:
         "plan": json.loads(plan_path.read_text()),
         "plan_path": str(plan_path),
         "profile": profile,
+        "controller": args.controller,
         "tracking_params": params,
-        "dynamics": args.dynamics,
+        "dynamics": args.dynamics if tracking else "none",
         "interface": interface,
         "rt": rt,
         "control_hz": real_session.CONTROL_HZ,
@@ -144,6 +214,7 @@ def prepare(args) -> dict:
         "segments": segments,
         "params": params,
         "dynamics": dynamics,
+        "controller": args.controller,
         "interface": interface,
         "rt": rt,
         "log_path": log_path,
@@ -151,27 +222,56 @@ def prepare(args) -> dict:
     }
 
 
-def connect_arm(interface: str, dynamics, profile: dict, params: dict, rt):
-    """The SDK arm, connected and not enabled. The SDK refuses a loosened profile here with
-    ValueError, and a bad parameter set when it builds the controller."""
-    from maker_arm_lab.real.arm import SdkArm
+def connect_arm(interface: str, dynamics, profile: dict, params, rt, controller="tracking"):
+    """The SDK arm, connected and not enabled: ``SdkArm`` (tracking) or ``SdkHoldArm``
+    (hold). The SDK refuses a loosened profile here with ValueError, and a bad parameter set
+    when it builds the controller."""
+    from maker_arm_lab.real.arm import SdkArm, SdkHoldArm
 
+    if controller == "hold":
+        return SdkHoldArm.connect(interface, profile=profile, rt=rt)
     return SdkArm.connect(interface, dynamics, profile=profile, params=params, rt=rt)
 
 
+def hold_on_controller(sdk) -> bool:
+    """Keep a live tracking controller and hold its current target: one row at the loop's
+    now replaces the plan, and the gravity feed-forward stays on. False, with nothing done,
+    when the controller is not a tracking one, the loop reports a fault or no longer runs
+    it: then only the SDK's hold is left. Swapping a live Tracking for the SDK's PD hold
+    would drop the feed-forward and let the arm sag by G / kp (up to ~150 mrad at caps
+    0.25)."""
+    if getattr(sdk, "controller", "tracking") != "tracking":
+        return False
+    reading = sdk.read()
+    if reading is None or not reading.alive or reading.state != "enabled" or reading.fault:
+        return False
+    now = sdk.now()
+    if now is None:
+        return False
+    sdk.push_rows(now, real_session.DT, [real_session.current_target(sdk)])
+    return True
+
+
 def hold(world: dict) -> None:
-    """Hold an enabled arm at its current pose, then drain its last ticks into the log."""
+    """Hold an enabled arm (``hold_on_controller``, else the SDK's hold at the current pose),
+    then drain its last ticks into the log."""
     sdk = world.get("arm")
     if sdk is None or not world.get("enabled"):
         return
     try:
-        sdk.hold()
-    except Exception:  # noqa: BLE001 -- no loop (a failed start): start the SDK's hold instead
+        held = hold_on_controller(sdk)
+    except Exception:  # noqa: BLE001 -- the controller is gone after all: the SDK's hold
         traceback.print_exc()
+        held = False
+    if not held:
         try:
-            sdk.arm.start_hold()
-        except Exception:  # noqa: BLE001 -- nothing more can be done from here
+            sdk.hold()
+        except Exception:  # noqa: BLE001 -- no loop (a failed start): start the SDK's hold
             traceback.print_exc()
+            try:
+                sdk.arm.start_hold()
+            except Exception:  # noqa: BLE001 -- nothing more can be done from here
+                traceback.print_exc()
     log = world.get("log")
     if log is not None:
         try:
@@ -210,37 +310,46 @@ def release(world: dict, mode: str, lines) -> None:
         traceback.print_exc()
 
 
+def signal_label(signum) -> str:
+    name = signal.Signals(signum).name
+    return "Ctrl-C (SIGINT)" if signum == signal.SIGINT else name
+
+
 def main(argv=None) -> int:
-    """Run one session. Ctrl-C ends the session (``interrupted``): during the setup by an
-    exception, once the log exists by a flag the run polls, so no log write is cut short. From
-    then on, through the
-    hold, the token and the release prompt, a Ctrl-C only says the arm still holds: an
-    escaping ``KeyboardInterrupt`` would skip the token and ``os._exit``, and dropping the SDK
-    arm at interpreter exit disables the motors without the typed ``RELEASE``."""
+    """Run one session. Ctrl-C, SIGTERM and SIGHUP end the session (``interrupted``, the
+    signal in the detail): during the setup by an exception, once the log exists by a flag
+    the run polls, so no log write is cut short. From then on, through the hold, the token
+    and the release prompt, any of them only says the arm still holds: an escaping
+    ``KeyboardInterrupt`` (or the default SIGTERM and SIGHUP, which kill the process) would
+    skip the token and ``os._exit``, and dropping the SDK arm at interpreter exit disables
+    the motors without the typed ``RELEASE``."""
     args = build_parser().parse_args(argv)
     world: dict = {}
     phase = ["setup"]
 
-    def on_sigint(signum, frame):
+    def on_signal(signum, frame):
+        label = signal_label(signum)
         if phase[0] == "setup":
             phase[0] = "closing"
+            world["signal"] = label
             raise KeyboardInterrupt
         if phase[0] == "session":
             # A flag, not an exception: an exception could cut a log append between two
             # columns. The run polls the flag every 20 ms and fails with "interrupted".
             phase[0] = "closing"
-            world["interrupted"] = True
+            world["interrupted"] = label
             return
         note = "the arm still holds; type RELEASE to disable the motors"
-        # os.write, not print: a SIGINT inside a sys.stderr write would re-enter its buffer.
-        text = f"Ctrl-C: {note if world.get('enabled') else 'the session is closing'}.\n"
+        # os.write, not print: a signal inside a sys.stderr write would re-enter its buffer.
+        text = f"{label}: {note if world.get('enabled') else 'the session is closing'}.\n"
         os.write(2, text.encode())
 
-    previous = signal.signal(signal.SIGINT, on_sigint)
+    previous = {s: signal.signal(s, on_signal) for s in SIGNALS}
     try:
         return _run(args, world, phase)
     finally:
-        signal.signal(signal.SIGINT, previous)
+        for s, handler in previous.items():
+            signal.signal(s, handler)
 
 
 def _run(args, world: dict, phase: list) -> int:
@@ -255,7 +364,7 @@ def _run(args, world: dict, phase: list) -> int:
             try:
                 world["arm"] = connect_arm(
                     ready["interface"], ready["dynamics"], ready["profile"], ready["params"],
-                    ready["rt"],
+                    ready["rt"], ready["controller"],
                 )  # fmt: skip
             except ValueError as err:
                 raise real_session.SessionFailure("profile", str(err)) from err
@@ -282,7 +391,8 @@ def _run(args, world: dict, phase: list) -> int:
         token = "SESSION_FAIL " + json.dumps({"reason": err.reason, "detail": err.detail})
         code = 1
     except KeyboardInterrupt:
-        token = "SESSION_FAIL " + json.dumps({"reason": "interrupted", "detail": "Ctrl-C"})
+        detail = world.get("signal", "Ctrl-C (SIGINT)")
+        token = "SESSION_FAIL " + json.dumps({"reason": "interrupted", "detail": detail})
         code = 1
     except Exception as err:  # noqa: BLE001 -- any uncaught error must still print a token
         detail = f"{err}\n{traceback.format_exc()}"

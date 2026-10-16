@@ -164,6 +164,11 @@ def test_a_sim_session_logs_every_tick_and_prints_ok(tmp_path):
         assert json.loads(f.attrs["rig"])["caps"]["kp"] == [0.5] * 7
         assert f.attrs["dynamics"] == "urdf" and len(f.attrs["sdk_revision"]) == 40
         assert f.attrs["lab_revision"] and json.loads(f.attrs["tracking_params"])
+        # kp at half the profile's: the error clamp doubles, so kp e_max stays the profile's
+        assert json.loads(f.attrs["tracking_params"])["e_max"] == pytest.approx([0.06] * 6)
+        assert f.attrs["controller"] == "tracking"
+        assert payload["late_ticks"] == f.attrs["late_ticks"]
+        assert 0.0 < payload["max_interval_s"] == f.attrs["max_interval_s"]
         pairs = f["clock_pairs"][:]
         assert pairs.shape[0] >= 8 and (np.diff(pairs[:, 0]) > 0).all()
         # the trajectory was tracked: j1 swept most of its 0.1 rad amplitude
@@ -277,9 +282,25 @@ def test_an_unknown_tracking_parameter_is_refused_before_connect(tmp_path, monke
     params.write_text(json.dumps({"tau_thh": [2.0] * 6}))
     plan = _plan(tmp_path, [{"hold": 0.2}])
     argv = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--params", str(params)]
+    argv += ["--interface", "sim"]
     code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--release", "now"])
     payload = _payload(_tokens(capsys.readouterr().out)[0])
     assert code == 1 and payload["reason"] == "params" and "tau_thh" in payload["detail"]
+
+
+def test_an_error_clamp_past_the_scaled_one_is_refused_before_connect(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(real_session, "connect_arm", _never_connect)
+    params = tmp_path / "params.json"
+    params.write_text(json.dumps({"e_max": [0.03, 0.07, 0.03, 0.03, 0.03, 0.03]}))
+    plan = _plan(tmp_path, [{"hold": 0.2}])
+    rig = _rig(tmp_path, caps={"kp": [0.5] * 7})
+    argv = ["--rig", str(rig), "--plan", str(plan), "--params", str(params)]
+    argv += ["--interface", "sim"]
+    code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--release", "now"])
+    payload = _payload(_tokens(capsys.readouterr().out)[0])
+    assert code == 1 and payload["reason"] == "params" and "e_max[1]" in payload["detail"]
 
 
 def test_a_usage_error_prints_one_session_fail_line():
@@ -346,6 +367,7 @@ class FakeSdk:
         self.dropped = [dropped_loop, dropped_trk]
         self.fault_after_s = fault_after_s
         self.pushes, self.holds, self.stops = [], 0, 0
+        self.pushed_rows = []
 
     def _t(self):
         return time.monotonic() - self.t0
@@ -369,6 +391,7 @@ class FakeSdk:
 
     def push_rows(self, t0, dt, rows):
         self.pushes.append((t0, dt, len(rows)))
+        self.pushed_rows.append([list(r) for r in rows])
 
     def drain(self):
         upto = int(self._t() * HZ)
@@ -433,6 +456,9 @@ def test_the_ok_payload_reports_the_dropped_total(tmp_path, monkeypatch, capsys)
     tokens = _tokens(capsys.readouterr().out)
     assert code == 0 and len(tokens) == 1 and _payload(tokens[0])["dropped"] == 5
     assert arm.holds == 0 and arm.stops == 1
+    # the fake ticks every 5 ms on the grid: no interval is late
+    assert _payload(tokens[0])["max_interval_s"] == pytest.approx(0.005)
+    assert _payload(tokens[0])["late_ticks"] == 0
 
 
 def test_a_fault_holds_the_arm_and_releases_only_on_release(tmp_path, monkeypatch, capsys):
@@ -489,7 +515,10 @@ def test_ctrl_c_in_the_session_sets_a_flag_and_takes_the_hold_path(tmp_path, mon
     code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--release", "now"])
     tokens = _tokens(capsys.readouterr().out)
     assert code == 1 and len(tokens) == 1 and _payload(tokens[0])["reason"] == "interrupted"
-    assert arm.holds == 1 and arm.stops == 1
+    # the controller still runs: it keeps its gravity feed-forward and holds the current
+    # target (one row), rather than swap to the SDK's pure PD hold
+    assert arm.holds == 0 and arm.stops == 1
+    assert arm.pushes[-1][2] == 1 and arm.pushed_rows[-1] == [list(MID)]
     with h5py.File(tmp_path / "s.h5") as f:
         assert len({f[k].shape[0] for k in ("t", "q", "cmd_tau", "fault_bits")}) == 1
 
@@ -549,3 +578,123 @@ def test_the_plan_loader_refuses_an_unknown_segment(tmp_path):
     plan = _plan(tmp_path, [{"hold": 1.0}, {"wait": 2.0}])
     with pytest.raises(ValueError, match="segment 1"):
         session.load_plan(plan, PROFILE)
+
+
+# --- the controller, the joint frame and the operator's terminal ---------------------------
+
+
+def test_a_hold_controller_session_on_sim_logs_every_tick(tmp_path):
+    plan = _plan(tmp_path, [{"hold": 1.0}, {"hold": 0.5}])
+    log = tmp_path / "s.h5"
+    args = ["--rig", _rig(tmp_path), "--plan", plan, "--interface", "sim", "--log", log]
+    code, tokens, err = _run([*args, "--controller", "hold"], stdin="RELEASE\n")
+    assert code == 0 and len(tokens) == 1 and tokens[0].startswith("SESSION_OK"), err
+    payload = _payload(tokens[0])
+    with h5py.File(log) as f:
+        assert f.attrs["controller"] == "hold" and f.attrs["dynamics"] == "none"
+        assert f["t"].shape[0] >= 0.9 * HZ * 1.5 and payload["ticks"] == f["t"].shape[0]
+        assert [k.decode() for k in f["segments"]["kind"]] == ["hold", "hold"]
+        assert "tick_t" not in f["trk"]  # no model, no Tracking
+        # the SDK hold: the profile's gains and no feed-forward on the arm joints
+        kp = np.array([j["kp"] for j in PROFILE["joints"]])
+        assert np.allclose(f["cmd_kp"][:], kp) and not f["cmd_tau"][:, :6].any()
+        q = f["q"][:]
+        assert np.abs(q - q[0]).max() < 0.05
+
+
+def test_a_trajectory_under_the_hold_controller_is_refused_before_connect(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(real_session, "connect_arm", _never_connect)
+    plan = _plan(tmp_path, [{"hold": 0.5}, {"traj": _traj(tmp_path, seconds=1.0)}])
+    argv = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--interface", "sim"]
+    code = real_session.main(
+        [*argv, "--log", str(tmp_path / "s.h5"), "--release", "now", "--controller", "hold"]
+    )
+    payload = _payload(_tokens(capsys.readouterr().out)[0])
+    assert code == 1 and payload["reason"] == "plan" and "hold controller" in payload["detail"]
+    assert not (tmp_path / "s.h5").exists()
+
+
+def test_tracking_on_a_real_interface_is_refused_before_connect(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(real_session, "connect_arm", _never_connect)
+    plan = _plan(tmp_path, [{"hold": 0.5}])
+    argv = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--interface", "vcan0"]
+    code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--release", "now"])
+    tokens = _tokens(capsys.readouterr().out)
+    assert code == 1 and len(tokens) == 1
+    payload = _payload(tokens[0])
+    assert payload["reason"] == "joint_frame" and "motor frame" in payload["detail"]
+    assert "--controller hold" in payload["detail"] and not (tmp_path / "s.h5").exists()
+
+
+class _Terminal(io.StringIO):
+    def isatty(self):
+        return True
+
+
+def test_a_real_session_refuses_input_that_is_not_a_terminal(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(real_session, "connect_arm", _never_connect)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("RELEASE\n"))
+    plan = _plan(tmp_path, [{"hold": 0.5}])
+    argv = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--interface", "vcan0"]
+    code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--controller", "hold"])
+    tokens = _tokens(capsys.readouterr().out)
+    assert code == 1 and len(tokens) == 1
+    payload = _payload(tokens[0])
+    assert payload["reason"] == "stdin" and "terminal" in payload["detail"]
+
+
+def test_a_real_hold_session_on_a_terminal_reaches_the_arm(tmp_path, monkeypatch, capsys):
+    arm = FakeSdk()
+    seen = {}
+
+    def connect(interface, dynamics, profile, params, rt, controller):
+        seen.update(interface=interface, controller=controller, dynamics=dynamics)
+        return arm
+
+    monkeypatch.setattr(real_session, "connect_arm", connect)
+    monkeypatch.setattr(sys, "stdin", _Terminal("RELEASE\n"))
+    plan = _plan(tmp_path, [{"hold": 0.2}])
+    argv = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--interface", "vcan0"]
+    code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--controller", "hold"])
+    assert code == 0 and _tokens(capsys.readouterr().out)[0].startswith("SESSION_OK")
+    assert seen == {"interface": "vcan0", "controller": "hold", "dynamics": None}
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_sigterm_and_sighup_hold_the_arm_and_print_one_token(tmp_path, signum):
+    plan = _plan(tmp_path, [{"hold": 60.0}])
+    log = tmp_path / "s.h5"
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "AMENT_PREFIX_PATH")}
+    args = ["--rig", _rig(tmp_path), "--plan", plan, "--interface", "sim", "--log", log]
+    proc = subprocess.Popen(
+        [sys.executable, str(SCRIPT), *map(str, args)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        deadline = time.monotonic() + 60.0
+        while not log.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        time.sleep(1.5)
+        proc.send_signal(signum)
+        line = proc.stdout.readline()
+        assert line.startswith("SESSION_FAIL") and _payload(line)["reason"] == "interrupted"
+        assert signal.Signals(signum).name in _payload(line)["detail"]
+        time.sleep(0.3)
+        proc.send_signal(signum)  # a second one at the release prompt only says it holds
+        time.sleep(0.3)
+        assert proc.poll() is None  # the arm holds until the operator types RELEASE
+        proc.stdin.write("RELEASE\n")
+        proc.stdin.flush()
+        assert proc.wait(timeout=30) == 1
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert _tokens(proc.stdout.read()) == []
+    with h5py.File(log) as f:
+        assert f["t"].shape[0] >= 0.9 * HZ * 1.5

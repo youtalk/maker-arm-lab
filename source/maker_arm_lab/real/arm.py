@@ -86,8 +86,25 @@ def contact_residual(dynamics, q, dq, ddq, tau) -> tuple[float, ...]:
     return tuple(float(m) - float(t) for m, t in zip(model, tau))
 
 
+def _reading(snap: dict | None) -> ArmReading | None:
+    if snap is None:
+        return None
+    return ArmReading(
+        t=float(snap["t"]),
+        q=tuple(float(v) for v in snap["positions"][:6]),
+        dq=tuple(float(v) for v in snap["velocities"][:6]),
+        tau=tuple(float(v) for v in snap["torques"][:6]),
+        gripper=float(snap["positions"][6]),
+        state=str(snap["state"]),
+        alive=bool(snap["loop_alive"]),
+        fault=snap["fault"],
+    )
+
+
 class SdkArm:
     """One arm session: ``start`` enables and starts tracking, then ``push`` one row a step."""
+
+    controller = "tracking"
 
     def __init__(
         self,
@@ -131,19 +148,7 @@ class SdkArm:
         raise RuntimeError(f"no snapshot within {FIRST_TICK_TIMEOUT_S} s of start_tracking")
 
     def read(self) -> ArmReading | None:
-        snap = self.arm.snapshot()
-        if snap is None:
-            return None
-        return ArmReading(
-            t=float(snap["t"]),
-            q=tuple(float(v) for v in snap["positions"][:6]),
-            dq=tuple(float(v) for v in snap["velocities"][:6]),
-            tau=tuple(float(v) for v in snap["torques"][:6]),
-            gripper=float(snap["positions"][6]),
-            state=str(snap["state"]),
-            alive=bool(snap["loop_alive"]),
-            fault=snap["fault"],
-        )
+        return _reading(self.arm.snapshot())
 
     def now(self) -> float | None:
         """The loop clock, None once the loop has not ticked for 0.2 s."""
@@ -172,6 +177,85 @@ class SdkArm:
         short of ``stop()`` and a fresh session.
         """
         self.arm.hold_now()
+
+    def stop(self) -> None:
+        """Disable every motor: the arm goes limp."""
+        self.arm.stop()
+
+
+HOLD_STALE_S = 0.2
+"""The motors' CAN_TIMEOUT: a loop whose tick has not changed for this long no longer runs."""
+
+
+class SdkHoldArm:
+    """One arm session under the SDK's hold controller (``Arm.start_hold``): the arm holds the
+    pose it had at ``start`` on the profile's PD gains, with no model, no feed-forward and no
+    ``Tracking``. ``real_session``'s surface (``read``, ``now``, ``telemetry``, ``drain``,
+    ``hold``, ``stop``); ``push_rows`` raises, since this controller takes no target. Under the
+    reduced caps a PD hold sags by G / kp, which is what a session with no trusted model
+    gets (ruling R32: the model's joint frame is not yet the arm's)."""
+
+    controller = "hold"
+
+    def __init__(self, arm, profile: dict | None = None, rt=None):
+        self.arm = arm
+        self.profile = profile if profile is not None else maker_arm_rs.profile()
+        self.rt = None if rt is None else (int(rt[0]), int(rt[1]))
+        self._tick = None
+        self._tick_mono = 0.0
+
+    @classmethod
+    def connect(cls, interface: str, profile: dict | None = None, rt=None) -> SdkHoldArm:
+        """As ``SdkArm.connect``, with no controller to build."""
+        if interface == "sim":
+            arm = maker_arm_rs.Arm.sim(profile)
+        else:
+            arm = maker_arm_rs.Arm.socketcan(interface, profile)
+        return cls(arm, profile=profile, rt=rt)
+
+    def start(self) -> ArmReading:
+        """Enable, start the hold loop and wait for its first snapshot; as ``SdkArm.start``,
+        a failure after ``enable`` leaves the motors to the caller's ``stop()``."""
+        self.arm.enable()
+        self.arm.start_hold(rt=self.rt)
+        deadline = time.monotonic() + FIRST_TICK_TIMEOUT_S
+        while time.monotonic() < deadline:
+            reading = self.read()
+            if reading is not None:
+                return reading
+            time.sleep(0.005)
+        raise RuntimeError(f"no snapshot within {FIRST_TICK_TIMEOUT_S} s of start_hold")
+
+    def read(self) -> ArmReading | None:
+        return _reading(self.arm.snapshot())
+
+    def now(self) -> float | None:
+        """The loop clock as ``Tracking.now`` reads it: the last tick's ``t`` plus the wall
+        time since that tick changed. None before the first tick, and None once the tick has
+        not changed for ``HOLD_STALE_S``."""
+        snap = self.arm.snapshot()
+        if snap is None:
+            return None
+        mono = time.monotonic()
+        if snap["tick"] != self._tick:
+            self._tick, self._tick_mono = snap["tick"], mono
+        elif mono - self._tick_mono > HOLD_STALE_S:
+            return None
+        return float(snap["t"]) + (mono - self._tick_mono)
+
+    def telemetry(self) -> None:
+        return None
+
+    def push_rows(self, t0: float, dt: float, rows) -> None:
+        raise RuntimeError("the hold controller takes no target; use the tracking controller")
+
+    def drain(self) -> tuple[dict | None, None]:
+        """The loop's columns (``Arm.drain``); there is no controller telemetry."""
+        return self.arm.drain(), None
+
+    def hold(self) -> None:
+        """Nothing to swap: the hold controller already holds. ``hold_now`` would re-target
+        the sagged pose and let the arm sink by one more sag."""
 
     def stop(self) -> None:
         """Disable every motor: the arm goes limp."""

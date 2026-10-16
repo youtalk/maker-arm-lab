@@ -14,7 +14,9 @@ A plan is a JSON object ``{"segments": [...]}`` (or the bare list), run in order
   typed line under ``label`` in the log's ``records``.
 
 Every check that can fail (the plan, each file, ``check_traj``) runs in ``load_plan``, before
-the arm is enabled. A prompt first drops any line typed before it. The run drains the SDK every ``DRAIN_PERIOD_S`` (the rings hold 4000
+the arm is enabled. A ``traj`` needs the tracking controller (``scripts/real_session.py
+--controller tracking``); the hold controller runs ``hold`` and ``prompt`` only. A prompt first
+drops any line typed before it. The run drains the SDK every ``DRAIN_PERIOD_S`` (the rings hold 4000
 ticks, 20 s) and stops with ``SessionFailure`` the moment the loop reports a fault or no longer
 runs the controller.
 """
@@ -269,8 +271,9 @@ class _Run:
         print(text, file=self.out, flush=True)
 
     def now(self) -> float:
-        if self.interrupted():
-            raise SessionFailure("interrupted", "Ctrl-C")
+        flag = self.interrupted()
+        if flag:
+            raise SessionFailure("interrupted", flag if isinstance(flag, str) else "Ctrl-C")
         reading = self.sdk.read()
         if reading is None or not reading.alive or reading.state != "enabled" or reading.fault:
             state = None if reading is None else (reading.state, reading.alive, reading.fault)
@@ -355,9 +358,13 @@ def run_session(
     a fault, a lost controller or the end of input at a prompt. It never holds or stops the
     arm: that is the caller's.
 
-    ``interrupted`` is polled every ``poll_s`` (a Ctrl-C flag): when it turns true the run
-    raises ``SessionFailure("interrupted")`` between two drains, never inside one, so a log
-    append is never cut short."""
+    ``interrupted`` is polled every ``poll_s`` (a Ctrl-C, SIGTERM or SIGHUP flag): when it
+    turns true the run raises ``SessionFailure("interrupted")`` between two drains, never
+    inside one, so a log append is never cut short; a string flag is the failure's detail.
+    ``max_interval_s`` and ``late_ticks`` are the log's tick-gap reads (``real.telemetry``).
+
+    Under the SDK's hold controller (``real.arm.SdkHoldArm``) a plan holds only ``hold`` and
+    ``prompt`` segments: the scripts refuse a ``traj`` before connect."""
     out = out if out is not None else sys.stderr
     run = _Run(sdk, log, lines, drain_s, poll_s, out, interrupted)
     for i, seg in enumerate(segments):
@@ -376,5 +383,7 @@ def run_session(
         "dropped": log.dropped,
         "faults": run.faults,
         "clamped": run.clamped,
+        "max_interval_s": log.max_interval_s,
+        "late_ticks": log.late_ticks,
         "records": run.records,
     }

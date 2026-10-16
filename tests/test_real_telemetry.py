@@ -134,3 +134,26 @@ def test_an_append_onto_misaligned_columns_is_refused(tmp_path):
     with pytest.raises(ValueError, match="misaligned"):
         log.append(_ticks(0.015, 2), None)
     log.close()
+
+
+def test_the_tick_intervals_are_read_across_drains(tmp_path):
+    log = TelemetryLog(tmp_path / "s.h5", {})
+    log.append(_ticks(0.0, 3), None)  # 0.000, 0.005, 0.010
+    log.append(_ticks(0.020, 2), None)  # a 10 ms gap across the drains, then 5 ms
+    log.append(_ticks(0.030, 1), None)  # 5 ms
+    t = [0.035, 0.0425, 0.050]  # 7.5 ms (1.5 x the period: not late) and 7.5 ms
+    log.append({**_ticks(0.0, 3), "t": t}, None)
+    assert log.max_interval_s == pytest.approx(0.010)
+    assert log.late_ticks == 1  # only the 10 ms interval is over 1.5 x 5 ms
+    log.close()
+    with h5py.File(tmp_path / "s.h5") as f:
+        assert f.attrs["max_interval_s"] == pytest.approx(0.010)
+        assert f.attrs["late_ticks"] == 1
+
+
+def test_a_log_with_one_tick_has_no_interval(tmp_path):
+    log = TelemetryLog(tmp_path / "s.h5", {})
+    assert log.max_interval_s == 0.0 and log.late_ticks == 0
+    log.append(_ticks(0.0, 1), None)
+    assert log.max_interval_s == 0.0 and log.late_ticks == 0
+    log.close()
