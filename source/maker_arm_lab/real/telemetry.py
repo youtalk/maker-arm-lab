@@ -104,6 +104,9 @@ class TelemetryLog:
         if n == 0:
             return 0
         known = self._columns.setdefault(group.name, set())
+        rows = {group[k].shape[0] for k in known}
+        if len(rows) > 1:
+            raise ValueError(f"{group.name}: the logged columns are misaligned ({sorted(rows)})")
         if known and set(arrays) != known:
             raise ValueError(
                 f"{group.name}: columns changed from {sorted(known)} to {sorted(arrays)}"

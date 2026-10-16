@@ -95,14 +95,13 @@ def test_the_reduced_profile_scales_the_caps_and_applies_the_calibration():
     base = rig.load_profile()
     config = rig.RigConfig(
         caps={"tau_max": [0.5] * 7, "kp": [0.25] * 7, "kd": [1.0] * 7},
-        calibration={"direction": [-1.0] + [1.0] * 6, "offset": [0.1] * 7},
+        calibration={"direction": [1.0] * 7, "offset": [0.0] * 7},
     )
     p = rig.reduced_profile(config)
     for j, b in zip(p["joints"], base["joints"]):
         assert j["tau_max"] == pytest.approx(0.5 * b["tau_max"])
         assert j["kp"] == pytest.approx(0.25 * b["kp"]) and j["kd"] == b["kd"]
-        assert j["offset"] == 0.1
-    assert p["joints"][0]["direction"] == -1.0 and p["joints"][1]["direction"] == 1.0
+        assert j["offset"] == 0.0 and j["direction"] == 1.0
     assert rig.reduced_profile(rig.RigConfig()) == base
 
 
@@ -118,6 +117,15 @@ def test_the_reduced_profile_scales_the_caps_and_applies_the_calibration():
 def test_a_cap_outside_the_unit_interval_is_refused(caps, match):
     with pytest.raises(ValueError, match=match):
         rig.reduced_profile(rig.RigConfig(caps=caps))
+
+
+@pytest.mark.parametrize(
+    "calibration",
+    [{"direction": [-1.0] + [1.0] * 6}, {"offset": [0.0] * 6 + [0.1]}],
+)
+def test_a_non_identity_calibration_is_refused_while_the_limits_are_motor_frame(calibration):
+    with pytest.raises(ValueError, match="motor frame"):
+        rig.reduced_profile(rig.RigConfig(calibration=calibration))
 
 
 def test_the_rig_json_round_trips_caps_and_calibration(tmp_path):

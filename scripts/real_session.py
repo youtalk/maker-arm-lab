@@ -181,12 +181,14 @@ def hold(world: dict) -> None:
 
 
 def release(world: dict, mode: str, lines) -> None:
-    """Disable the motors: at once, or on the typed word RELEASE or the end of input. A Ctrl-C
+    """Disable the motors: at once, or on the word RELEASE typed after this prompt (anything
+    typed before it is dropped) or the end of input. A Ctrl-C
     at the prompt keeps the arm held and asks again. An arm never enabled is let go at once."""
     sdk = world.get("arm")
     if sdk is None:
         return
     if mode == "prompt" and world.get("enabled"):
+        lines.clear()  # a RELEASE typed during the session must not release at its end
         print(
             "The arm holds. Support it, then type RELEASE to disable the motors.",
             file=sys.stderr,
@@ -209,18 +211,26 @@ def release(world: dict, mode: str, lines) -> None:
 
 
 def main(argv=None) -> int:
-    """Run one session. Ctrl-C ends the session (``interrupted``); from then on, through the
+    """Run one session. Ctrl-C ends the session (``interrupted``): during the setup by an
+    exception, once the log exists by a flag the run polls, so no log write is cut short. From
+    then on, through the
     hold, the token and the release prompt, a Ctrl-C only says the arm still holds: an
     escaping ``KeyboardInterrupt`` would skip the token and ``os._exit``, and dropping the SDK
     arm at interpreter exit disables the motors without the typed ``RELEASE``."""
     args = build_parser().parse_args(argv)
     world: dict = {}
-    running = [True]
+    phase = ["setup"]
 
     def on_sigint(signum, frame):
-        if running[0]:
-            running[0] = False
+        if phase[0] == "setup":
+            phase[0] = "closing"
             raise KeyboardInterrupt
+        if phase[0] == "session":
+            # A flag, not an exception: an exception could cut a log append between two
+            # columns. The run polls the flag every 20 ms and fails with "interrupted".
+            phase[0] = "closing"
+            world["interrupted"] = True
+            return
         note = "the arm still holds; type RELEASE to disable the motors"
         # os.write, not print: a SIGINT inside a sys.stderr write would re-enter its buffer.
         text = f"Ctrl-C: {note if world.get('enabled') else 'the session is closing'}.\n"
@@ -228,18 +238,19 @@ def main(argv=None) -> int:
 
     previous = signal.signal(signal.SIGINT, on_sigint)
     try:
-        return _run(args, world, running)
+        return _run(args, world, phase)
     finally:
         signal.signal(signal.SIGINT, previous)
 
 
-def _run(args, world: dict, running: list) -> int:
-    from maker_arm_lab.real.telemetry import TelemetryLog
-
-    lines = real_session.Lines()
+def _run(args, world: dict, phase: list) -> int:
+    lines = None
     code, token = 1, None
     try:
         try:
+            from maker_arm_lab.real.telemetry import TelemetryLog
+
+            lines = real_session.Lines().start()
             ready = prepare(args)
             try:
                 world["arm"] = connect_arm(
@@ -248,14 +259,23 @@ def _run(args, world: dict, running: list) -> int:
                 )  # fmt: skip
             except ValueError as err:
                 raise real_session.SessionFailure("profile", str(err)) from err
+            # From here a Ctrl-C only sets a flag: it must not cut the log's creation or an
+            # append. The run's first poll, right after the start, fails with "interrupted".
+            phase[0] = "session"
             world["log"] = TelemetryLog(ready["log_path"], ready["attrs"])
             world["enabled"] = True
             world["arm"].start()
-            summary = real_session.run_session(world["arm"], ready["segments"], world["log"], lines)
+            summary = real_session.run_session(
+                world["arm"],
+                ready["segments"],
+                world["log"],
+                lines,
+                interrupted=lambda: world.get("interrupted", False),
+            )
             summary["log"] = str(ready["log_path"])
             token, code = "SESSION_OK " + json.dumps(summary), 0
         finally:
-            running[0] = False
+            phase[0] = "closing"
     # Each branch sets code = 1: a Ctrl-C can land after the SESSION_OK assignment, before the
     # inner finally, and the exit code must still agree with the token.
     except real_session.SessionFailure as err:
@@ -279,7 +299,7 @@ def _run(args, world: dict, running: list) -> int:
                 code = 1
             traceback.print_exc()
     print(token, flush=True)
-    release(world, args.release, lines)
+    release(world, args.release, lines if lines is not None else real_session.Lines())
     return code
 
 

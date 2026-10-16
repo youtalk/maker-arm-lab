@@ -63,7 +63,8 @@ class RigConfig:
     key left out, keeps the profile's value. The exposure steps of the MS5 sessions set it."""
     calibration: dict | None = None
     """The motor to URDF map: ``{"direction": [7], "offset": [7]}``, joint = direction *
-    (motor - offset). None keeps the profile's identity map (session 2 measures it)."""
+    (motor - offset). None keeps the profile's identity map (session 2 measures it). Only the
+    identity is accepted until the profile's limits are re-expressed in joint coordinates."""
 
     @classmethod
     def from_json(cls, path) -> RigConfig:
@@ -91,7 +92,9 @@ def _seven(name: str, values) -> list[float]:
 def reduced_profile(rig: RigConfig) -> dict:
     """``maker_arm_rs.profile()`` with the rig's ``caps`` scaling each joint's ``tau_max``,
     ``kp`` and ``kd`` and its ``calibration`` setting each joint's ``direction`` and
-    ``offset``. A scale outside (0, 1] or an unknown key raises ValueError naming it (a group
+    ``offset``, which for now must be the identity (direction 1, offset 0): the profile's
+    limits are still the motor frame's. A scale outside (0, 1], a non-identity calibration or
+    an unknown key raises ValueError naming it (a group
     that is not an object, TypeError); the SDK
     checks the result again when the arm connects (``Arm.sim``, ``Arm.socketcan``)."""
     profile = load_profile()
@@ -112,8 +115,16 @@ def reduced_profile(rig: RigConfig) -> dict:
             if not 0.0 < s <= 1.0:
                 raise ValueError(f"caps.{key}[{i}] = {s} is outside (0, 1]")
             joints[i][key] = float(joints[i][key]) * s
+    identity = {"direction": 1.0, "offset": 0.0}
     for key, values in (rig.calibration or {}).items():
         for i, v in enumerate(_seven(f"calibration.{key}", values)):
+            if v != identity[key]:
+                raise ValueError(
+                    f"calibration.{key}[{i}] = {v}: only the identity calibration is accepted "
+                    "while the profile's joint limits (q_lo, q_hi) are still in the motor frame; "
+                    "the SDK clamp and check_traj read them as joint coordinates, so resolve "
+                    "the limit frame first"
+                )
             joints[i][key] = v
     return profile
 

@@ -14,7 +14,7 @@ A plan is a JSON object ``{"segments": [...]}`` (or the bare list), run in order
   typed line under ``label`` in the log's ``records``.
 
 Every check that can fail (the plan, each file, ``check_traj``) runs in ``load_plan``, before
-the arm is enabled. The run drains the SDK every ``DRAIN_PERIOD_S`` (the rings hold 4000
+the arm is enabled. A prompt first drops any line typed before it. The run drains the SDK every ``DRAIN_PERIOD_S`` (the rings hold 4000
 ticks, 20 s) and stops with ``SessionFailure`` the moment the loop reports a fault or no longer
 runs the controller.
 """
@@ -194,12 +194,37 @@ class Lines:
                 return
             self._queue.put(line)
 
-    def get(self, timeout: float) -> str | None:
-        if self._ended:
-            raise EOFError
+    def start(self) -> Lines:
+        """Start reading now, so lines typed ahead land in the queue, where ``clear`` drops
+        them, rather than wait in the input for the next question."""
         if self._thread is None:
             self._thread = threading.Thread(target=self._read, name="operator-input", daemon=True)
             self._thread.start()
+        return self
+
+    def clear(self) -> None:
+        """Drop every line typed before this question (on a terminal also the unread input),
+        so an early answer, or an early RELEASE, never answers it. The end of input stays."""
+        try:
+            if self.stream.isatty():
+                import termios
+
+                termios.tcflush(self.stream.fileno(), termios.TCIFLUSH)
+        except (AttributeError, OSError, ValueError):
+            pass
+        ended = False
+        while True:
+            try:
+                ended = self._queue.get_nowait() is self._EOF or ended
+            except queue.Empty:
+                break
+        if ended:
+            self._queue.put(self._EOF)
+
+    def get(self, timeout: float) -> str | None:
+        if self._ended:
+            raise EOFError
+        self.start()
         try:
             item = self._queue.get(timeout=timeout)
         except queue.Empty:
@@ -232,8 +257,9 @@ def current_target(sdk) -> list[float]:
 
 
 class _Run:
-    def __init__(self, sdk, log, lines, drain_s, poll_s, out):
+    def __init__(self, sdk, log, lines, drain_s, poll_s, out, interrupted):
         self.sdk, self.log, self.lines = sdk, log, lines
+        self.interrupted = interrupted
         self.drain_s, self.poll_s, self.out = drain_s, poll_s, out
         self.faults = self.clamped = self.segments = 0
         self.records: dict[str, str] = {}
@@ -243,6 +269,8 @@ class _Run:
         print(text, file=self.out, flush=True)
 
     def now(self) -> float:
+        if self.interrupted():
+            raise SessionFailure("interrupted", "Ctrl-C")
         reading = self.sdk.read()
         if reading is None or not reading.alive or reading.state != "enabled" or reading.fault:
             state = None if reading is None else (reading.state, reading.alive, reading.fault)
@@ -292,6 +320,7 @@ class _Run:
 
     def prompt(self, text: str, record: str) -> None:
         start = self.now()
+        self.lines.clear()
         self.say(f"{text}\n(type the answer for '{record}', then Enter)")
         while True:
             try:
@@ -318,13 +347,19 @@ def run_session(
     drain_s: float = DRAIN_PERIOD_S,
     poll_s: float = POLL_S,
     out=None,
+    interrupted=lambda: False,
 ) -> dict:
     """Run ``segments`` (``load_plan``) on a started ``sdk`` (``real.arm.SdkArm``'s session
     surface: ``read``, ``now``, ``telemetry``, ``push_rows``, ``drain``), every tick into
     ``log``. Returns the counts the ``SESSION_OK`` token reports; raises ``SessionFailure`` on
     a fault, a lost controller or the end of input at a prompt. It never holds or stops the
-    arm: that is the caller's."""
-    run = _Run(sdk, log, lines, drain_s, poll_s, out if out is not None else sys.stderr)
+    arm: that is the caller's.
+
+    ``interrupted`` is polled every ``poll_s`` (a Ctrl-C flag): when it turns true the run
+    raises ``SessionFailure("interrupted")`` between two drains, never inside one, so a log
+    append is never cut short."""
+    out = out if out is not None else sys.stderr
+    run = _Run(sdk, log, lines, drain_s, poll_s, out, interrupted)
     for i, seg in enumerate(segments):
         kind = seg["kind"]
         run.say(f"segment {i + 1}/{len(segments)}: {kind} {seg.get('label', '')}".rstrip())

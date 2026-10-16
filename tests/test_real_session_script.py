@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 import h5py
@@ -172,15 +173,44 @@ def test_a_sim_session_logs_every_tick_and_prints_ok(tmp_path):
         assert q.max() - q.min() > 0.12
 
 
+def _answer_when_asked(proc, answers):
+    """Read the script's stderr and write each answer once its question has printed."""
+    pending = list(answers)
+    err = []
+    while pending:
+        line = proc.stderr.readline()
+        assert line, "".join(err)
+        err.append(line)
+        if pending[0][0] in line:
+            proc.stdin.write(pending.pop(0)[1] + "\n")
+            proc.stdin.flush()
+    return "".join(err)
+
+
 def test_a_prompt_records_what_the_operator_typed(tmp_path):
     plan = _plan(tmp_path, [{"hold": 0.3}, {"prompt": "Is the tag visible?", "record": "tag"}])
     log = tmp_path / "s.h5"
-    code, tokens, err = _run(
-        ["--rig", _rig(tmp_path), "--plan", plan, "--interface", "sim", "--log", log],
-        stdin="yes, both corners\nRELEASE\n",
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "AMENT_PREFIX_PATH")}
+    args = ["--rig", _rig(tmp_path), "--plan", plan, "--interface", "sim", "--log", log]
+    proc = subprocess.Popen(
+        [sys.executable, str(SCRIPT), *map(str, args)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
     )
-    assert code == 0 and tokens[0].startswith("SESSION_OK"), err
-    assert "Is the tag visible?" in err
+    try:
+        # an answer typed before the question is dropped, not recorded
+        proc.stdin.write("too early\n")
+        proc.stdin.flush()
+        _answer_when_asked(proc, [("then Enter", "yes, both corners"), ("type RELEASE", "RELEASE")])
+        assert proc.wait(timeout=60) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    tokens = _tokens(proc.stdout.read())
+    assert len(tokens) == 1 and tokens[0].startswith("SESSION_OK")
     with h5py.File(log) as f:
         assert json.loads(f.attrs["records"]) == {"tag": "yes, both corners"}
         assert [k.decode() for k in f["segments"]["kind"]] == ["hold", "prompt"]
@@ -215,15 +245,30 @@ def test_a_raised_cap_in_the_rig_prints_session_fail(tmp_path):
     assert not (tmp_path / "s.h5").exists()
 
 
-def test_a_calibration_the_sdk_refuses_prints_session_fail(tmp_path):
+def test_a_non_identity_calibration_prints_session_fail_before_connect(tmp_path):
     plan = _plan(tmp_path, [{"hold": 0.2}])
-    rig = _rig(tmp_path, calibration={"direction": [1.0] * 6 + [2.0], "offset": [0.0] * 7})
+    rig = _rig(tmp_path, calibration={"direction": [1.0] * 7, "offset": [0.0] * 6 + [0.2]})
     code, tokens, _ = _run(
         ["--rig", rig, "--plan", plan, "--interface", "sim", "--log", tmp_path / "s.h5"]
     )
     assert code == 1 and len(tokens) == 1
     payload = _payload(tokens[0])
-    assert payload["reason"] == "profile" and "joints[6].direction" in payload["detail"]
+    assert payload["reason"] == "profile" and "calibration.offset[6]" in payload["detail"]
+    assert "motor frame" in payload["detail"] and not (tmp_path / "s.h5").exists()
+
+
+def test_a_profile_the_sdk_refuses_at_connect_prints_session_fail(tmp_path, monkeypatch, capsys):
+    from maker_arm_lab.real import rig as real_rig
+
+    loosened = core_profile.load_profile()
+    loosened["joints"][3]["tau_max"] *= 2.0  # past the lab's checks: the SDK still refuses
+    monkeypatch.setattr(real_rig, "reduced_profile", lambda rig: loosened)
+    plan = _plan(tmp_path, [{"hold": 0.2}])
+    argv = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--interface", "sim"]
+    code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--release", "now"])
+    payload = _payload(_tokens(capsys.readouterr().out)[0])
+    assert code == 1 and payload["reason"] == "profile"
+    assert "joints[3].tau_max" in payload["detail"] and not (tmp_path / "s.h5").exists()
 
 
 def test_an_unknown_tracking_parameter_is_refused_before_connect(tmp_path, monkeypatch, capsys):
@@ -410,6 +455,82 @@ def test_a_fault_holds_the_arm_and_releases_only_on_release(tmp_path, monkeypatc
     assert arm.holds == 1 and arm.stops == 1 and stops_seen[:2] == [0, 0]
     with h5py.File(tmp_path / "s.h5") as f:
         assert f["t"].shape[0] > 0  # the ticks up to the fault stay in the log
+
+
+def test_an_interrupt_flag_ends_the_run_between_drains(tmp_path):
+    arm = FakeSdk()
+    log = TelemetryLog(tmp_path / "s.h5", {})
+    t_stop = time.monotonic() + 0.3
+    with pytest.raises(session.SessionFailure) as err:
+        session.run_session(
+            arm, [{"kind": "hold", "seconds": 10.0}], log, session.Lines(io.StringIO("")),
+            interrupted=lambda: time.monotonic() > t_stop,
+        )  # fmt: skip
+    log.close()
+    assert err.value.reason == "interrupted" and time.monotonic() - t_stop < 1.0
+
+
+def test_ctrl_c_in_the_session_sets_a_flag_and_takes_the_hold_path(tmp_path, monkeypatch, capsys):
+    arm = FakeSdk()
+    monkeypatch.setattr(real_session, "connect_arm", lambda *a, **k: arm)
+    drain = arm.drain
+
+    def drain_then_ctrl_c():
+        # A real SIGINT inside the drain: with a raising handler it would escape mid-append.
+        out = drain()
+        if arm.drained > 0.2 * HZ and not getattr(arm, "signalled", False):
+            arm.signalled = True
+            os.kill(os.getpid(), signal.SIGINT)
+        return out
+
+    arm.drain = drain_then_ctrl_c
+    plan = _plan(tmp_path, [{"hold": 10.0}])
+    argv = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--interface", "sim"]
+    code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--release", "now"])
+    tokens = _tokens(capsys.readouterr().out)
+    assert code == 1 and len(tokens) == 1 and _payload(tokens[0])["reason"] == "interrupted"
+    assert arm.holds == 1 and arm.stops == 1
+    with h5py.File(tmp_path / "s.h5") as f:
+        assert len({f[k].shape[0] for k in ("t", "q", "cmd_tau", "fault_bits")}) == 1
+
+
+def test_a_release_typed_during_the_session_does_not_release_at_its_end(
+    tmp_path, monkeypatch, capsys
+):
+    arm = FakeSdk()
+    monkeypatch.setattr(real_session, "connect_arm", lambda *a, **k: arm)
+    r, w = os.pipe()
+    monkeypatch.setattr(sys, "stdin", os.fdopen(r, "r"))
+    writer = os.fdopen(w, "w")
+    writer.write("RELEASE\n")  # typed early, during the hold
+    writer.flush()
+    seen = []
+
+    def operator():
+        time.sleep(1.5)  # the session (0.5 s) is over and the release prompt waits
+        seen.append(arm.stops)
+        writer.write("RELEASE\n")
+        writer.close()
+
+    typist = threading.Thread(target=operator)
+    typist.start()
+    plan = _plan(tmp_path, [{"hold": 0.5}])
+    argv = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--interface", "sim"]
+    code = real_session.main([*argv, "--log", str(tmp_path / "s.h5")])
+    typist.join()
+    assert code == 0 and _tokens(capsys.readouterr().out)[0].startswith("SESSION_OK")
+    assert seen == [0] and arm.stops == 1
+
+
+def test_a_prompt_drops_lines_typed_before_it():
+    r, w = os.pipe()
+    lines = session.Lines(os.fdopen(r, "r")).start()
+    os.write(w, b"early\n")
+    time.sleep(0.2)
+    lines.clear()
+    os.write(w, b"late\n")
+    assert lines.get(2.0) == "late\n"
+    os.close(w)
 
 
 def test_end_of_input_at_a_prompt_fails_and_holds(tmp_path):

@@ -125,3 +125,12 @@ def test_a_log_never_overwrites_an_existing_file(tmp_path):
 def test_the_sdk_revision_is_the_pinned_commit():
     pin = re.search(r'maker-arm-rs = \{[^}]*rev = "([0-9a-f]{40})"', PYPROJECT.read_text())
     assert sdk_revision() == pin.group(1)
+
+
+def test_an_append_onto_misaligned_columns_is_refused(tmp_path):
+    log = TelemetryLog(tmp_path / "s.h5", {})
+    log.append(_ticks(0.0, 3), _trk(0.0, 3))
+    log._f["q"].resize(2, axis=0)  # as if an append had been cut between two columns
+    with pytest.raises(ValueError, match="misaligned"):
+        log.append(_ticks(0.015, 2), None)
+    log.close()
