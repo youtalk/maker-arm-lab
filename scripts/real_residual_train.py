@@ -16,7 +16,10 @@ residual dict (``real_session.py --residual MODEL.json`` runs it), with ``out_ma
 ``OUT_MAX_SIGMA`` standard deviations of the target. The SDK builds a controller with the
 model before anything is written. ``--report`` holds the dataset's counts, the training
 report (per joint RMSE of the model and of the zero model on the validation rows, the rows
-past the SDK's ``X_BOUND`` after the scale floors) and the provenance. The report is written
+past the SDK's ``X_BOUND`` after the scale floors), ``model_sha256`` (the sha256 of the model
+file) and the provenance, with ``ident_sha256`` (the sha256 of the ``--ident`` file): ruling
+R35, ``real_session.py --residual MODEL.json --residual_report REP.json`` runs the model only
+over the ident file it was trained against. The report is written
 first, then the model; neither file is ever overwritten.
 
 It prints exactly one ``RESID_OK {val_rmse, zero_rmse, rows, beyond_x_bound}`` (a model that
@@ -26,6 +29,7 @@ detail}`` line on every exit path and exits through ``os._exit``.
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import subprocess
@@ -123,7 +127,8 @@ def run(args) -> dict:
     ident = Path(args.ident).expanduser()
     try:
         dynamics = dm.from_ident(ident)
-        ident_data = json.loads(ident.read_text())
+        ident_bytes = ident.read_bytes()
+        ident_data = json.loads(ident_bytes)
     except (OSError, ValueError, TypeError, KeyError) as err:
         raise Failure("ident", f"{ident}: {err}") from err
     recorded = _ident_hold_steps(ident_data)
@@ -146,8 +151,8 @@ def run(args) -> dict:
         )
     except ValueError as err:
         raise Failure("train", str(err)) from err
-    spec = residual.residual_spec(model, rep["stats"], args.history)
-    try:  # the SDK must take the file before it is written
+    try:  # the out_max cap, then the SDK, must take the file before it is written
+        spec = residual.residual_spec(model, rep["stats"], args.history)
         maker_arm_rs.Tracking(dynamics, residual=spec)
     except (TypeError, ValueError) as err:
         raise Failure("export", str(err)) from err
@@ -162,9 +167,11 @@ def run(args) -> dict:
         "dataset": {k: v for k, v in info.items() if k != "t"},
         "train": rep,
         "model": str(out),
+        "model_sha256": hashlib.sha256(residual.spec_json(spec).encode()).hexdigest(),
         "provenance": {
             "logs": [str(p) for p in logs],
             "ident": str(ident),
+            "ident_sha256": hashlib.sha256(ident_bytes).hexdigest(),
             "ident_provenance": ident_data.get("provenance", {}),
             "lab_revision": lab_revision(),
             "sdk_revision": sdk_revision(),

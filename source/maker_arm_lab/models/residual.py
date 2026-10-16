@@ -24,6 +24,9 @@ layer's bias, ``b + y_mean / y_scale``. The SDK skips (gives zero for) a tick wi
 normalized input past ``X_BOUND``, so the input scale is floored per feature
 (``Q_STD_FLOOR``, ``DQ_STD_FLOOR``, ``TEMP_STD_FLOOR``): a session that held still, or ran at
 one temperature, would otherwise give a scale so narrow that every later reading skips.
+``out_max`` never exceeds the joint's ``tau_max`` of ``maker_arm_rs.profile()``: the export
+refuses one that does (``residual_spec``), since a residual past the motor's torque cap is a
+model gone wrong, not a correction.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from maker_arm_lab.core.profile import load_profile
 from maker_arm_lab.ident import fit
 
 ARM_DOF = 6
@@ -332,10 +336,15 @@ def train(
 
 
 def residual_spec(
-    model: ResidualMlp, stats: dict, history: int, out_max: Sequence[float] | None = None
+    model: ResidualMlp,
+    stats: dict,
+    history: int,
+    out_max: Sequence[float] | None = None,
+    tau_max: Sequence[float] | None = None,
 ) -> dict:
     """The SDK's residual dict (see the module docstring). ``out_max`` None is
-    ``OUT_MAX_SIGMA`` times ``stats["y_std"]``."""
+    ``OUT_MAX_SIGMA`` times ``stats["y_std"]``. ValueError, naming the joint, for an
+    ``out_max`` past ``tau_max`` (default: the six arm joints' of ``load_profile()``)."""
     s = _arrays(stats)
     width = n_inputs(history)
     if s["x_mean"].shape != (width,) or s["x_std"].shape != (width,):
@@ -343,6 +352,14 @@ def residual_spec(
     limit = OUT_MAX_SIGMA * s["y_std"] if out_max is None else np.asarray(out_max, dtype=float)
     if limit.shape != (ARM_DOF,) or not (np.isfinite(limit).all() and (limit >= 0).all()):
         raise ValueError(f"out_max needs six finite non-negative values, got {limit.tolist()}")
+    if tau_max is None:
+        tau_max = [float(j["tau_max"]) for j in load_profile()["joints"][:ARM_DOF]]
+    for j, (v, cap) in enumerate(zip(limit, tau_max)):
+        if v > float(cap):
+            raise ValueError(
+                f"out_max[{j}] = {v:.6g} N m is past the joint's tau_max {cap} N m: a residual "
+                "that large is a model gone wrong, not a correction"
+            )
     layers = []
     for k, layer in enumerate(model.linears):
         w = layer.weight.detach().to(torch.float64).numpy()
@@ -375,5 +392,11 @@ def export(
     never overwritten. Returns the dict."""
     spec = residual_spec(model, stats, history, out_max)
     with open(path, "x") as f:
-        f.write(json.dumps(spec) + "\n")
+        f.write(spec_json(spec))
     return spec
+
+
+def spec_json(spec: dict) -> str:
+    """The exact text ``export`` writes for ``spec``: its sha256 is the model's
+    (``scripts/real_residual_train.py``'s report, ruling R35)."""
+    return json.dumps(spec) + "\n"

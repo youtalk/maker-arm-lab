@@ -15,7 +15,10 @@ controller's model: ``urdf`` (the default) or the path of an identification file
 (``scripts/real_ident.py``, read by ``core.dynamics_model.from_ident``); the log records the
 choice and the file's content. ``--residual MODEL.json`` adds the learned residual torque
 (``scripts/real_residual_train.py``, the SDK's residual dict) to the controller; the log
-records its path and content (attrs ``residual`` and ``residual_model``). ``tracking_params``
+records its path and content (attrs ``residual`` and ``residual_model``). Ruling R35: it needs
+``--residual_report REP.json``, the training report, and runs only when the report's
+``ident_sha256`` is the sha256 of the ``--dynamics`` ident file and its ``model_sha256`` the
+model file's (attr ``residual_report``). ``tracking_params``
 gets ``e_max`` by ruling R33 (``real.rig.session_tracking_params``): the error clamp widens as
 the caps cut kp, so the spring's most torque, kp * e_max, stays the profile's.
 
@@ -49,6 +52,7 @@ powered session.
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import signal
@@ -96,6 +100,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--params", default="", help="JSON of tracking parameters to override")
     parser.add_argument(
         "--residual", default="", help="a residual model JSON (real_residual_train.py)"
+    )
+    parser.add_argument(
+        "--residual_report", default="", help="the residual's training report (R35)"
     )
     parser.add_argument("--release", choices=("prompt", "now"), default="prompt")
     parser.add_argument(
@@ -186,7 +193,7 @@ def prepare(args) -> dict:
         if not isinstance(override, dict):
             raise fail("params", f"{args.params}: the file must hold an object")
         params.update(override)
-    dynamics, ident, residual = None, None, None
+    dynamics, ident, residual, report = None, None, None, None
     if tracking:
         try:
             params = session_tracking_params(rig, params)
@@ -214,6 +221,9 @@ def prepare(args) -> dict:
                 maker_arm_rs.Tracking(dynamics, params=params, profile=profile, residual=residual)
             except (OSError, ValueError, TypeError) as err:
                 raise fail("residual", f"{args.residual}: {err}") from err
+            report = check_residual_report(args)
+        elif args.residual_report:
+            raise fail("residual", "--residual_report without --residual")
     else:
         if args.dynamics != URDF:
             raise fail("dynamics", f"{args.dynamics}: the hold controller runs no model")
@@ -242,6 +252,7 @@ def prepare(args) -> dict:
         "dynamics_ident": ident,
         "residual": str(Path(args.residual).expanduser()) if args.residual else "",
         "residual_model": residual,
+        "residual_report": report,
         "interface": interface,
         "rt": rt,
         "control_hz": real_session.CONTROL_HZ,
@@ -261,6 +272,50 @@ def prepare(args) -> dict:
         "log_path": log_path,
         "attrs": attrs,
     }
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def check_residual_report(args) -> dict:
+    """Ruling R35: the training report of ``--residual``, checked against the ``--dynamics``
+    ident file and the model file by sha256. Raises SessionFailure("residual")."""
+    fail = real_session.SessionFailure
+    if not args.residual_report:
+        raise fail(
+            "residual",
+            f"{args.residual}: --residual needs --residual_report REP.json, its training "
+            "report, to tie it to the ident file it was trained against (ruling R35)",
+        )
+    if args.dynamics == URDF:
+        raise fail(
+            "residual",
+            "--dynamics urdf: a residual is trained against an ident file, and the report's "
+            "ident_sha256 has no file to match",
+        )
+    path = Path(args.residual_report).expanduser()
+    try:
+        report = json.loads(path.read_text())
+        ident_sha = _sha256(Path(args.dynamics).expanduser())
+        model_sha = _sha256(Path(args.residual).expanduser())
+    except (OSError, ValueError) as err:
+        raise fail("residual", f"{args.residual_report}: {err}") from err
+    prov = report.get("provenance") if isinstance(report, dict) else None
+    want = prov.get("ident_sha256") if isinstance(prov, dict) else None
+    if want != ident_sha:
+        raise fail(
+            "residual",
+            f"{path}: the report's ident_sha256 {want} is not the sha256 {ident_sha} of "
+            f"--dynamics {args.dynamics}: the residual was trained against another model",
+        )
+    if report.get("model_sha256") != model_sha:
+        raise fail(
+            "residual",
+            f"{path}: the report's model_sha256 {report.get('model_sha256')} is not the "
+            f"sha256 {model_sha} of --residual {args.residual}",
+        )
+    return report
 
 
 def connect_arm(

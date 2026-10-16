@@ -800,19 +800,42 @@ def _residual_file(tmp_path, name="residual.json", **change):
     return path
 
 
+def _sha(path):
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _residual_report(tmp_path, ident, model, name="residual_report.json", **change):
+    """The training report's provenance as ``scripts/real_residual_train.py`` writes it."""
+    path = tmp_path / name
+    body = {
+        "model": str(model),
+        "model_sha256": _sha(model),
+        "provenance": {"ident": str(ident), "ident_sha256": _sha(ident)},
+    }
+    body["provenance"].update(change.pop("provenance", {}))
+    body.update(change)
+    path.write_text(json.dumps(body))
+    return path
+
+
 def test_a_sim_session_with_a_residual_model_runs_it_and_records_it(tmp_path):
     model = _residual_file(tmp_path)
+    ident = _ident_file(tmp_path)
+    report = _residual_report(tmp_path, ident, model)
     plan = _plan(tmp_path, [{"hold": 0.3}])
     log = tmp_path / "s.h5"
     code, tokens, err = _run(
         ["--rig", _rig(tmp_path), "--plan", plan, "--interface", "sim", "--log", log]
-        + ["--residual", model],
+        + ["--dynamics", ident, "--residual", model, "--residual_report", report],
         stdin="RELEASE\n",
     )
     assert code == 0 and tokens[0].startswith("SESSION_OK"), err
     with h5py.File(log) as f:
         assert f.attrs["residual"] == str(model)
         assert json.loads(f.attrs["residual_model"]) == json.loads(model.read_text())
+        assert json.loads(f.attrs["residual_report"]) == json.loads(report.read_text())
         tau_res = f["trk/tau_res"][:]
         skips = f["trk/residual_skips"][:]
     # the first tick fills the history of two, then the model acts on every tick
@@ -837,10 +860,48 @@ def test_a_bad_residual_model_prints_session_fail_before_connect(tmp_path, monke
     unknown = _residual_file(tmp_path, "unknown.json", y_mean=[0.0] * 6)
     short = _residual_file(tmp_path, "short.json", history=3)  # 2-tick layers, 3-tick history
     plan = _plan(tmp_path, [{"hold": 0.2}])
+    ident = _ident_file(tmp_path)
     for model in (unknown, short, tmp_path / "missing.json"):
+        report = _residual_report(tmp_path, ident, unknown, provenance={})
         argv = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--residual", str(model)]
-        argv += ["--interface", "sim"]
+        argv += ["--interface", "sim", "--dynamics", str(ident), "--residual_report", str(report)]
         code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--release", "now"])
         payload = _payload(_tokens(capsys.readouterr().out)[0])
         assert code == 1 and payload["reason"] == "residual" and str(model) in payload["detail"]
+    assert not (tmp_path / "s.h5").exists()
+
+
+def test_a_residual_needs_the_report_of_its_ident_file(tmp_path, monkeypatch, capsys):
+    """Ruling R35: ``--residual`` needs ``--residual_report``, whose ident sha256 must be the
+    ``--dynamics`` file's and whose model sha256 the model's; each check fails before
+    connect."""
+    monkeypatch.setattr(real_session, "connect_arm", _never_connect)
+    model = _residual_file(tmp_path)
+    ident = _ident_file(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    other_ident = _ident_file(other, armature=0.03)
+    plan = _plan(tmp_path, [{"hold": 0.2}])
+    base = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--interface", "sim"]
+    base += ["--log", str(tmp_path / "s.h5"), "--release", "now", "--residual", str(model)]
+    cases = [
+        ([], "--residual_report"),
+        (["--residual_report", str(_residual_report(tmp_path, ident, model))], "urdf"),
+        (
+            ["--dynamics", str(other_ident)]
+            + ["--residual_report", str(_residual_report(tmp_path, ident, model))],
+            "ident_sha256",
+        ),
+        (
+            ["--dynamics", str(ident), "--residual_report"]
+            + [str(_residual_report(tmp_path, ident, model, "r2.json", model_sha256="0" * 64))],
+            "model_sha256",
+        ),
+        (["--dynamics", str(ident), "--residual_report", str(tmp_path / "none.json")], "none"),
+    ]
+    for extra, needle in cases:
+        code = real_session.main([*base, *extra])
+        payload = _payload(_tokens(capsys.readouterr().out)[0])
+        assert code == 1 and payload["reason"] == "residual", (extra, payload)
+        assert needle in payload["detail"], (needle, payload["detail"])
     assert not (tmp_path / "s.h5").exists()

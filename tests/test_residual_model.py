@@ -2,6 +2,7 @@
 training and its export to the ``maker_arm_rs`` residual format."""
 
 import ast
+import hashlib
 import json
 import os
 import subprocess
@@ -284,8 +285,9 @@ def test_the_sdk_reads_the_same_window_as_the_dataset(tmp_path):
     torch.manual_seed(0)
     net = residual.ResidualMlp(residual.n_inputs(4), hidden=(16,))
     stats = residual.fit_stats(X, Y, 4)
-    stats["y_std"] = np.full(6, 0.5)  # a visible output; out_max 100 never clamps it
-    spec = residual.export(net, stats, 4, [100.0] * 6, tmp_path / "m.json")
+    stats["y_std"] = np.full(6, 0.5)  # a visible output; out_max at tau_max never clamps it
+    tau_max = [float(j["tau_max"]) for j in core_profile.load_profile()["joints"][:6]]
+    spec = residual.export(net, stats, 4, tau_max, tmp_path / "m.json")
     sdk, _ = _sdk_residual(spec, model, tr["t"], tr["q"], tr["dq"], temp)
     k = np.searchsorted(tr["t"], info["t"])
     want = residual.predict(net, stats, X)
@@ -368,6 +370,10 @@ def test_the_train_script_learns_a_residual_and_never_overwrites(tmp_path):
     split = report["train"]
     assert report["dataset"]["rows"] == split["n_train"] + split["embargo"] + split["n_val"]
     assert "beyond_x_bound" in report["train"] and report["provenance"]["ident"] == str(ident)
+    # ruling R35: the report ties the model to its ident file and to the model file itself
+    sha = hashlib.sha256
+    assert report["provenance"]["ident_sha256"] == sha(ident.read_bytes()).hexdigest()
+    assert report["model_sha256"] == sha(out.read_bytes()).hexdigest()
     before = out.read_text()
     code, tokens, _ = _run([*args, "--epochs", "1"])
     assert code == 1 and len(tokens) == 1
@@ -398,3 +404,25 @@ def test_the_train_script_refuses_a_hold_model_other_than_the_idents(tmp_path):
     assert code == 1 and len(tokens) == 1
     assert json.loads(tokens[0].split(" ", 1)[1])["reason"] == "hold_steps"
     assert not out.exists()
+
+
+def test_an_out_max_past_the_joints_torque_cap_is_refused(tmp_path):
+    torch.manual_seed(0)
+    n_in = residual.n_inputs(2)
+    stats = {
+        "x_mean": np.zeros(n_in),
+        "x_std": np.ones(n_in),
+        "y_mean": np.zeros(6),
+        "y_std": np.full(6, 0.01),
+    }
+    model = residual.ResidualMlp(n_in, hidden=(8,))
+    tau_max = [float(j["tau_max"]) for j in core_profile.load_profile()["joints"][:6]]
+    at_cap = residual.residual_spec(model, stats, 2, tau_max)
+    assert at_cap["out_max"] == tau_max
+    over = list(tau_max)
+    over[2] *= 1.01
+    with pytest.raises(ValueError, match=r"out_max\[2\]"):
+        residual.residual_spec(model, stats, 2, over)
+    with pytest.raises(ValueError, match="tau_max"):
+        residual.residual_spec(model, {**stats, "y_std": np.full(6, 100.0)}, 2)  # 3 sigma: 300
+    assert not list(tmp_path.iterdir())
