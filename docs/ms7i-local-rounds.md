@@ -1,9 +1,9 @@
-# MS7i: local rounds, rounds 1 and 2
+# MS7i: local rounds, rounds 1 to 3
 
-Date: 2026-10-15. Status: final for rounds 1 and 2. This report uses the ledger through its entry
-of 14:09 on 2026-10-15. Round 1 ran from 10-13 to 10-15, and both of its tracks ended before a
-checked read. The owner chose the round 2 levers on 10-15, and round 2 ended the same day (section
-9). Only the choice of the round 3 levers is open (section 9.5).
+Date: 2026-10-15. Status: final for rounds 1 to 3. This report uses the ledger through its entry
+of 16:32 on 2026-10-15. Round 1 ran from 10-13 to 10-15, and both of its tracks ended before a
+checked read. The owner chose the levers of rounds 2 and 3 on 10-15, and both rounds ended the same
+day (sections 9 and 10). Only the choice of the round 4 levers is open (section 10.5).
 
 The design of MS7i is revision 3 of the design document of 2026-10-13. The owner started the run on
 it with /goal at about 11:35 on 2026-10-13. This report cites the design as "spec section N" and
@@ -106,6 +106,10 @@ In round 2 (section 9), Track V paused, and Track ACT measured the release of AC
 census field. ACT-C opens 7.5 mm nearer the far wall and 6 mm farther to the side than S, on every
 release. Its extra losses past the far wall follow that position (+30 against S) more than the
 speed of the arm (+9). So the round 3 lever aims at the position of the release (section 9.5).
+
+In round 3 (section 10), a new switch hands an off-center release to the rig. ACT-C with it gains
++41 at 1.35 paired SE, under the bar of 2 SE, and still reads under S. No candidate of MS7i passed a
+screen in rounds 1 to 3.
 
 ## 2. The bars and the candidate path
 
@@ -1002,3 +1006,84 @@ The owner chooses the levers of round 3. Each lever below aims at the position o
    says that the position does not bind the total.
 3. P-c, a stop of Track ACT. ACT-C reads under S on all three 20-heap pairs without a switch: D =
    -21, -62 and -70. MS7i then waits for the real arm.
+
+## 10. Round 3: the centered release
+
+### 10.1 The choice and the rule
+
+The owner chose lever P-a at 14:46 on 10-15. Its zone comes from the round 2 read of S
+(`i/act/analysis/zone_ref.py`). The measure is the shortest distance from the release point to an
+interior wall of the served box. Over the 2310 stowed releases of S, its 5th percentile is
+0.0258 m. Under it lie 4.9 % of the stowed releases of S and 34.3 % of those of ACT-C.
+
+Rule R3A-1, entered at 14:46 before any number:
+
+- The switch `--release_handoff` works with `--guard_margin 0.025`, the 5th percentile rounded down
+  to the mm. Take a step where the carry guard holds an open command closed. The pick point is
+  inside the perceived interior of the served box, but less than 0.025 m from a wall. Then the
+  loop hands the carry to the rig at once, and the rig places the part at the box center. Every
+  other guard step stays as before.
+- ACT-C 400k and S each read the screen with the switch. Each pairs with its own round 2 read.
+- Mechanism: the core count of ACT-C falls to 36 or less, half of 73.
+- Effect: a gain of 2 paired SE or more makes the switch a lever for that policy.
+- Candidate: ACT-C with the switch enters the path of section 2.2 only with the screen bars against
+  h_S_scr: 2550 or more, 200 or more an hour, a held-out row of 0.80 or more, and D > 0.
+
+### 10.2 The code
+
+PR #202 (`feat/ms7i-center-release` 377b960, a draft) adds the switch. `rim_handoff_due` in
+`core/loop.py` decides the hand-off from the perceived box pose, the FK pick point and the hold
+detector. So the rule stays on the perceived boundary. The hand-off uses the path of the stall
+hand-off, with no wait. Without the switch, no step and no payload byte changes, and the tests pin
+this. The reads ran from worktree 7i-r2 at 377b960.
+
+### 10.3 The reads
+
+Both reads used seed 20307000, draws 0 to 19, with the switches and the classifier of S and the
+new switch. i_C400_ch_scr read on 10 lanes of Machine B from 15:17 to 16:07. i_S_ch_scr read on 10
+lanes of Machine A from 15:17 to 16:31.
+
+| read | correct of 3000 | rate | held-out row | hand-offs | lifted_lost | core | D against its round 2 read, paired SE |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| i_C400_ch_scr, ACT-C with the switch | 2507 | 357.00 | 589 of 744, 0.7917 | 782 | 184 | 17 | +41, 30.3 |
+| i_C400_rc_scr, ACT-C | 2466 | 382.00 | 592 of 744, 0.7957 | | 237 | 73 | |
+| i_S_ch_scr, S with the switch | 2545 | 359.24 | 605 of 744, 0.8132 | 247 | 190 | 24 | +9, 21.5 |
+| i_S_rc_scr, S | 2536 | 359.48 | 588 of 744, 0.7903 | | 208 | 25 | |
+
+- The rig placed all 782 hand-offs of ACT-C and all 247 of S. ACT-C hands off about one cycle in
+  four.
+- The core count of ACT-C falls from 73 to 17. But the core set leaves out the guarded cycles, and
+  each hand-off has a guard step. The fairer count is lifted_lost, which falls from 237 to 184.
+- ACT-C gains +41 at 1.35 paired SE, and S gains +9 at 0.42 SE. Neither reaches 2 SE.
+- The rate of ACT-C falls from 382.00 to 357.00 an hour, because the rig carries more slowly.
+
+### 10.4 The result
+
+Rule R3A-1 does not make the switch a lever for either policy. ACT-C with the switch also fails
+the screen bars. Against h_S_scr, D is -26 at a paired SE of 26.0. The total is 2507 against the
+bar of 2550, and the held-out row is 0.7917. Against S with the same switch, D is -38 at a paired
+SE of 19.7.
+
+So ACT-C stays under S with or without the switch, on four 20-heap pairs:
+
+| pair | D, paired SE |
+| --- | --- |
+| i_C400_scr against h_S_scr, round 1 | -21, 34.8 |
+| i_C400_d2039 against i_S_d2039, round 1 | -62, 33.7 |
+| i_C400_rc_scr against i_S_rc_scr, round 2 | -70, 28.8 |
+| i_C400_ch_scr against i_S_ch_scr, round 3 | -38, 19.7 |
+
+The release position explains part of the gap: the switch moves ACT-C by +41. The rest lies
+elsewhere in the cycle.
+
+### 10.5 Round 4 levers
+
+The owner chooses the levers of round 4.
+
+1. Q-a, a pause of MS7i until the real arm arrives. Track V has no compute units, and Track ACT
+   has no candidate. The switch of round 3 stays a draft (PR #202).
+2. Q-b, a check of the switch on fresh draws, for S. S with the switch and S without it read draws
+   20 to 39. A pooled gain of 2 paired SE over the 40 heaps makes it a serving lever of S for the
+   real arm. On the screen the gain was only +9, so the check will likely fail.
+3. Q-c, a study of where else ACT-C loses parts to S. A read-only subagent splits the 38 parts of
+   the round 3 pair by cycle class and phase, as section 5.5 did for round 1. It needs no new read.
