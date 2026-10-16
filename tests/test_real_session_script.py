@@ -698,3 +698,67 @@ def test_sigterm_and_sighup_hold_the_arm_and_print_one_token(tmp_path, signum):
     assert _tokens(proc.stdout.read()) == []
     with h5py.File(log) as f:
         assert f["t"].shape[0] >= 0.9 * HZ * 1.5
+def _ident_file(tmp_path, armature=0.02):
+    from maker_arm_lab.core import dynamics_model as dm
+
+    path = tmp_path / "ident.json"
+    data = {
+        "bodies": [[m, list(c), [list(r) for r in i]] for m, c, i in dm.urdf_bodies()],
+        "friction": [[0.1, 0.02, 0.01, 0.15, 0.05]] * 6,
+        "armature": [armature] * 6,
+        "torque_sigma": [0.1] * 6,
+        "provenance": {"logs": [], "date": "2026-10-16"},
+    }
+    path.write_text(json.dumps(data))
+    return path
+
+
+def test_an_ident_file_is_the_controllers_model_and_is_logged(tmp_path, monkeypatch, capsys):
+    from maker_arm_lab.core import dynamics_model as dm
+
+    ident = _ident_file(tmp_path)
+    seen = {}
+
+    def connect(interface, dynamics, profile, params, rt):
+        seen["dynamics"] = dynamics
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(real_session, "connect_arm", connect)
+    plan = _plan(tmp_path, [{"hold": 0.2}])
+    argv = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--dynamics", str(ident)]
+    code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--release", "now"])
+    assert code == 1 and _payload(_tokens(capsys.readouterr().out)[0])["reason"] == "profile"
+    args = ([0.1] * 6, [0.3] * 6, [1.0] * 6)
+    want = dm.from_ident(ident)
+    assert np.allclose(seen["dynamics"].inverse(*args), want.inverse(*args))
+    assert np.allclose(seen["dynamics"].friction([0.3] * 6), want.friction([0.3] * 6))
+    assert not np.allclose(
+        seen["dynamics"].inverse(*args), dm.dynamics(dm.urdf_bodies()).inverse(*args)
+    )
+
+
+def test_a_sim_session_with_an_ident_file_records_it(tmp_path):
+    ident = _ident_file(tmp_path)
+    plan = _plan(tmp_path, [{"hold": 0.3}])
+    log = tmp_path / "s.h5"
+    code, tokens, err = _run(
+        ["--rig", _rig(tmp_path), "--plan", plan, "--interface", "sim", "--log", log]
+        + ["--dynamics", ident],
+        stdin="RELEASE\n",
+    )
+    assert code == 0 and tokens[0].startswith("SESSION_OK"), err
+    with h5py.File(log) as f:
+        assert f.attrs["dynamics"] == str(ident)
+        assert json.loads(f.attrs["dynamics_ident"]) == json.loads(ident.read_text())
+
+
+def test_a_bad_ident_file_prints_session_fail_before_connect(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(real_session, "connect_arm", _never_connect)
+    bad = _ident_file(tmp_path, armature=-0.1)  # the SDK refuses a negative armature
+    plan = _plan(tmp_path, [{"hold": 0.2}])
+    for dynamics in (str(bad), str(tmp_path / "missing.json")):
+        argv = ["--rig", str(_rig(tmp_path)), "--plan", str(plan), "--dynamics", dynamics]
+        code = real_session.main([*argv, "--log", str(tmp_path / "s.h5"), "--release", "now"])
+        payload = _payload(_tokens(capsys.readouterr().out)[0])
+        assert code == 1 and payload["reason"] == "dynamics" and dynamics in payload["detail"]
+    assert not (tmp_path / "s.h5").exists()

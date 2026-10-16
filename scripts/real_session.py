@@ -10,24 +10,26 @@ to HDF5 (``real.telemetry``).
 ``--interface sim`` runs the SDK's simulator; the default is the rig's ``can_interface``. The
 rig's ``caps`` and ``calibration`` make the profile (``real.rig.reduced_profile``), its
 ``tracking_params`` the controller's parameters (``--params PARAMS.json`` overrides keys), its
-``rt`` the loop's SCHED_FIFO priority and core (not on the simulator). ``--dynamics urdf`` is
-the controller's model. ``tracking_params`` gets ``e_max`` by ruling R33
+``rt`` the loop's SCHED_FIFO priority and core (not on the simulator). ``--dynamics`` is the
+controller's model: ``urdf`` (the default) or the path of an identification file
+(``scripts/real_ident.py``, read by ``core.dynamics_model.from_ident``); the log records the
+choice and the file's content. ``tracking_params`` gets ``e_max`` by ruling R33
 (``real.rig.session_tracking_params``): the error clamp widens as the caps cut kp, so the
 spring's most torque, kp * e_max, stays the profile's.
 
 ``--controller tracking`` (the default) runs ``maker_arm_rs.Tracking`` with the model;
 ``--controller hold`` runs the SDK's hold controller (``real.arm.SdkHoldArm``: no model, PD at
-the start pose, the drain still logged) and refuses a plan with a ``traj`` segment. Ruling R32:
-on a real interface (anything but ``sim``) the tracking controller is refused before connect
-while the rig's calibration is the identity, the only one ``reduced_profile`` accepts: the
-model works in URDF joint coordinates, the identity feeds it the motor frame's angles. A real
-session also refuses an input that is not a terminal (ruling R34): the end of input releases
-the arm, so a pipe that ends would let it go.
+the start pose, the drain still logged) and refuses a plan with a ``traj`` segment and a
+``--dynamics`` other than ``urdf``. Ruling R32: on a real interface (anything but ``sim``) the
+tracking controller is refused before connect while the rig's calibration is the identity,
+the only one ``reduced_profile`` accepts: the model works in URDF joint coordinates, the
+identity feeds it the motor frame's angles. A real session also refuses an input that is not a
+terminal (ruling R34): the end of input releases the arm, so a pipe that ends would let it go.
 
 The plan format is ``real.session``'s docstring. Every check that can fail (the rig, the
-profile, the controller and the interface, the plan, each trajectory's ``check_traj``, the log
-path) runs before the arm is enabled; the SDK checks the profile again when it connects. The
-script never writes the rig JSON and never overwrites a log.
+profile, the controller and the interface, the plan, each trajectory's ``check_traj``, the
+ident file, the log path) runs before the arm is enabled; the SDK checks the profile again
+when it connects. The script never writes the rig JSON and never overwrites a log.
 
 It prints exactly one ``SESSION_OK {segments, ticks, dropped, faults, ...}`` or
 ``SESSION_FAIL {reason, detail}`` line on every exit path and exits through ``os._exit``. A
@@ -57,7 +59,7 @@ sys.path.insert(0, str(ROOT / "source"))
 
 from maker_arm_lab.real import session as real_session
 
-DYNAMICS = ("urdf",)
+URDF = "urdf"
 CONTROLLERS = ("tracking", "hold")
 SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 """Each one ends a session the same way: the hold, one token, the release prompt."""
@@ -84,7 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--interface", default="", help="'sim' for the SDK simulator; default the rig's CAN"
     )
-    parser.add_argument("--dynamics", choices=DYNAMICS, default="urdf")
+    parser.add_argument(
+        "--dynamics", default=URDF, help="'urdf' or the path of an ident JSON (real_ident.py)"
+    )
     parser.add_argument("--params", default="", help="JSON of tracking parameters to override")
     parser.add_argument("--release", choices=("prompt", "now"), default="prompt")
     parser.add_argument(
@@ -175,20 +179,36 @@ def prepare(args) -> dict:
         if not isinstance(override, dict):
             raise fail("params", f"{args.params}: the file must hold an object")
         params.update(override)
-    dynamics = None
+    dynamics, ident = None, None
     if tracking:
         try:
             params = session_tracking_params(rig, params)
         except (TypeError, ValueError) as err:
             raise fail("params", str(err)) from err
-        dynamics = dm.dynamics(dm.urdf_bodies())
+        if args.dynamics == URDF:
+            dynamics = dm.dynamics(dm.urdf_bodies())
+        else:
+            ident_path = Path(args.dynamics).expanduser()
+            try:
+                dynamics = dm.from_ident(ident_path)
+                ident = json.loads(ident_path.read_text())
+            except (OSError, ValueError, TypeError) as err:
+                raise fail("dynamics", f"{args.dynamics}: {err}") from err
         try:
             # A throwaway controller: the SDK checks the parameters when it builds one.
             maker_arm_rs.Tracking(dynamics, params=params, profile=profile)
         except (TypeError, ValueError) as err:
             raise fail("params", str(err)) from err
     else:
+        if args.dynamics != URDF:
+            raise fail("dynamics", f"{args.dynamics}: the hold controller runs no model")
         params = None
+    if not tracking:
+        dynamics_label = "none"
+    elif ident is None:
+        dynamics_label = args.dynamics
+    else:
+        dynamics_label = str(Path(args.dynamics).expanduser())
     log_path = Path(args.log).expanduser()
     if log_path.exists():
         raise fail("log_exists", f"{log_path} exists; a session log is never overwritten")
@@ -201,7 +221,8 @@ def prepare(args) -> dict:
         "profile": profile,
         "controller": args.controller,
         "tracking_params": params,
-        "dynamics": args.dynamics if tracking else "none",
+        "dynamics": dynamics_label,
+        "dynamics_ident": ident,
         "interface": interface,
         "rt": rt,
         "control_hz": real_session.CONTROL_HZ,
