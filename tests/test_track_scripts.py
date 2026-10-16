@@ -140,3 +140,47 @@ def test_a_stopped_loop_ends_the_soak_and_still_stops_the_arm(monkeypatch):
     with pytest.raises(RuntimeError, match="loop stopped"):
         soak.run_soak(0.01, None)
     assert calls == ["stop"]
+
+
+def _residual_model(tmp_path):
+    import numpy as np
+    import torch
+
+    from maker_arm_lab.models import residual
+
+    torch.manual_seed(0)
+    n_in = residual.n_inputs(2)
+    stats = {
+        "x_mean": np.zeros(n_in),
+        "x_std": np.full(n_in, 10.0),  # the desk pose, its speed and 30 degC stay in X_BOUND
+        "y_mean": np.zeros(6),
+        "y_std": np.full(6, 0.01),
+    }
+    path = tmp_path / "residual.json"
+    residual.export(residual.ResidualMlp(n_in, hidden=(8,)), stats, 2, None, path)
+    return path
+
+
+def test_timing_runs_the_observer_compensation_and_a_residual(tmp_path):
+    params = tmp_path / "params.json"
+    params.write_text(json.dumps({"dob": True, "dob_f": 5.0, "tau_th": [0.5] * 6}))
+    model = _residual_model(tmp_path)
+    line = _run(
+        "track_timing.py", "--ticks", "500", "--bar_us", "100000",
+        "--params", str(params), "--residual", str(model),
+    )  # fmt: skip
+    assert line.startswith("TIMING_OK "), line
+    payload = json.loads(line.split(" ", 1)[1])
+    assert payload["params"] == {"dob": True, "dob_f": 5.0, "tau_th": [0.5] * 6}
+    assert payload["residual"] == str(model) and payload["residual_active_share"] > 0.9
+    assert payload["dob_active_share"] > 0.0
+
+
+def test_timing_refuses_a_bad_params_or_residual_file(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"tau_thh": [0.5] * 6}))
+    for args in (("--params", str(bad)), ("--residual", str(tmp_path / "missing.json"))):
+        line = _run("track_timing.py", "--ticks", "10", *args)
+        assert line.startswith("TIMING_FAIL "), line
+        reason = json.loads(line.split(" ", 1)[1])["reason"]
+        assert ("tau_thh" in reason) or ("missing.json" in reason), reason
