@@ -52,14 +52,16 @@ Source: MS5 revision section 8.2.
 
 Source: MS5 revision section 8.3.
 
-- Data: ten excitation trajectories under reduced caps, logged by the telemetry ring. They use
-  seeds 1 to 10.
-- Held-out set: the excitations with seeds 9 and 10 (`INITIAL`). The fit never sees them.
+- Data: ten excitation trajectories under reduced caps, logged by the telemetry ring. One run
+  seed S = 20261016 (`INITIAL`, the owner can change it before session 3) writes them as
+  `exc_00` to `exc_09`.
+- Held-out set: `exc_08` and `exc_09` of that seed (`INITIAL`). The fit never sees them.
 - Rule: on the held-out set, the identified model's residual torque RMS is lower than the URDF
   model's on every joint. Held-out static poses are scored the same way.
 - `COND_MAX` is 200. A base-parameter regression whose condition number is above it is not
   accepted, and the excitation set is redesigned.
-- The numbers, the margin and the held-out seeds go into the ledger before the fit.
+- The numbers, the margin, the seed and the held-out file indices go into the ledger before
+  the fit.
 - Reported, with no bar: the static error at the desk pose under each model, and the largest
   resistance torque while a person drags the arm with the admittance on.
 
