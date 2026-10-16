@@ -318,9 +318,14 @@ def hold_model(t, q, dq, ddq, tau, kp, kd, hold_steps: int | None):
     return q_mean, v_mean, a_mean, drive
 
 
-def load_free_motion(path: Path, hold_steps: int | None = HOLD_STEPS) -> dict:
+def load_free_motion(
+    path: Path, hold_steps: int | None = HOLD_STEPS, segment_prefix: str | None = None
+) -> dict:
     """The free-motion samples of one session log: ``q``, ``dq``, ``ddq``, ``tau`` (N, 6) and
-    the counts behind them, through ``hold_model``."""
+    the counts behind them, through ``hold_model``. With ``segment_prefix``, only the ticks
+    inside a ``traj`` segment whose label (the plan's file name) starts with it: ``exc_`` the
+    held-out excitations, ``static_`` the static poses (``scripts/real_excitation.py``); an
+    ``approach`` walk never counts."""
     path = Path(path)
     with h5py.File(path, "r") as f:
         t = f["t"][:]
@@ -344,6 +349,12 @@ def load_free_motion(path: Path, hold_steps: int | None = HOLD_STEPS) -> dict:
     for seg in segments:
         if _decode(seg["kind"]) == "prompt":
             free &= ~((t >= seg["start_t"]) & (t <= seg["end_t"]))
+    if segment_prefix is not None:
+        named = np.zeros(n, dtype=bool)
+        for seg in segments:
+            if _decode(seg["kind"]) == "traj" and _decode(seg["label"]).startswith(segment_prefix):
+                named |= (t >= seg["start_t"]) & (t <= seg["end_t"])
+        free &= named
     # The acceleration: a centred moving average of dq, then a centred difference.
     half = SMOOTH_TICKS // 2
     valid = np.zeros(n, dtype=bool)
@@ -592,13 +603,17 @@ def fit(
 
 
 def residual_rms(
-    logs: Sequence[Path], dynamics: maker_arm_rs.Dynamics, hold_steps: int | None = HOLD_STEPS
+    logs: Sequence[Path],
+    dynamics: maker_arm_rs.Dynamics,
+    hold_steps: int | None = HOLD_STEPS,
+    segment_prefix: str | None = None,
 ) -> list[float]:
     """Per joint, N m: the RMS of the torque (``load_free_motion``) less ``inverse +
-    friction`` of ``dynamics``, over the free-motion samples of ``logs``."""
+    friction`` of ``dynamics``, over the free-motion samples of ``logs`` (only those of the
+    ``traj`` segments named by ``segment_prefix``, if given)."""
     sq, n = np.zeros(ARM_DOF), 0
     for path in logs:
-        d = load_free_motion(path, hold_steps)
+        d = load_free_motion(path, hold_steps, segment_prefix)
         for q, dq, ddq, tau in zip(*(d[k].tolist() for k in ("q", "dq", "ddq", "tau"))):
             pred = np.add(dynamics.inverse(q, dq, ddq), dynamics.friction(dq))
             sq += (np.asarray(tau) - pred) ** 2
@@ -606,6 +621,27 @@ def residual_rms(
     if n == 0:
         raise IdentError("no free-motion samples in the logs")
     return [float(v) for v in np.sqrt(sq / n)]
+
+
+def prediction_spread(
+    logs: Sequence[Path],
+    a: maker_arm_rs.Dynamics,
+    b: maker_arm_rs.Dynamics,
+    hold_steps: int | None = HOLD_STEPS,
+    segment_prefix: str | None = None,
+) -> list[float]:
+    """Per joint, N m: the largest |difference| between the ``inverse + friction`` of ``a``
+    and of ``b`` over the samples ``residual_rms`` reads. Zero on a joint the samples cannot
+    tell the two models apart on: at rest, the base yaw joint carries no gravity torque under
+    any masses, and Coulomb friction and armature act only in motion."""
+    spread = np.zeros(ARM_DOF)
+    for path in logs:
+        d = load_free_motion(path, hold_steps, segment_prefix)
+        for q, dq, ddq in zip(*(d[k].tolist() for k in ("q", "dq", "ddq"))):
+            pa = np.add(a.inverse(q, dq, ddq), a.friction(dq))
+            pb = np.add(b.inverse(q, dq, ddq), b.friction(dq))
+            spread = np.maximum(spread, np.abs(pa - pb))
+    return [float(v) for v in spread]
 
 
 def deadband(r_free: np.ndarray, multiple: float = K_DEADBAND) -> list[float]:

@@ -578,3 +578,22 @@ def test_the_deadband_is_the_multiple_of_the_free_motion_rms():
         fit.deadband(np.zeros((0, 6)))
     with pytest.raises(ValueError):
         fit.deadband(np.full((3, 6), np.nan))
+
+
+def test_a_segment_prefix_keeps_only_the_named_traj_segments(tmp_path):
+    t = np.arange(400) * 0.005
+    q = np.tile(np.asarray(excitation.EXCITE_CENTER), (400, 1))
+    q[:, 1] += 0.2 * np.sin(2.0 * np.pi * 0.5 * t)
+    dq = np.gradient(q, t, axis=0)
+    segments = [
+        (0.0, 0.995, "traj", "exc_08.npz"),
+        (1.0, 1.995, "traj", "static_00.npz"),
+        (0.0, 0.5, "approach", "static_00.npz"),
+    ]
+    path = write_session_log(tmp_path / "s.h5", t, q, dq, np.zeros((400, 6)), segments=segments)
+    whole = fit.load_free_motion(path, hold_steps=None)
+    exc = fit.load_free_motion(path, hold_steps=None, segment_prefix="exc_")
+    static = fit.load_free_motion(path, hold_steps=None, segment_prefix="static_")
+    assert 0 < exc["samples"] < whole["samples"] and 0 < static["samples"] < whole["samples"]
+    assert exc["samples"] + static["samples"] <= whole["samples"]
+    assert fit.load_free_motion(path, hold_steps=None, segment_prefix="none_")["samples"] == 0

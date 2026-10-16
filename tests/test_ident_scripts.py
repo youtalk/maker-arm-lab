@@ -15,7 +15,7 @@ from maker_arm_lab.core import dynamics_model as dm
 from maker_arm_lab.core import profile as core_profile
 from maker_arm_lab.ident import excitation
 from maker_arm_lab.real import session
-from test_ident import _true_model, synthetic_log
+from test_ident import synthetic_log
 
 EXCITE = ROOT / "scripts" / "real_excitation.py"
 IDENT = ROOT / "scripts" / "real_ident.py"
@@ -155,12 +155,50 @@ def ident_logs(tmp_path_factory):
         count=3,
         amplitude_rad=None,
     )
-    model = _true_model()
+    model = _heavy_model()
     logs = [
         synthetic_log(root / f"exc_{k:02d}.h5", model, tr, noise=0.05, seed=k)
-        for k, tr in enumerate(trajs)
+        for k, tr in enumerate(trajs[:2])
     ]
-    return logs[:2], logs[2:]
+    return logs, [heldout_log(root / "heldout.h5", model, trajs[2])]
+
+
+def _heavy_model():
+    """The test arm: the URDF bodies at 1.2 times their mass, the true friction and armature
+    (``test_ident``), so a static pose tells it from the URDF model."""
+    import maker_arm_rs
+
+    from test_ident import TRUE_ARMATURE, TRUE_FRICTION
+
+    return maker_arm_rs.Dynamics(
+        tuple(dm.MOUNT_RPY),
+        dm.chain_links(dm.ARM_JOINT_NAMES),
+        dm.scaled(dm.urdf_bodies(), 1.2),
+        [list(f) for f in TRUE_FRICTION],
+        dm.GRAVITY,
+        TRUE_ARMATURE,
+    )
+
+
+def heldout_log(path, model, traj, static_s=3.0):
+    """The held-out session as ``plan_heldout.json`` runs it: an excitation (``exc_02``) and
+    then a static pose (``static_00``), each a ``traj`` segment under its file's name."""
+    t = np.asarray(traj["t"])
+    dt = float(t[1] - t[0])
+    m = round(static_s / dt)
+    still = {
+        "t": t[-1] + dt * np.arange(1, m + 1),
+        "q": np.tile(traj["q"][-1], (m, 1)),
+        "dq": np.zeros((m, 6)),
+        "ddq": np.zeros((m, 6)),
+    }
+    whole = {k: np.concatenate([np.asarray(traj[k]), still[k]]) for k in still}
+    segments = [
+        (float(t[0]), float(t[-1]), "approach", "exc_02.npz"),
+        (float(t[0]), float(t[-1]), "traj", "exc_02.npz"),
+        (float(still["t"][0]), float(still["t"][-1]), "traj", "static_00.npz"),
+    ]
+    return synthetic_log(path, model, whole, noise=0.05, seed=7, segments=segments)
 
 
 def test_the_ident_script_writes_the_model_and_applies_the_held_out_rule(ident_logs, tmp_path):
@@ -172,15 +210,24 @@ def test_the_ident_script_writes_the_model_and_applies_the_held_out_rule(ident_l
     assert code == 0 and len(tokens) == 1 and tokens[0].startswith("IDENT_OK"), err
     payload = _payload(tokens[0])
     assert payload["pass"] is True and payload["hold_steps"] == 0
-    assert len(payload["rms_ident"]) == len(payload["rms_urdf"]) == 6
-    assert all(i < u for i, u in zip(payload["rms_ident"], payload["rms_urdf"]))
+    # the held-out trajectories and the static poses are scored and judged apart
+    assert set(payload["groups"]) == {"trajectories", "static"}
+    for group in payload["groups"].values():
+        assert len(group["rms_ident"]) == len(group["rms_urdf"]) == 6
+        judged = [j for j in range(6) if j not in group["tied"]]
+        assert all(group["rms_ident"][j] < group["rms_urdf"][j] for j in judged)
+        assert group["pass"] is True and group["samples"] > 0
+    # at rest the base yaw joint carries no gravity torque: the two models tie there
+    assert payload["groups"]["trajectories"]["tied"] == []
+    assert payload["groups"]["static"]["tied"] == [0, 4, 5]
     rep = json.loads(report.read_text())
     assert rep["pass"] is True and rep["heldout"] == [str(h) for h in held]
-    assert rep["rms_ident"] == payload["rms_ident"] and rep["hold_steps"] == 0
+    assert rep["groups"] == payload["groups"] and rep["hold_steps"] == 0
+    assert rep["margin"] == 0.0
     # the report carries the read under no hold model next to the chosen one
     assert set(rep["reads"]) == {"none", "0"}
     assert rep["reads"]["none"]["hold_steps"] is None
-    assert rep["reads"]["0"]["rms_ident"] == payload["rms_ident"]
+    assert rep["reads"]["0"]["groups"] == payload["groups"]
     assert len(rep["reads"]["none"]["armature"]) == 6
     dyn = dm.from_ident(out)
     assert len(dyn.friction([0.3] * 6)) == 6
@@ -390,3 +437,53 @@ def test_sigterm_at_a_gripper_question_holds_the_arm_and_prints_one_token(tmp_pa
         if proc.poll() is None:
             proc.kill()
     assert [x for x in proc.stdout.read().splitlines() if x.startswith(TOKENS)] == []
+
+
+def test_the_held_out_rule_needs_both_groups_to_pass(ident_logs, tmp_path, monkeypatch, capsys):
+    from maker_arm_lab.ident import fit
+
+    real = fit.residual_rms
+    urdf = dm.dynamics(dm.urdf_bodies())
+    probe = ([0.1] * 6, [0.0] * 6, [0.0] * 6)
+
+    def static_worse(logs, dynamics, hold_steps=fit.HOLD_STEPS, segment_prefix=None):
+        rms = real(logs, dynamics, hold_steps=hold_steps, segment_prefix=segment_prefix)
+        is_urdf = np.allclose(dynamics.inverse(*probe), urdf.inverse(*probe))
+        if segment_prefix == "static_" and not is_urdf:
+            rms[3] = 1e3  # the identified model loses on one joint of the static poses only
+        return rms
+
+    monkeypatch.setattr(fit, "residual_rms", static_worse)
+    logs, held = ident_logs
+    out, report = tmp_path / "ident.json", tmp_path / "report.json"
+    argv = ["--logs", *map(str, logs), "--heldout", *map(str, held), *HOLD]
+    code = load_script(IDENT).main([*argv, "--out", str(out), "--report", str(report)])
+    tokens = [x for x in capsys.readouterr().out.splitlines() if x.startswith(TOKENS)]
+    assert code == 0 and len(tokens) == 1 and tokens[0].startswith("IDENT_OK")
+    payload = _payload(tokens[0])
+    assert payload["groups"]["trajectories"]["pass"] is True
+    assert payload["groups"]["static"]["pass"] is False and payload["pass"] is False
+
+
+def test_a_held_out_log_without_static_poses_fails_the_read(ident_logs, tmp_path):
+    logs, _ = ident_logs
+    trajs = excitation.design_excitation(
+        np.random.default_rng(4),
+        core_profile.sim_profile(),
+        excitation.EXCITE_CENTER,
+        count=1,
+        amplitude_rad=None,
+    )
+    t = trajs[0]["t"]
+    only = synthetic_log(
+        tmp_path / "held.h5", _heavy_model(), trajs[0], noise=0.05, seed=9,
+        segments=[(float(t[0]), float(t[-1]), "traj", "exc_08.npz")],
+    )  # fmt: skip
+    out, report = tmp_path / "ident.json", tmp_path / "report.json"
+    code, tokens, _ = _run(
+        IDENT, ["--logs", *logs, "--heldout", only, "--out", out, "--report", report, *HOLD]
+    )
+    assert code == 1 and len(tokens) == 1 and tokens[0].startswith("IDENT_FAIL")
+    payload = _payload(tokens[0])
+    assert payload["reason"] == "heldout" and "static_" in payload["detail"]
+    assert not out.exists() and not report.exists()

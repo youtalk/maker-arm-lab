@@ -12,16 +12,25 @@ poses), each read whole.
 
 The fit is ``ident.fit.fit`` on the free-motion samples of ``--logs``, ridge least squares
 toward the URDF bodies. ``--out`` is the model file (``core.dynamics_model.from_ident`` reads
-it; ``real_session.py --dynamics IDENT.json`` runs it). The rule (MS5 revision section 8.3):
-on the ``--heldout`` logs the identified model's residual RMS is lower than the URDF model's
-on every joint. ``--hold_steps`` (``ident.fit.HOLD_STEPS``: how the motor's PD law runs
+it; ``real_session.py --dynamics IDENT.json`` runs it). The rule (MS5 revision section 8.3,
+amended 2026-10-16 before session 1): on the ``--heldout`` logs the identified model's
+residual RMS is lower than the URDF model's on every joint, scored and judged apart on the two
+held-out groups (``HELDOUT_GROUPS``): the held-out excitations (the ``traj`` segments named
+``exc_*``, ``exc_08`` and ``exc_09``) and the static poses (``static_*``). Both must pass, with
+no margin (``MARGIN`` 0: strictly lower). A joint on which the two models predict the same
+torque to within ``TIE_NM`` on every sample of a group (``ident.fit.prediction_spread``)
+cannot be told apart there and is reported under ``tied``, not judged: at the static poses the
+joints with little gravity load (j1, and the wrist's j5 and j6) see the two models agree to a
+few mN m, so a strict rule would read the torque noise there. A group with no judged joint or
+no free-motion sample fails (no judged joint: ``pass`` false; no sample: ``heldout``). ``--hold_steps`` (``ident.fit.HOLD_STEPS``: how the motor's PD law runs
 through a held command) has no default: its real-arm value is unverified until session 3, and
 it moves the identified viscous term by about ``kp T / 2``. The token and the model use the
 chosen value; ``--report`` carries the fit, both RMS vectors and the verdict under ``none``
 and under the chosen value, and the fit's report. The report is written first, then the
 model; neither file is ever overwritten.
 
-It prints exactly one ``IDENT_OK {hold_steps, rms_ident, rms_urdf, pass}`` (``pass`` false is
+It prints exactly one ``IDENT_OK {hold_steps, groups: {trajectories, static}: {rms_ident,
+rms_urdf, samples, pass}, pass}`` (``pass`` false is
 still a finished read) or ``IDENT_FAIL {reason, detail}`` line on every exit path and exits
 through ``os._exit``.
 """
@@ -36,6 +45,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "source"))
+
+
+HELDOUT_GROUPS = {"trajectories": "exc_", "static": "static_"}
+"""The held-out groups of ``plan_heldout.json`` and the ``traj`` label prefix of each."""
+MARGIN = 0.0
+"""N m: how far below the URDF model's RMS the identified model's must be. Pre-registered as
+none: strictly lower on every joint."""
+TIE_NM = 0.01  # INITIAL: session 3 reads the torque resolution of the real motors
+"""N m: a joint whose two models' predictions never differ by more than this on a group's
+samples is tied there, its verdict a coin toss on the noise: on the bench's static poses the
+spread reads 0.9 mN m on j1, 6.4 on j5 and 2.1 on j6, against 0.2 to 0.5 N m on j2 to j4 and
+the 0.05 N m torque noise of the synthetic logs."""
 
 
 class Failure(Exception):
@@ -107,18 +128,44 @@ def run(args) -> dict:
         raise Failure("logs", f"a held-out log is also fitted: {shared}")
     urdf_model = dm.dynamics(dm.urdf_bodies())
 
+    def group_read(dynamics, hold_steps) -> dict:
+        groups = {}
+        for name, prefix in HELDOUT_GROUPS.items():
+            samples = sum(
+                fit.load_free_motion(h, hold_steps, segment_prefix=prefix)["samples"]
+                for h in heldout
+            )
+            if samples == 0:
+                raise Failure(
+                    "heldout",
+                    f"hold_steps {hold_steps}: no free-motion sample in the held-out {name} "
+                    f"(traj segments {prefix}*) of {[str(h) for h in heldout]}",
+                )
+            kw = {"hold_steps": hold_steps, "segment_prefix": prefix}
+            rms_ident = fit.residual_rms(heldout, dynamics, **kw)
+            rms_urdf = fit.residual_rms(heldout, urdf_model, **kw)
+            spread = fit.prediction_spread(heldout, dynamics, urdf_model, **kw)
+            tied = [j for j, s in enumerate(spread) if s <= TIE_NM]
+            judged = [j for j in range(len(rms_ident)) if j not in tied]
+            groups[name] = {
+                "rms_ident": rms_ident,
+                "rms_urdf": rms_urdf,
+                "samples": int(samples),
+                "tied": tied,
+                "pass": bool(judged) and all(rms_ident[j] < rms_urdf[j] - MARGIN for j in judged),
+            }
+        return groups
+
     def read(hold_steps):
         try:
             res = fit.fit(logs, dm.urdf_bodies(), lam=args.lam, hold_steps=hold_steps)
-            rms_ident = fit.residual_rms(heldout, res.dynamics(), hold_steps=hold_steps)
-            rms_urdf = fit.residual_rms(heldout, urdf_model, hold_steps=hold_steps)
+            groups = group_read(res.dynamics(), hold_steps)
         except fit.IdentError as err:
             raise Failure("fit", f"hold_steps {hold_steps}: {err}") from err
-        verdict = all(i < u for i, u in zip(rms_ident, rms_urdf))
+        verdict = all(g["pass"] for g in groups.values())
         return res, {
             "hold_steps": hold_steps,
-            "rms_ident": rms_ident,
-            "rms_urdf": rms_urdf,
+            "groups": groups,
             "pass": verdict,
             "armature": res.armature,
             "friction": res.friction,
@@ -136,9 +183,11 @@ def run(args) -> dict:
             reads = {"none": {"hold_steps": None, "failed": err.detail}}
     reads[str(args.hold_steps).lower()] = chosen
     body = {
-        **{k: chosen[k] for k in ("hold_steps", "rms_ident", "rms_urdf", "pass")},
+        **{k: chosen[k] for k in ("hold_steps", "groups", "pass")},
         "rule": "held-out residual RMS of the identified model below the URDF model's on every "
-        "joint (MS5 revision section 8.3)",
+        "joint, on the held-out trajectories and on the static poses apart, both to pass "
+        "(MS5 revision section 8.3, amended 2026-10-16 before session 1)",
+        "margin": MARGIN,
         "logs": [str(p) for p in logs],
         "heldout": [str(h) for h in heldout],
         "ident": str(out),
@@ -150,7 +199,7 @@ def run(args) -> dict:
     out.parent.mkdir(parents=True, exist_ok=True)
     prov = {"lab_revision": lab_revision(), "heldout": [str(h) for h in heldout]}
     res.to_json(out, provenance={**prov, "hold_steps": args.hold_steps})
-    return {k: chosen[k] for k in ("hold_steps", "rms_ident", "rms_urdf", "pass")}
+    return {k: chosen[k] for k in ("hold_steps", "groups", "pass")}
 
 
 def main(argv=None) -> int:
