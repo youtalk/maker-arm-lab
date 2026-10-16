@@ -114,3 +114,18 @@ def test_a_raised_profile_is_refused_before_the_sdk_arm_connects():
     with pytest.raises(ValueError, match=r"joints\[2\]\.tau_max"):
         real_arm.SdkArm.connect("can-does-not-exist", dm.dynamics(dm.urdf_bodies()),
                                 profile=profile)  # fmt: skip
+
+
+def test_gripper_angle_of_inverts_jaw_fraction_under_a_map_and_clamps():
+    profile = sim_profile()
+    g = profile["joints"][6]
+    for gripper_map in ((0.03, 0.065), (0.025, 0.0523), None):
+        for f in np.linspace(0.0, 1.0, 11):
+            angle = real_arm.gripper_angle_of(profile, float(f), gripper_map)
+            assert g["q_lo"] <= angle <= g["q_hi"]
+            if gripper_map is None or f > 0.0:
+                assert real_arm.jaw_fraction(profile, angle, gripper_map) == pytest.approx(f)
+    # a map whose closed gap is positive cannot reach fraction 0: the command stops at q_lo
+    assert real_arm.gripper_angle_of(profile, 0.0, (0.03, 0.065)) == g["q_lo"]
+    with pytest.raises(ValueError):
+        real_arm.gripper_angle_of(profile, 0.5, (0.0, 0.05))

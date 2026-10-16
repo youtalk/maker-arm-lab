@@ -9,7 +9,7 @@ The arm is held under the rig's reduced caps (``real.rig.reduced_profile``). The
 the gripper motor through ``--angles`` angles, evenly across its soft limits less
 ``real.session.TRAJ_MARGIN_RAD``, at ``real.session.APPROACH_SPEED_RAD_S``, and at each one
 waits ``SETTLE_S`` and asks for the gap between the jaws in mm. It drops anything typed
-before the question and accepts only a finite positive number; anything else asks again. It
+before the question and accepts only a finite number from 0 up to ``MAX_GAP_MM``; anything else asks again. It
 fits ``gap = a * angle + b`` (m) by least squares. The fit fails unless the gap grows toward
 the open limit (the profile gripper's ``q_hi``) by at least ``MIN_GAP_SPAN_M`` over the angles
 and is positive there. ``full_gap_mm`` is the gap at that limit.
@@ -42,6 +42,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import real_session as rs
 from maker_arm_lab.real import session as real_session
+from maker_arm_lab.robots.frames import JAW_FULL_GAP
 
 SETTLE_S = 1.0  # INITIAL: session 2
 """Seconds the gripper holds at an angle before the question."""
@@ -105,13 +106,18 @@ def fit_line(angles, gaps_m, q_hi: float) -> dict:
     return {"a": a, "b": b, "full_gap_mm": 1000.0 * full, "rms_mm": 1000.0 * rms}
 
 
+MAX_GAP_MM = 2.0 * 1000.0 * float(JAW_FULL_GAP)  # INITIAL: session 2
+"""A typed gap above this (twice the provisional full gap) is a typo, not a reading."""
+
+
 def parse_gap_mm(text: str) -> float | None:
-    """The caliper reading in mm, or None unless the line is a finite positive number."""
+    """The caliper reading in mm, or None unless the line is a finite number in
+    (0, ``MAX_GAP_MM``]."""
     try:
         value = float(text.strip())
     except ValueError:
         return None
-    return value if math.isfinite(value) and value > 0.0 else None
+    return value if math.isfinite(value) and 0.0 < value <= MAX_GAP_MM else None
 
 
 def prepare(args) -> dict:
@@ -184,7 +190,11 @@ def measure(world: dict, ready: dict, lines) -> list[float]:
             if gap is not None:
                 gaps.append(gap)
                 break
-            print("Not a positive number; measure again.", file=sys.stderr, flush=True)
+            print(
+                f"Not a number in (0, {MAX_GAP_MM:.0f}] mm; measure again.",
+                file=sys.stderr,
+                flush=True,
+            )
             segments = []
             question = f"Gripper {k + 1} again, angle {angle:.6f} rad: the gap in mm."
     return gaps

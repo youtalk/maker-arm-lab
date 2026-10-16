@@ -66,6 +66,26 @@ def jaw_fraction(
     return min(1.0, max(0.0, (a * float(angle) + b) / full))
 
 
+def gripper_angle_of(
+    profile: dict, fraction: float, gripper_map: tuple[float, float] | None = None
+) -> float:
+    """The gripper motor angle that commands jaw opening ``fraction`` (clipped to [0, 1]): the
+    inverse of ``jaw_fraction``. Without ``gripper_map`` it is ``core.profile.gripper_angle``.
+    With ``(a, b)``, ``angle = (fraction * full_gap - b) / a``, ``full_gap`` the gap at the
+    profile gripper's ``q_hi``, clamped to the gripper's soft limits. ValueError if the map
+    is flat (a = 0) or gives no positive gap at the open limit."""
+    f = min(1.0, max(0.0, float(fraction)))
+    if gripper_map is None:
+        return _profile.gripper_angle(profile, f)
+    g = profile["joints"][_profile.GRIPPER_INDEX]
+    lo, hi = float(g["q_lo"]), float(g["q_hi"])
+    a, b = float(gripper_map[0]), float(gripper_map[1])
+    full = a * hi + b
+    if a == 0.0 or not full > 0.0:
+        raise ValueError(f"the gripper map ({a}, {b}) cannot be inverted to a command")
+    return min(hi, max(lo, (f * full - b) / a))
+
+
 def pick_point(ik, q) -> np.ndarray:
     """(3,) the FK pick point, ``grasp_center`` plus ``PICK_OFFSET_MEASURED`` in its frame."""
     pos, rot = ik.fk(torch.as_tensor(np.asarray(q, dtype=np.float64)))

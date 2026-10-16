@@ -287,11 +287,11 @@ def test_the_gripper_map_script_fits_the_caliper_line_and_writes_the_rig(tmp_pat
     a, b = 0.025, 0.0523  # m per rad, m: 61 mm at the profile's open limit
 
     def caliper(angle, n):
-        return "abc" if n == 2 else f"{1000.0 * (a * angle + b):.3f}"
+        return {2: "abc", 3: "5000"}.get(n) or f"{1000.0 * (a * angle + b):.3f}"
 
     code, tokens, err, asked = _gripper_run(tmp_path, caliper, calibration=None)
     assert code == 0 and len(tokens) == 1 and tokens[0].startswith("GRIPPER_MAP_OK"), err
-    assert asked == 5  # four angles and the re-prompt after "abc"
+    assert asked == 6  # four angles, "abc" and a typo past the maximum ask again
     out = _payload(tokens[0])
     assert out["a"] == pytest.approx(a, rel=1e-3) and out["b"] == pytest.approx(b, rel=1e-3)
     assert out["rms_mm"] < 0.01
