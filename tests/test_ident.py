@@ -508,7 +508,7 @@ BENCH_SEEDS = (1, 2, 3)
 (20261016) was the one the excitation knobs were tuned on; the review asked for several."""
 
 
-def _bench_runs(root, seed, count):
+def bench_runs(root, seed, count):
     """``count`` 20 s excitations on the bench plant, rung A, URDF model, as session logs.
     Deviations from the excitation defaults, recorded: they swing to the soft limits (the bench
     has no desk) at a 0.3 Hz fundamental and up to the full velocity cap. At the defaults (0.1
@@ -546,7 +546,7 @@ def _bench_runs(root, seed, count):
 def bench_seed(request, tmp_path_factory):
     """The realistic bench plant (COULOMB_NM, VISCOUS_NMS, ARM_ARMATURE): four fit and two
     held-out excitations of one seed, and the fit."""
-    logs = _bench_runs(tmp_path_factory.mktemp("bench"), request.param, 6)
+    logs = bench_runs(tmp_path_factory.mktemp("bench"), request.param, 6)
     return logs[:4], logs[4:], fit.fit(logs[:4], dm.urdf_bodies(), hold_steps=BENCH_HOLD)
 
 
@@ -576,7 +576,7 @@ def test_the_fit_recovers_viscous_friction_on_a_plant_whose_friction_is_the_mode
     root = tmp_path_factory.mktemp("viscous")
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(bench, "COULOMB_NM", {k: 0.0 for k in bench.COULOMB_NM})
-        logs = [log for seed in BENCH_SEEDS for log in _bench_runs(root, seed, 4)]
+        logs = [log for seed in BENCH_SEEDS for log in bench_runs(root, seed, 4)]
     res = fit.fit(logs, dm.urdf_bodies(), hold_steps=BENCH_HOLD)
     viscous = [f[1] for f in res.friction]
     assert all(abs(v - bench.VISCOUS_NMS) / bench.VISCOUS_NMS < 0.30 for v in viscous), viscous

@@ -69,6 +69,12 @@ class Trace:
     """The measured torque the controller saw: tick k's MIT reply, the torque applied in its
     first physics step (from the state at the end of tick k - 1) plus the torque noise. ``run``
     always fills it; None only in a hand-built trace."""
+    tau_dob: np.ndarray | None = None
+    """The Tracking's observer compensation per tick (``telemetry()["tau_dob"]``, zero with
+    ``dob`` off); None on B0 and B1."""
+    tau_res: np.ndarray | None = None
+    """The Tracking's learned residual torque per tick (``telemetry()["tau_res"]``, zero
+    without a residual); None on B0 and B1."""
 
 
 def grip_value() -> float:
@@ -195,8 +201,13 @@ def run(
     tracking: maker_arm_rs.Tracking | None = None,
     exact: maker_arm_rs.Dynamics | None = None,
     seed: int = 0,
+    temperature: Sequence[float] | None = None,
 ) -> Trace:
-    """One run of ``rung`` from rest at ``q0``. Each push is ``(t_push, t0, dt, rows)``."""
+    """One run of ``rung`` from rest at ``q0``. Each push is ``(t_push, t0, dt, rows)``.
+
+    ``tracking`` is built by the caller, so its ``params`` (``dob``, ``dob_f``, ...) and its
+    ``residual`` act as built. ``temperature`` (seven, degC) is what the Tracking's residual
+    reads on every tick; None passes none (the SDK's default of 0)."""
     if rung not in RUNGS:
         raise ValueError(f"unknown rung {rung}")
     if rung in ("F", "A") and tracking is None:
@@ -224,9 +235,15 @@ def run(
             _, t0, dt, rows = pending.pop(0)
             (tracking.push if rung in ("F", "A") else plan.push)(t0, dt, [list(r) for r in rows])
         if rung in ("F", "A"):
-            cmds = tracking.update(t, [*q_m, grip], [*dq_m, 0.0], [*tau_m, 0.0])
+            state = (t, [*q_m, grip], [*dq_m, 0.0], [*tau_m, 0.0])
+            if temperature is None:
+                cmds = tracking.update(*state)
+            else:
+                cmds = tracking.update(*state, [float(v) for v in temperature])
             tel = tracking.telemetry()
             r, offset, q_r, gate = tel["r"], tel["offset"], tel["q_r"], tel["gate"]
+            rec["tau_dob"].append(list(tel["tau_dob"]))
+            rec["tau_res"].append(list(tel["tau_res"]))
         else:
             target = plan.sample(t)
             tau = exact.gravity(list(q_m)) if rung == "B1" else [0.0] * ARM_DOF
@@ -256,4 +273,6 @@ def run(
         rec["q_r"].append(list(q_r))
         rec["gate"].append(gate)
         rec["tau"].append(tau_m.copy())
+    if rung not in ("F", "A"):
+        del rec["tau_dob"], rec["tau_res"]  # no Tracking: they stay None
     return Trace(**{k: np.asarray(v, dtype=float) for k, v in rec.items()})
