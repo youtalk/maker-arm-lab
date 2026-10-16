@@ -3,8 +3,8 @@
 Date: 2026-10-15. Status: final for rounds 1 to 4. This report uses the ledger through its entry
 of 20:33 on 2026-10-15. Round 1 ran from 10-13 to 10-15, and both of its tracks ended before a
 checked read. The owner chose the levers of rounds 2 to 4 on 10-15, and all three rounds ended the
-same day (sections 9 to 11). Track V paused in round 2, and Track ACT ended in round 4. Only the
-owner's choice of the next step is open (section 11.5).
+same day (sections 9 to 11). Track V paused in round 2, and Track ACT ended in round 4. The owner
+then paused MS7i until the real arm arrives (section 11.5).
 
 The design of MS7i is revision 3 of the design document of 2026-10-13. The owner started the run on
 it with /goal at about 11:35 on 2026-10-13. This report cites the design as "spec section N" and
@@ -1186,3 +1186,6 @@ The owner chooses:
    (`passenger_drop` refuses it now). The source is +17 at 2.0 SE in round 3, but only +6 in
    round 2.
 3. A check of the switch for S on draws 20 to 39, as a serving lever for the real arm.
+
+The owner chose the pause at 20:53 on 10-15. The local rounds of MS7i close after round 4. The
+official seed 20307200 and the checked seed 20307600 stay unused by a candidate.
