@@ -20,23 +20,34 @@ tag log is given, ``{"schema", "log", "tag_log", "latency_ms", "pairs": [{"q", "
 "start_t", "end_t", "label", "n_q", "n_tag"}]}``, the input of the sensing plan's
 ``register_base``. No output file is ever overwritten.
 
-The output JSON (``--out``, schema ``maker-arm-lab/motion-read/1``):
+The output JSON (``--out``, schema ``maker-arm-lab/motion-read/2``):
 
-- ``metrics``: name -> ``{"joints": [6] | null, "tip": float | null, "count": int}`` for
-  ``tracking_rms``, ``stop_sway``, ``hold_jitter``, ``free_residual_rms``, ``yield_mm``,
-  ``drag_resistance``, ``tip_sway`` and ``flex_share``. ``joints`` is one value per arm joint
-  in URDF order (``link_002_joint`` .. ``link_007_joint``), ``tip`` the value pooled at the
-  tip, ``count`` the segments behind it (the free rows, for ``free_residual_rms``). A null is
-  a value with no data (an empty window, or a metric without that side).
+- ``metrics``: name -> ``{"joints": [6] | null, "tip": float | null, "count": int,
+  "excluded": int}`` for ``tracking_rms``, ``stop_sway``, ``hold_jitter``,
+  ``free_residual_rms``, ``yield_free_mm`` (transports, stops and holds: must read 0),
+  ``yield_push_mm`` (prompts, the push tests), ``drag_free``, ``drag_push``, ``tip_sway`` and
+  ``flex_share``. ``joints`` is one value per arm joint in URDF order (``link_002_joint`` ..
+  ``link_007_joint``), ``tip`` the value pooled at the tip, ``count`` the segments behind it
+  (the free rows, for ``free_residual_rms``), ``excluded`` the segments left out (a stop with
+  a gap past ``max_gap_s``; for ``flex_share`` also a stop under the tag variance floor). A
+  null is a value with no data (an empty window, or a metric without that side).
+  ``flex_share`` pools as the sum of the stops' residual variances over the sum of their tag
+  variances.
 - ``units``: name -> ``{"joints": unit | null, "tip": unit | null}`` (rad, mm, N m, fraction).
-- ``pooling``: name -> how ``metrics`` pools the segments (rms over rows, mean, max).
+- ``pooling``: name -> how ``metrics`` pools the segments (rms over rows, mean, max, sum).
+- ``limits``: ``max_gap_s``, ``flex_tag_var_floor_mm2``, ``stop_window_s``, ``settle_s``.
 - ``segments``: one entry per read window in time order, ``{"index", "kind", "label",
-  "start_t", "end_t", "rows", "reads": {name: {"joints", "tip"}}}``; ``kind`` is ``traj``,
-  ``stop``, ``hold`` or ``prompt``, ``index`` the row in the log's ``segments`` (a stop: its
-  transport's).
+  "start_t", "end_t", "rows", "tracked_rows", "missing_ticks", "max_gap_s", "gap_excluded",
+  "reads": {name: {"joints", "tip"}}}``, plus ``"flex": {"resid_var_mm2", "tag_var_mm2"}`` on
+  a stop with the tip side. ``kind`` is ``traj``, ``stop``, ``hold`` or ``prompt``,
+  ``index`` the row in the log's ``segments`` (a stop: its transport's). Every segment reads
+  ``yield_mm`` and ``drag_resistance``; a transport ``tracking_rms``; a stop ``stop_sway``
+  and the tip side's ``tip_sway`` and ``flex_share``; a hold ``hold_jitter``.
 - ``tip_side``: ``{"available", "reason", "tag_world"}``; ``tag_world`` is ``rig_overhead``
   or ``logged_pos``.
+- ``overhead_pose``: ``{"pos", "quat"}`` the read used (``rig_overhead``), else null.
 - ``pairs``: null without a tag log, else ``{"holds", "pairs", "out"}``.
+- ``log_meta``: the session log's attrs (JSON attrs decoded): what the session ran with.
 - ``log``, ``tag_log``, ``rig``, ``latency_ms``, ``tag_frames``, ``joint_names``.
 
 It prints exactly one ``MOTION_READ_OK {out, metrics: {name: {joints, tip}}, tip_side}`` or
@@ -132,7 +143,7 @@ def _rig(path: Path | None):
         quat = [float(v) for v in data["overhead_quat"]]
         if len(pos) != 3 or len(quat) != 4:
             raise Failure("rig", "overhead_pos is 3 numbers and overhead_quat 4")
-        pose = (pos, quat_matrix(quat))
+        pose = (pos, quat_matrix(quat), quat)
     return offset, pose
 
 
@@ -166,7 +177,7 @@ def run(args) -> dict:
         tag_lines=tag_lines,
         latency_ms=args.latency_ms,
         tag_offset=tag_offset,
-        world_from_cam=pose,
+        world_from_cam=None if pose is None else pose[:2],
     )
     pairs = body.pop("pairs_list")
     body["pairs"] = None
@@ -179,6 +190,11 @@ def run(args) -> dict:
         rig=None if rig_path is None else str(rig_path),
         latency_ms=args.latency_ms,
         joint_names=list(ARM_JOINT_NAMES),
+        overhead_pose=(
+            {"pos": pose[0], "quat": pose[2]}
+            if body["tip_side"]["tag_world"] == "rig_overhead"
+            else None
+        ),
     )
     if pairs is not None and pairs_out is not None:
         pairs_out.parent.mkdir(parents=True, exist_ok=True)

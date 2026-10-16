@@ -22,13 +22,17 @@ upper bound of the largest distance between two tip positions).
 
 - ``tracking_rms``: RMS of ``q_r - q`` over a transport (rad; tip: FK(q_r) - FK(q)).
 - ``stop_sway``: peak to peak of ``q`` over a stop after a least-squares line is removed.
-- ``hold_jitter``: standard deviation of ``q`` over a hold after its first ``SETTLE_S``.
+- ``hold_jitter``: standard deviation of ``q`` over a hold after its first ``SETTLE_S``. It
+  removes no trend: a creep through the hold counts as jitter.
 - ``free_residual_rms``: RMS of the observer's ``r`` over the free rows of the whole log
   (N m): tracked, ``gate == 1``, not clamped and outside every prompt, as ``ident.fit``
   reads free motion.
 - ``yield_mm``: the largest tip shift of FK(q_r) against FK(q_d), ``q_d = q_r - offset``
-  (the admittance offset), over a segment (mm).
-- ``drag_resistance``: the largest ``|r|`` per joint over a segment (N m).
+  (the admittance offset), over a segment (mm). ``read`` reads it on every segment and pools
+  it twice: ``yield_free_mm`` over the transports, stops and holds (free motion, which must
+  read 0 mm) and ``yield_push_mm`` over the prompts (the push tests, which must read > 0).
+- ``drag_resistance``: the largest ``|r|`` per joint over a segment (N m), pooled the same
+  two ways as ``drag_free`` and ``drag_push``.
 
 The tip side reads the tag on the SDK clock (``align``): a frame's host time is its
 ``arrival_mono_ns`` less the latency, mapped through the log's ``clock_pairs``.
@@ -38,18 +42,26 @@ The tip side reads the tag on the SDK clock (``align``): a frame's host time is 
 - ``flex_share``: over a window, the variance of the tag position that FK of the measured q
   (applied to the rig's ``tag_offset`` in the ``grasp_center`` frame, ``points``) does not
   explain: ``sum var(tag - fk) / sum var(tag)``, each series less its mean (a constant
-  registration bias is not flex). 0 for a rigid arm; it can exceed 1 when the tag noise is
-  larger than the motion. NaN when the window has fewer than ``MIN_TAG_FRAMES`` frames or the
-  tag does not move.
+  registration bias is not flex). 0 for a rigid arm. A near-still tag sits at the camera's
+  noise floor, where the ratio is noise over noise: a window whose tag variance is below
+  ``FLEX_TAG_VAR_FLOOR_MM2`` reads NaN. ``read`` pools the stops as ``sum resid_var / sum
+  tag_var`` (``flex_variances``), never as a mean of ratios. The read is sensitive to the
+  latency: an error ``d`` in ``latency_ms`` shifts the tag against FK by ``d`` in time, so a
+  sway at angular frequency ``w`` leaves a residual of about ``(w d)^2`` of its variance
+  (3.5 Hz and 10 ms: about 5 %), read as flex.
 - ``hold_pairs``: one (mean q, mean tag ``cam_pos``) pair per hold after its settle, the
   input of the sensing plan's ``register_base``.
 
 Every window is half open, ``start_t <= t < end_t``: the row at a segment's end belongs to
 the next one. Every read of an empty window is NaN (a joint vector of NaN), never an error.
+Ticks the rings dropped leave gaps in ``tick``; ``window_stats`` reports a window's rows,
+missing ticks and largest gap, and ``read`` nulls a stop whose largest gap exceeds
+``MAX_GAP_S`` (its line fit and its FK interpolation would bridge the gap).
 """
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -70,6 +82,13 @@ EDGE_S = 1.0
 """How far past the first or last clock pair ``align`` still maps a frame, at unit rate: two
 drain periods. A frame further out is dropped."""
 MIN_TAG_FRAMES = 3
+FLEX_TAG_VAR_FLOOR_MM2 = 0.1  # INITIAL: session 2 (the sensing tag read measures tag noise)
+"""The tag variance (mm^2, summed over the axes) below which a window's flex share reads NaN:
+about the still tag's noise variance."""
+MAX_GAP_S = 0.02  # INITIAL: session 2
+"""The largest gap between two loop rows (or a row and the window's edge) a stop read accepts:
+four ticks at 200 Hz."""
+CONTROL_HZ = 200.0
 MOTION_KINDS = ("traj", "approach")
 """The segments that move the arm: a stop window ends where the next one starts."""
 TIP_METRICS = ("tracking_rms", "stop_sway", "hold_jitter")
@@ -91,6 +110,7 @@ class MotionLog:
     loop row has no tracking row (``tracked`` False)."""
 
     t: np.ndarray
+    tick: np.ndarray
     q: np.ndarray
     clamped: np.ndarray
     tracked: np.ndarray
@@ -100,6 +120,7 @@ class MotionLog:
     gate: np.ndarray
     raw_segments: list[tuple[float, float, str, str]]
     clock_pairs: np.ndarray
+    attrs: dict | None = None
     path: Path | None = None
 
 
@@ -107,11 +128,26 @@ def _decode(value) -> str:
     return value.decode() if isinstance(value, bytes) else str(value)
 
 
+def _attr_value(value):
+    if isinstance(value, bytes):
+        value = value.decode()
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, str) and value[:1] in ("{", "["):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
 def load_log(path) -> MotionLog:
     """The session log at ``path``, the trk rows joined onto the loop rows on ``t``."""
     path = Path(path)
     with h5py.File(path, "r") as f:
         t = np.asarray(f["t"][:], dtype=np.float64)
+        tick = np.asarray(f["tick"][:], dtype=np.int64)
+        attrs = {k: _attr_value(v) for k, v in f.attrs.items()}
         q = np.asarray(f["q"][:, :ARM_DOF], dtype=np.float64)
         clamped = np.asarray(f["clamped"][:], dtype=bool)
         trk = f["trk"]
@@ -142,6 +178,7 @@ def load_log(path) -> MotionLog:
             joined[key][tracked] = col[rows]
     return MotionLog(
         t=t,
+        tick=tick,
         q=q,
         clamped=clamped,
         tracked=tracked,
@@ -151,6 +188,7 @@ def load_log(path) -> MotionLog:
         gate=joined["gate"],
         raw_segments=raw,
         clock_pairs=pairs,
+        attrs=attrs,
         path=path,
     )
 
@@ -184,6 +222,34 @@ def segments(log) -> list[Segment]:
 
 def _window(log: MotionLog, start: float, end: float) -> np.ndarray:
     return (log.t >= start) & (log.t < end)
+
+
+def window_stats(log, seg: Segment) -> dict:
+    """``rows`` (loop rows in ``seg``), ``tracked_rows``, ``missing_ticks`` (the tick span of
+    those rows less the rows: ticks the rings dropped inside the window) and ``max_gap_s``,
+    the largest time between two rows or between a row and the window's edges (the whole
+    window when it has no row)."""
+    log = _as_log(log)
+    use = _window(log, seg.start_t, seg.end_t)
+    t, tick = log.t[use], log.tick[use]
+    rows = int(t.shape[0])
+    if rows == 0:
+        return {
+            "rows": 0,
+            "tracked_rows": 0,
+            "missing_ticks": 0,
+            "max_gap_s": float(seg.end_t - seg.start_t),
+        }
+    edges = np.concatenate([[seg.start_t], t, [seg.end_t]])
+    gaps = np.diff(edges)
+    # a row is due every tick: the gap after the last row is one tick short of the edge
+    gaps[-1] = max(0.0, gaps[-1] - 1.0 / CONTROL_HZ)
+    return {
+        "rows": rows,
+        "tracked_rows": int(log.tracked[use].sum()),
+        "missing_ticks": int(tick.max() - tick.min() + 1 - rows),
+        "max_gap_s": float(gaps.max()),
+    }
 
 
 def _nan6() -> np.ndarray:
@@ -428,58 +494,83 @@ def tip_sway(tag_pos: np.ndarray, seg: Segment) -> float:
     return float(1e3 * np.linalg.norm(_p2p(_detrend(rows[:, 0], rows[:, 1:]))))
 
 
-def flex_share(tag_pos: np.ndarray, fk_pos: np.ndarray, seg: Segment) -> float:
-    """The share of the tag's variance over ``seg`` that FK does not explain. ``tag_pos`` is
-    ``align``'s rows; ``fk_pos`` (N, 4) is ``(t, x, y, z)`` of ``points(ik, q, tag_offset)``
-    at the loop rows, interpolated to each tag frame's time."""
+def flex_variances(tag_pos: np.ndarray, fk_pos: np.ndarray, seg: Segment) -> tuple:
+    """``(resid_var_mm2, tag_var_mm2)`` over ``seg``: the variance of ``tag - fk`` and of the
+    tag, each summed over the axes, in mm^2; NaN for a window with too few frames.
+    ``tag_pos`` is ``align``'s rows; ``fk_pos`` (N, 4) is ``(t, x, y, z)`` of ``points(ik, q,
+    tag_offset)`` at the loop rows, interpolated to each tag frame's time."""
     rows = _tag_window(tag_pos, seg)
     fk_pos = np.asarray(fk_pos, dtype=np.float64).reshape(-1, 4)
     if rows.shape[0] < MIN_TAG_FRAMES or fk_pos.shape[0] < 2:
-        return math.nan
+        return math.nan, math.nan
     inside = (rows[:, 0] >= fk_pos[0, 0]) & (rows[:, 0] <= fk_pos[-1, 0])
     rows = rows[inside]
     if rows.shape[0] < MIN_TAG_FRAMES:
-        return math.nan
+        return math.nan, math.nan
     fk = np.stack([np.interp(rows[:, 0], fk_pos[:, 0], fk_pos[:, 1 + k]) for k in range(3)], 1)
-    tag = rows[:, 1:] - rows[:, 1:].mean(axis=0)
-    resid = (rows[:, 1:] - fk) - (rows[:, 1:] - fk).mean(axis=0)
-    total = float((tag**2).sum())
-    if total <= 0.0:
+    resid = rows[:, 1:] - fk
+    tag_var = float(1e6 * rows[:, 1:].var(axis=0).sum())
+    resid_var = float(1e6 * resid.var(axis=0).sum())
+    return resid_var, tag_var
+
+
+def flex_share(
+    tag_pos: np.ndarray,
+    fk_pos: np.ndarray,
+    seg: Segment,
+    floor_mm2: float = FLEX_TAG_VAR_FLOOR_MM2,
+) -> float:
+    """The share of the tag's variance over ``seg`` that FK does not explain
+    (``flex_variances``); NaN when the tag variance is below ``floor_mm2``."""
+    resid_var, tag_var = flex_variances(tag_pos, fk_pos, seg)
+    if not (math.isfinite(tag_var) and tag_var >= floor_mm2 and tag_var > 0.0):
         return math.nan
-    return float((resid**2).sum() / total)
+    return resid_var / tag_var
 
 
 # --- the whole read ---------------------------------------------------------------------
 
-SCHEMA = "maker-arm-lab/motion-read/1"
+SCHEMA = "maker-arm-lab/motion-read/2"
 UNITS = {
     "tracking_rms": {"joints": "rad", "tip": "mm"},
     "stop_sway": {"joints": "rad", "tip": "mm"},
     "hold_jitter": {"joints": "rad", "tip": "mm"},
     "free_residual_rms": {"joints": "N m", "tip": None},
-    "yield_mm": {"joints": "rad", "tip": "mm"},
-    "drag_resistance": {"joints": "N m", "tip": None},
+    "yield_free_mm": {"joints": "rad", "tip": "mm"},
+    "yield_push_mm": {"joints": "rad", "tip": "mm"},
+    "drag_free": {"joints": "N m", "tip": None},
+    "drag_push": {"joints": "N m", "tip": None},
     "tip_sway": {"joints": None, "tip": "mm"},
     "flex_share": {"joints": None, "tip": "fraction"},
 }
 """Each metric's two values: ``joints`` per arm joint, ``tip`` pooled at the tip (None: the
-metric has no such value). ``yield_mm``'s joints are the largest ``|offset|``."""
+metric has no such value). The yields' joints are the largest ``|offset|``."""
 POOLING = {
     "tracking_rms": "rms over every tracked transport row",
     "stop_sway": "mean over the stops",
     "hold_jitter": "mean over the holds",
     "free_residual_rms": "rms over the free rows of the log",
-    "yield_mm": "max over the holds and prompts",
-    "drag_resistance": "max over the holds and prompts",
+    "yield_free_mm": "max over the transports, stops and holds",
+    "yield_push_mm": "max over the prompts",
+    "drag_free": "max over the transports, stops and holds",
+    "drag_push": "max over the prompts",
     "tip_sway": "mean over the stops",
-    "flex_share": "mean over the stops",
+    "flex_share": "sum of the residual variances over the sum of the tag variances, over the "
+    "stops at or above the tag variance floor",
 }
-SEGMENT_READS = {
-    "traj": ("tracking_rms",),
-    "stop": ("stop_sway", "tip_sway", "flex_share"),
-    "hold": ("hold_jitter", "yield_mm", "drag_resistance"),
-    "prompt": ("yield_mm", "drag_resistance"),
+POOLED_FROM = {
+    "tracking_rms": ("tracking_rms", ("traj",)),
+    "stop_sway": ("stop_sway", ("stop",)),
+    "hold_jitter": ("hold_jitter", ("hold",)),
+    "yield_free_mm": ("yield_mm", ("traj", "stop", "hold")),
+    "yield_push_mm": ("yield_mm", ("prompt",)),
+    "drag_free": ("drag_resistance", ("traj", "stop", "hold")),
+    "drag_push": ("drag_resistance", ("prompt",)),
+    "tip_sway": ("tip_sway", ("stop",)),
 }
+"""Pooled metric -> (the per-segment read, the segment kinds it pools)."""
+STOP_READS = ("stop_sway", "tip_sway", "flex_share")
+"""The reads a stop with a gap past ``MAX_GAP_S`` nulls."""
 
 
 def _num(x) -> float | None:
@@ -500,6 +591,14 @@ def _value(joints=None, tip=None) -> dict:
     return {"joints": _vec(joints), "tip": None if tip is None else _num(tip)}
 
 
+def _pool(name: str, stack: np.ndarray, weights: np.ndarray):
+    if name == "tracking_rms":
+        return np.sqrt(np.nansum(weights[:, None] * stack**2, axis=0) / weights.sum())
+    if name in ("yield_free_mm", "yield_push_mm", "drag_free", "drag_push"):
+        return np.nanmax(stack, axis=0)
+    return np.nanmean(stack, axis=0)
+
+
 def read(
     log,
     ik,
@@ -513,8 +612,13 @@ def read(
 
     ``tag_lines`` and ``latency_ms`` add the hold pairs, and with ``tag_offset`` the tip
     side. ``world_from_cam`` = (position (3,), rotation (3, 3)) puts the tag's ``cam_pos`` in
-    the arm's base frame (the registered overhead pose); None reads the logged ``pos``."""
+    the arm's base frame (the registered overhead pose); None reads the logged ``pos``.
+    ValueError for ``tag_lines`` without a finite ``latency_ms``."""
     log = _as_log(log)
+    if tag_lines is not None:
+        if latency_ms is None or not math.isfinite(float(latency_ms)):
+            raise ValueError("a tag log needs latency_ms (the sensing ledger's stamp p50)")
+        tag_lines = list(tag_lines)
     segs = segments(log)
     tag_pos = None
     tag_world = None
@@ -536,70 +640,89 @@ def read(
     detail = []
     for seg in segs:
         reads: dict[str, dict] = {}
-        rows = 0
+        stats = window_stats(log, seg)
+        entry = {
+            "index": seg.index,
+            "kind": seg.kind,
+            "label": seg.label,
+            "start_t": seg.start_t,
+            "end_t": seg.end_t,
+            **stats,
+            "gap_excluded": False,
+            "reads": reads,
+        }
         if seg.kind == "traj":
-            rows = int((_window(log, seg.start_t, seg.end_t) & log.tracked).sum())
             reads["tracking_rms"] = _value(
                 tracking_rms(log, seg), tip_value("tracking_rms", log, seg, ik)
             )
         elif seg.kind == "stop":
-            reads["stop_sway"] = _value(stop_sway(log, seg), tip_value("stop_sway", log, seg, ik))
-            if tag_pos is not None:
-                use = _window(log, seg.start_t - 0.05, seg.end_t + 0.05)
-                fk_pos = np.concatenate(
-                    [log.t[use, None], points(ik, log.q[use], tag_offset)], axis=1
+            if stats["max_gap_s"] > MAX_GAP_S:
+                entry["gap_excluded"] = True
+                for name in STOP_READS:
+                    reads[name] = _value()
+            else:
+                reads["stop_sway"] = _value(
+                    stop_sway(log, seg), tip_value("stop_sway", log, seg, ik)
                 )
-                reads["tip_sway"] = _value(tip=tip_sway(tag_pos, seg))
-                reads["flex_share"] = _value(tip=flex_share(tag_pos, fk_pos, seg))
-        if seg.kind == "hold":
+                if tag_pos is not None:
+                    use = _window(log, seg.start_t - 0.05, seg.end_t + 0.05)
+                    fk_pos = np.concatenate(
+                        [log.t[use, None], points(ik, log.q[use], tag_offset)], axis=1
+                    )
+                    resid_var, tag_var = flex_variances(tag_pos, fk_pos, seg)
+                    entry["flex"] = {
+                        "resid_var_mm2": _num(resid_var),
+                        "tag_var_mm2": _num(tag_var),
+                    }
+                    reads["tip_sway"] = _value(tip=tip_sway(tag_pos, seg))
+                    reads["flex_share"] = _value(tip=flex_share(tag_pos, fk_pos, seg))
+        elif seg.kind == "hold":
             reads["hold_jitter"] = _value(
                 hold_jitter(log, seg), tip_value("hold_jitter", log, seg, ik)
             )
-        if seg.kind in ("hold", "prompt"):
-            reads["yield_mm"] = _value(yield_offset(log, seg), yield_mm(log, seg, ik))
-            reads["drag_resistance"] = _value(drag_resistance(log, seg))
-        detail.append(
-            {
-                "index": seg.index,
-                "kind": seg.kind,
-                "label": seg.label,
-                "start_t": seg.start_t,
-                "end_t": seg.end_t,
-                "rows": rows,
-                "reads": reads,
-            }
-        )
-
-    def gather(name, part):
-        vals = []
-        for d in detail:
-            v = d["reads"].get(name, {}).get(part)
-            if v is not None:
-                vals.append((d, np.asarray(v, dtype=np.float64)))
-        return vals
+        reads["yield_mm"] = _value(yield_offset(log, seg), yield_mm(log, seg, ik))
+        reads["drag_resistance"] = _value(drag_resistance(log, seg))
+        detail.append(entry)
 
     metrics: dict[str, dict] = {}
     for name in UNITS:
-        out = {"joints": None, "tip": None, "count": 0}
+        out = {"joints": None, "tip": None, "count": 0, "excluded": 0}
         if name == "free_residual_rms":
-            out.update(_value(free_residual_rms(log)), count=int(free_mask(log).sum()))
-            out["tip"] = None
+            out["joints"] = _vec(free_residual_rms(log))
+            out["count"] = int(free_mask(log).sum())
+        elif name == "flex_share":
+            used = [d for d in detail if d["kind"] == "stop" and "flex" in d]
+            ok = [
+                d for d in used
+                if d["flex"]["tag_var_mm2"] is not None
+                and d["flex"]["tag_var_mm2"] >= FLEX_TAG_VAR_FLOOR_MM2
+                and d["flex"]["tag_var_mm2"] > 0.0
+                and d["flex"]["resid_var_mm2"] is not None
+            ]  # fmt: skip
+            if ok:
+                resid = sum(d["flex"]["resid_var_mm2"] for d in ok)
+                total = sum(d["flex"]["tag_var_mm2"] for d in ok)
+                out["tip"] = _num(resid / total)
+            out["count"] = len(ok)
+            out["excluded"] = sum(
+                1 for d in detail if d["kind"] == "stop" and d["gap_excluded"]
+            ) + (len(used) - len(ok))
         else:
+            source, kinds = POOLED_FROM[name]
+            pool = [d for d in detail if d["kind"] in kinds]
+            out["excluded"] = sum(1 for d in pool if d["gap_excluded"])
             for part in ("joints", "tip"):
-                vals = gather(name, part)
+                vals = [
+                    (d, np.asarray(d["reads"][source][part], dtype=np.float64).reshape(-1))
+                    for d in pool
+                    if source in d["reads"] and d["reads"][source][part] is not None
+                ]
                 if not vals:
                     continue
                 stack = np.stack([v for _, v in vals])
-                if name == "tracking_rms":
-                    w = np.array([d["rows"] for d, _ in vals], dtype=np.float64)
-                    agg = np.sqrt(np.nansum(w[:, None] * stack.reshape(len(vals), -1) ** 2, 0)
-                                  / w.sum())  # fmt: skip
-                    agg = agg if part == "joints" else agg[0]
-                elif name in ("yield_mm", "drag_resistance"):
-                    agg = np.nanmax(stack, axis=0)
-                else:
-                    agg = np.nanmean(stack, axis=0)
-                out[part] = _vec(agg) if part == "joints" else _num(agg)
+                weights = np.array([d["tracked_rows"] for d, _ in vals], dtype=np.float64)
+                agg = _pool(name, stack, weights)
+                out[part] = _vec(agg) if part == "joints" else _num(agg[0])
                 out["count"] = max(out["count"], len(vals))
         metrics[name] = out
 
@@ -610,9 +733,16 @@ def read(
         "schema": SCHEMA,
         "units": UNITS,
         "pooling": POOLING,
+        "limits": {
+            "max_gap_s": MAX_GAP_S,
+            "flex_tag_var_floor_mm2": FLEX_TAG_VAR_FLOOR_MM2,
+            "stop_window_s": STOP_WINDOW_S,
+            "settle_s": SETTLE_S,
+        },
         "metrics": metrics,
         "segments": detail,
         "tip_side": {"available": tag_pos is not None, "reason": reason, "tag_world": tag_world},
         "tag_frames": None if tag_pos is None else int(tag_pos.shape[0]),
+        "log_meta": dict(log.attrs or {}),
         "pairs_list": pairs,
     }

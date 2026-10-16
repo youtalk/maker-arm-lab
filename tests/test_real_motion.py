@@ -38,10 +38,13 @@ def ik():
     return GlobalIK()
 
 
-def write_log(path, t, q, *, q_r=None, r=None, offset=None, gate=None, segments=(), drop=()):
+def write_log(
+    path, t, q, *, q_r=None, r=None, offset=None, gate=None, segments=(), drop=(), lost=()
+):
     """A session log of six-wide ``q`` at times ``t``: one drain per ``CHUNK`` rows, its clock
     pair at ``MONO0 + t_last``. The tracking rows default to ``q_r = q``, ``r = 0``,
-    ``offset = 0``, ``gate = 1``; the rows in ``drop`` have no tracking row (a fault hold)."""
+    ``offset = 0``, ``gate = 1``; the rows in ``drop`` have no tracking row (a fault hold), the
+    rows in ``lost`` no row at all (ticks the rings dropped: a gap in ``tick``)."""
     t = np.asarray(t, dtype=float)
     q = np.asarray(q, dtype=float)
     n = t.shape[0]
@@ -51,6 +54,14 @@ def write_log(path, t, q, *, q_r=None, r=None, offset=None, gate=None, segments=
     gate = np.ones(n) if gate is None else np.asarray(gate, dtype=float)
     keep = np.ones(n, dtype=bool)
     keep[list(drop)] = False
+    tick = np.arange(n)
+    if len(lost):
+        alive = np.ones(n, dtype=bool)
+        alive[list(lost)] = False
+        t, q, q_r, r, offset, gate, keep, tick = (
+            a[alive] for a in (t, q, q_r, r, offset, gate, keep, tick)
+        )
+        n = t.shape[0]
 
     def seven(a):
         return np.concatenate([a, np.zeros((a.shape[0], 1))], axis=1)
@@ -61,7 +72,7 @@ def write_log(path, t, q, *, q_r=None, r=None, offset=None, gate=None, segments=
             m = sl.stop - sl.start
             ticks = {
                 "t": t[sl],
-                "tick": np.arange(sl.start, sl.stop),
+                "tick": tick[sl],
                 "clamped": np.zeros(m, dtype=bool),
                 "q": seven(q[sl]),
                 "dq": np.zeros((m, 7)),
@@ -234,7 +245,7 @@ def test_free_motion_yields_zero_and_a_push_yields_its_offset(tmp_path, ik):
     r[push, 1] = -1.5 * np.sin(math.pi * (t[push] - 1.5))
     segs = [(0.0, 1.5, "hold", "free"), (1.5, 3.0, "prompt", "push")]
     log = motion.load_log(write_log(tmp_path / "s.h5", t, q, offset=offset, r=r, segments=segs))
-    free, pushed = segments(log)
+    free, pushed = (s for s in segments(log) if s.kind in ("hold", "prompt"))
     assert yield_mm(log, free, ik) == pytest.approx(0.0, abs=1e-9)
     q_d = POSE - np.array([0, 0.02, 0, 0, 0, 0])
     expected = 1e3 * np.linalg.norm(pick_point(ik, POSE) - pick_point(ik, q_d))
@@ -290,7 +301,7 @@ def _tag_and_fk(ik, t, q, offset, extra=None):
 
 
 def test_a_rigid_tip_has_a_flex_share_of_zero(tmp_path, ik):
-    log = synthetic_log_with_stop(tmp_path / "s.h5", amp_rad=0.002, f_hz=3.5, zeta=0.4)
+    log = synthetic_log_with_stop(tmp_path / "s.h5", amp_rad=0.01, f_hz=3.5, zeta=0.4)
     tag_pos, fk_pos = _tag_and_fk(ik, log.t, log.q, [0.0, 0.01, 0.02])
     seg = stop_seg(log)
     assert flex_share(tag_pos, fk_pos, seg) == pytest.approx(0.0, abs=1e-9)
@@ -299,7 +310,7 @@ def test_a_rigid_tip_has_a_flex_share_of_zero(tmp_path, ik):
 
 def test_a_flexing_tip_reads_the_unexplained_share(tmp_path, ik):
     t, q = still(2.0)
-    q[:, 0] += 0.001 * np.sin(2.0 * math.pi * 3.0 * t)
+    q[:, 0] += 0.005 * np.sin(2.0 * math.pi * 3.0 * t)
     log = motion.load_log(write_log(tmp_path / "s.h5", t, q, segments=[(0.0, 1.0, "traj", "")]))
     pts = motion.points(ik, log.q, [0.0, 0.0, 0.0])
     arm = pts - pts.mean(axis=0)
@@ -327,3 +338,91 @@ def test_points_is_the_fk_pick_point_with_its_offset(ik):
     q = np.stack([POSE, POSE + 0.1])
     got = motion.points(ik, q, PICK_OFFSET_MEASURED)
     assert np.allclose(got, [pick_point(ik, row) for row in q], atol=1e-12)
+
+
+def test_a_near_still_tag_reads_no_flex_share(tmp_path, ik):
+    log = synthetic_log_with_stop(tmp_path / "s.h5", amp_rad=1e-5, f_hz=3.5, zeta=0.4, drift=0.0)
+    rng = np.random.default_rng(4)
+    noise = rng.normal(0.0, 1e-4, (log.t.shape[0], 3))  # 0.1 mm: the camera's noise floor
+    tag_pos, fk_pos = _tag_and_fk(ik, log.t, log.q, [0.0, 0.0, 0.0], extra=noise)
+    seg = stop_seg(log)
+    resid, total = motion.flex_variances(tag_pos, fk_pos, seg)
+    assert total < motion.FLEX_TAG_VAR_FLOOR_MM2 and resid / total > 0.9
+    assert math.isnan(flex_share(tag_pos, fk_pos, seg))
+
+
+def _two_stop_session(tmp_path, ik, lost=()):
+    """Two transports, each ending in a stop: the first sways 0.01 rad on joint 1, the second
+    barely moves. Tag frames ride on FK with 0.1 mm noise."""
+    t, q = still(4.0)
+    w = 2.0 * math.pi * 3.5
+    for end, amp in ((1.0, 0.01), (3.0, 1e-5)):
+        span = (t >= end) & (t < end + 0.6)
+        s = t[span] - end
+        q[span, 1] += amp * np.exp(-0.4 * w * s) * np.cos(w * s)
+    segs = [(0.0, 1.0, "traj", "a"), (2.0, 3.0, "traj", "b")]
+    log = motion.load_log(write_log(tmp_path / "s.h5", t, q, segments=segs, lost=lost))
+    pts = motion.points(ik, log.q, [0.0, 0.0, 0.0])
+    noise = np.random.default_rng(5).normal(0.0, 1e-4, pts.shape)
+    lines = [
+        tag_line(log.t[k], cam_pos=pts[k] + noise[k], pos=pts[k] + noise[k])
+        for k in range(0, log.t.shape[0], 7)
+    ]
+    return log, lines
+
+
+def test_the_flex_pool_sums_the_variances_and_skips_a_still_stop(tmp_path, ik):
+    log, lines = _two_stop_session(tmp_path, ik)
+    body = motion.read(log, ik, lines, 91.0, tag_offset=[0.0, 0.0, 0.0])
+    stops = [d for d in body["segments"] if d["kind"] == "stop"]
+    moving, still_stop = stops
+    assert still_stop["flex"]["tag_var_mm2"] < motion.FLEX_TAG_VAR_FLOOR_MM2
+    assert still_stop["reads"]["flex_share"]["tip"] is None
+    flex = body["metrics"]["flex_share"]
+    assert flex["count"] == 1 and flex["excluded"] == 1
+    want = moving["flex"]["resid_var_mm2"] / moving["flex"]["tag_var_mm2"]
+    assert flex["tip"] == pytest.approx(want, rel=1e-9) and flex["tip"] < 0.05
+
+
+def test_a_stop_with_a_gap_reads_null_and_is_counted(tmp_path, ik):
+    lost = list(range(240, 250))  # 50 ms the rings dropped
+    log, lines = _two_stop_session(tmp_path, ik, lost=lost)
+    body = motion.read(log, ik, lines, 91.0, tag_offset=[0.0, 0.0, 0.0])
+    gapped, clean = (d for d in body["segments"] if d["kind"] == "stop")
+    assert gapped["missing_ticks"] == len(lost) and gapped["max_gap_s"] > motion.MAX_GAP_S
+    assert gapped["gap_excluded"] and clean["missing_ticks"] == 0 and not clean["gap_excluded"]
+    assert all(gapped["reads"][k] == {"joints": None, "tip": None} for k in motion.STOP_READS)
+    assert body["metrics"]["stop_sway"]["count"] == 1
+    assert body["metrics"]["stop_sway"]["excluded"] == 1
+    assert body["metrics"]["flex_share"]["excluded"] == 2  # the gap and the still stop
+    traj = next(d for d in body["segments"] if d["kind"] == "traj")
+    assert traj["rows"] == traj["tracked_rows"] == 200 and traj["max_gap_s"] < 0.01
+
+
+def test_a_yield_during_a_transport_reads_free_not_push(tmp_path, ik):
+    t, q = still(4.0)
+    offset = np.zeros((t.shape[0], 6))
+    offset[(t >= 0.5) & (t < 1.0), 2] = 0.01  # the admittance yields in free motion
+    segs = [(0.0, 1.5, "traj", "a"), (2.0, 4.0, "prompt", "push")]
+    log = motion.load_log(write_log(tmp_path / "s.h5", t, q, offset=offset, segments=segs))
+    body = motion.read(log, ik)
+    q_d = POSE - np.array([0, 0, 0.01, 0, 0, 0])
+    want = 1e3 * np.linalg.norm(pick_point(ik, POSE) - pick_point(ik, q_d))
+    assert body["metrics"]["yield_free_mm"]["tip"] == pytest.approx(want, rel=1e-3)
+    assert body["metrics"]["yield_free_mm"]["joints"][2] == pytest.approx(0.01)
+    assert body["metrics"]["yield_push_mm"]["tip"] == pytest.approx(0.0, abs=1e-9)
+    assert body["metrics"]["drag_push"]["count"] == 1
+
+
+def test_the_read_needs_a_latency_with_a_tag_log(tmp_path, ik):
+    t, q = still(1.0)
+    log = motion.load_log(write_log(tmp_path / "s.h5", t, q))
+    with pytest.raises(ValueError, match="latency_ms"):
+        motion.read(log, ik, [tag_line(0.5, pos=(0, 0, 0))], None, tag_offset=[0, 0, 0])
+
+
+def test_the_read_carries_the_log_attrs(tmp_path, ik):
+    t, q = still(1.0)
+    log = motion.load_log(write_log(tmp_path / "s.h5", t, q))
+    meta = motion.read(log, ik)["log_meta"]
+    assert meta["lab_revision"] == "test" and meta["dropped"] == 0 and meta["records"] == {}

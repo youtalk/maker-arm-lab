@@ -19,8 +19,10 @@ METRICS = (
     "stop_sway",
     "hold_jitter",
     "free_residual_rms",
-    "yield_mm",
-    "drag_resistance",
+    "yield_free_mm",
+    "yield_push_mm",
+    "drag_free",
+    "drag_push",
     "tip_sway",
     "flex_share",
 )
@@ -50,7 +52,7 @@ def _session(tmp_path):
     t, q = still(8.0)
     move = t < 2.0
     q[move, 0] += np.linspace(-0.1, 0.0, int(move.sum()))
-    q[~move, 0] += 0.001 * np.exp(-3.0 * (t[~move] - 2.0)) * np.sin(22.0 * (t[~move] - 2.0))
+    q[~move, 0] += 0.01 * np.exp(-3.0 * (t[~move] - 2.0)) * np.sin(22.0 * (t[~move] - 2.0))
     segs = [(0.0, 2.0, "traj", "a.npz"), (2.0, 5.0, "hold", ""), (5.0, 8.0, "hold", "")]
     log = write_log(tmp_path / "s.h5", t, q, segments=segs)
     from maker_arm_lab.core.global_ik import GlobalIK
@@ -100,10 +102,12 @@ def test_the_full_read_writes_every_metric(tmp_path):
     code, tokens, err = _run([*args, "--pairs_out", pairs, "--out", out])
     assert code == 0 and len(tokens) == 1 and tokens[0].startswith("MOTION_READ_OK"), err
     body = json.loads(out.read_text())
-    assert body["schema"] == "maker-arm-lab/motion-read/1"
+    assert body["schema"] == "maker-arm-lab/motion-read/2"
+    assert body["overhead_pose"] == {"pos": [0.0, 0.0, 0.0], "quat": [1.0, 0.0, 0.0, 0.0]}
+    assert body["log_meta"]["lab_revision"] == "test" and body["latency_ms"] == 91.0
     assert set(body["metrics"]) == set(METRICS)
     for name in METRICS:
-        assert set(body["metrics"][name]) == {"joints", "tip", "count"}
+        assert set(body["metrics"][name]) == {"joints", "tip", "count", "excluded"}
         assert set(body["units"][name]) == {"joints", "tip"}
     assert body["tip_side"] == {"available": True, "reason": None, "tag_world": "rig_overhead"}
     # the tag rides on FK through the tag offset: a rigid arm
@@ -128,7 +132,13 @@ def test_without_a_tag_offset_the_read_writes_the_pairs_and_the_motor_side(tmp_p
     assert code == 0 and len(tokens) == 1 and tokens[0].startswith("MOTION_READ_OK"), err
     body = json.loads(out.read_text())
     assert body["tip_side"]["available"] is False and "tag_offset" in body["tip_side"]["reason"]
-    assert body["metrics"]["flex_share"] == {"joints": None, "tip": None, "count": 0}
+    assert body["metrics"]["flex_share"] == {
+        "joints": None,
+        "tip": None,
+        "count": 0,
+        "excluded": 0,
+    }
+    assert body["overhead_pose"] is None
     assert all(math.isfinite(v) for v in body["metrics"]["stop_sway"]["joints"])
     held = json.loads(pairs.read_text())["pairs"]
     assert len(held) == 2 and np.allclose(held[0]["q"], POSE, atol=1e-3)
