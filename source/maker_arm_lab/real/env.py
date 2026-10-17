@@ -89,6 +89,7 @@ from maker_arm_lab.mj.context_names import CONTEXT_CAMERA_NAMES, CONTEXT_DIMS
 from maker_arm_lab.real import camera_model, pacing
 from maker_arm_lab.real.arm import (
     contact_residual,
+    gripper_angle_of,
     jaw_fraction,
     pick_jacobian,
     pick_point,
@@ -335,7 +336,7 @@ class RealEnv:
             raw[:, :6].double(), fraction, self.profile, self._arm_term.clamped
         )
         target = [float(v) for v in arm[0]]
-        grip = _profile.gripper_angle(self.profile, float(fraction[0]))
+        grip = gripper_angle_of(self.profile, float(fraction[0]), self.rig.gripper_map)
         self._check_arm(self.arm.read())
         now = self.arm.now()
         if now is None:
@@ -364,7 +365,9 @@ class RealEnv:
     def _refresh(self, reading) -> None:
         self._check_arm(reading)
         self._reading = reading
-        per_jaw = jaw_fraction(self.profile, reading.gripper) * GRIPPER_OPEN_POS
+        per_jaw = (
+            jaw_fraction(self.profile, reading.gripper, self.rig.gripper_map) * GRIPPER_OPEN_POS
+        )
         data = self.scene["robot"].data
         data.joint_pos[0] = torch.tensor([*reading.q, per_jaw, per_jaw])
         data.joint_vel[0, :6] = torch.tensor(reading.dq)

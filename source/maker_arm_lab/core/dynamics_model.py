@@ -6,8 +6,9 @@ center of mass, and the inertia tensor about the center of mass. This module rea
 the vendored URDF (the sim's own model) or from the housing mass model asset, and lumps the
 two jaws into link_007 at a fixed opening, because the loop does not model the gripper.
 
-stdlib and ``maker_arm_rs`` only, so it runs unchanged on the Jetson Thor. MA2's fitted
-parameter file replaces the URDF here later.
+stdlib and ``maker_arm_rs`` only, so it runs unchanged on the Jetson Thor. ``from_ident``
+reads the identification's parameter file (``ident.fit.IdentResult.to_json``, MS5 control plan
+task 7) in place of the URDF: the fitted bodies, friction and armature.
 """
 
 from __future__ import annotations
@@ -166,13 +167,33 @@ def scaled(bodies: Sequence[Body], factor: float) -> list[Body]:
 
 def dynamics(
     bodies: Sequence[Body],
-    friction: Sequence[tuple[float, float, float]] | None = None,
+    friction: Sequence[Sequence[float]] | None = None,
     urdf: Path = VENDORED_URDF,
+    armature: Sequence[float] | None = None,
 ) -> maker_arm_rs.Dynamics:
+    """``friction`` holds per joint ``(coulomb, viscous, eps)`` or ``(coulomb, viscous, eps,
+    static_, stribeck_v)``; ``armature`` six rotor inertias (kg m^2)."""
     return maker_arm_rs.Dynamics(
         tuple(MOUNT_RPY),
         chain_links(ARM_JOINT_NAMES, urdf),
         list(bodies),
-        None if friction is None else list(friction),
+        None if friction is None else [list(f) for f in friction],
         GRAVITY,
+        None if armature is None else [float(a) for a in armature],
     )
+
+
+def from_ident(path: Path, urdf: Path = VENDORED_URDF) -> maker_arm_rs.Dynamics:
+    """The identified model in the file at ``path``: ``bodies`` (six ``[mass, com, inertia
+    about the com]``), ``friction`` (six 5-tuples) and ``armature`` (six). Raises ValueError
+    for a file the SDK would refuse or that lacks a field."""
+    data = json.loads(Path(path).read_text())
+    data = data if isinstance(data, dict) else {}  # an ident file holds an object
+    missing = [k for k in ("bodies", "friction", "armature") if k not in data]
+    if missing:
+        raise ValueError(f"{path}: the ident file has no {', '.join(missing)}")
+    try:
+        bodies = [_freeze(m, c, i) for m, c, i in data["bodies"]]
+    except (TypeError, ValueError) as err:
+        raise ValueError(f"{path}: bodies must be [mass, com, inertia] triples ({err})") from err
+    return dynamics(bodies, data["friction"], urdf, data["armature"])

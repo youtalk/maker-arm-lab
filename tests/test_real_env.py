@@ -15,6 +15,7 @@ from maker_arm_lab.core.global_ik import GlobalIK
 from maker_arm_lab.core.profile import gripper_angle, sim_profile
 from maker_arm_lab.core.quat import rpy_from_quat
 from maker_arm_lab.core.torque import pick_force
+from maker_arm_lab.real import arm as real_arm
 from maker_arm_lab.real import camera_model
 from maker_arm_lab.real.rig import RigConfig
 from maker_arm_lab.robots.frames import ARM_JOINT_REGEX, GRIPPER_OPEN_POS, JAW_FULL_GAP, TOOL_BODY
@@ -74,6 +75,21 @@ def test_a_step_pushes_the_clamped_row_one_period_ahead_and_waits_for_the_tick()
     assert clock.sleeps[-1] == pytest.approx(PERIOD)
     assert not bool(terminated[0]) and not bool(truncated[0])
     assert len(env.ticks.ticks) == 1
+
+
+def test_commands_and_state_share_the_gripper_map():
+    rig = RigConfig(gripper_map=(0.03, 0.065))
+    env, arm, _ = make_env(rig=rig)
+    env.step(_action(0.03))
+    angle = arm.pushes[-1][2][6]
+    assert angle == pytest.approx(
+        real_arm.gripper_angle_of(sim_profile(), 0.03 / JAW_FULL_GAP, (0.03, 0.065))
+    )
+    assert angle != pytest.approx(gripper_angle(sim_profile(), 0.03 / JAW_FULL_GAP))
+    clock = FakeClock()
+    back, _, _ = make_env(clock=clock, arm=FakeArm(clock, gripper=angle), rig=rig)
+    fraction = policy_state(back.scene["robot"].data.joint_pos)[0, 6].item()
+    assert fraction == pytest.approx(0.03 / JAW_FULL_GAP, abs=1e-6)
 
 
 def test_half_dilation_doubles_the_period():

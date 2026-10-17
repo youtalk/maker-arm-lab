@@ -3,6 +3,7 @@
 import math
 import time
 
+import maker_arm_rs
 import numpy as np
 import pytest
 
@@ -23,6 +24,25 @@ def test_jaw_fraction_inverts_the_provisional_transmission_and_clips():
     g = profile["joints"][6]
     assert real_arm.jaw_fraction(profile, g["q_hi"] + 0.5) == 1.0
     assert real_arm.jaw_fraction(profile, g["q_lo"] - 0.5) == 0.0
+
+
+def test_the_gripper_map_replaces_the_provisional_one():
+    profile = sim_profile()
+    g = profile["joints"][6]
+    a, b = 0.03, 0.065  # m per rad, m: the gap at angle 0
+    full = a * g["q_hi"] + b
+    mid = 0.5 * (g["q_lo"] + g["q_hi"])
+    got = real_arm.jaw_fraction(profile, mid, gripper_map=(a, b))
+    assert got == pytest.approx((a * mid + b) / full)
+    assert real_arm.jaw_fraction(profile, g["q_hi"], gripper_map=(a, b)) == pytest.approx(1.0)
+    assert real_arm.jaw_fraction(profile, g["q_hi"] + 1.0, gripper_map=(a, b)) == 1.0
+    assert real_arm.jaw_fraction(profile, g["q_lo"] - 5.0, gripper_map=(a, b)) == 0.0
+    # without the map the provisional line stays
+    assert real_arm.jaw_fraction(profile, mid) == real_arm.jaw_fraction(
+        profile, mid, gripper_map=None
+    )
+    with pytest.raises(ValueError, match="open limit"):
+        real_arm.jaw_fraction(profile, mid, gripper_map=(a, -1.0))
 
 
 def test_the_pick_jacobian_predicts_a_small_motion():
@@ -70,3 +90,42 @@ def test_the_sdk_arm_starts_pushes_holds_and_stops_on_the_sdk_simulator():
     finally:
         sdk.stop()
     assert sdk.read() is None or sdk.read().state != "enabled"
+
+
+def test_the_sdk_arm_connects_with_a_reduced_profile_and_sends_its_gains():
+    profile = maker_arm_rs.profile()
+    for j in profile["joints"]:
+        j["kp"] *= 0.5
+    sdk = real_arm.SdkArm.connect("sim", dm.dynamics(dm.urdf_bodies()), profile=profile)
+    try:
+        sdk.start()
+        time.sleep(0.2)
+        ticks, trk = sdk.drain()
+        assert len(ticks["t"]) > 10 and len(trk["tick_t"]) > 10
+        cap = np.array([j["kp"] for j in profile["joints"]])
+        assert (np.asarray(ticks["cmd_kp"]) <= cap + 1e-9).all()
+    finally:
+        sdk.stop()
+
+
+def test_a_raised_profile_is_refused_before_the_sdk_arm_connects():
+    profile = maker_arm_rs.profile()
+    profile["joints"][2]["tau_max"] *= 2.0
+    with pytest.raises(ValueError, match=r"joints\[2\]\.tau_max"):
+        real_arm.SdkArm.connect("can-does-not-exist", dm.dynamics(dm.urdf_bodies()),
+                                profile=profile)  # fmt: skip
+
+
+def test_gripper_angle_of_inverts_jaw_fraction_under_a_map_and_clamps():
+    profile = sim_profile()
+    g = profile["joints"][6]
+    for gripper_map in ((0.03, 0.065), (0.025, 0.0523), None):
+        for f in np.linspace(0.0, 1.0, 11):
+            angle = real_arm.gripper_angle_of(profile, float(f), gripper_map)
+            assert g["q_lo"] <= angle <= g["q_hi"]
+            if gripper_map is None or f > 0.0:
+                assert real_arm.jaw_fraction(profile, angle, gripper_map) == pytest.approx(f)
+    # a map whose closed gap is positive cannot reach fraction 0: the command stops at q_lo
+    assert real_arm.gripper_angle_of(profile, 0.0, (0.03, 0.065)) == g["q_lo"]
+    with pytest.raises(ValueError):
+        real_arm.gripper_angle_of(profile, 0.5, (0.0, 0.05))

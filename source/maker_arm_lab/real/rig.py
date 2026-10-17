@@ -24,8 +24,18 @@ from pathlib import Path
 
 from maker_arm_lab.core import cameras, desk_boxes
 from maker_arm_lab.core.parts import BASE_CLASSES
+from maker_arm_lab.core.profile import load_profile
 
 NUM_BOXES = 4
+NUM_MOTORS = 7
+"""Six arm joints and the gripper, the order of ``maker_arm_rs.profile()["joints"]``."""
+CAP_KEYS = ("tau_max", "kp", "kd")
+"""The profile keys ``caps`` scales. The error clamp ``e_max`` follows kp (``capped_e_max``)."""
+ARM_DOF = 6
+E_MAX_DEFAULT_RAD = 0.03
+"""The SDK's default error clamp per arm joint (``TrackingParams::default().e_max``,
+INITIAL there); ``tests/test_real_rig.py`` pins it to the SDK's behaviour."""
+CALIBRATION_KEYS = ("direction", "offset")
 
 
 @dataclass(frozen=True)
@@ -52,17 +62,145 @@ class RigConfig:
     tracking_params: dict = field(default_factory=lambda: {"tau_th": [2.0] * 6})  # INITIAL: A1
     tray_lean_deg: float = 30.0
     desk_z: float = 0.0
+    caps: dict | None = None
+    """The session's reduced caps: ``{"tau_max": [7], "kp": [7], "kd": [7]}``, each a scale in
+    (0, 1] of ``maker_arm_rs.profile()``'s per-joint value (``reduced_profile``). None, or a
+    key left out, keeps the profile's value. The exposure steps of the MS5 sessions set it."""
+    calibration: dict | None = None
+    """The motor to URDF map: ``{"direction": [7], "offset": [7]}``, joint = direction *
+    (motor - offset). None keeps the profile's identity map (session 2 measures it). Only the
+    identity is accepted until the profile's limits are re-expressed in joint coordinates."""
+    gripper_map: tuple[float, float] | None = None
+    """The gripper's motor angle to jaw gap line, ``gap = a * angle + b`` in m, from the
+    caliper (``scripts/real_gripper_map.py``). None keeps the provisional map of
+    ``core.profile`` (``real.arm.jaw_fraction``)."""
 
     @classmethod
     def from_json(cls, path) -> RigConfig:
+        """The rig at ``path``. ValueError for an unknown key or a ``gripper_map`` that is
+        not two finite numbers with a nonzero slope."""
         data = json.loads(Path(path).read_text())
         unknown = set(data) - {f.name for f in fields(cls)}
         if unknown:
             raise ValueError(f"unknown rig keys {sorted(unknown)}")
+        if data.get("gripper_map") is not None:
+            check_gripper_map(data["gripper_map"])
         return cls(**{k: tuple(v) if isinstance(v, list) else v for k, v in data.items()})
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
+
+
+def check_gripper_map(value) -> tuple[float, float]:
+    """``gap = a * angle + b`` as ``(a, b)``; ValueError unless both are finite numbers and
+    ``a != 0`` (a flat line cannot be inverted to a command, ``real.arm.gripper_angle_of``)."""
+    if isinstance(value, (str, bytes)) or not hasattr(value, "__len__") or len(value) != 2:
+        raise ValueError(f"gripper_map needs [a, b], got {value!r}")
+    for i, v in enumerate(value):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError(f"gripper_map[{i}] = {v!r} is not a finite number")
+    if value[0] == 0:
+        raise ValueError("gripper_map has slope a = 0: the line cannot be inverted")
+    return float(value[0]), float(value[1])
+
+
+def _seven(name: str, values) -> list[float]:
+    if isinstance(values, (str, bytes)) or len(values) != NUM_MOTORS:
+        raise ValueError(f"{name} needs {NUM_MOTORS} values, got {values!r}")
+    out = []
+    for i, v in enumerate(values):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError(f"{name}[{i}] = {v!r} is not a finite number")
+        out.append(float(v))
+    return out
+
+
+def reduced_profile(rig: RigConfig) -> dict:
+    """``maker_arm_rs.profile()`` with the rig's ``caps`` scaling each joint's ``tau_max``,
+    ``kp`` and ``kd`` (the controller's ``e_max`` follows kp: ``session_tracking_params``) and
+    its ``calibration`` setting each joint's ``direction`` and
+    ``offset``, which for now must be the identity (direction 1, offset 0): the profile's
+    limits are still the motor frame's. A scale outside (0, 1], a non-identity calibration or
+    an unknown key raises ValueError naming it (a group
+    that is not an object, TypeError); the SDK
+    checks the result again when the arm connects (``Arm.sim``, ``Arm.socketcan``)."""
+    profile = load_profile()
+    joints = profile["joints"]
+    for group, allowed, value in (
+        ("caps", CAP_KEYS, rig.caps),
+        ("calibration", CALIBRATION_KEYS, rig.calibration),
+    ):
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            raise TypeError(f"{group} must be an object, got {value!r}")
+        unknown = sorted(set(value) - set(allowed))
+        if unknown:
+            raise ValueError(f"{group} has unknown keys {unknown}; allowed {list(allowed)}")
+    for key, scales in (rig.caps or {}).items():
+        for i, s in enumerate(_seven(f"caps.{key}", scales)):
+            if not 0.0 < s <= 1.0:
+                raise ValueError(f"caps.{key}[{i}] = {s} is outside (0, 1]")
+            joints[i][key] = float(joints[i][key]) * s
+    identity = {"direction": 1.0, "offset": 0.0}
+    for key, values in (rig.calibration or {}).items():
+        for i, v in enumerate(_seven(f"calibration.{key}", values)):
+            if v != identity[key]:
+                raise ValueError(
+                    f"calibration.{key}[{i}] = {v}: only the identity calibration is accepted "
+                    "while the profile's joint limits (q_lo, q_hi) are still in the motor frame; "
+                    "the SDK clamp and check_traj read them as joint coordinates, so resolve "
+                    "the limit frame first"
+                )
+            joints[i][key] = v
+    return profile
+
+
+def _kp_scales(caps: dict | None) -> list[float]:
+    if caps is not None and not isinstance(caps, dict):
+        raise TypeError(f"caps must be an object, got {caps!r}")
+    if not caps or "kp" not in caps:
+        return [1.0] * NUM_MOTORS
+    scales = _seven("caps.kp", caps["kp"])
+    for i, s in enumerate(scales):
+        if not 0.0 < s <= 1.0:
+            raise ValueError(f"caps.kp[{i}] = {s} is outside (0, 1]")
+    return scales
+
+
+def capped_e_max(kp_scales: Sequence[float] | None) -> list[float]:
+    """The error clamp per arm joint that keeps the spring ceiling ``kp * e_max`` at the
+    profile's (ruling R33): ``E_MAX_DEFAULT_RAD / kp_scale``. A reduced kp alone would also
+    cut the most torque the spring can add to the gravity feed-forward, by the same scale, and
+    an arm whose model is light then sags to its limit (at kp 0.25 the bench's j2 ran 1.5 rad
+    with the model's mass at 0.65 of the plant's). The reduced ``tau_max`` still bounds the
+    command. None: the profile's kp (scale 1)."""
+    scales = [1.0] * NUM_MOTORS if kp_scales is None else list(kp_scales)
+    return [E_MAX_DEFAULT_RAD / float(s) for s in scales[:ARM_DOF]]
+
+
+def session_tracking_params(rig: RigConfig, params: dict) -> dict:
+    """``params`` (the rig's ``tracking_params`` with any override) with ``e_max`` set by
+    ruling R33 from the rig's ``caps.kp`` (``capped_e_max``). An explicit ``e_max`` (six
+    values) wins only where it does not exceed that; past it, ValueError naming the joint."""
+    out = dict(params)
+    cap = capped_e_max(_kp_scales(rig.caps))
+    if "e_max" not in out:
+        out["e_max"] = cap
+        return out
+    given = out["e_max"]
+    if isinstance(given, (str, bytes)) or not hasattr(given, "__len__") or len(given) != ARM_DOF:
+        raise ValueError(f"e_max needs {ARM_DOF} values, got {given!r}")
+    for j, (v, c) in enumerate(zip(given, cap)):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError(f"e_max[{j}] = {v!r} is not a finite number")
+        if v > c * (1.0 + 1e-12):
+            raise ValueError(
+                f"e_max[{j}] = {v} exceeds {c:.6g} rad, {E_MAX_DEFAULT_RAD} over the joint's kp "
+                "scale: past it the spring could push more than the profile's kp * e_max"
+            )
+    out["e_max"] = [float(v) for v in given]
+    return out
 
 
 def fold_box_yaw(yaw: float) -> float:
