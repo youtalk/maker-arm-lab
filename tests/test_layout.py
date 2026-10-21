@@ -553,6 +553,7 @@ def test_a_leaning_tray_wall_stands_on_the_interior_edge_and_rises_to_the_rim(le
 
 
 def test_sparse_points_keep_the_gap_and_the_part_clearance():
+    # Footprint half diagonals of catalog parts.
     hd = [0.025, 0.018, 0.018, 0.0073, 0.02] * 2
     pts = layout.sample_sparse_points(random.Random(3), hd, 0.035)
     for (i, a), (j, b) in itertools.combinations(enumerate(pts), 2):

@@ -470,6 +470,7 @@ def test_a_sparse_reset_leaves_ten_upright_parts_apart_in_the_tray(deep):
     draw = layout.sample_run_draw(random.Random(4))
     draw["slot_colors"] = (0, 1, 2, 3)
     ten = parts.sample_parts(random.Random(0), parts.split(parts.catalog(), 20260915)[0], 10)
+    ten[-1] = parts.make_part("slope", 1, 2)  # a hull that is not centred on its box
     env = MjLegoSortEnv(
         1,
         draw,
@@ -486,6 +487,7 @@ def test_a_sparse_reset_leaves_ten_upright_parts_apart_in_the_tray(deep):
         data = env.scene[f"brick_{b}"].data
         xy.append(data.root_pos_w[0, :2])
         assert env._in_tray(data.root_pos_w[0].tolist())
+        assert data.root_pos_w[0, 2] > 0.003, b  # nothing sank through the floor
         _, x, y, _ = data.root_quat_w[0].tolist()
         assert 1.0 - 2.0 * (x * x + y * y) > math.cos(math.radians(10.0)), b
     for a, b in itertools.combinations(xy, 2):

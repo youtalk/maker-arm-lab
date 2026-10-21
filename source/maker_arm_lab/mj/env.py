@@ -1065,22 +1065,32 @@ class MjLegoSortEnv:
 
     def _drop_sparse(self, i: int, gap: float) -> None:
         """MS7j sparse scene: all parts in one batch, each upright on its base (identity
-        quaternion, the part frame's z up) with a yaw from U(0, pi), 5 mm over the tray floor.
-        The floor is the desk at z = 0 for the shallow and the deep tray alike. A part stands
-        upright, so its footprint half diagonal sets its clearance, not the 3D one."""
-        d, h = self.datas[i], self.handles
+        quaternion, the part frame's z up) with a yaw from U(0, pi), its lowest point 5 mm over
+        the tray floor. The floor is the desk at z = 0 for the shallow and the deep tray alike.
+        A part stands upright, so its footprint half diagonal sets its clearance, not the 3D
+        one. The lowest point is read from the geoms, since a slope's hull is not centred."""
+        m, d, h = self.models[i], self.datas[i], self.handles
         batch = list(range(len(self.parts)))
         self._unpark(i, batch)
         points = layout.sample_sparse_points(
             self._rng, [0.5 * math.hypot(*self.parts[b].size[:2]) for b in batch], gap
         )
+        for b in batch:
+            adr = h.brick_qpos[b]
+            d.qpos[adr : adr + 7] = (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+        mujoco.mj_forward(m, d)
         for b, (x, y) in zip(batch, points):
+            rows = [(d.geom_xmat[g].reshape(3, 3), m.geom_aabb[g]) for g in h.body_geoms[b]]
+            low = min(
+                d.geom_xpos[g][2] + (r @ a[:3])[2] - np.abs(r[2]) @ a[3:]
+                for g, (r, a) in zip(h.body_geoms[b], rows)
+            )
             yaw = self._rng.uniform(0.0, math.pi)
             adr = h.brick_qpos[b]
-            d.qpos[adr : adr + 3] = (x, y, 0.005 + self.parts[b].size[2] / 2)
+            d.qpos[adr : adr + 3] = (x, y, 0.005 + d.xpos[h.brick_bodies[b]][2] - low)
             d.qpos[adr + 3 : adr + 7] = (math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2))
             d.qvel[h.brick_dof[b] : h.brick_dof[b] + 6] = 0.0
-        mujoco.mj_forward(self.models[i], d)
+        mujoco.mj_forward(m, d)
 
     def _settle(self, i: int, stacked: bool) -> None:
         """HEAP_SETTLE_STEPS of physics with the arm held. A stacked pile (the MS7f deep tray,
