@@ -350,7 +350,11 @@ HEAP_DROP_BATCH = 5
 HEAP_DROP_BATCH_STEPS = 60
 HEAP_DROP_GAP = 0.005
 HEAP_DROP_TRIES = 500
-SPARSE_RESTARTS = 20
+SPARSE_RESTARTS = 200
+"""Whole-layout restarts of ``sample_sparse_poses``. Read on 10000 random 10-part default-catalog
+draws at gap 0.035: 20 restarts fail 9, 40 fail 9, 100 fail 4, 200 fail 2 (mean 4 ms a layout).
+A set that fails burns every restart (2 s at 200). The residual sets hold three or four of the
+big 4x8, 4x6 and 4x4 bricks."""
 HEAP_SETTLE_STEPS = 480
 
 
