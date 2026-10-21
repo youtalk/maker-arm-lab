@@ -454,7 +454,7 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
     check_ms7e(parser, args)
     check_ms7f(parser, args)
     try:
-        args.stress = stress_from_args(args)
+        stress_from_args(args)  # validate only: args stays JSON-serializable
     except ValueError as err:
         parser.error(str(err))
     check_teacher_waits(parser, args)
@@ -579,6 +579,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
         draw = sample_run_draw(random.Random(args.layout_seed), args.spatial_scale)
         draw["slot_colors"] = perm
         parts = heap_parts(args)
+        stress = stress_from_args(args)
         env = MjLegoSortEnv(
             args.num_envs,
             draw,
@@ -604,7 +605,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             deep_tray=args.deep_tray,
             tray_refill=args.tray_refill,
             pile_pgs=args.pile_pgs,
-            stress=args.stress,
+            stress=stress,
             export_dir=args.dagger_dir or None,
             shard_name=args.shard_name,
             export_all=bool(args.dagger_dir),
@@ -745,8 +746,8 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
         payload["ms7e"] = ms7e_switches(args)
         payload["ms7f"] = ms7f_switches(args)
         payload["deep_box_floor"] = args.deep_box_floor
-        if args.stress.block():  # off leaves the payload byte-identical to main
-            payload["stress"] = args.stress.block()
+        if stress.block():  # off leaves the payload byte-identical to main
+            payload["stress"] = stress.block()
         if args.dagger_dir:
             payload["shard"] = str(Path(args.dagger_dir) / f"{args.shard_name}.hdf5")
         if args.record_all:
