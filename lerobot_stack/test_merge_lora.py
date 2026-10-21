@@ -37,11 +37,13 @@ class Policy:
 
     def save_pretrained(self, out):
         Path(out).mkdir(parents=True, exist_ok=True)
-        (Path(out) / "config.json").write_text(json.dumps({"use_peft": self.config.use_peft}))
+        keys = ("use_peft", "dtype", "device")
+        config = {k: getattr(self.config, k) for k in keys if hasattr(self.config, k)}
+        (Path(out) / "config.json").write_text(json.dumps(config))
         save_file({"w": self.w.reshape(1)}, str(Path(out) / "model.safetensors"))
 
 
-RUN_CONFIG = object()
+RUN_CONFIG = SimpleNamespace(dtype="bfloat16", device="cuda")
 
 
 def install(monkeypatch, delta, merged_delta):
@@ -74,12 +76,15 @@ def install(monkeypatch, delta, merged_delta):
         PeftModel=SimpleNamespace(from_pretrained=lambda b, p, config: Wrapped()),
     )
 
+    run_config = SimpleNamespace(**vars(RUN_CONFIG))
+
     def load_base(path, config=None):
-        assert (path, config) == (BASE, RUN_CONFIG)  # the run's config, not the base repo's
+        assert (path, config) == (BASE, run_config)  # the run's config, not the base repo's
+        assert (config.dtype, config.device) == ("float32", "cpu")  # a float32 merge on --device
         return base
 
     configs = SimpleNamespace(
-        PreTrainedConfig=SimpleNamespace(from_pretrained=lambda p: RUN_CONFIG)
+        PreTrainedConfig=SimpleNamespace(from_pretrained=lambda p: run_config)
     )
     monkeypatch.setitem(sys.modules, "lerobot.configs.policies", configs)
     pi05 = SimpleNamespace(PI05Policy=SimpleNamespace(from_pretrained=load_base))
@@ -106,7 +111,8 @@ def test_merge_copies_the_serving_files_and_clears_use_peft(tmp_path, monkeypatc
     assert merge_lora.main(["--adapter", str(adapter), "--out", str(out)]) == 0
     token, _, payload = capsys.readouterr().out.strip().partition(" ")
     assert token == "MERGE_OK" and json.loads(payload)["max_abs_diff"] < 1e-6
-    assert json.loads((out / "config.json").read_text())["use_peft"] is False
+    saved = json.loads((out / "config.json").read_text())
+    assert saved == {"use_peft": False, "dtype": "bfloat16", "device": "cuda"}  # the run's
     names = {p.name for p in out.iterdir()}
     assert names == {
         "config.json",

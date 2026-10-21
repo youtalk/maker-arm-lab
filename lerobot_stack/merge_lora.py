@@ -7,7 +7,8 @@ DIR is a LeRobot 0.6.1 ``pretrained_model`` folder of a PEFT run: adapter_config
 adapter_model.safetensors, config.json (use_peft true) and the policy_pre/postprocessor files
 with their state files. The base policy comes from the adapter config's
 ``base_model_name_or_path``. One fixed batch (seed 0, fixed noise) runs through the adapter
-model and then the merged model. OUT gets config.json with use_peft false, model.safetensors,
+model and then the merged model. The merge and the check run in float32 on --device, and OUT
+keeps the run's dtype and device. OUT gets config.json with use_peft false, model.safetensors,
 the processor files and a copy of action_space.json. It prints one MERGE_OK or MERGE_FAIL line
 and exits through os._exit. A max_abs_diff above 1e-3 is MERGE_FAIL and OUT is not written.
 peft and lerobot are imported in main's path, so the module imports in any venv.
@@ -65,6 +66,12 @@ def merge(adapter: str, out: str, device: str = "cpu") -> tuple[bool, dict]:
         raise ValueError(f"{adapter}/adapter_config.json names no base model")
     # The run's config (the dataset's features), as LeRobot's factory loads a PEFT base.
     run_config = PreTrainedConfig.from_pretrained(adapter)
+    # Merge and compare in float32. In bf16 the rounding of the merged weights alone moves the
+    # chunk past MAX_DIFF (0.008 on the first real save). OUT keeps the run's dtype, so the
+    # server casts the float32 weights as it casts the base's. from_pretrained loads onto
+    # config.device, and the run's config says cuda.
+    run_dtype, run_config.dtype = run_config.dtype, "float32"
+    run_device, run_config.device = run_config.device, device
     base = PI05Policy.from_pretrained(peft_config.base_model_name_or_path, config=run_config)
     model = PeftModel.from_pretrained(base, adapter, config=peft_config).to(device).eval()
     batch, noise = fixed_batch(base.config, device)
@@ -77,6 +84,7 @@ def merge(adapter: str, out: str, device: str = "cpu") -> tuple[bool, dict]:
     if diff > MAX_DIFF:
         return False, info
     merged.config.use_peft = False
+    merged.config.dtype, merged.config.device = run_dtype, run_device
     merged.save_pretrained(out)
     for path in processors:
         shutil.copy(path, Path(out) / path.name)
