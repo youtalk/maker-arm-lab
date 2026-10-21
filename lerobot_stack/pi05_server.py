@@ -30,16 +30,21 @@ chunks close against 0.98), so --jaw_latch L filters each chunk instead (``latch
 the warp): after a close, the next L jaw commands stay at most the close's. The teacher's labels
 never re-open within 10 frames of a close (0 of 46,669), and V's chunks sampled before a close
 re-open within 10 actions of their own close in 29 % (29-31 % in the loop). Its policy id part
-is ``+latch<L>``, last. S * J ties the jaw's noise to the call's scale: at S = 0.01 and J = 100, a
-still resample at S2 = 1 draws the jaw at 100. So --jaw_noise_abs A draws the jaw column of every
-initial noise from A * N(0, 1), whatever the call's scale (the arm keeps its own), with J = 1 and
-no shared draw. Its policy id part is ``+jawabs<A>``, after ``+jawshared``. At zero arm noise V
-hovers still after a missed grasp, and a one-chunk redraw does not help: the next forward at zero
+is ``+latch<L>``, after the still part. S * J ties the jaw's noise to the call's scale: at
+S = 0.01 and J = 100, a still resample at S2 = 1 draws the jaw at 100. So --jaw_noise_abs A
+draws the jaw column of every initial noise from A * N(0, 1), whatever the call's scale (the arm
+keeps its own), with J = 1 and no shared draw. Its policy id part is ``+jawabs<A>``, after
+``+jawshared``. At zero arm noise V hovers still after a missed grasp, and a one-chunk redraw
+does not help: the next forward at zero
 arm noise goes back to the hover. So the heap loop's ``retry_noise_at`` flags a row that started to
 hover for the rest of its cycle, and --retry_noise_scale S forwards each row whose retry flag is
 set with its arm noise at S in place of --noise_scale, in a forward of their own; the jaw keeps its
 own rules, and the still rule and the latch apply as before. Its policy id part is ``+retry<S>``,
 right after the sampling parts.
+MS7j: --infer_delay D emulates the real arm's inference delay (``policy_server.DelayLine``): a
+lane's chunk arrives D control steps after its observation, without its first D actions, retry
+forwards and still resamples included. D must be shorter than the warped chunk. Its policy id part
+is ``+delay<D>``, last, and the inference block gains ``infer_delay``.
 MS7i Run A (the heap loop's ``--pi05_prompt``) sends each env's subtask id under the wire's
 optional ``prompt`` key. The server reads a row's id only when it refills that row's queue, so a
 new id between two refills changes nothing and never forces a replan: the chunk in play, its
@@ -71,7 +76,6 @@ import json
 import os
 import time
 import traceback
-from collections import deque
 
 import numpy as np
 import zmq
@@ -92,7 +96,9 @@ from policy_protocol import (
 from policy_server import (
     ACTION_WARP_MAX,
     ACTION_WARP_MIN,
+    DelayLine,
     _read_action_space_marker,
+    check_delay,
     warp_chunk,
 )
 from train_pi05 import PHRASES, POSITIVE, prompt
@@ -174,7 +180,9 @@ class SharedServer:
     ``still`` = (S2, E, F), the still rows of a forward (``still_rows`` at E and F) get
     ``predict_chunk(obs of those rows, S2)``'s chunk. ``jaw_latch`` L > 0 passes every chunk
     through ``latch_jaw`` before the warp. ``retry_noise_scale`` S forwards the rows whose retry
-    flag is set with ``predict_chunk(obs of those rows, S)``, in a forward of their own."""
+    flag is set with ``predict_chunk(obs of those rows, S)``, in a forward of their own.
+    ``infer_delay`` D serves each lane's chunks D calls after their observation (``DelayLine``),
+    whichever forward made them: a plain one, a retry, a still resample or a latched chunk."""
 
     def __init__(
         self,
@@ -187,11 +195,13 @@ class SharedServer:
         still: tuple[float, float, float] | None = None,
         jaw_latch: int = 0,
         retry_noise_scale: float | None = None,
+        infer_delay: int = 0,
     ):
         if not ACTION_WARP_MIN <= action_warp <= ACTION_WARP_MAX:
             raise ValueError(
                 f"action_warp must be in [{ACTION_WARP_MIN}, {ACTION_WARP_MAX}], got {action_warp}"
             )
+        check_delay(infer_delay, n_action_steps, action_warp)
         self._predict = predict_chunk
         self._policy_id = policy_id
         self._n = n_action_steps
@@ -203,12 +213,15 @@ class SharedServer:
             self._inference["retry_noise_scale"] = retry_noise_scale
         if jaw_latch:
             self._inference["jaw_latch"] = jaw_latch
+        if infer_delay:
+            self._inference["infer_delay"] = infer_delay
         self._still = still
         self._retry = retry_noise_scale
         self._latch = jaw_latch
         self._gripper = gripper
         self._warp = action_warp
-        self._queues: dict[bytes, list[deque]] = {}  # lane identity -> one queue an env row
+        self._delay = infer_delay
+        self._lines: dict[bytes, DelayLine] = {}  # lane identity -> its env rows' queues
         self.forward_sizes: list[int] = []  # rows of each forward, for the log and the tests
 
     def ready(self, port: int) -> dict:
@@ -246,7 +259,7 @@ class SharedServer:
             if kind == "hello":
                 replies.append((lane, hello_reply(header, self.ready(0)), None))
             elif kind == "reset":
-                self._queues.pop(lane, None)
+                self._lines.pop(lane, None)
                 replies.append((lane, {"type": "reset_ack"}, None))
             elif kind == "step":
                 problem = self._check_step(header, arrays)
@@ -277,11 +290,9 @@ class SharedServer:
         retrying = []  # per need row: its retry flag is set
         for lane, arrays in steps:
             batch = int(arrays["state"].shape[0])
-            if len(self._queues.get(lane, ())) != batch:
-                self._queues[lane] = [deque() for _ in range(batch)]
             replan = arrays.get(REPLAN_KEY, np.zeros(batch, dtype=bool))
             retry = arrays.get(RETRY_KEY, np.zeros(batch, dtype=bool))
-            due = [i for i, q in enumerate(self._queues[lane]) if replan[i] or not q]
+            due = self._lines.setdefault(lane, DelayLine(self._delay)).due(replan)
             need += [(lane, i) for i in due]
             retrying += [bool(retry[i]) for i in due]
         if need:
@@ -322,7 +333,7 @@ class SharedServer:
             except Exception:  # noqa: BLE001 -- every lane of the forward gets the error
                 error = _error("exception", traceback.format_exc())
                 for lane, _ in need:
-                    self._queues.pop(lane, None)
+                    self._lines.pop(lane, None)
                 return [(lane, error, None) for lane, _ in steps]
             self.forward_sizes.append(len(need))
             ms = 1000 * (time.perf_counter() - start)
@@ -331,10 +342,10 @@ class SharedServer:
             log += "" if self._still is None else f" still={len(still)}"
             print(log + (f" latched={latched}" if self._latch else ""), flush=True)
             for (lane, i), actions in zip(need, warp_chunk(chunk, self._warp)):
-                self._queues[lane][i] = deque(actions)
+                self._lines[lane].put(i, actions)
         replies = []
         for lane, arrays in steps:
-            action = np.stack([q.popleft() for q in self._queues[lane]])
+            action = self._lines[lane].pop()
             if np.isfinite(action).all():
                 replies.append((lane, {"type": "action"}, {"action": action}))
             else:
@@ -513,6 +524,7 @@ def main() -> int:
     parser.add_argument("--still_rad", type=float, default=STILL_RAD)
     parser.add_argument("--still_open", type=float, default=STILL_OPEN)
     parser.add_argument("--jaw_latch", type=int, default=0, help="actions held after a close")
+    parser.add_argument("--infer_delay", type=int, default=0, help="MS7j: steps a chunk waits")
     try:
         args = parser.parse_args()
         if args.num_steps is not None and args.num_steps < 1:
@@ -528,6 +540,8 @@ def main() -> int:
             parser.error(f"--still_open must be in [0, 1], got {open_frac}")
         if args.jaw_latch < 0:
             parser.error(f"--jaw_latch must be at least 0, got {args.jaw_latch}")
+        if args.infer_delay < 0:
+            parser.error(f"--infer_delay must be at least 0, got {args.infer_delay}")
         predict_chunk, n_action_steps, inference, gripper, sampling = load_pi05(
             args.checkpoint,
             args.device,
@@ -544,6 +558,7 @@ def main() -> int:
         policy_id += sampling + ("" if retry is None else f"+retry{retry}")
         policy_id += "" if still is None else "+still{}r{}o{}".format(*still)
         policy_id += f"+latch{args.jaw_latch}" if args.jaw_latch else ""
+        policy_id += f"+delay{args.infer_delay}" if args.infer_delay else ""
         server = SharedServer(
             predict_chunk,
             policy_id,
@@ -554,6 +569,7 @@ def main() -> int:
             still,
             args.jaw_latch,
             retry,
+            args.infer_delay,
         )
         socket = zmq.Context.instance().socket(zmq.ROUTER)
         socket.bind(f"tcp://127.0.0.1:{args.port}")

@@ -40,6 +40,10 @@ heap loop's --retry_noise_at flags draws its arm noise at S), and the cache matc
 --pi05_jaw_latch L reaches the server as --jaw_latch (the jaw commands held after a close), and
 the cache matches it. The heap loop's --pi05_prompt (MS7i Run A: each env's subtask id on the
 wire) goes in --client_flags, needs --pi05, and the cache matches it as a loop switch.
+
+--infer_delay D (MS7j) reaches either server as its --infer_delay: each chunk arrives D control
+steps after its observation. The server records it in its inference block only when D > 0, and
+the cache matches it there.
 """
 
 import argparse
@@ -97,6 +101,7 @@ class GateCfg:
     action_warp: float = 1.0  # the server plays each chunk this many times faster (MS7f speed)
     # MS7g D20: a second pretrained_model dir; the server serves the mean of both checkpoints.
     ensemble_with: str | None = None
+    infer_delay: int = 0  # MS7j: control steps between a chunk's observation and its first action
     # MS7h design 7.3: a pi0.5 checkpoint, served by one shared pi05_server.py to `lanes` clients.
     pi05: bool = False
     lanes: int = 1
@@ -804,6 +809,8 @@ def _server_command(cfg: GateCfg) -> list[str]:
         cmd += ["--action_warp", str(cfg.action_warp)]
     if cfg.ensemble_with:
         cmd += ["--ensemble_with", cfg.ensemble_with]
+    if cfg.infer_delay:
+        cmd += ["--infer_delay", str(cfg.infer_delay)]
     return cmd
 
 
@@ -892,6 +899,7 @@ def _pi05_server_command(cfg: GateCfg) -> list[str]:
             if cfg.pi05_retry_noise_scale is not None
             else []
         ),
+        *(["--infer_delay", str(cfg.infer_delay)] if cfg.infer_delay else []),
     ]
 
 
@@ -1117,6 +1125,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     still = {key: served[key] for key in PI05_STILL if key in served}
     same_inference = same_inference and still == _pi05_still(cfg)
     same_inference = same_inference and served.get("jaw_latch", 0) == cfg.pi05_jaw_latch
+    # A payload that predates the inference delay ran without one.
+    same_inference = same_inference and served.get("infer_delay", 0) == cfg.infer_delay
     if cfg.pi05:
         named = str(payload.get("policy_id", "")).removeprefix(f"pi05:{cfg.checkpoint}")
         same_inference = same_inference and (
@@ -1315,6 +1325,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help="MS7g D20: a second pretrained_model dir at the same path on every host; the "
         "server serves the mean of both checkpoints' actions",
+    )
+    parser.add_argument(
+        "--infer_delay",
+        type=int,
+        default=0,
+        help="MS7j: the server serves each chunk this many control steps after its observation "
+        "(0: at once); for the ACT server and with --pi05",
     )
     parser.add_argument(
         "--pi05",
@@ -1696,6 +1713,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError(f"--pi05_still_rad must be finite and above 0, got {still[1]}")
     if still[2] is not None and not 0.0 <= still[2] <= 1.0:
         raise ValueError(f"--pi05_still_open must be in [0, 1], got {still[2]}")
+    if args.infer_delay < 0:  # the server's own refusal; it also refuses a chunk too short
+        raise ValueError(f"--infer_delay must be at least 0, got {args.infer_delay}")
     if not 1.0 <= args.action_warp <= 3.0:  # the server's ACTION_WARP_MIN and ACTION_WARP_MAX
         raise ValueError(f"--action_warp must be in [1.0, 3.0], got {args.action_warp}")
     heap = args.heap_k > 0 and args.backend == "mujoco"

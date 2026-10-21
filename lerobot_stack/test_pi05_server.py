@@ -270,6 +270,46 @@ def test_a_retry_row_draws_its_arm_noise_at_the_retry_scale_in_a_forward_of_its_
     assert capsys.readouterr().out.strip().endswith(" retry=4")
 
 
+class TagModel:
+    """chunk[r, t] = (state[r, 0], t, the retry noise scale or -1, 0, ...)."""
+
+    def __call__(self, obs, *scale):
+        chunk = np.zeros((len(obs["state"]), N, 7), np.float32)
+        chunk[:, :, 0] = obs["state"][:, :1]
+        chunk[:, :, 1] = np.arange(N)
+        chunk[:, :, 2] = scale[0] if scale else -1.0
+        return chunk
+
+
+def test_the_pi05_server_follows_the_same_sequence():
+    from policy_server import ActionQueues
+
+    inference = {"n_action_steps": N, "chunk_size": N, "num_inference_steps": 10}
+    s = ps.SharedServer(TagModel(), "pi05:/ckpt", N, inference, "continuous", 1.0, None, 0, 0.5, 3)
+    assert s.ready(0)["inference"]["infer_delay"] == 3
+    act = ActionQueues(TagModel(), N, delay=3)
+    served, want = [], []
+    for call in range(130):  # each call's state[:, 0] is the call index
+        if call == 109:  # a reset drops the chunk forwarded at call 107
+            assert s.process([(b"a", {"type": "reset"}, {})])[0][0][1]["type"] == "reset_ack"
+            act.reset()
+        flag = [call in (48, 60)]
+        header, arrays = step(call, replan=flag)
+        arrays["retry"] = np.array([call == 48])  # a retry forward obeys the same delay
+        served.append(s.process([(b"a", header, arrays)])[0][0][2]["action"][0])
+        want.append(act.step({"state": arrays["state"]}, np.array(flag))[0])
+    np.testing.assert_array_equal(np.stack(served)[:, :2], np.stack(want)[:, :2])
+    tags = [(int(a[0]), int(a[1])) for a in served]
+    assert tags[47:52] == [(0, 47), (0, 48), (0, 49), (0, 49), (48, 3)]
+    assert served[51][2] == 0.5 and served[50][2] == -1.0  # the retry chunk, 3 calls later
+    assert tags[60:64] == [(48, 12), (48, 13), (48, 14), (60, 3)]
+    assert tags[107:112] == [(60, 47), (60, 48), (109, 0), (109, 1), (109, 2)]  # no call-107 rows
+    assert len(s.forward_sizes) == 6  # at calls 0, 47, 48, 60, 107 and 109
+    ps.SharedServer(TagModel(), "pi05:/ckpt", N, inference, "continuous", 1.5, infer_delay=32)
+    with pytest.raises(ValueError, match="infer_delay"):  # 50 actions at 1.5 play 33
+        ps.SharedServer(TagModel(), "pi05:/ckpt", N, inference, "continuous", 1.5, infer_delay=33)
+
+
 def test_hello_ack_and_shutdown():
     replies, keep = server(warp=1.5).process([(b"a", {"type": "hello", "protocol": 4}, {})])
     ack = replies[0][1]
@@ -605,6 +645,8 @@ STILL_ON = ["--still_noise_scale", "0.7", "--still_rad", "0.1", "--still_open", 
             "+jawabs1.0+retry1.0+still0.7r0.1o0.8+latch10",
             [0.7, 0.1, 0.8],
         ),
+        (["--infer_delay", "0"], "", {}),
+        (["--jaw_latch", "10", "--infer_delay", "6"], "+latch10+delay6", {}),
     ],
 )
 def test_the_policy_id_names_each_switch_off_its_default(
@@ -628,6 +670,7 @@ def test_the_policy_id_names_each_switch_off_its_default(
     assert ready["inference"].get("jaw_noise_abs") == (1.0 if "+jawabs" in tail else None)
     assert ready["inference"].get("jaw_latch") == (10 if "+latch" in tail else None)
     assert ready["inference"].get("retry_noise_scale") == (1.0 if "+retry" in tail else None)
+    assert ready["inference"].get("infer_delay") == (6 if "+delay" in tail else None)
     names = ("still_noise_scale", "still_rad", "still_open")
     assert {k: v for k, v in ready["inference"].items() if k in names} == dict(zip(names, block))
 
@@ -650,6 +693,7 @@ def test_the_policy_id_names_each_switch_off_its_default(
         ["--still_open", "1.5"],
         ["--retry_noise_scale", "-1"],
         ["--retry_noise_scale", "nan"],
+        ["--infer_delay", "-1"],
     ],
 )
 def test_a_bad_sampling_value_fails_with_the_token(flags):

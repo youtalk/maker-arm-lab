@@ -1956,3 +1956,40 @@ def test_a_malformed_stress_knob_is_a_gate_error_on_a_resumed_read(tmp_path, mon
     out = capsys.readouterr()
     tokens = [x for x in out.out.splitlines() if x.startswith("GATE_")]
     assert tokens == ["GATE_ERROR"] and "--jpeg_quality" in out.err
+
+
+def test_the_supervisor_sends_infer_delay_and_keys_the_cache(tmp_path, monkeypatch, capsys):
+    read = _argv(tmp_path) + PI05_HEAP + ["--n_action_steps", "50"]
+    plain = ge._build_cfg(ge._parse_args(read))
+    act = ge._build_cfg(ge._parse_args(read + ["--infer_delay", "1"]))
+    pi05 = ge._build_cfg(ge._parse_args(read + ["--pi05", "--infer_delay", "6"]))
+    assert (plain.infer_delay, act.infer_delay, pi05.infer_delay) == (0, 1, 6)
+    assert "--infer_delay" not in ge._server_command(plain)  # off: the same bytes
+    assert ge._server_command(act) == ge._server_command(plain) + ["--infer_delay", "1"]
+    pi05_plain = ge._build_cfg(ge._parse_args(read + ["--pi05"]))
+    assert "--infer_delay" not in ge._pi05_server_command(pi05_plain)
+    assert ge._pi05_server_command(pi05) == ge._pi05_server_command(pi05_plain) + [
+        "--infer_delay",
+        "6",
+    ]
+    ledger = _fake_ledger(tmp_path)
+    open_loop = {"n_action_steps": None, "temporal_ensemble_coeff": None}
+    off = _cfg(tmp_path, ledger, processes=1, **open_loop)
+    on = _cfg(tmp_path, ledger, processes=1, infer_delay=1, **open_loop)
+    off.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None, "chunk_size": 100}
+
+    def cached(cfg, **inference):
+        payload = _payload(draw, [_episode(6)], policy_id="act:ck+nas50")
+        payload["inference"] = served | inference
+        (off.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    # A payload without the key, every one before the delay, ran without one.
+    assert cached(off) and not cached(off, infer_delay=1)
+    assert cached(on, infer_delay=1) and not cached(on) and not cached(on, infer_delay=6)
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(_argv(tmp_path) + ["--infer_delay", "-1"]) == 2
+    out = capsys.readouterr()
+    assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--infer_delay" in out.err
