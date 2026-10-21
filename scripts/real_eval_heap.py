@@ -1,9 +1,9 @@
 """The heap gate client on the real arm (MS5 design sections 4.2, 7 and 8): one process runs
 one real episode.
 
-The MS7e served configuration on ``RealEnv``: the unchanged heap loop under ``perceived`` with
-every loop rule of policy S minus the image classifier (``SERVED_SWITCHES``, ``SERVED_RIG``,
-``SERVED_ORACLE`` and ``SERVED_INFERENCE``) and the knob scales at ``all=0``,
+Policy S's served configuration (MS7j) on ``RealEnv``: the unchanged heap loop under
+``perceived`` with every loop rule of S minus the image classifier (``SERVED_SWITCHES``,
+``SERVED_RIG``, ``SERVED_ORACLE`` and ``SERVED_INFERENCE``) and the knob scales at ``all=0``,
 because the noise is the rig's own. The policy server (lerobot_stack) and the perception
 worker run on this host; the arm runs ``Tracking`` in the SDK's loop.
 
