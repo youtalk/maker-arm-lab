@@ -1,6 +1,6 @@
 """lerobot-train for pi0.5 with the loss masked on padded actions, as ACT's loss is.
 
-LeRobot 0.5.1's ``PI05Policy.forward`` averages the flow-matching loss over every action of the
+LeRobot's ``PI05Policy.forward`` averages the flow-matching loss over every action of the
 chunk, the padded ones past the episode end (``action_is_pad``) included, and LeRobot pads a
 chunk by repeating the episode's last action. ACT's loss multiplies by ``~action_is_pad``. In the
 MS7h derived dataset 74.6 % of the episodes end parked at the desk-box retreat point, so the
@@ -9,9 +9,13 @@ same observation: V at step 30k parked there with open jaws in 28 % of its cycle
 2026-10-07). This runs lerobot-train with ``PI05Policy.forward`` masked.
 
 Run it like lerobot-train, from the pi venv: ``python train_pi05.py --policy.type=pi05 ...``.
-It refuses another lerobot version, because ``forward`` is a copy of 0.5.1's.
+It refuses another lerobot version, because ``forward`` is a copy of 0.6.1's. ``--lora=R`` expands
+to the ``--peft.*`` flags of ``lora_flags(R)`` (spec section 6.3, B3).
 
-``--mix=ROOT:SHARE``, once a source (the MS7h DAgger round HD59 with one, MS7i Run A and Run B
+``--mix`` and ``--prompt_codes`` exit on 0.6.1: its ``EpisodeAwareSampler`` draws from
+``meta.episodes``, so ``Mixed`` never samples its extra roots. The code stays for reproducibility.
+
+``--mix=ROOT:SHARE`` (0.5.1 only), once a source (the MS7h DAgger round HD59 with one, MS7i Run A and Run B
 with two), trains on the corpus (``--dataset.root``) and each ROOT in one mix (``Mixed``): a draw
 is a frame of ROOT with probability SHARE and a corpus frame with 1 minus their sum, and the
 corpus's metadata, so its normalizer, serves every source. ``--prompt_codes`` (MS7i Run A) reads
@@ -21,13 +25,20 @@ sentence of its tag, which a tagged frame leaves out at the rate DROP. Without t
 changes.
 """
 
+import json
 import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 
-LEROBOT = "0.5.1"
+LEROBOT = "0.6.1"
+LORA_TARGETS = (
+    r"model\.paligemma_with_expert\.(paligemma\.model\.language_model|gemma_expert\.model)"
+    r"\.layers\.\d+\.(self_attn\.(q|k|v|o)_proj|mlp\.(gate|up|down)_proj)"
+)
+LORA_FULL = ("action_in_proj", "action_out_proj", "time_mlp_in", "time_mlp_out")
+LORA_FLAG = "--lora="
 MIX_FLAG, PROMPTS_FLAG = "--mix=", "--prompt_codes"
 TASK = "pick up the marked part and place it in its box"  # derive_vla_dataset imports it
 PHRASES = ("reach the marked part", "close on the part", "carry it to its box", "release it")
@@ -44,6 +55,17 @@ def prompt(code: int, drop: bool = False) -> str:
     return f"{TASK}. {PHRASES[subtask]}." + ("" if drop else TAGS[tag])
 
 
+def lora_flags(rank: int) -> list[str]:
+    """The lerobot-train flags of the LoRA recipe at ``rank``, alpha equal to it."""
+    return [
+        "--peft.method_type=LORA",
+        f"--peft.r={rank}",
+        f"--peft.lora_alpha={rank}",
+        f"--peft.target_modules={LORA_TARGETS}",
+        f"--peft.full_training_modules={json.dumps(list(LORA_FULL))}",
+    ]
+
+
 def masked_means(losses: torch.Tensor, is_pad: torch.Tensor) -> tuple:
     """(mean, (B,) per-sample means, (D,) per-dim means) of the (B, T, D) ``losses`` over the
     actions that are not padding ((B, T) ``is_pad``)."""
@@ -56,12 +78,15 @@ def masked_means(losses: torch.Tensor, is_pad: torch.Tensor) -> tuple:
 
 
 def forward(self, batch: dict, reduction: str = "mean") -> tuple:
-    """``PI05Policy.forward`` of lerobot 0.5.1 with its loss reduced by ``masked_means``."""
+    """``PI05Policy.forward`` of lerobot 0.6.1 with its loss reduced by ``masked_means``."""
     from lerobot.utils.constants import ACTION, OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS
 
     images, img_masks = self._preprocess_images(batch)
     tokens, masks = batch[OBS_LANGUAGE_TOKENS], batch[OBS_LANGUAGE_ATTENTION_MASK]
-    losses = self.model.forward(images, img_masks, tokens, masks, self.prepare_action(batch))
+    actions = self.prepare_action(batch)
+    noise = self.model.sample_noise(actions.shape, actions.device)  # noise, then time: 0.5.1's
+    time = self.model.sample_time(actions.shape[0], actions.device)  # RNG order
+    losses = self.model.forward(images, img_masks, tokens, masks, actions, noise, time)
     losses = losses[:, :, : self.config.output_features[ACTION].shape[0]]
     loss, per_sample, per_dim = masked_means(losses, batch["action_is_pad"])
     loss_dict = {"loss_per_dim": per_dim.detach().cpu().numpy().tolist(), "loss": loss.item()}
@@ -183,12 +208,19 @@ def main(argv: list[str]) -> None:
         raise SystemExit(
             f"train_pi05.py copies lerobot {LEROBOT}'s forward, found {lerobot.__version__}"
         )
+    if any(a.startswith(MIX_FLAG) or a == PROMPTS_FLAG for a in argv):
+        raise SystemExit(
+            f"{MIX_FLAG}/{PROMPTS_FLAG} are not supported on lerobot {LEROBOT}: its "
+            "EpisodeAwareSampler draws from meta.episodes, so Mixed never samples its extra roots"
+        )
     from lerobot.policies.pi05.modeling_pi05 import PI05Policy
     from lerobot.scripts import lerobot_train
 
-    mix, prompts, argv = split_mix(argv)
-    if mix:
-        lerobot_train.make_dataset = mixed_maker(lerobot_train.make_dataset, mix, prompts)
+    argv = [
+        x
+        for a in argv
+        for x in (lora_flags(int(a[len(LORA_FLAG) :])) if a.startswith(LORA_FLAG) else [a])
+    ]
     PI05Policy.forward = forward
     sys.argv = [sys.argv[0], *argv]
     lerobot_train.main()
