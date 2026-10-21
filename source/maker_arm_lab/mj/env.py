@@ -1056,8 +1056,31 @@ class MjLegoSortEnv:
         first = min(k, layout.TRAY_REFILL_START) if self.tray_refill else k
         self.pool[i] = list(range(first, k))
         self._park(i, self.pool[i])
-        self._drop_batches(i, list(range(first)), zone, stacked=self.deep_tray)
+        gap = self.stress.sparse_gap if self.stress is not None else 0.0
+        if gap > 0:
+            self._drop_sparse(i, gap)
+        else:
+            self._drop_batches(i, list(range(first)), zone, stacked=self.deep_tray)
         self._settle(i, stacked=self.deep_tray)
+
+    def _drop_sparse(self, i: int, gap: float) -> None:
+        """MS7j sparse scene: all parts in one batch, each upright on its base (identity
+        quaternion, the part frame's z up) with a yaw from U(0, pi), 5 mm over the tray floor.
+        The floor is the desk at z = 0 for the shallow and the deep tray alike. A part stands
+        upright, so its footprint half diagonal sets its clearance, not the 3D one."""
+        d, h = self.datas[i], self.handles
+        batch = list(range(len(self.parts)))
+        self._unpark(i, batch)
+        points = layout.sample_sparse_points(
+            self._rng, [0.5 * math.hypot(*self.parts[b].size[:2]) for b in batch], gap
+        )
+        for b, (x, y) in zip(batch, points):
+            yaw = self._rng.uniform(0.0, math.pi)
+            adr = h.brick_qpos[b]
+            d.qpos[adr : adr + 3] = (x, y, 0.005 + self.parts[b].size[2] / 2)
+            d.qpos[adr + 3 : adr + 7] = (math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2))
+            d.qvel[h.brick_dof[b] : h.brick_dof[b] + 6] = 0.0
+        mujoco.mj_forward(self.models[i], d)
 
     def _settle(self, i: int, stacked: bool) -> None:
         """HEAP_SETTLE_STEPS of physics with the arm held. A stacked pile (the MS7f deep tray,

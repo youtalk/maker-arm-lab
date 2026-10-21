@@ -350,6 +350,7 @@ HEAP_DROP_BATCH = 5
 HEAP_DROP_BATCH_STEPS = 60
 HEAP_DROP_GAP = 0.005
 HEAP_DROP_TRIES = 500
+SPARSE_RESTARTS = 20
 HEAP_SETTLE_STEPS = 480
 
 
@@ -494,6 +495,37 @@ def sample_heap_batch(
                 points[k] = (x, y)
                 break
     return [points[k] for k in range(len(half_diagonals))]
+
+
+def sample_sparse_points(
+    rng: random.Random, half_diagonals: Sequence[float], gap: float
+) -> list[tuple[float, float]]:
+    """Tray points for parts that stand apart (the readiness suite's sparse scene), in input order.
+
+    Each point is ``sample_tray_point``'s, inset by the part's half diagonal plus
+    TRAY_DROP_INSET. Two points are at least ``max(gap, hd_i + hd_j + HEAP_DROP_GAP)`` apart.
+    The largest parts go first. A part that finds no place in HEAP_DROP_TRIES draws restarts
+    the whole layout, since the first big parts can block the rest. After SPARSE_RESTARTS
+    restarts it raises ValueError.
+    """
+    order = sorted(range(len(half_diagonals)), key=lambda k: -half_diagonals[k])
+    for _ in range(SPARSE_RESTARTS):
+        points: dict[int, tuple[float, float]] = {}
+        for k in order:
+            hd = half_diagonals[k]
+            for _ in range(HEAP_DROP_TRIES):
+                p = sample_tray_point(rng, hd + TRAY_DROP_INSET)
+                if all(
+                    math.dist(p, q) >= max(gap, hd + half_diagonals[j] + HEAP_DROP_GAP)
+                    for j, q in points.items()
+                ):
+                    points[k] = p
+                    break
+            else:
+                break
+        else:
+            return [points[k] for k in range(len(half_diagonals))]
+    raise ValueError(f"no room for {len(half_diagonals)} parts {gap} m apart in the tray")
 
 
 def scatter_x(bl: BinLayout) -> tuple[float, float]:

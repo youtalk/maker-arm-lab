@@ -550,3 +550,15 @@ def test_a_leaning_tray_wall_stands_on_the_interior_edge_and_rises_to_the_rim(le
         assert len(rim) == 2 and torch.allclose(
             (rim[:, axis] - edge) * sign, torch.tensor(grow, dtype=torch.float64)
         )
+
+
+def test_sparse_points_keep_the_gap_and_the_part_clearance():
+    hd = [0.025, 0.018, 0.018, 0.0073, 0.02] * 2
+    pts = layout.sample_sparse_points(random.Random(3), hd, 0.035)
+    for (i, a), (j, b) in itertools.combinations(enumerate(pts), 2):
+        assert math.dist(a, b) >= max(0.035, hd[i] + hd[j] + layout.HEAP_DROP_GAP)
+
+
+def test_sparse_points_refuse_an_impossible_layout():
+    with pytest.raises(ValueError):
+        layout.sample_sparse_points(random.Random(1), [0.036] * 40, 0.035)
