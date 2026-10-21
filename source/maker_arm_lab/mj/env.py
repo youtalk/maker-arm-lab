@@ -106,7 +106,7 @@ from maker_arm_lab.mj.context_names import (
 )
 from maker_arm_lab.mj.depth import noisy_depth_mm
 from maker_arm_lab.mj.recorder import MAX_INT8_PART, ShardRecorder
-from maker_arm_lab.mj.stress import WARP_SOURCE_PX, Stress, offset_rotation
+from maker_arm_lab.mj.stress import WARP_SOURCE_PX, Stress, degrade, offset_rotation
 from maker_arm_lab.real import camera_model
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_NAMES,
@@ -980,13 +980,13 @@ class MjLegoSortEnv:
                 self._warps[i][c] = camera_model.ViewWarp(h, (px, px), supersample=2)
 
     def _render(self, i: int, camera: int) -> np.ndarray:
-        """Env ``i``'s 224 px frame of ``camera``. The order is: render, then warp back to the
-        nominal view if ``_stress_cameras`` drew a warp. ``stamp_markers`` stamps the marker
-        after that, on the warped frame."""
+        """Env ``i``'s 224 px frame of ``camera``. The order is: render, degrade (exposure, blur,
+        JPEG), then warp back to the nominal view if ``_stress_cameras`` drew a warp.
+        ``stamp_markers`` stamps the marker after that, crisp, as the real path does."""
         warp = self._warps[i].get(camera)
         r = self.renderers[i] if warp is None else self._warp_renderers[i]
         r.update_scene(self.datas[i], camera=camera)
-        frame = r.render()
+        frame = degrade(r.render(), self.stress)
         return frame if warp is None else warp.apply(frame)
 
     def _reset_env(self, i: int) -> None:
@@ -1007,6 +1007,8 @@ class MjLegoSortEnv:
                 scene.apply_bins(m, bl, heap=self.parts is not None)
             scene.apply_lighting(m, ep)
             scene.apply_cameras(m, ep, self.camera_back)
+        if self.stress.hard_light:
+            scene.apply_hard_light(m, self.episode_draws[i])
         self._stress_cameras(i)
         # Physics DR first: mj_setConst re-derives the model constants AT qpos0 and resets the
         # data to it, so it has to run before the pose below is written.

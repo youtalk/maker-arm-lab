@@ -243,3 +243,36 @@ def test_the_offset_follows_each_episode_draw():
     for a in range(4):
         for b in range(a):
             assert not np.allclose(homographies[a], homographies[b])
+
+
+@needs_gl
+@pytest.mark.parametrize("episode_draws", [False, True])
+def test_hard_light_does_not_compound_over_resets(episode_draws):
+    e = MjLegoSortEnv(
+        2,
+        sample_run_draw(random.Random(3)),
+        cameras=True,
+        episode_draws=episode_draws,
+        stress=Stress(hard_light=True),
+    )
+    e.reset(seed=1)
+    for i, m in enumerate(e.models):
+        dome, sun = m.light("dome").id, m.light("sun").id
+        ep = e.episode_draws[i]
+        want = scene.dome_tint(ep["dome_color_temp"]) * min(
+            scene.DOME_CAP, scene.DOME_GAIN * ep["dome_intensity"]
+        )
+        np.testing.assert_allclose(m.light_diffuse[dome], 0.5 * 0.3 * want)
+        assert m.light_diffuse[sun][0] == 1.0 and m.light_castshadow[sun] == 1
+    first = [m.light_diffuse.copy() for m in e.models]
+    e.reset(seed=2)
+    if not episode_draws:
+        for m, f in zip(e.models, first):
+            np.testing.assert_allclose(m.light_diffuse, f)
+    e.close()
+
+
+@needs_gl
+def test_degrade_runs_before_the_marker_and_the_knobs_change_the_frame():
+    base, shot = render_once(Stress()), render_once(Stress(exposure_stops=1.0, jpeg_quality=85))
+    assert _mean_diff(base.overhead, shot.overhead) > 1.0

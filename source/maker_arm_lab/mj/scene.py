@@ -727,6 +727,26 @@ def apply_lighting(model: mujoco.MjModel, draw: dict) -> None:
     model.geom_rgba[model.geom("floor").id, :3] = draw["floor_color"]
 
 
+HARD_DOME_SCALE = 0.3  # MS7j hard light: the dome keeps this share of the drawn level
+HARD_KEY_DIFFUSE = 1.0
+HARD_KEY_SPECULAR = 0.3
+HARD_KEY_RPY_DEG = (-45.0, 30.0, 0.0)
+
+
+def apply_hard_light(model: mujoco.MjModel, draw: dict) -> None:
+    """MS7j hard light rig: a dim dome and the sun as a strong shadow-casting key light. It reads
+    ``draw``, never the model's current values, so a reset applies it again from the same
+    level and nothing shrinks."""
+    dome = dome_tint(draw["dome_color_temp"]) * min(DOME_CAP, DOME_GAIN * draw["dome_intensity"])
+    d = model.light("dome").id
+    model.light_diffuse[d] = model.light_ambient[d] = 0.5 * HARD_DOME_SCALE * dome
+    s = model.light("sun").id
+    model.light_diffuse[s] = HARD_KEY_DIFFUSE
+    model.light_specular[s] = HARD_KEY_SPECULAR
+    model.light_dir[s] = _direction_from_rpy_deg(HARD_KEY_RPY_DEG)
+    model.light_castshadow[s] = 1
+
+
 def apply_cameras(model: mujoco.MjModel, draw: dict, camera_back: float = 0.0) -> None:
     """Move both cameras to ``draw``'s jitter. A model built without cameras is left alone."""
     if model.ncam == 0:

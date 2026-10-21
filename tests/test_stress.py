@@ -1,8 +1,9 @@
 import argparse
 
+import numpy as np
 import pytest
 
-from maker_arm_lab.mj.stress import Stress, add_stress_arguments, stress_from_args
+from maker_arm_lab.mj.stress import Stress, add_stress_arguments, degrade, stress_from_args
 
 
 def parse(flags):
@@ -54,3 +55,33 @@ def test_the_heap_client_reports_a_bad_stress_flag_as_a_usage_failure(capsys):
     with pytest.raises(SystemExit):
         mod.parse_args(["--heap_k", "5", "--warp_back"])
     assert 'EVAL_FAIL {"reason": "usage"' in capsys.readouterr().out
+
+
+def _textured():
+    return np.random.default_rng(0).integers(0, 256, (224, 224, 3), dtype=np.uint8)
+
+
+def test_degrade_with_the_knobs_off_is_the_same_object():
+    img = np.zeros((224, 224, 3), np.uint8)
+    assert degrade(img, Stress()) is img
+
+
+def test_one_stop_up_brightens_mid_grey_to_about_175():
+    out = degrade(np.full((8, 8, 3), 128, np.uint8), Stress(exposure_stops=1.0))
+    assert 170 <= int(out[0, 0, 0]) <= 180
+
+
+def test_jpeg_and_blur_change_a_textured_frame_a_little():
+    img = _textured()
+    for s in (Stress(jpeg_quality=85), Stress(blur_sigma=1.0)):
+        out = degrade(img, s)
+        assert out.shape == img.shape and out.dtype == np.uint8
+        assert 0 < np.abs(out.astype(int) - img).mean() < 80
+
+
+def test_blur_sigma_scales_with_the_frame_width():
+    big = np.kron(_textured(), np.ones((2, 2, 1), np.uint8))
+    small = degrade(_textured(), Stress(blur_sigma=1.0)).astype(int)
+    out = degrade(big, Stress(blur_sigma=1.0)).astype(int)
+    # sigma 2 at 448 px is the same blur as sigma 1 at 224 px, up to resampling
+    assert np.abs(out[::2, ::2] - small).mean() < 12

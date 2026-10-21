@@ -62,6 +62,33 @@ class Stress:
 STRESS_KNOBS: tuple[str, ...] = tuple(f.name for f in fields(Stress))
 
 
+def degrade(image, s: Stress):
+    """Exposure, blur and JPEG on a uint8 RGB frame, in the camera's own order. With the three
+    knobs off it returns ``image`` itself. ``blur_sigma`` is in 224 px units, so a wider frame
+    scales it by width / 224."""
+    if not (s.exposure_stops or s.blur_sigma or s.jpeg_quality):
+        return image
+    import io
+
+    import numpy as np
+    from PIL import Image, ImageFilter
+
+    if s.exposure_stops:
+        c = image / 255.0
+        lin = np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+        lin = np.clip(lin * 2.0**s.exposure_stops, 0.0, 1.0)
+        c = np.where(lin <= 0.0031308, lin * 12.92, 1.055 * lin ** (1 / 2.4) - 0.055)
+        image = np.round(255.0 * c).astype(np.uint8)
+    pil = Image.fromarray(image)
+    if s.blur_sigma:
+        pil = pil.filter(ImageFilter.GaussianBlur(s.blur_sigma * image.shape[1] / 224.0))
+    if s.jpeg_quality:
+        buf = io.BytesIO()
+        pil.save(buf, "JPEG", quality=s.jpeg_quality)
+        pil = Image.open(buf)
+    return np.asarray(pil.convert("RGB")).copy()
+
+
 def add_stress_arguments(parser) -> None:
     parser.add_argument("--sparse_gap", type=float, default=0.0, help="MS7j: sparse heap, in m")
     parser.add_argument("--obs_delay", type=int, default=0, help="MS7j: camera delay, in steps")
