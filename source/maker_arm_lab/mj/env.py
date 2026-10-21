@@ -106,6 +106,7 @@ from maker_arm_lab.mj.context_names import (
 )
 from maker_arm_lab.mj.depth import noisy_depth_mm
 from maker_arm_lab.mj.recorder import MAX_INT8_PART, ShardRecorder
+from maker_arm_lab.mj.stress import Stress
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_NAMES,
     GRIPPER_CLOSED_POS,
@@ -300,6 +301,7 @@ class MjLegoSortEnv:
         deep_tray: bool = False,
         tray_refill: bool = False,
         pile_pgs: bool = False,
+        stress: Stress | None = None,
     ):
         # MS6 phase B design 5.4: "binary" is the raw >= 0 opens contract every corpus before
         # phase B was recorded with; "continuous" reads action[:, 6] as the jaw gap in meters.
@@ -461,6 +463,8 @@ class MjLegoSortEnv:
         # MS7f --pile_pgs: the step solves a large pile with PGS (_pick_solver) and returns to
         # the model's own solver after it; the reset's drop and settle keep the model's.
         self.pile_pgs = pile_pgs
+        # MS7j: the stress knobs. Tasks 6 to 9 act on them, this only holds them.
+        self.stress = stress or Stress()
         self._own_solver = (base_model.opt.solver, base_model.opt.iterations)
         # A parked part's colliders and gravity come back from these (``_unpark``).
         self._contype = base_model.geom_contype.copy()

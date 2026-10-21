@@ -423,6 +423,47 @@ def noise_scales_key(text: str) -> str:
     return ",".join(f"{k}={repr(float(scales[k])).removesuffix('.0')}" for k in names)
 
 
+STRESS_KNOBS = (
+    "sparse_gap",
+    "obs_delay",
+    "overhead_offset",
+    "wrist_offset",
+    "overhead_fov_delta",
+    "wrist_fov_delta",
+    "warp_back",
+    "jpeg_quality",
+    "blur_sigma",
+    "exposure_stops",
+    "hard_light",
+)
+"""``maker_arm_lab.mj.stress.STRESS_KNOBS`` (MS7j), copied and pinned by the test. The knobs reach
+the MuJoCo heap client through --client_flags and are recorded as ``payload["stress"]`` only when
+some knob is on. Pass a negative offset as ``--overhead_offset=-3,0,0,0,0,0``."""
+
+
+def stress_block(client_flags) -> dict:
+    """The stress knobs the client flags turn on, as ``Stress.block()`` writes them: only the
+    knobs off their default, ``{}`` when all are off."""
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    for name in STRESS_KNOBS:
+        if name in ("warp_back", "hard_light"):
+            parser.add_argument(f"--{name}", action="store_true")
+        elif name.endswith("_offset"):
+            parser.add_argument(f"--{name}", default="")
+        else:
+            kind = int if name in ("obs_delay", "jpeg_quality") else float
+            parser.add_argument(f"--{name}", type=kind, default=0)
+    found = vars(parser.parse_known_args(list(client_flags))[0])
+    block = {}
+    for name in STRESS_KNOBS:
+        value = found[name]
+        if name.endswith("_offset"):
+            value = [float(v) for v in value.split(",")] if value else 0
+        if value:
+            block[name] = value
+    return block
+
+
 def loop_switches(client_flags) -> dict:
     """Which of ``LOOP_SWITCHES`` the client flags turn on, each of ``LOOP_SETTINGS``'s values
     (``--rake_cap 4`` reads 4), each of ``LOOP_MARGINS``'s values (its default when absent), and
@@ -1043,6 +1084,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
             and MS7E_OFF | payload.get("ms7e", {}) == ms7e_block(cfg)
             # The same for the MS7f switches (MS7f design section 12.2).
             and MS7F_OFF | payload.get("ms7f", {}) == ms7f_block(cfg)
+            # A payload without a stress block ran with every MS7j knob off.
+            and payload.get("stress", {}) == stress_block(cfg.client_flags)
         )
     # The served inference configuration is part of what a draw measured. An open-loop read
     # (the checkpoint's own n_action_steps) must never stand in for a temporal-ensemble read.

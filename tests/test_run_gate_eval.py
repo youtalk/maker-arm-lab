@@ -1899,3 +1899,41 @@ def test_the_pi05_mode_refuses_what_its_server_cannot_serve(
     assert ge.main(_argv(tmp_path) + PI05_HEAP + extra) == 2
     out = capsys.readouterr()
     assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and message in out.err
+
+
+STRESS_EXAMPLES = [
+    [],
+    ["--overhead_offset", "0,3,0,0,0,0", "--jpeg_quality", "85"],
+    ["--wrist_offset=-1,0,0,0,0,0.01", "--wrist_fov_delta", "2", "--warp_back", "--obs_delay", "3"],
+    ["--sparse_gap", "0.05", "--tray", "--blur_sigma", "1.5", "--hard_light"],
+]
+
+
+def test_the_supervisors_stress_copy_matches_the_core_module():
+    import argparse
+
+    from maker_arm_lab.mj import stress
+    from maker_arm_lab.mj.stress import add_stress_arguments, stress_from_args
+
+    assert ge.STRESS_KNOBS == stress.STRESS_KNOBS
+    for flags in STRESS_EXAMPLES:
+        parser = argparse.ArgumentParser()
+        add_stress_arguments(parser)
+        parser.add_argument("--tray", action="store_true")
+        assert ge.stress_block(flags) == stress_from_args(parser.parse_known_args(flags)[0]).block()
+
+
+def test_a_cached_draw_with_another_stress_block_is_not_reused(tmp_path):
+    ledger = _fake_ledger(tmp_path)
+    cfg = _cfg(tmp_path, ledger, processes=1, backend="mujoco", heap_k=50)
+    cfg.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+
+    def cached(cfg, **extra):
+        (cfg.out_dir / "eval_000.json").write_text(json.dumps(_heap_payload(draw, **extra)))
+        return ge._cached_payload(cfg, draw) is not None
+
+    block = {"jpeg_quality": 85}
+    assert cached(cfg) and not cached(cfg, stress=block)
+    cfg.client_flags = ("--jpeg_quality", "85")
+    assert cached(cfg, stress=block) and not cached(cfg)
