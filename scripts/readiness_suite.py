@@ -13,8 +13,8 @@ Stdlib only, like run_gate_eval.py, and it imports no maker_arm_lab.
         FILE.md and prints SUITE_OK {json}. A row is refused when its draws are not the
         baseline's (a missing or extra file, another seed, other parts or another num_envs),
         when its policy is not the baseline's, or when its payloads ran other knobs than its
-        name says: SUITE_FAIL {json}, exit 1, and no table. The tool never pairs a part of the
-        draws.
+        name says: SUITE_FAIL {json}, exit 1, and no table (an earlier FILE.md is removed
+        first). The tool never pairs a part of the draws.
 
 BASE_ARGS is policy S's supervisor argv (``reads/i_S_d2039/fleet.json``), each flag once at the
 value that argparse kept, without --checkpoint, --seed, --ledger, --processes, --only_processes,
@@ -274,6 +274,7 @@ def _line(name: str, expected: str, n: int, t: dict, p: dict | None = None) -> s
 
 
 def table(base_dir: str, specs: list[str], out: str) -> dict:
+    Path(out).expanduser().unlink(missing_ok=True)  # a refused table leaves no earlier one
     base = _load(base_dir, BASE)
     results, totals = {}, {}
     for spec in specs:

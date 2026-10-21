@@ -264,6 +264,7 @@ def test_an_unpaired_row_is_refused(tmp_path, draws):
     base = _write(tmp_path / "base", _draws((40, 45, 50)))
     row = _write(tmp_path / "row", draws)
     out = tmp_path / "t.md"
+    out.write_text("an earlier table\n")  # a refusal must not leave it to read as current
     code, lines = _cli(
         "table", "--base", base, "--row", f"overhead_pose/tilt/1={row}", "--out", out
     )
