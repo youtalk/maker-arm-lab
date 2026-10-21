@@ -456,6 +456,10 @@ class StandInPolicy:
     def init_rtc_processor(self):
         self.rtc_processor = self.config.rtc_config
 
+    def requires_grad_(self, flag):
+        self.grad = flag
+        return self
+
 
 @pytest.fixture
 def stand_in(monkeypatch, tmp_path):
@@ -753,6 +757,7 @@ def test_rtc_passes_the_delay_and_the_normalized_leftover(stand_in, monkeypatch)
     calls = rtc_stand_in(policy, monkeypatch)
     predict_chunk, n, inference, gripper, _ = ps.load_pi05(ckpt, "cpu", rtc_delay=6)
     assert policy.rtc_processor == SimpleNamespace(enabled=True, execution_horizon=25)
+    assert policy.grad is False  # no graph over the parameters
     s = ps.SharedServer(predict_chunk, "pi05:/ckpt", n, inference, gripper, infer_delay=6, rtc=True)
     assert s.ready(0)["inference"]["rtc"] == ps.RTC_HORIZON == 25
     served = []
@@ -774,7 +779,12 @@ def test_rtc_passes_the_delay_and_the_normalized_leftover(stand_in, monkeypatch)
 
 
 @pytest.mark.parametrize(
-    "flags", [["--rtc"], ["--rtc", "--infer_delay", "6", "--action_warp", "1.5"]]
+    "flags",
+    [
+        ["--rtc"],
+        ["--rtc", "--infer_delay", "6", "--action_warp", "1.5"],
+        ["--rtc", "--infer_delay", "26"],  # past RTC_HORIZON, where the leftover is cut
+    ],
 )
 def test_rtc_refuses_a_warp_or_no_delay(flags):
     test_a_bad_sampling_value_fails_with_the_token(flags)
@@ -841,3 +851,23 @@ def test_rtc_retry_and_still_forwards_carry_the_leftover():
     # Call 0: both rows unguided, then their still resample. Call 25: the retry row, the rest,
     # then the still resample of both, each with its rows' leftovers.
     assert got == [(0,), (0, 0.5), (1, 1.0), (1,), (2, 0.5)]
+
+
+def test_rtc_guides_only_the_frozen_rows_on_a_replan(stand_in, monkeypatch, capsys):
+    policy, ckpt = stand_in
+    calls = rtc_stand_in(policy, monkeypatch)
+    predict_chunk, n, inference, gripper, _ = ps.load_pi05(ckpt, "cpu", rtc_delay=6)
+    s = ps.SharedServer(predict_chunk, "pi05:/ckpt", n, inference, gripper, infer_delay=6, rtc=True)
+    for call in range(26):  # row 0 replans at call 10, row 2 at 25, where rows 1 and 2 refill
+        s.process([(b"a", *step(0.5, batch=3, replan=[call == 10, False, call == 25]))])
+    assert s.forward_sizes == [3, 1, 2]
+    kwargs = [c[0] for c in calls]
+    assert kwargs[0] == {}  # call 0: no chunk yet
+    for k, horizon, first in ((1, 6, 10), (2, 6, 25), (3, 25, 25)):  # replan, replan, refill
+        assert (kwargs[k]["inference_delay"], kwargs[k]["execution_horizon"]) == (6, horizon)
+        left = kwargs[k]["prev_chunk_left_over"]  # the first chunk's rows from the call on
+        assert left.shape == (1, horizon, 32)
+        want = 100 + torch.arange(first, first + horizon, dtype=torch.float32)
+        assert torch.equal(left[0, :, 0], want)
+    log = [line.split(" ")[-1] for line in capsys.readouterr().out.strip().splitlines()]
+    assert log == ["rtc=0:3", "rtc=6:1", "rtc=6:1,25:1"]  # each horizon its own sub-batch

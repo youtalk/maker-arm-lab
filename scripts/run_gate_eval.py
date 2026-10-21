@@ -44,8 +44,8 @@ wire) goes in --client_flags, needs --pi05, and the cache matches it as a loop s
 --infer_delay D (MS7j) reaches either server as its --infer_delay: each chunk arrives D control
 steps after its observation. The server records it in its inference block only when D > 0, and
 the cache matches it there. --pi05_rtc reaches the pi0.5 server as --rtc (real-time chunking
-under that delay, at --action_warp 1.0), which records "rtc": its RTC_HORIZON, and the cache
-matches it.
+under that delay of at most its RTC_HORIZON, at --action_warp 1.0), which records "rtc": its
+RTC_HORIZON, and the cache matches it.
 """
 
 import argparse
@@ -1731,8 +1731,12 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError(f"--infer_delay must be at least 0, got {args.infer_delay}")
     if not 1.0 <= args.action_warp <= 3.0:  # the server's ACTION_WARP_MIN and ACTION_WARP_MAX
         raise ValueError(f"--action_warp must be in [1.0, 3.0], got {args.action_warp}")
-    if args.pi05_rtc and (not args.pi05 or args.infer_delay < 1 or args.action_warp != 1.0):
-        raise ValueError("--pi05_rtc needs --pi05, --infer_delay above 0 and --action_warp 1.0")
+    delay_ok = 1 <= args.infer_delay <= PI05_RTC_HORIZON  # the server's own refusal
+    if args.pi05_rtc and (not args.pi05 or not delay_ok or args.action_warp != 1.0):
+        raise ValueError(
+            f"--pi05_rtc needs --pi05, --infer_delay in [1, {PI05_RTC_HORIZON}] and"
+            " --action_warp 1.0"
+        )
     heap = args.heap_k > 0 and args.backend == "mujoco"
     if args.gripper != "binary" and not heap:
         # Only the MuJoCo heap client drives a continuous gripper (phase B design 5.4).

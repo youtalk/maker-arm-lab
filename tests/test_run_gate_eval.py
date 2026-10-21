@@ -1891,6 +1891,7 @@ def test_the_pi05_server_logs_to_the_out_dir_and_the_supervisor_waits_for_ready(
         (["--pi05", "--pi05_retry_noise_scale", "inf"], "--pi05_retry_noise_scale must be finite"),
         (["--pi05_rtc", "--infer_delay", "6"], "--pi05_rtc needs --pi05"),
         (["--pi05", "--pi05_rtc"], "--pi05_rtc needs"),
+        (["--pi05", "--pi05_rtc", "--infer_delay", "26"], "--pi05_rtc needs"),
         (
             ["--pi05", "--pi05_rtc", "--infer_delay", "6", "--action_warp", "1.5"],
             "--pi05_rtc needs",

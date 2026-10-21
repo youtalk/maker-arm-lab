@@ -289,6 +289,29 @@ def test_an_unpaired_row_is_refused(tmp_path, draws):
     assert token["failed_expected"] == []
 
 
+def _rtc(draws):
+    for payload in draws.values():
+        payload["policy_id"] += "+rtc"
+        payload["inference"]["rtc"] = 25
+    return draws
+
+
+def test_a_table_refuses_rows_that_disagree_on_rtc_and_names_rtc_rows(tmp_path):
+    base = _write(tmp_path / "base", _draws((40, 45, 50)))
+    six = _write(tmp_path / "six", _rtc(_draws((40, 44, 50), delay=6)))
+    chunked = _write(tmp_path / "chunked", _draws((40, 44, 50), delay=12))
+    twelve = _write(tmp_path / "twelve", _rtc(_draws((40, 44, 50), delay=12)))
+    out = tmp_path / "t.md"
+    rows = ["--row", f"infer_delay/steps/6={six}", "--row", f"infer_delay/steps/12={chunked}"]
+    code, lines = _cli("table", "--base", base, *rows, "--out", out)
+    assert code == 1 and lines[0].startswith("SUITE_FAIL ") and "RTC" in lines[0], lines
+    assert not out.exists()
+    rows[-1] = f"infer_delay/steps/12={twelve}"
+    code, lines = _cli("table", "--base", base, *rows, "--out", out)
+    assert code == 0 and json.loads(lines[-1].split(" ", 1)[1])["rtc"] is True, lines
+    assert out.read_text().splitlines()[0] == "# Readiness suite: tolerance table, RTC rows"
+
+
 def _passes(*names_and_flags):
     return {name: {"passes": ok} for name, ok in names_and_flags}
 

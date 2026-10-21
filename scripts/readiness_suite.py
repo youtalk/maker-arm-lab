@@ -278,7 +278,7 @@ def _line(name: str, expected: str, n: int, t: dict, p: dict | None = None) -> s
 def table(base_dir: str, specs: list[str], out: str) -> dict:
     Path(out).expanduser().unlink(missing_ok=True)  # a refused table leaves no earlier one
     base = _load(base_dir, BASE)
-    results, totals = {}, {}
+    results, totals, rtc = {}, {}, set()
     for spec in specs:
         name, _, path = spec.partition("=")
         if name not in BY_NAME or not path:
@@ -288,15 +288,20 @@ def table(base_dir: str, specs: list[str], out: str) -> dict:
         payloads = _load(path, BY_NAME[name])
         results[name] = paired(base, payloads)
         totals[name] = _totals(payloads)
+        rtc |= {"rtc" in (p.get("inference") or {}) for p in payloads.values()}
+    if len(rtc) > 1:  # MS7j Task 12: one table holds the chunked rows, another the RTC rows
+        raise ValueError("the rows disagree on RTC: put RTC rows and chunked rows in two tables")
+    rtc = rtc == {True}
     largest = largest_passing(results)
     head = "| Row | A1 | n | Correct | Drop | SE | Drop + SE | Rule | Better/same/worse"
     lines = [
-        "# Readiness suite: tolerance table",
+        "# Readiness suite: tolerance table" + (", RTC rows" if rtc else ""),
         "",
         (
             f"Baseline: {base_dir}. A row passes when drop + SE <= {TOLERANCE:g} points (MS7j"
             " design section 6.4). Drop and SE are in points of correct placements per part."
             " Seconds are sim seconds per correct placement."
+            + (" The rows serve with RTC (--pi05_rtc), the baseline chunked." if rtc else "")
         ),
         "",
         head + " | Lifted | Wrong box | Never lifted | s per correct |",
@@ -309,7 +314,13 @@ def table(base_dir: str, specs: list[str], out: str) -> dict:
     lines += [f"| {k} | {'none' if v is None else v} |" for k, v in largest.items()]
     Path(out).expanduser().write_text("\n".join(lines) + "\n")
     failed = [n for n, p in results.items() if BY_NAME[n].expected and not p["passes"]]
-    return {"out": str(out), "draws": len(base), "largest": largest, "failed_expected": failed}
+    return {
+        "out": str(out),
+        "draws": len(base),
+        "largest": largest,
+        "failed_expected": failed,
+        "rtc": rtc,
+    }
 
 
 class _Parser(argparse.ArgumentParser):
