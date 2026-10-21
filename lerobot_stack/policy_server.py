@@ -262,10 +262,13 @@ class DelayLine:
     A row with no last action yet (the first chunk after a reset or a new batch) takes its chunk
     at once and whole. The client's reset drops the line, its last actions and its pending
     chunks. At D = 0 every chunk fills its queue at once, and a row forwards when its queue is
-    empty or its replan flag is set: the plain queue of before the delay."""
+    empty or its replan flag is set: the plain queue of before the delay. ``refill`` R (default
+    D) moves the forward to a queue of R actions or fewer: the pi0.5 server's RTC forwards at
+    its RTC_HORIZON."""
 
-    def __init__(self, delay: int):
+    def __init__(self, delay: int, refill: int | None = None):
         self.delay = delay
+        self.refill = delay if refill is None else refill
         self._call = 0
         self._queues: list[deque] = []
         self._pending: list = []  # per row: None, or (the call it arrives at, its actions)
@@ -283,7 +286,7 @@ class DelayLine:
         return [
             i
             for i, queue in enumerate(self._queues)
-            if replan[i] or (self._pending[i] is None and len(queue) <= self.delay)
+            if replan[i] or (self._pending[i] is None and len(queue) <= self.refill)
         ]
 
     def put(self, row: int, actions: np.ndarray) -> None:
@@ -291,6 +294,13 @@ class DelayLine:
             self._queues[row] = deque(actions)
         else:
             self._pending[row] = (self._call + self.delay, actions[self.delay :])
+
+    def left(self, row: int) -> np.ndarray | None:
+        """What ``row`` plays from this call on, after ``due``: its queue, or its last action
+        when the queue is empty (``pop`` repeats it), None before its first chunk."""
+        if self._queues[row]:
+            return np.stack(self._queues[row])
+        return None if self._last[row] is None else self._last[row][None]
 
     def pop(self) -> np.ndarray:
         for i, queue in enumerate(self._queues):

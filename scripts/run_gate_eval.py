@@ -43,7 +43,9 @@ wire) goes in --client_flags, needs --pi05, and the cache matches it as a loop s
 
 --infer_delay D (MS7j) reaches either server as its --infer_delay: each chunk arrives D control
 steps after its observation. The server records it in its inference block only when D > 0, and
-the cache matches it there.
+the cache matches it there. --pi05_rtc reaches the pi0.5 server as --rtc (real-time chunking
+under that delay, at --action_warp 1.0), which records "rtc": its RTC_HORIZON, and the cache
+matches it.
 """
 
 import argparse
@@ -115,6 +117,7 @@ class GateCfg:
     pi05_still_rad: float = 0.15  # the server's STILL_RAD (tests pin the copy)
     pi05_still_open: float = 0.9  # the server's STILL_OPEN
     pi05_jaw_latch: int = 0  # 0: the server's jaw latch is off
+    pi05_rtc: bool = False  # MS7j: the server's real-time chunking, under --infer_delay
     only_processes: tuple | None = None
     eval_timeout_s: float = 4 * 3600
     backend: str = "isaac"  # "mujoco" spawns scripts/mj_eval_policy.py under .venv/bin/python
@@ -856,6 +859,7 @@ def _start_server(cfg: GateCfg) -> _ServerHandle:
 PI05_PYTHON = "lerobot_stack/.venv-pi/bin/python"
 PI05_READY_S = 900  # loading about 9 GB of pi0.5 weights on a busy host takes minutes
 PI05_STILL = ("still_noise_scale", "still_rad", "still_open")  # the server's flags and keys
+PI05_RTC_HORIZON = 25  # the server's RTC_HORIZON, its inference block's "rtc" (tests pin the copy)
 
 
 def _pi05_still(cfg: GateCfg) -> dict:
@@ -900,6 +904,7 @@ def _pi05_server_command(cfg: GateCfg) -> list[str]:
             else []
         ),
         *(["--infer_delay", str(cfg.infer_delay)] if cfg.infer_delay else []),
+        *(["--rtc"] if cfg.pi05_rtc else []),
     ]
 
 
@@ -1127,6 +1132,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     same_inference = same_inference and served.get("jaw_latch", 0) == cfg.pi05_jaw_latch
     # A payload that predates the inference delay ran without one.
     same_inference = same_inference and served.get("infer_delay", 0) == cfg.infer_delay
+    rtc = PI05_RTC_HORIZON if cfg.pi05_rtc else None  # recorded only when on
+    same_inference = same_inference and served.get("rtc") == rtc
     if cfg.pi05:
         named = str(payload.get("policy_id", "")).removeprefix(f"pi05:{cfg.checkpoint}")
         same_inference = same_inference and (
@@ -1394,6 +1401,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=int,
         default=None,
         help="with --pi05: hold the jaw command this many actions after a close in each chunk",
+    )
+    parser.add_argument(
+        "--pi05_rtc",
+        action="store_true",
+        help="MS7j, with --pi05: real-time chunking under --infer_delay, at --action_warp 1.0",
     )
     parser.add_argument("--only_processes", type=_process_list, default=None)
     parser.add_argument("--eval_timeout_s", type=float, default=4 * 3600)
@@ -1719,6 +1731,8 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError(f"--infer_delay must be at least 0, got {args.infer_delay}")
     if not 1.0 <= args.action_warp <= 3.0:  # the server's ACTION_WARP_MIN and ACTION_WARP_MAX
         raise ValueError(f"--action_warp must be in [1.0, 3.0], got {args.action_warp}")
+    if args.pi05_rtc and (not args.pi05 or args.infer_delay < 1 or args.action_warp != 1.0):
+        raise ValueError("--pi05_rtc needs --pi05, --infer_delay above 0 and --action_warp 1.0")
     heap = args.heap_k > 0 and args.backend == "mujoco"
     if args.gripper != "binary" and not heap:
         # Only the MuJoCo heap client drives a continuous gripper (phase B design 5.4).

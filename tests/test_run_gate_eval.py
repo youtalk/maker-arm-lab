@@ -1889,6 +1889,12 @@ def test_the_pi05_server_logs_to_the_out_dir_and_the_supervisor_waits_for_ready(
         (["--pi05_retry_noise_scale", "1"], "need --pi05"),
         (["--pi05", "--pi05_retry_noise_scale", "-1"], "--pi05_retry_noise_scale must be finite"),
         (["--pi05", "--pi05_retry_noise_scale", "inf"], "--pi05_retry_noise_scale must be finite"),
+        (["--pi05_rtc", "--infer_delay", "6"], "--pi05_rtc needs --pi05"),
+        (["--pi05", "--pi05_rtc"], "--pi05_rtc needs"),
+        (
+            ["--pi05", "--pi05_rtc", "--infer_delay", "6", "--action_warp", "1.5"],
+            "--pi05_rtc needs",
+        ),
     ],
 )
 def test_the_pi05_mode_refuses_what_its_server_cannot_serve(
@@ -1993,3 +1999,29 @@ def test_the_supervisor_sends_infer_delay_and_keys_the_cache(tmp_path, monkeypat
     assert ge.main(_argv(tmp_path) + ["--infer_delay", "-1"]) == 2
     out = capsys.readouterr()
     assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--infer_delay" in out.err
+
+
+def test_the_pi05_rtc_reaches_the_server_and_splits_the_cache(tmp_path):
+    read = _argv(tmp_path) + PI05_HEAP + ["--pi05", "--infer_delay", "6"]
+    plain = ge._build_cfg(ge._parse_args(read))
+    rtc = ge._build_cfg(ge._parse_args(read + ["--pi05_rtc"]))
+    assert (plain.pi05_rtc, rtc.pi05_rtc) == (False, True)
+    assert "--rtc" not in ge._pi05_server_command(plain)  # off: the same bytes
+    assert ge._pi05_server_command(rtc) == ge._pi05_server_command(plain) + ["--rtc"]
+    ledger = _fake_ledger(tmp_path)
+    off = _cfg(tmp_path, ledger, processes=1, pi05=True, infer_delay=6)
+    on = _cfg(tmp_path, ledger, processes=1, pi05=True, infer_delay=6, pi05_rtc=True)
+    off.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    served = {"n_action_steps": 1, "temporal_ensemble_coeff": 0.01, "num_inference_steps": 10}
+
+    def cached(cfg, **inference):
+        payload = _payload(draw, [_episode(6)], policy_id="pi05:ck")
+        payload["inference"] = served | {"infer_delay": 6} | inference
+        (off.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    assert cached(off) and not cached(off, rtc=25)
+    assert cached(on, rtc=25) and not cached(on) and not cached(on, rtc=10)
+    source = (Path(__file__).parents[1] / "lerobot_stack" / "pi05_server.py").read_text()
+    assert f"\nRTC_HORIZON = {ge.PI05_RTC_HORIZON}\n" in source

@@ -233,6 +233,15 @@ def test_paired_drop_and_se_on_known_counts():
     assert (got["passes"], got["better"], got["same"], got["worse"]) == (False, 0, 1, 2)
     got = suite.paired(_draws((40, 45, 50)), _draws((41, 45, 49), delay=1))
     assert got["drop"] == 0 and got["passes"] and (got["better"], got["worse"]) == (1, 1)
+    rtc = _draws((41, 45, 49), delay=6)
+    for payload in rtc.values():  # an RTC row pairs with the chunked baseline
+        payload["policy_id"] += "+rtc"
+        payload["inference"]["rtc"] = 25
+    assert suite.paired(_draws((40, 45, 50)), rtc)["drop"] == 0
+    for payload in rtc.values():
+        del payload["inference"]["rtc"]
+    with pytest.raises(ValueError, match="policy"):  # +rtc without the server's record
+        suite.paired(_draws((40, 45, 50)), rtc)
     for other in ({"policy": "act:/other/pretrained_model"}, {"num_envs": 5}):
         with pytest.raises(ValueError):
             suite.paired(_draws((40, 45, 50)), _draws((40, 45, 50), **other))

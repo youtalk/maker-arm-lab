@@ -44,7 +44,16 @@ right after the sampling parts.
 MS7j: --infer_delay D emulates the real arm's inference delay (``policy_server.DelayLine``): a
 lane's chunk arrives D control steps after its observation, without its first D actions, retry
 forwards and still resamples included. D must be shorter than the warped chunk. Its policy id part
-is ``+delay<D>``, last, and the inference block gains ``infer_delay``.
+is ``+delay<D>``, and the inference block gains ``infer_delay``.
+MS7j: --rtc adds LeRobot's real-time chunking (RTC) under that delay, at --action_warp 1.0 only,
+so a queue row is a chunk row. A lane forwards once its queue holds RTC_HORIZON actions or fewer,
+and the forward passes inference_delay D, execution_horizon RTC_HORIZON and the leftover: the
+rows the lane still plays from this call on (its queue, or its last action repeated), in the
+model's normalized output, before the postprocessor. The chunk still arrives D calls later
+without its first D actions. Each queue row keeps its normalized twin for this, and the latch
+holds the normalized jaw with the served one. Rows without a leftover (the first chunk after a
+reset) forward apart, unguided. Retry forwards and still resamples are guided like any forward.
+Its policy id part is ``+rtc``, last, and the inference block gains ``"rtc": RTC_HORIZON``.
 MS7i Run A (the heap loop's ``--pi05_prompt``) sends each env's subtask id under the wire's
 optional ``prompt`` key. The server reads a row's id only when it refills that row's queue, so a
 new id between two refills changes nothing and never forces a replan: the chunk in play, its
@@ -134,6 +143,10 @@ it is a close); 0 with no target."""
 JAW_FULL_GAP = 2 * 0.0524125
 """m: the jaw gap at state column 6 = 1.0, that column being the left jaw's opening fraction of
 convert_to_lerobot's GRIPPER_TRAVEL (both jaws move alike; a test pins the copy)."""
+RTC_HORIZON = 25
+"""MS7j --rtc: a lane forwards at a queue of this many actions or fewer, and the guidance toward
+the leftover reaches this far into the next chunk (LeRobot's execution_horizon), half the
+checkpoint's 50-action chunk."""
 
 
 def latch_jaw(chunk: np.ndarray, state: np.ndarray, steps: int) -> tuple[np.ndarray, int]:
@@ -142,17 +155,20 @@ def latch_jaw(chunk: np.ndarray, state: np.ndarray, steps: int) -> tuple[np.ndar
     close is an action t whose command is under the row's target width w (``TARGET_WIDTH`` of
     the derived ``state``, w > 0) after a command at or above w at t - 1, or, at t = 0, after
     a measured gap (``JAW_FULL_GAP`` times state[:, 6]) at or above w. A chunk that starts
-    under w from a gap under w has no close, so a release stays free. Pure."""
+    under w from a gap under w has no close, so a release stays free. A 14-wide chunk (--rtc:
+    the normalized actions after the served ones) holds its normalized jaw at the same steps at
+    most at the close's normalized command: the unnormalizer is increasing, so the two stay one
+    action. Pure."""
     out = chunk.copy()
     for row in range(len(out)):
-        w, prev, left, cap = state[row, TARGET_WIDTH], JAW_FULL_GAP * state[row, 6], 0, 0.0
-        jaw = out[row, :, JAW]  # a view
+        w, prev, left, close = state[row, TARGET_WIDTH], JAW_FULL_GAP * state[row, 6], 0, 0
+        jaw = out[row, :, JAW :: ACTION_SHAPE[0]]  # a view: the jaw, and its normalized twin
         for t in range(len(jaw)):
             if left:
-                jaw[t], left = min(jaw[t], cap), left - 1
-            elif w > 0 and prev >= w > jaw[t]:
-                cap, left = jaw[t], steps
-            prev = jaw[t]
+                jaw[t], left = np.minimum(jaw[t], jaw[close]), left - 1
+            elif w > 0 and prev >= w > jaw[t, 0]:
+                close, left = t, steps
+            prev = jaw[t, 0]
     return out, int((out != chunk).any(axis=(1, 2)).sum())
 
 
@@ -162,6 +178,16 @@ def still_rows(chunk: np.ndarray, state: np.ndarray, rad: float, open_frac: floa
     jaws open (state[:, 6] >= ``open_frac``). Pure."""
     moved = np.abs(chunk[:, :, :6] - state[:, None, :6]).max(axis=(1, 2))
     return np.flatnonzero((moved < rad) & (state[:, 6] >= open_frac))
+
+
+def leftover(left: np.ndarray | None) -> np.ndarray:
+    """The (RTC_HORIZON, 7) RTC leftover of a row from its 14-wide ``DelayLine.left``: the
+    normalized half, cut at RTC_HORIZON or padded with its last row, which the line repeats on an
+    empty queue. NaN before the row's first chunk."""
+    if left is None:
+        return np.full((RTC_HORIZON, *ACTION_SHAPE), np.nan, np.float32)
+    rows = left[:RTC_HORIZON, ACTION_SHAPE[0] :]
+    return np.pad(rows, ((0, RTC_HORIZON - len(rows)), (0, 0)), mode="edge")
 
 
 def tasks(prompts, rows: int) -> list[str]:
@@ -182,7 +208,10 @@ class SharedServer:
     through ``latch_jaw`` before the warp. ``retry_noise_scale`` S forwards the rows whose retry
     flag is set with ``predict_chunk(obs of those rows, S)``, in a forward of their own.
     ``infer_delay`` D serves each lane's chunks D calls after their observation (``DelayLine``),
-    whichever forward made them: a plain one, a retry, a still resample or a latched chunk."""
+    whichever forward made them: a plain one, a retry, a still resample or a latched chunk.
+    ``rtc`` (D > 0, warp 1.0) adds obs["leftover"] (``leftover``) to each forward of rows that
+    have one, and ``predict_chunk`` returns the (n, n_action_steps, 14) chunk: the served actions,
+    then the normalized ones, which the lines keep."""
 
     def __init__(
         self,
@@ -196,6 +225,7 @@ class SharedServer:
         jaw_latch: int = 0,
         retry_noise_scale: float | None = None,
         infer_delay: int = 0,
+        rtc: bool = False,
     ):
         if not ACTION_WARP_MIN <= action_warp <= ACTION_WARP_MAX:
             raise ValueError(
@@ -215,12 +245,17 @@ class SharedServer:
             self._inference["jaw_latch"] = jaw_latch
         if infer_delay:
             self._inference["infer_delay"] = infer_delay
+        if rtc:
+            self._inference["rtc"] = RTC_HORIZON
         self._still = still
         self._retry = retry_noise_scale
         self._latch = jaw_latch
         self._gripper = gripper
         self._warp = action_warp
         self._delay = infer_delay
+        self._rtc = rtc
+        self._refill = RTC_HORIZON if rtc else None
+        self._width = ACTION_SHAPE[0] * (2 if rtc else 1)
         self._lines: dict[bytes, DelayLine] = {}  # lane identity -> its env rows' queues
         self.forward_sizes: list[int] = []  # rows of each forward, for the log and the tests
 
@@ -278,11 +313,23 @@ class SharedServer:
 
     def _forward(self, obs: dict, *scale) -> np.ndarray:
         """The (n, n_action_steps, 7) chunk of ``obs``'s n rows, at the noise ``scale`` (none:
-        the configured one)."""
+        the configured one). Under RTC it is 14 wide, and the rows without a leftover (NaN)
+        forward apart, without the key."""
         rows = len(obs["state"])
+        fresh = np.zeros(rows, dtype=bool)
+        if "leftover" in obs:
+            fresh = np.isnan(obs["leftover"]).all(axis=(1, 2))
+        if fresh.any():
+            plain = {k: v[fresh] for k, v in obs.items() if k != "leftover"}
+            chunk = np.empty((rows, self._n, self._width), dtype=np.float32)
+            chunk[fresh] = self._forward(plain, *scale)
+            if not fresh.all():
+                chunk[~fresh] = self._forward({k: v[~fresh] for k, v in obs.items()}, *scale)
+            return chunk
         chunk = np.asarray(self._predict(obs, *scale), dtype=np.float32)
-        if chunk.shape != (rows, self._n, *ACTION_SHAPE):
-            raise ValueError(f"predict_chunk returned {chunk.shape}, want ({rows}, {self._n}, 7)")
+        if chunk.shape != (rows, self._n, self._width):
+            want = f"({rows}, {self._n}, {self._width})"
+            raise ValueError(f"predict_chunk returned {chunk.shape}, want {want}")
         return chunk
 
     def _step(self, steps: list) -> list:
@@ -292,7 +339,8 @@ class SharedServer:
             batch = int(arrays["state"].shape[0])
             replan = arrays.get(REPLAN_KEY, np.zeros(batch, dtype=bool))
             retry = arrays.get(RETRY_KEY, np.zeros(batch, dtype=bool))
-            due = self._lines.setdefault(lane, DelayLine(self._delay)).due(replan)
+            line = self._lines.setdefault(lane, DelayLine(self._delay, self._refill))
+            due = line.due(replan)
             need += [(lane, i) for i in due]
             retrying += [bool(retry[i]) for i in due]
         if need:
@@ -310,12 +358,14 @@ class SharedServer:
                     for lane, i in need
                 ]
                 obs["prompt"] = np.asarray(ids, dtype=np.int16)
+            if self._rtc:  # MS7j: what each row still plays, NaN before its first chunk
+                obs["leftover"] = np.stack([leftover(self._lines[ln].left(i)) for ln, i in need])
             start = time.perf_counter()
             retried = np.flatnonzero(retrying) if self._retry is not None else []
             try:
                 if len(retried):  # the retry rows' arm noise at S, in a forward of their own
                     rest = np.setdiff1d(np.arange(len(need)), retried)
-                    chunk = np.empty((len(need), self._n, *ACTION_SHAPE), dtype=np.float32)
+                    chunk = np.empty((len(need), self._n, self._width), dtype=np.float32)
                     chunk[retried] = self._forward(
                         {k: v[retried] for k, v in obs.items()}, self._retry
                     )
@@ -327,7 +377,7 @@ class SharedServer:
                     still = still_rows(chunk, obs["state"], *self._still[1:])
                     if len(still):
                         resample = {k: v[still] for k, v in obs.items()}
-                        chunk[still] = self._predict(resample, self._still[0])
+                        chunk[still] = self._forward(resample, self._still[0])
                 if self._latch:
                     chunk, latched = latch_jaw(chunk, obs["state"], self._latch)
             except Exception:  # noqa: BLE001 -- every lane of the forward gets the error
@@ -345,7 +395,7 @@ class SharedServer:
                 self._lines[lane].put(i, actions)
         replies = []
         for lane, arrays in steps:
-            action = self._lines[lane].pop()
+            action = self._lines[lane].pop()[:, : ACTION_SHAPE[0]]  # RTC: the served half
             if np.isfinite(action).all():
                 replies.append((lane, {"type": "action"}, {"action": action}))
             else:
@@ -395,11 +445,14 @@ def load_pi05(
     jaw_noise_scale: float = 1.0,
     jaw_noise_shared: bool = False,
     jaw_noise_abs: float | None = None,
+    rtc_delay: int = 0,
 ):
     """(predict_chunk, n_action_steps, inference, gripper, sampling) of a pi05 pretrained_model
     directory. ``sampling`` is the policy id's ``+steps<N>+noise<S>+jawnoise<J>+jawshared`` and
     ``+jawabs<A>``, each part only when its value is off its default (num_steps None means the
-    checkpoint's own).
+    checkpoint's own). ``rtc_delay`` D > 0 turns on LeRobot's RTC (MS7j --rtc): a forward whose
+    obs holds "leftover" (n, RTC_HORIZON, 7) is guided toward it at inference_delay D, and every
+    forward returns the served chunk and then the model's normalized one, 14 wide.
 
     The server reads only local files: the checkpoint and the tokenizer in the Hugging Face
     cache (the gated google/paligemma-3b-pt-224 files). transformers 5.3's AutoTokenizer also
@@ -426,6 +479,11 @@ def load_pi05(
             f"{checkpoint} takes {images} and a state of {state} to an action of {action}, "
             f"not the derived dataset's {sorted(IMAGE_KEYS.values())}, (23,) and (7,)"
         )
+    if rtc_delay:  # imported here only: the server runs without it (0.5.1 has the same API)
+        from lerobot.policies.rtc.configuration_rtc import RTCConfig
+
+        config.rtc_config = RTCConfig(enabled=True, execution_horizon=RTC_HORIZON)
+        policy.init_rtc_processor()
     policy.to(device)
     policy.eval()
     with open(os.path.join(checkpoint, "policy_preprocessor.json")) as f:
@@ -476,10 +534,20 @@ def load_pi05(
         batch["task"] = tasks(obs.get("prompt"), rows)
         for key, name in IMAGE_KEYS.items():
             batch[name] = torch.from_numpy(obs[key]).permute(0, 3, 1, 2).to(torch.float32) / 255.0
-        with torch.inference_mode():
-            chunk = policy.predict_action_chunk(pre(batch), **kwargs, **noise)
+        guide = {}
+        if "leftover" in obs:  # zero padded to the model's action width, as it trains
+            pad = config.max_action_dim - obs["leftover"].shape[-1]
+            left = torch.from_numpy(np.pad(obs["leftover"], ((0, 0), (0, 0), (0, pad))))
+            guide = {"inference_delay": rtc_delay, "execution_horizon": RTC_HORIZON}
+            guide["prev_chunk_left_over"] = left.to(device)
+        # RTC's guidance turns grad on inside, which inference_mode refuses
+        with torch.no_grad() if rtc_delay else torch.inference_mode():
+            chunk = policy.predict_action_chunk(pre(batch), **kwargs, **noise, **guide)
             chunk = chunk[:, : config.n_action_steps]
-            return np.asarray(post(chunk).to("cpu", torch.float32), dtype=np.float32)
+            served = np.asarray(post(chunk).to("cpu", torch.float32), dtype=np.float32)
+        if not rtc_delay:
+            return served
+        return np.concatenate([served, np.asarray(chunk.to("cpu", torch.float32))], axis=-1)
 
     inference = {
         "n_action_steps": int(config.n_action_steps),
@@ -525,6 +593,7 @@ def main() -> int:
     parser.add_argument("--still_open", type=float, default=STILL_OPEN)
     parser.add_argument("--jaw_latch", type=int, default=0, help="actions held after a close")
     parser.add_argument("--infer_delay", type=int, default=0, help="MS7j: steps a chunk waits")
+    parser.add_argument("--rtc", action="store_true", help="MS7j: real-time chunking")
     try:
         args = parser.parse_args()
         if args.num_steps is not None and args.num_steps < 1:
@@ -542,6 +611,8 @@ def main() -> int:
             parser.error(f"--jaw_latch must be at least 0, got {args.jaw_latch}")
         if args.infer_delay < 0:
             parser.error(f"--infer_delay must be at least 0, got {args.infer_delay}")
+        if args.rtc and (args.infer_delay < 1 or args.action_warp != 1.0):
+            parser.error("--rtc needs --infer_delay above 0 and --action_warp 1.0")
         predict_chunk, n_action_steps, inference, gripper, sampling = load_pi05(
             args.checkpoint,
             args.device,
@@ -550,6 +621,7 @@ def main() -> int:
             args.jaw_noise_scale,
             args.jaw_noise_shared,
             jaw_abs,
+            args.infer_delay if args.rtc else 0,
         )
         policy_id = f"pi05:{args.checkpoint}" + (
             f"+warp{args.action_warp}" if args.action_warp != 1.0 else ""
@@ -559,6 +631,7 @@ def main() -> int:
         policy_id += "" if still is None else "+still{}r{}o{}".format(*still)
         policy_id += f"+latch{args.jaw_latch}" if args.jaw_latch else ""
         policy_id += f"+delay{args.infer_delay}" if args.infer_delay else ""
+        policy_id += "+rtc" if args.rtc else ""
         server = SharedServer(
             predict_chunk,
             policy_id,
@@ -570,6 +643,7 @@ def main() -> int:
             args.jaw_latch,
             retry,
             args.infer_delay,
+            args.rtc,
         )
         socket = zmq.Context.instance().socket(zmq.ROUTER)
         socket.bind(f"tcp://127.0.0.1:{args.port}")

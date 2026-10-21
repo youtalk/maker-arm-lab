@@ -185,7 +185,8 @@ def measures(payload: dict) -> dict:
 def paired(base: dict[str, dict], row: dict[str, dict]) -> dict:
     """The row's drop against the baseline, paired by draw (``eval_NNN.json`` name to payload).
     Raises ``ValueError`` unless both hold the same draws, two or more, of one policy. The row's
-    policy id may end in its server's ``+delay<D>``."""
+    policy id may end in its server's ``+delay<D>``, and then ``+rtc`` (MS7j Task 12), so an RTC
+    row pairs with a chunked baseline at the same serving."""
     if set(base) != set(row):
         raise ValueError(f"draws differ: baseline {sorted(base)}, row {sorted(row)}")
     if len(base) < 2:
@@ -195,9 +196,10 @@ def paired(base: dict[str, dict], row: dict[str, dict]) -> dict:
         for key in DRAW_KEYS:
             if base[name].get(key) != row[name].get(key):
                 raise ValueError(f"{name}: the row's {key} is not the baseline's")
-        delay = (row[name].get("inference") or {}).get("infer_delay", 0)
-        policy = row[name].get("policy_id", "").removesuffix(f"+delay{delay}")
-        if policy != base[name].get("policy_id", ""):  # +delay<D> is the last part of an id
+        inference = row[name].get("inference") or {}
+        tail = f"+delay{inference.get('infer_delay', 0)}" + "+rtc" * ("rtc" in inference)
+        policy = row[name].get("policy_id", "").removesuffix(tail)
+        if policy != base[name].get("policy_id", ""):  # the server's last parts of an id
             raise ValueError(f"{name}: the row's policy {policy} is not the baseline's")
     b = [measures(base[n]) for n in names]
     c = [x["correct"] - measures(row[n])["correct"] for x, n in zip(b, names)]

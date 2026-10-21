@@ -453,6 +453,9 @@ class StandInPolicy:
         self.tasks = batch["task"]
         return torch.zeros(len(batch["task"]), N, 7)
 
+    def init_rtc_processor(self):
+        self.rtc_processor = self.config.rtc_config
+
 
 @pytest.fixture
 def stand_in(monkeypatch, tmp_path):
@@ -721,3 +724,120 @@ def test_a_given_noise_replaces_every_draw(stand_in):
         obs |= {"wrist": arrays["wrist"], "overhead": arrays["overhead"]}
         predict_chunk(obs, 0.7, noise=given)
         assert policy.kwargs.pop()["noise"] is given
+
+
+def rtc_stand_in(policy, monkeypatch):
+    """The stand-in under --rtc: lerobot's RTCConfig stubbed, the postprocessor 2 c + 1 (the
+    served actions are not the model's normalized ones), and call k's chunk 100 k + t in every
+    column. Returns each call's (kwargs, inference mode on, grad on)."""
+    rtc = SimpleNamespace(RTCConfig=SimpleNamespace)
+    monkeypatch.setitem(sys.modules, "lerobot.policies.rtc.configuration_rtc", rtc)
+    factory = SimpleNamespace(
+        make_pre_post_processors=lambda **kw: (lambda b: b, lambda c: 2 * c + 1)
+    )
+    monkeypatch.setitem(sys.modules, "lerobot.policies.factory", factory)
+    monkeypatch.setattr(policy, "config", SimpleNamespace(**vars(policy.config)))
+    calls = []
+
+    def predict_action_chunk(batch, **kwargs):
+        calls.append((kwargs, torch.is_inference_mode_enabled(), torch.is_grad_enabled()))
+        chunk = 100 * len(calls) + torch.arange(N, dtype=torch.float32)
+        return chunk[None, :, None].expand(len(batch["task"]), N, 7).clone()
+
+    monkeypatch.setattr(policy, "predict_action_chunk", predict_action_chunk)
+    return calls
+
+
+def test_rtc_passes_the_delay_and_the_normalized_leftover(stand_in, monkeypatch):
+    policy, ckpt = stand_in
+    calls = rtc_stand_in(policy, monkeypatch)
+    predict_chunk, n, inference, gripper, _ = ps.load_pi05(ckpt, "cpu", rtc_delay=6)
+    assert policy.rtc_processor == SimpleNamespace(enabled=True, execution_horizon=25)
+    s = ps.SharedServer(predict_chunk, "pi05:/ckpt", n, inference, gripper, infer_delay=6, rtc=True)
+    assert s.ready(0)["inference"]["rtc"] == ps.RTC_HORIZON == 25
+    served = []
+    for call in range(51):  # lane b steps once, at call 25: its first chunk, no leftover
+        lanes = [(b"a", *step(0.5))] + [(b"b", *step(0.2))] * (call == 25)
+        served.append(s.process(lanes)[0][0][2]["action"][0, 0])
+    assert s.forward_sizes == [1, 2, 1]  # at calls 0, 25 (both lanes) and 50
+    assert [c[0] for c in calls[:2]] == [{}, {}]  # a's first chunk, then b's, unguided
+    for (kwargs, *_), chunk in zip(calls[2:], (1, 3)):  # a at 25 and 50: its chunk's rows 25..
+        assert kwargs.keys() == {"inference_delay", "execution_horizon", "prev_chunk_left_over"}
+        assert (kwargs["inference_delay"], kwargs["execution_horizon"]) == (6, 25)
+        left = kwargs["prev_chunk_left_over"]
+        assert left.shape == (1, 25, 32) and not left[..., 7:].any()
+        want = (100 * chunk + torch.arange(25, 50.0))[None, :, None].expand(1, 25, 7)
+        assert torch.equal(left[..., :7], want)
+    assert not any(mode or grad for _, mode, grad in calls)  # no_grad, not inference_mode
+    want = [2 * (100 + t) + 1 for t in range(31)] + [2 * (300 + t) + 1 for t in range(6, 26)]
+    assert served == want  # call 25's chunk plays from call 31, without its first 6 actions
+
+
+@pytest.mark.parametrize(
+    "flags", [["--rtc"], ["--rtc", "--infer_delay", "6", "--action_warp", "1.5"]]
+)
+def test_rtc_refuses_a_warp_or_no_delay(flags):
+    test_a_bad_sampling_value_fails_with_the_token(flags)
+
+
+def test_rtc_names_the_policy_last(stand_in, monkeypatch, capsys):
+    policy, ckpt = stand_in
+    rtc_stand_in(policy, monkeypatch)
+    monkeypatch.setattr(ps.SharedServer, "serve", lambda self, socket: None)
+    argv = ["pi05_server.py", "--checkpoint", ckpt, "--device", "cpu", "--port", "0"]
+    monkeypatch.setattr(sys, "argv", argv + ["--jaw_latch", "10", "--infer_delay", "6", "--rtc"])
+    assert ps.main() == 0
+    ready = json.loads(capsys.readouterr().out.split("SERVER_READY ", 1)[1].splitlines()[0])
+    assert ready["policy_id"] == f"pi05:{ckpt}+latch10+delay6+rtc"
+    assert (ready["inference"]["infer_delay"], ready["inference"]["rtc"]) == (6, 25)
+
+
+class RtcModel:
+    """A 14-wide chunk, as load_pi05's under --rtc: the served actions, then the normalized
+    ones (served = 2 n + 1). The arm holds the state (a still chunk), and the jaw closes at t = 30
+    (0.01 m against a 2 cm target) and re-opens after it. Records each call's (leftover, scale)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, obs, *scale):
+        self.calls.append((obs.get("leftover"), *scale))
+        served = jaw_chunk(*[[0.05] * 30 + [0.01] + [0.05] * 19] * len(obs["state"]))
+        served[:, :, :6] = obs["state"][:, None, :6]
+        return np.concatenate([served, (served - 1) / 2], axis=-1)
+
+
+def rtc_step(batch=1, retry=None):
+    """A step with open jaws and a 2 cm target."""
+    header, arrays = step(0.5, batch=batch)
+    arrays["state"][:, 6], arrays["context"][:, 14] = 1.0, 0.02
+    if retry is not None:
+        arrays["retry"] = np.asarray(retry)
+    return header, arrays
+
+
+def test_rtc_latches_the_normalized_jaw_with_the_served_one():
+    model, inference = RtcModel(), {"n_action_steps": N, "chunk_size": N, "num_inference_steps": 10}
+    s = ps.SharedServer(
+        model, "pi05:/ckpt", N, inference, "continuous", 1.0, None, 15, None, 6, True
+    )
+    served = [s.process([(b"a", *rtc_step())])[0][0][2]["action"][0] for _ in range(26)]
+    assert served[25].shape == (7,)  # the served half only
+    norm = (np.array([0.05] * 30 + [0.01] + [0.05] * 19, np.float32) - 1) / 2
+    want = norm[25:].copy()
+    want[6:21] = norm[30]  # rows 31..45 held at the close, as the served jaw is
+    np.testing.assert_array_equal(model.calls[1][0][0, :, ps.JAW], want)
+    assert model.calls[0][0] is None
+
+
+def test_rtc_retry_and_still_forwards_carry_the_leftover():
+    model, inference = RtcModel(), {"n_action_steps": N, "chunk_size": N, "num_inference_steps": 10}
+    s = ps.SharedServer(
+        model, "pi05:/ckpt", N, inference, "continuous", 1.0, (0.5, 0.15, 0.9), 0, 1.0, 6, True
+    )
+    for call in range(26):  # row 1's retry flag is set at call 25
+        s.process([(b"a", *rtc_step(batch=2, retry=[False, call == 25]))])
+    got = [(0 if left is None else len(left), *scale) for left, *scale in model.calls]
+    # Call 0: both rows unguided, then their still resample. Call 25: the retry row, the rest,
+    # then the still resample of both, each with its rows' leftovers.
+    assert got == [(0,), (0, 0.5), (1, 1.0), (1,), (2, 0.5)]
