@@ -41,6 +41,9 @@ class Policy:
         save_file({"w": self.w.reshape(1)}, str(Path(out) / "model.safetensors"))
 
 
+RUN_CONFIG = object()
+
+
 def install(monkeypatch, delta, merged_delta):
     """peft whose adapter adds ``delta`` to w, and whose merge folds in ``merged_delta``."""
     base = Policy()
@@ -70,7 +73,16 @@ def install(monkeypatch, delta, merged_delta):
         ),
         PeftModel=SimpleNamespace(from_pretrained=lambda b, p, config: Wrapped()),
     )
-    pi05 = SimpleNamespace(PI05Policy=SimpleNamespace(from_pretrained=lambda p: base))
+
+    def load_base(path, config=None):
+        assert (path, config) == (BASE, RUN_CONFIG)  # the run's config, not the base repo's
+        return base
+
+    configs = SimpleNamespace(
+        PreTrainedConfig=SimpleNamespace(from_pretrained=lambda p: RUN_CONFIG)
+    )
+    monkeypatch.setitem(sys.modules, "lerobot.configs.policies", configs)
+    pi05 = SimpleNamespace(PI05Policy=SimpleNamespace(from_pretrained=load_base))
     monkeypatch.setitem(sys.modules, "peft", peft)
     monkeypatch.setitem(sys.modules, "lerobot.policies.pi05.modeling_pi05", pi05)
 

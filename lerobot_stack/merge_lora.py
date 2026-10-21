@@ -44,6 +44,7 @@ def fixed_batch(config, device):
 
 def merge(adapter: str, out: str, device: str = "cpu") -> tuple[bool, dict]:
     import torch
+    from lerobot.configs.policies import PreTrainedConfig
     from lerobot.policies.pi05.modeling_pi05 import PI05Policy
     from peft import PeftConfig, PeftModel
 
@@ -62,7 +63,9 @@ def merge(adapter: str, out: str, device: str = "cpu") -> tuple[bool, dict]:
     peft_config = PeftConfig.from_pretrained(adapter)
     if not peft_config.base_model_name_or_path:
         raise ValueError(f"{adapter}/adapter_config.json names no base model")
-    base = PI05Policy.from_pretrained(peft_config.base_model_name_or_path)
+    # The run's config (the dataset's features), as LeRobot's factory loads a PEFT base.
+    run_config = PreTrainedConfig.from_pretrained(adapter)
+    base = PI05Policy.from_pretrained(peft_config.base_model_name_or_path, config=run_config)
     model = PeftModel.from_pretrained(base, adapter, config=peft_config).to(device).eval()
     batch, noise = fixed_batch(base.config, device)
     with torch.no_grad():
