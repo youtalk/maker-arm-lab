@@ -443,8 +443,9 @@ some knob is on. Pass a negative offset as ``--overhead_offset=-3,0,0,0,0,0``.""
 
 def stress_block(client_flags) -> dict:
     """The stress knobs the client flags turn on, as ``Stress.block()`` writes them: only the
-    knobs off their default, ``{}`` when all are off."""
-    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    knobs off their default, ``{}`` when all are off. A malformed knob raises ValueError, which
+    ``main`` turns into GATE_ERROR."""
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, exit_on_error=False)
     for name in STRESS_KNOBS:
         if name in ("warp_back", "hard_light"):
             parser.add_argument(f"--{name}", action="store_true")
@@ -453,7 +454,10 @@ def stress_block(client_flags) -> dict:
         else:
             kind = int if name in ("obs_delay", "jpeg_quality") else float
             parser.add_argument(f"--{name}", type=kind, default=0)
-    found = vars(parser.parse_known_args(list(client_flags))[0])
+    try:
+        found = vars(parser.parse_known_args(list(client_flags))[0])
+    except argparse.ArgumentError as exc:
+        raise ValueError(f"--client_flags: {exc}") from exc
     block = {}
     for name in STRESS_KNOBS:
         value = found[name]

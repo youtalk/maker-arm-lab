@@ -1937,3 +1937,22 @@ def test_a_cached_draw_with_another_stress_block_is_not_reused(tmp_path):
     assert cached(cfg) and not cached(cfg, stress=block)
     cfg.client_flags = ("--jpeg_quality", "85")
     assert cached(cfg, stress=block) and not cached(cfg)
+
+
+def test_a_malformed_stress_knob_is_a_gate_error_on_a_resumed_read(tmp_path, monkeypatch, capsys):
+    for flags in (["--jpeg_quality", "abc"], ["--overhead_offset", "-3,0,0,0,0,0"]):
+        with pytest.raises(ValueError, match=flags[0]):
+            ge.stress_block(flags)
+    ledger = _fake_ledger(tmp_path)
+    out_dir = tmp_path / "gate"
+    out_dir.mkdir()
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    (out_dir / "eval_000.json").write_text(json.dumps(_heap_payload(draw)))
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server"))
+    argv = ["--checkpoint", "ck", "--out_dir", str(out_dir), "--ledger", str(ledger)]
+    argv += ["--threshold", "0.85", "--seed", str(SELECTION_SEED), "--processes", "1"]
+    argv += HEAP + ["--client_flags", "--jpeg_quality abc"]
+    assert ge.main(argv) == 2
+    out = capsys.readouterr()
+    tokens = [x for x in out.out.splitlines() if x.startswith("GATE_")]
+    assert tokens == ["GATE_ERROR"] and "--jpeg_quality" in out.err
