@@ -106,13 +106,16 @@ from maker_arm_lab.mj.context_names import (
 )
 from maker_arm_lab.mj.depth import noisy_depth_mm
 from maker_arm_lab.mj.recorder import MAX_INT8_PART, ShardRecorder
-from maker_arm_lab.mj.stress import Stress
+from maker_arm_lab.mj.stress import WARP_SOURCE_PX, Stress, offset_rotation
+from maker_arm_lab.real import camera_model
 from maker_arm_lab.robots.frames import (
     ARM_JOINT_NAMES,
     GRIPPER_CLOSED_POS,
     GRIPPER_OPEN_POS,
     HOME_JOINT_POS,
     PICK_OFFSET_MEASURED,
+    WRIST_CAM_POS_IN_WRIST,
+    WRIST_CAM_ROT_IN_WRIST,
 )
 
 CONTROL_HZ = 30
@@ -484,6 +487,14 @@ class MjLegoSortEnv:
             for geoms in self.handles.body_geoms
         )
         self.renderers = [mujoco.Renderer(m, 224, 224) for m in self.models] if cameras else []
+        # MS7j --warp_back: a moved camera renders here and warps back through _warps[i], a
+        # ViewWarp per moved camera id that each reset draws (_stress_cameras).
+        self._warp_renderers = (
+            [mujoco.Renderer(m, WARP_SOURCE_PX, WARP_SOURCE_PX) for m in self.models]
+            if cameras and self.stress.warp_back
+            else []
+        )
+        self._warps: list[dict] = [{} for _ in self.models]
         self._wrist_hires: list = [None] * len(self.models)  # ``wrist_crop``'s, on first use
         self._cam_wrist = base_model.camera("wrist").id if cameras else -1
         self._cam_overhead = base_model.camera("overhead").id if cameras else -1
@@ -813,6 +824,9 @@ class MjLegoSortEnv:
 
         A finite ``marker_points`` row is stamped instead of the target's live centre: the
         frozen marker of MS7c, the perceived centre at selection held for the whole cycle.
+
+        Under an MS7j overhead camera knob, the projection is through the episode's nominal
+        overhead camera, not the moved one: a real rig stamps through the pose it believes.
         """
         if not self.cameras:
             return
@@ -826,14 +840,22 @@ class MjLegoSortEnv:
                 point = d.xpos[h.brick_bodies[t]]
             else:
                 continue
-            uv = overlay.project_point(
-                d.cam_xpos[c],
-                d.cam_xmat[c],
-                float(m.cam_fovy[c]),
-                224,
-                224,
-                point,
-            )
+            if self.stress.overhead_camera_on():
+                pos, rot = scene.overhead_camera_pose(self.episode_draws[i], self.camera_back)
+                uv = camera_model.project(
+                    camera_model.Pinhole.sim(cameras.OVERHEAD_FOV_DEG),
+                    camera_model.Pose.from_pos_quat(pos, rot),
+                    point,
+                )
+            else:
+                uv = overlay.project_point(
+                    d.cam_xpos[c],
+                    d.cam_xmat[c],
+                    float(m.cam_fovy[c]),
+                    224,
+                    224,
+                    point,
+                )
             if uv is not None:
                 overlay.stamp_marker(self._overhead[i], *uv)
 
@@ -902,13 +924,70 @@ class MjLegoSortEnv:
         return r.render()[y0:y1, x0:x1].copy()
 
     def close(self) -> None:
-        for r in self.renderers + [r for r in self._wrist_hires if r is not None]:
+        hires = [r for r in self._wrist_hires if r is not None]
+        for r in self.renderers + self._warp_renderers + hires:
             r.close()
-        self.renderers, self._wrist_hires = [], [None] * len(self.models)
+        self.renderers, self._warp_renderers = [], []
+        self._wrist_hires = [None] * len(self.models)
         if self.recorder is not None:
             self.recorder.close()
 
     # -- internals -----------------------------------------------------------------
+
+    def _stress_cameras(self, i: int) -> None:
+        """Apply the MS7j camera knobs to env ``i``'s nominal cameras: the episode's draw with
+        ``camera_back``, so the offsets follow every episode's pose. Under ``--warp_back`` it
+        also draws each moved camera's warp back to its nominal view. The overhead warp maps
+        the desk plane z = 0. The wrist warp undoes the offset rotation only, as the real wrist
+        path corrects the rotation and not the position. ``Stress`` and
+        ``stress.offset_rotation`` give the frames of the offsets. Every reset writes the whole
+        pose, so nothing accumulates. With every camera knob off it changes nothing."""
+        s = self.stress
+        if not self.cameras:
+            return
+        m, draw, px = self.models[i], self.episode_draws[i], WARP_SOURCE_PX
+        cams = []
+        if s.overhead_camera_on():
+            o = s.overhead_offset or (0.0,) * 6
+            pos, rot = scene.overhead_camera_pose(draw, self.camera_back)
+            moved = (np.add(pos, o[3:]), offset_rotation(rot, *o[:3]))
+            fovy = cameras.OVERHEAD_FOV_DEG + s.overhead_fov_delta
+            h = camera_model.plane_homography(
+                camera_model.Pinhole.sim(fovy, px),
+                camera_model.Pose.from_pos_quat(*moved),
+                camera_model.Pinhole.sim(cameras.OVERHEAD_FOV_DEG),
+                camera_model.Pose.from_pos_quat(pos, rot),
+            )
+            cams.append((self._cam_overhead, moved, fovy, h))
+        if s.wrist_offset or s.wrist_fov_delta:
+            o = s.wrist_offset or (0.0,) * 6
+            rot = WRIST_CAM_ROT_IN_WRIST
+            pos = np.add(WRIST_CAM_POS_IN_WRIST, draw["wrist_cam_dpos"])
+            moved = (pos + camera_model.quat_matrix(rot) @ o[3:], offset_rotation(rot, *o[:3]))
+            fovy = cameras.WRIST_FOV_DEG + s.wrist_fov_delta
+            turn = camera_model.quat_matrix(offset_rotation((1.0, 0.0, 0.0, 0.0), *o[:3]))
+            h = camera_model.rotation_homography(
+                camera_model.Pinhole.sim(fovy, px),
+                camera_model.Pinhole.sim(cameras.WRIST_FOV_DEG),
+                turn.T,
+            )
+            cams.append((self._cam_wrist, moved, fovy, h))
+        for c, (pos, rot), fovy, h in cams:
+            m.cam_pos[c] = pos
+            m.cam_quat[c] = quat_mul(rot, cameras.ROS_TO_MUJOCO_CAM)
+            m.cam_fovy[c] = fovy
+            if s.warp_back:
+                self._warps[i][c] = camera_model.ViewWarp(h, (px, px), supersample=2)
+
+    def _render(self, i: int, camera: int) -> np.ndarray:
+        """Env ``i``'s 224 px frame of ``camera``. The order is: render, then warp back to the
+        nominal view if ``_stress_cameras`` drew a warp. ``stamp_markers`` stamps the marker
+        after that, on the warped frame."""
+        warp = self._warps[i].get(camera)
+        r = self.renderers[i] if warp is None else self._warp_renderers[i]
+        r.update_scene(self.datas[i], camera=camera)
+        frame = r.render()
+        return frame if warp is None else warp.apply(frame)
 
     def _reset_env(self, i: int) -> None:
         m, d, h = self.models[i], self.datas[i], self.handles
@@ -928,6 +1007,7 @@ class MjLegoSortEnv:
                 scene.apply_bins(m, bl, heap=self.parts is not None)
             scene.apply_lighting(m, ep)
             scene.apply_cameras(m, ep, self.camera_back)
+        self._stress_cameras(i)
         # Physics DR first: mj_setConst re-derives the model constants AT qpos0 and resets the
         # data to it, so it has to run before the pose below is written.
         if self.cfg.desk_color:
@@ -1364,12 +1444,10 @@ class MjLegoSortEnv:
             if images and self.cameras:
                 if self.cfg.frame_jitter:
                     self.jitter_overhead(i)
-                r = self.renderers[i]
-                r.update_scene(d, camera=self._cam_wrist)
-                self._wrist[i] = r.render()
-                r.update_scene(d, camera=self._cam_overhead)
-                self._overhead[i] = r.render()
+                self._wrist[i] = self._render(i, self._cam_wrist)
+                self._overhead[i] = self._render(i, self._cam_overhead)
                 if self.parts is not None:
+                    r = self.renderers[i]
                     r.enable_depth_rendering()
                     try:
                         r.update_scene(d, camera=self._cam_overhead)

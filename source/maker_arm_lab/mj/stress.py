@@ -6,14 +6,37 @@ of ``STRESS_KNOBS`` and ``stress_block``, and a test pins it to this module."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, fields
+
+from maker_arm_lab.core.quat import quat_mul
+
+WARP_SOURCE_PX = 448
+"""Under ``--warp_back``, a moved camera renders at this size, and ``ViewWarp`` with
+``supersample=2`` takes it back to the 224 px nominal view."""
+
+
+def offset_rotation(rot_wxyz, rx: float, ry: float, rz: float) -> tuple[float, ...]:
+    """``R @ Rx(rx) @ Ry(ry) @ Rz(rz)``: ``rot_wxyz``, a ROS optical camera rotation (x right,
+    y down, z forward), turned about its own axes by degrees. rx > 0 tilts the view up, ry > 0
+    turns it right, and rz > 0 rolls it clockwise as seen from behind the camera."""
+    out = tuple(rot_wxyz)
+    for axis, deg in enumerate((rx, ry, rz)):
+        half = math.radians(deg) / 2.0
+        turn = [math.cos(half), 0.0, 0.0, 0.0]
+        turn[1 + axis] = math.sin(half)
+        out = quat_mul(out, turn)
+    return out
 
 
 @dataclass(frozen=True)
 class Stress:
     sparse_gap: float = 0.0  # m, 0 = the normal heap drop
     obs_delay: int = 0  # control steps of camera delay
-    overhead_offset: tuple[float, ...] = ()  # (rx, ry, rz deg, dx, dy, dz m), () = off
+    # (rx, ry, rz deg, dx, dy, dz m), () = off. The angles are offset_rotation's. The overhead
+    # shift is in the world (dx forward, dy lateral, dz up), the wrist shift in the nominal
+    # camera's optical frame (dx right, dy down, dz forward along the view).
+    overhead_offset: tuple[float, ...] = ()
     wrist_offset: tuple[float, ...] = ()
     overhead_fov_delta: float = 0.0  # deg added to the rendered fovy
     wrist_fov_delta: float = 0.0
