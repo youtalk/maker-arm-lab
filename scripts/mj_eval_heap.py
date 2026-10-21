@@ -737,6 +737,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             record_all=args.record_all,
             pi05_prompt=args.pi05_prompt,
             release_handoff=args.release_handoff,
+            obs_delay=stress.obs_delay,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
