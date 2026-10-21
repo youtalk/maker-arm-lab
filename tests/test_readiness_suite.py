@@ -1,5 +1,6 @@
 """MS7j design sections 6.1 and 6.4: the readiness suite's rows and its tolerance table."""
 
+import argparse
 import json
 import math
 import shlex
@@ -15,6 +16,7 @@ from maker_arm_lab.mj.stress import stress_from_args
 SCRIPT = ROOT / "scripts" / "readiness_suite.py"
 suite = load_script(SCRIPT)
 ge = load_script("run_gate_eval")
+fleet = load_script("fleet")
 SCENE = {
     "backend",
     "num_envs",
@@ -37,6 +39,7 @@ SCENE = {
     "threshold",
     "min_stows_per_hour",
     "heldout_threshold",
+    "no-frame_jitter",  # ruling R27: clears the --frame_jitter of fleet.py's PROTOCOL
 }
 
 
@@ -69,7 +72,8 @@ def test_the_suite_serves_the_real_clients_rules():
     argv += ["--processes", "1", "--out_dir", "/tmp/x", "--client_flags", suite.BASE_CLIENT]
     cfg = ge._build_cfg(ge._parse_args(argv))
     assert (cfg.heap_k, cfg.num_envs, cfg.desk_boxes, cfg.threshold) == (10, 5, 4, 0.0)
-    assert cfg.families == () and cfg.box_draw == 0 and not cfg.frame_jitter
+    assert cfg.families == () and cfg.box_draw == 0
+    assert not ge._build_cfg(ge._parse_args(["--frame_jitter", *argv])).frame_jitter
     assert cfg.min_stows_per_hour is None and cfg.heldout_threshold is None
     assert ge.stress_block(cfg.client_flags) == {"sparse_gap": 0.035}
 
@@ -92,18 +96,36 @@ SPOT = {
 }
 
 
+def _client(row, heap, pi05):
+    """The supervisor config and the heap client's args of the row's read, with the supervisor
+    argv of a ``fleet.py read`` lane: fleet's PROTOCOL and flags first, the row's argv after."""
+    ns = argparse.Namespace(ckpt="/ckpt/pretrained_model", pi05=pi05, threshold=0.85)
+    ns.__dict__.update(seed=20390000, draws=[0], split="heldout", n_steps=50)
+    ns.client_flags = "--select_at_release --replan_on_switch --squeeze_floor --square_wrist"
+    lane = [*fleet.supervisor_args(ns, "/tmp/ledger.json"), "--device", "cpu", *suite.argv(row)]
+    lane += ["--out_dir", "/tmp/x", "--port", "7100", "--only_processes", "0"]
+    cfg = ge._build_cfg(ge._parse_args(lane + ["--lanes", "1"] * pi05))
+    cmd = ge._eval_command(cfg, ge.make_eval_draws(1, 20390000)[0])
+    return cfg, heap.parse_args(cmd[cmd.index("scripts/mj_eval_heap.py") + 1 :])
+
+
 def test_every_row_parses_with_the_clients_stress_parser():
     heap = load_script("mj_eval_heap")
     assert len({r.name for r in suite.ROWS}) == len(suite.ROWS) == 59
-    for row in suite.ROWS:
-        client = shlex.split(f"{suite.BASE_CLIENT} {row.client}")
-        block = stress_from_args(heap.parse_args(["--heap_k", "10", "--tray", *client])).block()
-        assert block == ge.stress_block(client), row.name  # the supervisor's cache key
+    for row in (suite.BASE, *suite.ROWS):
+        for pi05 in [p for p, on in ((False, row.act), (True, row.pi05)) if on]:
+            cfg, args = _client(row, heap, pi05)
+            assert not (cfg.frame_jitter or args.frame_jitter), row.name  # PROTOCOL's is cleared
+            assert args.perceived and (args.desk_boxes, args.heap_k) == (4, 10), row.name
+            assert cfg.pi05 == pi05 and cfg.infer_delay == (int(row.level) if row.server else 0)
+            block = stress_from_args(args).block()
+            assert block == ge.stress_block(cfg.client_flags), row.name  # the cache key
         assert block.pop("sparse_gap") == 0.035
-        assert bool(block) != bool(row.server), row.name  # one knob: the client's or the server's
+        # one knob, the client's or the server's, and none for the base
+        assert bool(block) + bool(row.server) == (row != suite.BASE), row.name
         if row.server:
             assert row.server == f"--infer_delay {row.level}"
-        elif row.level != "on":
+        elif row.level not in ("on", ""):
             on = [v for x in block.values() for v in (x if isinstance(x, list) else [x])]
             assert [v for v in on if v is not True and v != 0] == [float(row.level)], row.name
         if row.name in SPOT:
@@ -182,13 +204,18 @@ def _episode(correct, parts=50, steps=300):
     }
 
 
-def _payload(i, correct, stress=None, run_seed=None):
+POLICY = "act:/ckpt/pretrained_model+nas50+warp1.5+ctx16+gap"
+
+
+def _payload(i, correct, stress=None, run_seed=None, policy=POLICY, num_envs=1, delay=0):
     return {
         "run_seed": 100 + i if run_seed is None else run_seed,
         "layout_seed": 600 + i,
         "permutation": [0, 1, 2, 3],
+        "num_envs": num_envs,
         "parts": ["brick_2x4"] * 50,
-        "inference": {"n_action_steps": 50},
+        "policy_id": policy + (f"+delay{delay}" if delay else ""),
+        "inference": {"n_action_steps": 50, **({"infer_delay": delay} if delay else {})},
         "stress": {"sparse_gap": 0.035, **(stress or {})},
         "episodes": [_episode(correct)],
     }
@@ -204,8 +231,11 @@ def test_paired_drop_and_se_on_known_counts():
     assert math.isclose(got["drop"], 100 * 8 / 150)
     assert math.isclose(got["se"], 100 * math.sqrt(3) * statistics.stdev([2, 0, 6]) / 150)
     assert (got["passes"], got["better"], got["same"], got["worse"]) == (False, 0, 1, 2)
-    got = suite.paired(_draws((40, 45, 50)), _draws((41, 45, 49)))
+    got = suite.paired(_draws((40, 45, 50)), _draws((41, 45, 49), delay=1))
     assert got["drop"] == 0 and got["passes"] and (got["better"], got["worse"]) == (1, 1)
+    for other in ({"policy": "act:/other/pretrained_model"}, {"num_envs": 5}):
+        with pytest.raises(ValueError):
+            suite.paired(_draws((40, 45, 50)), _draws((40, 45, 50), **other))
 
 
 TILT = {"overhead_offset": [1, 0, 0, 0, 0, 0]}
@@ -225,8 +255,10 @@ def _write(path, draws):
         {**_draws((40, 45, 50), stress=TILT), "eval_001.json": _payload(1, 45, TILT, run_seed=7)},
         _draws((40, 45, 50, 50), stress=TILT),  # a draw the baseline lacks
         _draws((40, 45, 50), stress={"overhead_offset": [-1, 0, 0, 0, 0, 0]}),  # another row's
+        _draws((40, 45, 50), stress=TILT, policy="act:/retrained/pretrained_model"),
+        _draws((40, 45, 50), stress=TILT, num_envs=5),
     ],
-    ids=["missing", "seed", "extra", "knobs"],
+    ids=["missing", "seed", "extra", "knobs", "policy", "num_envs"],
 )
 def test_an_unpaired_row_is_refused(tmp_path, draws):
     base = _write(tmp_path / "base", _draws((40, 45, 50)))

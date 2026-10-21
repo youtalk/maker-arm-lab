@@ -1405,8 +1405,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--frame_jitter",
-        action="store_true",
-        help="MuJoCo only: small overhead-camera jitter resampled per rendered frame",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="MuJoCo only: small overhead-camera jitter resampled per rendered frame. A later "
+        "--no-frame_jitter clears the one in fleet.py's PROTOCOL (the MS7j suite)",
     )
     parser.add_argument(
         "--spatial_scale",

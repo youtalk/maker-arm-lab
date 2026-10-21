@@ -10,10 +10,11 @@ Stdlib only, like run_gate_eval.py, and it imports no maker_arm_lab.
         SUITE_OK {"rows": N}.
   table --base DIR --row NAME=DIR ... --out FILE.md
         Pairs the eval_NNN.json payloads of each row with the baseline's, writes the table to
-        FILE.md and prints SUITE_OK {json}. A row whose draws are not the baseline's (a missing
-        or extra file, another seed or other parts), or whose payloads ran other knobs than its
-        name says, is refused: SUITE_FAIL {json}, exit 1, and no table. The tool never pairs a
-        part of the draws.
+        FILE.md and prints SUITE_OK {json}. A row is refused when its draws are not the
+        baseline's (a missing or extra file, another seed, other parts or another num_envs),
+        when its policy is not the baseline's, or when its payloads ran other knobs than its
+        name says: SUITE_FAIL {json}, exit 1, and no table. The tool never pairs a part of the
+        draws.
 
 BASE_ARGS is policy S's supervisor argv (``reads/i_S_d2039/fleet.json``), each flag once at the
 value that argparse kept, without --checkpoint, --seed, --ledger, --processes, --only_processes,
@@ -23,7 +24,10 @@ value that argparse kept, without --checkpoint, --seed, --ledger, --processes, -
 - --desk_boxes 4 (S: 8), without --box_draw, --families, --categories, --classifier, --cls_flip
   and --vote_weights. The parts are the default catalog, so the classes are the four base
   classes.
-- Without --frame_jitter, --tray_refill and --box_empty. --episode_draws stays.
+- --no-frame_jitter, without --tray_refill and --box_empty. --episode_draws stays. The
+  supervisor's --frame_jitter is a BooleanOptionalAction, so --no-frame_jitter clears the
+  --frame_jitter that fleet.py's PROTOCOL puts first (ruling R27). The overhead camera knobs
+  refuse frame jitter.
 - --max_cycles_per_stowed 1000 (S kept 1000 too) and --threshold 0 (S: 0.85), without
   --min_stows_per_hour and --heldout_threshold. The suite is no gate.
 
@@ -46,13 +50,13 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import run_gate_eval as ge
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # run_gate_eval, imported in calls
 
 BASE_ARGS: tuple[str, ...] = (
     *("--backend", "mujoco", "--num_envs", "5", "--heap_k", "10", "--parts_seed", "20260915"),
     *("--parts_split", "all", "--episode_draws", "--context", "camera_box_target"),
     *("--gripper", "continuous", "--eval_timeout_s", "72000", "--max_cycles_per_stowed", "1000"),
+    "--no-frame_jitter",
     *("--threshold", "0", "--n_action_steps", "50", "--action_warp", "1.5"),
     *("--tray", "--desk_boxes", "4", "--tray_lean", "30", "--deep_tray", "--deep_box_floor"),
     *("--scripted_rake", "--part_failures", "--pick_snap", "--dwell_close", "--adopt_held"),
@@ -66,11 +70,9 @@ BASE_CLIENT = (
     "--select_at_release --replan_on_switch --squeeze_floor --square_wrist --max_wall_minutes 900"
     " --sparse_gap 0.035"
 )
-CONTROL_HZ = 30.0
-"""``core.loop.CONTROL_HZ``: control steps per simulated second."""
 LIFTED = frozenset({"stowed", "carrying", "lifted_lost", "wrong_box"})
 """The cycle classes whose ``last_held`` part left the tray floor."""
-DRAW_KEYS = ("run_seed", "layout_seed", "permutation", "parts")
+DRAW_KEYS = ("run_seed", "layout_seed", "permutation", "parts", "num_envs")
 """What a row's payload must share with the baseline's of the same name to pair."""
 TOLERANCE = 5.0  # points of placement rate
 
@@ -182,7 +184,8 @@ def measures(payload: dict) -> dict:
 
 def paired(base: dict[str, dict], row: dict[str, dict]) -> dict:
     """The row's drop against the baseline, paired by draw (``eval_NNN.json`` name to payload).
-    Raises ``ValueError`` unless both hold the same draws, two or more."""
+    Raises ``ValueError`` unless both hold the same draws, two or more, of one policy. The row's
+    policy id may end in its server's ``+delay<D>``."""
     if set(base) != set(row):
         raise ValueError(f"draws differ: baseline {sorted(base)}, row {sorted(row)}")
     if len(base) < 2:
@@ -192,6 +195,10 @@ def paired(base: dict[str, dict], row: dict[str, dict]) -> dict:
         for key in DRAW_KEYS:
             if base[name].get(key) != row[name].get(key):
                 raise ValueError(f"{name}: the row's {key} is not the baseline's")
+        delay = (row[name].get("inference") or {}).get("infer_delay", 0)
+        policy = row[name].get("policy_id", "").removesuffix(f"+delay{delay}")
+        if policy != base[name].get("policy_id", ""):  # +delay<D> is the last part of an id
+            raise ValueError(f"{name}: the row's policy {policy} is not the baseline's")
     b = [measures(base[n]) for n in names]
     c = [x["correct"] - measures(row[n])["correct"] for x, n in zip(b, names)]
     parts = sum(x["parts"] for x in b)
@@ -230,6 +237,8 @@ def largest_passing(results: dict[str, dict]) -> dict[str, str | None]:
 
 def _load(path: str, row: Row) -> dict[str, dict]:
     """A read's payloads, each checked to have run the row's knobs."""
+    import run_gate_eval as ge
+
     want = (ge.stress_block(shlex.split(argv(row)[-1])), int(row.level) if row.server else 0)
     payloads = {}
     for p in sorted(Path(path).expanduser().glob("eval_[0-9][0-9][0-9].json")):
@@ -242,11 +251,13 @@ def _load(path: str, row: Row) -> dict[str, dict]:
 
 
 def _totals(payloads: dict[str, dict]) -> dict:
+    import run_gate_eval as ge
+
     total = dict.fromkeys(("parts", "lifted", "correct", "wrong", "never", "steps"), 0)
     for payload in payloads.values():
         for key, value in measures(payload).items():
             total[key] += value
-    seconds = total["steps"] / CONTROL_HZ
+    seconds = total["steps"] / ge.CONTROL_HZ
     total["s_per_correct"] = seconds / total["correct"] if total["correct"] else None
     return total
 
