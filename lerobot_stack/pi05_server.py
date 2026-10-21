@@ -454,11 +454,12 @@ def load_pi05(
             noise[..., JAW] = jaw_noise_abs * draw[..., JAW]
         return noise
 
-    def predict_chunk(obs: dict, scale: float = noise_scale) -> np.ndarray:
-        rows, noise = len(obs["state"]), {}
+    def predict_chunk(obs: dict, scale: float = noise_scale, noise=None) -> np.ndarray:
+        """``noise`` (rows, chunk_size, max_action_dim) replaces every draw above, unchanged."""
+        rows, noise = len(obs["state"]), {} if noise is None else {"noise": noise}
         sampled = scale != 1.0 or jaw_noise_scale != 1.0 or jaw_noise_shared
         sampled = sampled or jaw_noise_abs is not None
-        if sampled:  # else sample_actions' own draw
+        if sampled and not noise:  # else the given noise, or sample_actions' own draw
             noise["noise"] = initial_noise(rows, scale)
         batch = {"observation.state": torch.from_numpy(obs["state"])}
         batch["task"] = tasks(obs.get("prompt"), rows)

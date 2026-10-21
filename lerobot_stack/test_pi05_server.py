@@ -665,3 +665,15 @@ def test_a_bad_sampling_value_fails_with_the_token(flags):
     assert result.returncode == 2
     line = result.stdout.strip().splitlines()[-1]
     assert line.startswith("SERVER_FAIL usage: ") and flags[0] in line
+
+
+def test_a_given_noise_replaces_every_draw(stand_in):
+    policy, ckpt = stand_in
+    given = torch.full((2, N, 32), 3.0)
+    for args in ((), (None, 0.5, 0.25, True)):  # default sampling, and every jaw switch on
+        predict_chunk, *_ = ps.load_pi05(ckpt, "cpu", *args)
+        _, arrays = step(0.5, batch=2)
+        obs = {"state": derived_state(arrays["state"], arrays["context"])}
+        obs |= {"wrist": arrays["wrist"], "overhead": arrays["overhead"]}
+        predict_chunk(obs, 0.7, noise=given)
+        assert policy.kwargs.pop()["noise"] is given
