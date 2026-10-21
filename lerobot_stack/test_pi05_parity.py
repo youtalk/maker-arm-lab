@@ -41,3 +41,15 @@ def test_compare_fails_over_the_jaw_bar(tmp_path):
 def test_compare_passes_identical_chunks(tmp_path):
     code, token, info = compare(tmp_path, np.zeros((16, 50, 7), np.float32))
     assert (code, token, info["p99"]) == (0, "PARITY_OK", [0.0] * 7)
+
+
+def test_a_failing_compare_prints_its_token_through_a_pipe():
+    run = subprocess.run(
+        [sys.executable, str(SCRIPT), "compare", "/nonexistent/a.npy", "/nonexistent/b.npy"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    lines = [x for x in run.stdout.splitlines() if x.startswith("PARITY_")]
+    assert run.returncode == 1 and len(lines) == 1 and lines[0].startswith("PARITY_FAIL ")

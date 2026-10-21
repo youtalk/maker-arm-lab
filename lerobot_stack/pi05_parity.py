@@ -104,12 +104,15 @@ def main(argv: list[str]) -> int:
         return int(exc.code or 0)
     except Exception as exc:  # noqa: BLE001 -- any failure must become the fail token
         traceback.print_exc()
-        print("PARITY_FAIL " + json.dumps({"error": f"{type(exc).__name__}: {exc}"[:300]}))
+        print(
+            "PARITY_FAIL " + json.dumps({"error": f"{type(exc).__name__}: {exc}"[:300]}), flush=True
+        )
         return 1
     print(("PARITY_OK " if ok else "PARITY_FAIL ") + json.dumps(info), flush=True)
     return 0 if ok else 1
 
 
 if __name__ == "__main__":
-    sys.stdout.flush()
-    os._exit(main(sys.argv[1:]))
+    code = main(sys.argv[1:])
+    sys.stdout.flush()  # os._exit skips the flush, and --help prints without one
+    os._exit(code)

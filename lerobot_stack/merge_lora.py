@@ -107,5 +107,6 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.stdout.flush()
-    os._exit(main(sys.argv[1:]))
+    code = main(sys.argv[1:])
+    sys.stdout.flush()  # os._exit skips the flush, and --help prints without one
+    os._exit(code)
