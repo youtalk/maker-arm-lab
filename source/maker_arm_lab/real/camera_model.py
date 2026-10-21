@@ -181,6 +181,7 @@ class ViewWarp:
             float(max(np.ptp(self._su[inside]), np.ptp(self._sv[inside]))) if inside.any() else 0.0
         )
         """The view's extent in source pixels, the larger axis."""
+        self._samples: dict[tuple[int, int], tuple] = {}  # per frame (height, width)
 
     def jpeg_reduce(self) -> int:
         """The largest JPEG DCT reduction (1, 2, 4 or 8) that keeps at least one source pixel
@@ -203,6 +204,21 @@ class ViewWarp:
                 f"a {w_img}x{h_img} frame is not a uniform scale of the "
                 f"{self.source_size[0]}x{self.source_size[1]} source"
             )
+        if (h_img, w_img) not in self._samples:
+            self._samples[h_img, w_img] = self._sample_points(h_img, w_img, scale)
+        corners, fx, gx, fy, gy, invalid = self._samples[h_img, w_img]
+        # uint8 times the float64 weights is the float64 bilinear blend, exactly as before.
+        a, b, c, d = (np.take(image.reshape(-1, 3), i, axis=0) for i in corners)
+        out = (a * gx + b * fx) * gy + (c * gx + d * fx) * fy
+        out[invalid] = 0.0
+        s, n = self.supersample, self.size
+        out = out.reshape(n, s, n, s, -1).mean(axis=(1, 3))
+        return np.clip(np.rint(out), 0, 255).astype(np.uint8)
+
+    def _sample_points(self, h_img: int, w_img: int, scale: float) -> tuple:
+        """``apply``'s gathers in an (h_img, w_img) frame, which depend only on the homography
+        and the frame's size: the flat indices of the four bilinear corners, the weights fx,
+        1 - fx, fy and 1 - fy, and the samples outside the frame."""
         x = self._su * scale - 0.5
         y = self._sv * scale - 0.5
         x0, y0 = np.floor(x).astype(np.int64), np.floor(y).astype(np.int64)
@@ -210,17 +226,8 @@ class ViewWarp:
         valid = (x >= -0.5) & (x <= w_img - 0.5) & (y >= -0.5) & (y <= h_img - 0.5)
         xa, xb = np.clip(x0, 0, w_img - 1), np.clip(x0 + 1, 0, w_img - 1)
         ya, yb = np.clip(y0, 0, h_img - 1), np.clip(y0 + 1, 0, h_img - 1)
-
-        def at(yy, xx):
-            return image[yy, xx].astype(np.float32)
-
-        top = at(ya, xa) * (1.0 - fx) + at(ya, xb) * fx
-        bottom = at(yb, xa) * (1.0 - fx) + at(yb, xb) * fx
-        out = top * (1.0 - fy) + bottom * fy
-        out[~valid] = 0.0
-        s, n = self.supersample, self.size
-        out = out.reshape(n, s, n, s, -1).mean(axis=(1, 3))
-        return np.clip(np.rint(out), 0, 255).astype(np.uint8)
+        corners = [yy * w_img + xx for yy, xx in ((ya, xa), (ya, xb), (yb, xa), (yb, xb))]
+        return corners, fx, 1.0 - fx, fy, 1.0 - fy, ~valid
 
 
 def overhead_warp(camera: Pinhole, pose: Pose, plane_z: float = 0.0) -> ViewWarp:
