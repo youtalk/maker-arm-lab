@@ -12,6 +12,8 @@ def parse(flags):
     parser.add_argument("--frame_jitter", action="store_true")
     parser.add_argument("--tray", action="store_true")
     parser.add_argument("--tray_refill", action="store_true")
+    parser.add_argument("--dagger_dir", default="")
+    parser.add_argument("--record_all", action="store_true")
     return parser.parse_args(flags)
 
 
@@ -37,6 +39,15 @@ def test_the_block_names_only_the_knobs_that_are_on():
         ["--overhead_fov_delta", "2", "--warp_back", "--frame_jitter"],
         ["--sparse_gap", "0.05"],
         ["--sparse_gap", "0.05", "--tray", "--tray_refill"],
+        ["--sparse_gap=-0.05", "--tray"],
+        ["--sparse_gap", "nan", "--tray"],
+        ["--sparse_gap", "inf", "--tray"],
+        ["--blur_sigma", "nan"],
+        ["--exposure_stops", "inf"],
+        ["--overhead_fov_delta", "inf", "--warp_back"],
+        ["--wrist_offset", "0,0,0,0,0,nan", "--warp_back"],
+        ["--obs_delay", "2", "--dagger_dir", "d"],
+        ["--obs_delay", "2", "--record_all"],
     ],
 )
 def test_bad_combinations_are_refused(flags):

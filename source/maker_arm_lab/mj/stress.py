@@ -143,8 +143,15 @@ def stress_from_args(args) -> Stress:
         raise ValueError("--warp_back needs a camera offset or a fov delta")
     if not 0 <= stress.jpeg_quality <= 100:
         raise ValueError("--jpeg_quality must lie in 0 to 100")
-    if stress.blur_sigma < 0 or stress.obs_delay < 0:
-        raise ValueError("--blur_sigma and --obs_delay must not be negative")
+    floats = (stress.sparse_gap, stress.overhead_fov_delta, stress.wrist_fov_delta)
+    floats += (stress.blur_sigma, stress.exposure_stops, *stress.overhead_offset)
+    if not all(math.isfinite(v) for v in floats + stress.wrist_offset):
+        raise ValueError("the stress knobs must be finite")
+    if stress.sparse_gap < 0 or stress.blur_sigma < 0 or stress.obs_delay < 0:
+        raise ValueError("--sparse_gap, --blur_sigma and --obs_delay must not be negative")
+    if stress.obs_delay and (getattr(args, "dagger_dir", "") or getattr(args, "record_all", False)):
+        # The recorder would save the delayed frame next to the current state and depth.
+        raise ValueError("--obs_delay refuses --dagger_dir and --record_all")
     if stress.overhead_camera_on() and getattr(args, "frame_jitter", False):
         raise ValueError("overhead camera knobs refuse --frame_jitter, which rewrites the pose")
     if stress.sparse_gap:
