@@ -349,6 +349,7 @@ def test_the_latch_holds_the_jaw_after_a_close_and_leaves_a_release_free():
 
 
 def test_the_full_gap_is_twice_the_converter_travel():
+    pytest.importorskip("h5py")
     from convert_to_lerobot import GRIPPER_TRAVEL
 
     assert ps.JAW_FULL_GAP == 2 * GRIPPER_TRAVEL
