@@ -497,35 +497,79 @@ def sample_heap_batch(
     return [points[k] for k in range(len(half_diagonals))]
 
 
-def sample_sparse_points(
-    rng: random.Random, half_diagonals: Sequence[float], gap: float
-) -> list[tuple[float, float]]:
-    """Tray points for parts that stand apart (the readiness suite's sparse scene), in input order.
+def _corners(x: float, y: float, yaw: float, size: tuple[float, float]):
+    c, s = math.cos(yaw), math.sin(yaw)
+    ux, uy, vx, vy = c * size[0] / 2, s * size[0] / 2, -s * size[1] / 2, c * size[1] / 2
+    return [(x + sx * ux + sy * vx, y + sx * uy + sy * vy) for sx, sy in _SIGNS]
 
-    Each point is ``sample_tray_point``'s, inset by the part's half diagonal plus
-    TRAY_DROP_INSET. Two points are at least ``max(gap, hd_i + hd_j + HEAP_DROP_GAP)`` apart.
-    The largest parts go first. A part that finds no place in HEAP_DROP_TRIES draws restarts
-    the whole layout, since the first big parts can block the rest. After SPARSE_RESTARTS
-    restarts it raises ValueError.
+
+_SIGNS = ((1, 1), (-1, 1), (-1, -1), (1, -1))
+
+
+def _rect_gap(a, b) -> float:
+    """Distance between two convex rectangles given by their corners in order, 0 on overlap."""
+    for poly in (a, b):
+        for k in range(4):
+            (x0, y0), (x1, y1) = poly[k], poly[(k + 1) % 4]
+            nx, ny = y1 - y0, x0 - x1  # an edge normal: a separating axis if the spans are apart
+            pa = [nx * x + ny * y for x, y in a]
+            pb = [nx * x + ny * y for x, y in b]
+            if max(pa) < min(pb) or max(pb) < min(pa):
+                break
+        else:
+            continue
+        break
+    else:
+        return 0.0
+    best = math.inf
+    for src, dst in ((a, b), (b, a)):
+        for px, py in src:
+            for k in range(4):
+                (x0, y0), (x1, y1) = dst[k], dst[(k + 1) % 4]
+                ex, ey = x1 - x0, y1 - y0
+                t = max(0.0, min(1.0, ((px - x0) * ex + (py - y0) * ey) / (ex * ex + ey * ey)))
+                best = min(best, math.hypot(px - x0 - t * ex, py - y0 - t * ey))
+    return best
+
+
+def sample_sparse_poses(
+    rng: random.Random, sizes: Sequence[tuple[float, float]], gap: float
+) -> list[tuple[float, float, float]]:
+    """(x, y, yaw) in the tray for parts that stand apart (the readiness suite's sparse scene).
+
+    ``sizes`` are the parts' footprints (size_x, size_y). A pose is valid when the yawed
+    footprint lies inside the tray interior inset by TRAY_DROP_INSET, its centre is at least
+    ``gap`` from every placed centre and its rectangle at least HEAP_DROP_GAP from every placed
+    rectangle. Yaw is U(0, pi). The largest footprints go first. A part with no place after
+    HEAP_DROP_TRIES draws restarts the whole layout, since the first big parts can block the
+    rest. After SPARSE_RESTARTS restarts it raises ValueError.
     """
-    order = sorted(range(len(half_diagonals)), key=lambda k: -half_diagonals[k])
+    (x0, x1), (y0, y1) = tray_bounds()
+    order = sorted(range(len(sizes)), key=lambda k: -(sizes[k][0] * sizes[k][1]))
     for _ in range(SPARSE_RESTARTS):
-        points: dict[int, tuple[float, float]] = {}
+        placed: dict[int, tuple[float, float, float]] = {}
         for k in order:
-            hd = half_diagonals[k]
             for _ in range(HEAP_DROP_TRIES):
-                p = sample_tray_point(rng, hd + TRAY_DROP_INSET)
+                yaw = rng.uniform(0.0, math.pi)
+                c, s = abs(math.cos(yaw)), abs(math.sin(yaw))
+                ex = (c * sizes[k][0] + s * sizes[k][1]) / 2 + TRAY_DROP_INSET
+                ey = (s * sizes[k][0] + c * sizes[k][1]) / 2 + TRAY_DROP_INSET
+                if x1 - x0 < 2 * ex or y1 - y0 < 2 * ey:
+                    continue
+                x, y = rng.uniform(x0 + ex, x1 - ex), rng.uniform(y0 + ey, y1 - ey)
+                me = _corners(x, y, yaw, sizes[k])
                 if all(
-                    math.dist(p, q) >= max(gap, hd + half_diagonals[j] + HEAP_DROP_GAP)
-                    for j, q in points.items()
+                    math.dist((x, y), q[:2]) >= gap
+                    and _rect_gap(me, _corners(*q, sizes[j])) >= HEAP_DROP_GAP
+                    for j, q in placed.items()
                 ):
-                    points[k] = p
+                    placed[k] = (x, y, yaw)
                     break
             else:
                 break
         else:
-            return [points[k] for k in range(len(half_diagonals))]
-    raise ValueError(f"no room for {len(half_diagonals)} parts {gap} m apart in the tray")
+            return [placed[k] for k in range(len(sizes))]
+    raise ValueError(f"no room for {len(sizes)} parts {gap} m apart in the tray")
 
 
 def scatter_x(bl: BinLayout) -> tuple[float, float]:
