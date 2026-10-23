@@ -225,6 +225,14 @@ def _draws(counts, **kw):
     return {f"eval_{i:03d}.json": _payload(i, c, **kw) for i, c in enumerate(counts)}
 
 
+def _with(draws, **top):
+    """``draws`` with these top-level keys set in every payload."""
+    return {name: {**payload, **top} for name, payload in draws.items()}
+
+
+LOOP = {"n_action_steps": 50, "loop": {"guard_margin": 0.02}}  # a client flag the base lacks
+
+
 def test_paired_drop_and_se_on_known_counts():
     got = suite.paired(_draws((40, 45, 50)), _draws((38, 45, 44)))
     assert got["n"] == 3
@@ -266,8 +274,10 @@ def _write(path, draws):
         _draws((40, 45, 50), stress={"overhead_offset": [-1, 0, 0, 0, 0, 0]}),  # another row's
         _draws((40, 45, 50), stress=TILT, policy="act:/retrained/pretrained_model"),
         _draws((40, 45, 50), stress=TILT, num_envs=5),
+        _with(_draws((40, 45, 50), stress=TILT), inference=LOOP),
+        _with(_draws((40, 45, 50), stress=TILT), tray_lean=0.0),
     ],
-    ids=["missing", "seed", "extra", "knobs", "policy", "num_envs"],
+    ids=["missing", "seed", "extra", "knobs", "policy", "num_envs", "loop", "scene"],
 )
 def test_an_unpaired_row_is_refused(tmp_path, draws):
     base = _write(tmp_path / "base", _draws((40, 45, 50)))

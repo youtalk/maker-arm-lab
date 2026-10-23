@@ -10,11 +10,16 @@ Stdlib only, like run_gate_eval.py, and it imports no maker_arm_lab.
         SUITE_OK {"rows": N}.
   table --base DIR --row NAME=DIR ... --out FILE.md
         Pairs the eval_NNN.json payloads of each row with the baseline's, writes the table to
-        FILE.md and prints SUITE_OK {json}. A row is refused when its draws are not the
+        FILE.md and prints SUITE_OK {"out", "draws", "largest", "failed_expected", "rtc"}, where
+        "rtc" is true when the rows serve with RTC. A row is refused when its draws are not the
         baseline's (a missing or extra file, another seed, other parts or another num_envs),
-        when its policy is not the baseline's, or when its payloads ran other knobs than its
-        name says: SUITE_FAIL {json}, exit 1, and no table (an earlier FILE.md is removed
-        first). The tool never pairs a part of the draws.
+        when its scene is not the baseline's (ms7e, ms7f, desk_boxes, tray, tray_lean,
+        deep_box_floor, cycle_budget or frame_jitter), when its policy is not the baseline's,
+        when its inference block (the loop switches included) differs from the baseline's in a
+        key other than infer_delay and rtc, or when its payloads ran other knobs than its name
+        says. A table whose rows disagree on RTC is refused too: the RTC rows and the chunked
+        rows go in two tables. A refusal prints SUITE_FAIL {json}, exits 1 and writes no table
+        (an earlier FILE.md is removed first). The tool never pairs a part of the draws.
 
 BASE_ARGS is policy S's supervisor argv (``reads/i_S_d2039/fleet.json``), each flag once at the
 value that argparse kept, without --checkpoint, --seed, --ledger, --processes, --only_processes,
@@ -72,8 +77,15 @@ BASE_CLIENT = (
 )
 LIFTED = frozenset({"stowed", "carrying", "lifted_lost", "wrong_box"})
 """The cycle classes whose ``last_held`` part left the tray floor."""
-DRAW_KEYS = ("run_seed", "layout_seed", "permutation", "parts", "num_envs")
-"""What a row's payload must share with the baseline's of the same name to pair."""
+DRAW_KEYS = (
+    *("run_seed", "layout_seed", "permutation", "parts", "num_envs", "ms7e", "ms7f"),
+    *("desk_boxes", "tray", "tray_lean", "deep_box_floor", "cycle_budget", "frame_jitter"),
+)
+"""What a row's payload must share with the baseline's of the same name to pair: the draw and
+the scene. A key absent from both is equal."""
+DELAY_KEYS = ("infer_delay", "rtc")
+"""The only keys in which a row's inference block (the loop switches included) may differ from
+the baseline's: the server's delay row knobs."""
 TOLERANCE = 5.0  # points of placement rate
 
 
@@ -184,9 +196,10 @@ def measures(payload: dict) -> dict:
 
 def paired(base: dict[str, dict], row: dict[str, dict]) -> dict:
     """The row's drop against the baseline, paired by draw (``eval_NNN.json`` name to payload).
-    Raises ``ValueError`` unless both hold the same draws, two or more, of one policy. The row's
-    policy id may end in its server's ``+delay<D>``, and then ``+rtc`` (MS7j Task 12), so an RTC
-    row pairs with a chunked baseline at the same serving."""
+    Raises ``ValueError`` unless both hold the same draws, two or more, of one policy with one
+    serving and one loop (the inference block apart from ``DELAY_KEYS``). The row's policy id
+    may end in its server's ``+delay<D>``, and then ``+rtc`` (MS7j Task 12), so an RTC row pairs
+    with a chunked baseline at the same serving."""
     if set(base) != set(row):
         raise ValueError(f"draws differ: baseline {sorted(base)}, row {sorted(row)}")
     if len(base) < 2:
@@ -201,6 +214,13 @@ def paired(base: dict[str, dict], row: dict[str, dict]) -> dict:
         policy = row[name].get("policy_id", "").removesuffix(tail)
         if policy != base[name].get("policy_id", ""):  # the server's last parts of an id
             raise ValueError(f"{name}: the row's policy {policy} is not the baseline's")
+        b, r = (
+            {k: v for k, v in (p.get("inference") or {}).items() if k not in DELAY_KEYS}
+            for p in (base[name], row[name])
+        )
+        if b != r:
+            keys = sorted(k for k in b.keys() | r.keys() if b.get(k) != r.get(k))
+            raise ValueError(f"{name}: the row's inference {keys} is not the baseline's")
     b = [measures(base[n]) for n in names]
     c = [x["correct"] - measures(row[n])["correct"] for x, n in zip(b, names)]
     parts = sum(x["parts"] for x in b)
@@ -300,7 +320,9 @@ def table(base_dir: str, specs: list[str], out: str) -> dict:
         (
             f"Baseline: {base_dir}. A row passes when drop + SE <= {TOLERANCE:g} points (MS7j"
             " design section 6.4). Drop and SE are in points of correct placements per part."
-            " Seconds are sim seconds per correct placement."
+            ' Seconds are sim seconds per correct placement. "Lifted" counts the parts the'
+            " policy held, so a part that lands in a box without a grasp of its own counts as"
+            ' never lifted, and the tolerance rule reads only "Correct".'
             + (" The rows serve with RTC (--pi05_rtc), the baseline chunked." if rtc else "")
         ),
         "",
