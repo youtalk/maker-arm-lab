@@ -154,10 +154,12 @@ def open_sources(rig, namespace: str, closers: list):
 
 
 def check_served_inference(server) -> None:
-    """Refuse a policy server that serves with other chunking or warp than S."""
+    """Refuse a policy server that serves with other chunking or warp than S, or that runs an
+    MS7j emulation knob (``infer_delay``, ``rtc``): the real arm has its own inference delay."""
     served = {
         "n_action_steps": server.n_action_steps,
         "action_warp": server.inference.get("action_warp", 1.0),
+        **{k: server.inference[k] for k in ("infer_delay", "rtc") if k in server.inference},
     }
     if served != SERVED_INFERENCE:
         raise EvalFailure("served_inference", f"server serves {served}, need {SERVED_INFERENCE}")

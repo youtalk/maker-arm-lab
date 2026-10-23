@@ -149,9 +149,17 @@ class _Server:
 
 
 @pytest.mark.parametrize(
-    "server", [_Server(inference={"action_warp": 1.0}), _Server(inference={}), _Server(1)]
+    "server",
+    [
+        _Server(inference={"action_warp": 1.0}),
+        _Server(inference={}),
+        _Server(1),
+        _Server(inference={"action_warp": 1.5, "infer_delay": 1}),  # an emulated delay
+        _Server(inference={"action_warp": 1.5, "infer_delay": 6, "rtc": 25}),
+        _Server(inference={"action_warp": 1.5, "rtc": 25}),
+    ],
 )
-def test_the_client_refuses_a_server_with_another_warp_or_chunk(monkeypatch, capsys, server):
+def test_the_client_refuses_another_serving_or_an_emulated_delay(monkeypatch, capsys, server):
     env, arm, _ = make_env()
 
     def build(args, world):
@@ -167,6 +175,15 @@ def test_the_client_refuses_a_server_with_another_warp_or_chunk(monkeypatch, cap
 
 def test_the_client_accepts_the_served_inference():
     real_eval_heap.check_served_inference(_Server(inference={"action_warp": 1.5}))
+
+
+def test_build_world_checks_the_served_inference_before_it_keeps_the_policy():
+    """The refusal test above stubs build_world, so the real call is pinned in its text."""
+    tree = ast.parse(SCRIPT.read_text())
+    build = next(n for n in tree.body if getattr(n, "name", None) == "build_world")
+    body = [ast.unparse(statement) for statement in build.body]
+    check = body.index("check_served_inference(server)")
+    assert check < body.index("world['policy'] = TimedPolicy(server, env.ticks, env.trip)")
 
 
 @pytest.mark.parametrize("args", [["--heap_k", "10"], [*ARGS[:4], "--dilation", "1.5"]])
