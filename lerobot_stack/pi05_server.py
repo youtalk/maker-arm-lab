@@ -47,17 +47,23 @@ forwards and still resamples included. D must be shorter than the warped chunk. 
 is ``+delay<D>``, and the inference block gains ``infer_delay``.
 MS7j: --rtc adds LeRobot's real-time chunking (RTC) under that delay, at --action_warp 1.0 only,
 so a queue row is a chunk row, and with D at most RTC_HORIZON. A lane forwards once its queue
-holds RTC_HORIZON actions or fewer, and the forward passes inference_delay D, execution_horizon
-RTC_HORIZON and the leftover: the rows the lane still plays from this call on (its queue, or its
-last action repeated), in the model's normalized output, before the postprocessor. A forward on
-a replan flag guides only the D frozen rows (execution_horizon D, the leftover's first D rows),
-so a new target or a retry does not follow the old chunk for RTC_HORIZON rows (ruling R31). The
-chunk still arrives D calls later without its first D actions. Each queue row keeps its
-normalized twin for this, and the latch holds the normalized jaw with the served one. Rows
-without a leftover (the first chunk after a reset) forward apart, unguided, and so do the rows of
-each horizon. Retry forwards and still resamples are guided like any forward. Each FORWARD line
-gains " rtc=H:N,...", the rows at each horizon H (0: unguided). Its policy id part is ``+rtc``,
-last, and the inference block gains ``"rtc": RTC_HORIZON``.
+holds RTC_HORIZON actions or fewer, and the forward passes inference_delay D, an
+execution_horizon H and the leftover's first H rows. The leftover is what the lane still plays
+from this call on, in the model's normalized output, before the postprocessor: its queue, and on
+a queue shorter than D its last action repeated up to D rows, as the line repeats it until the
+next chunk arrives. H is RTC_HORIZON cut to the leftover's length (LeRobot's RTCProcessor cuts
+it so), so the guidance never pulls toward a padded row that the line does not play. A forward
+on a replan flag guides only the D frozen rows (H = D), so a new target or a retry does not
+follow the old chunk for RTC_HORIZON rows (ruling R31). The chunk still arrives D calls later
+without its first D actions. Each queue row keeps its normalized twin for this, and the latch
+holds the normalized jaw with the served one. Rows without a leftover (the first chunk after a
+reset) forward apart, unguided, and so do the rows of each horizon. Retry forwards and still
+resamples are guided like any forward. Each FORWARD line gains " rtc=H:N,...", the rows at each
+horizon H (0: unguided). Its policy id part is ``+rtc``, last, and the inference block gains
+``"rtc": RTC_HORIZON``. When the warped chunk minus D is RTC_HORIZON or shorter (n_action_steps
+25, for example), each chunk arrival triggers the next forward at once, so a chunk plays only D
+actions (a forward every D calls), where a chunked row at the same serving plays
+n_action_steps - D. Neither the policy id nor the inference block records this cadence.
 MS7i Run A (the heap loop's ``--pi05_prompt``) sends each env's subtask id under the wire's
 optional ``prompt`` key. The server reads a row's id only when it refills that row's queue, so a
 new id between two refills changes nothing and never forces a replan: the chunk in play, its
@@ -149,8 +155,10 @@ JAW_FULL_GAP = 2 * 0.0524125
 convert_to_lerobot's GRIPPER_TRAVEL (both jaws move alike; a test pins the copy)."""
 RTC_HORIZON = 25
 """MS7j --rtc: a lane forwards at a queue of this many actions or fewer, and the guidance toward
-the leftover reaches this far into the next chunk (LeRobot's execution_horizon), half the
-checkpoint's 50-action chunk."""
+the leftover reaches at most this far into the next chunk (LeRobot's execution_horizon), half the
+checkpoint's 50-action chunk. When the warped chunk minus D is this or shorter (n_action_steps
+25, for example), each chunk arrival triggers the next forward at once, so a chunk plays only D
+actions (a forward every D calls)."""
 
 
 def latch_jaw(chunk: np.ndarray, state: np.ndarray, steps: int) -> tuple[np.ndarray, int]:
@@ -184,15 +192,27 @@ def still_rows(chunk: np.ndarray, state: np.ndarray, rad: float, open_frac: floa
     return np.flatnonzero((moved < rad) & (state[:, 6] >= open_frac))
 
 
-def leftover(left: np.ndarray | None) -> np.ndarray:
-    """The (RTC_HORIZON, 7) RTC leftover of a row from its 14-wide ``DelayLine.left``: the
-    normalized half, cut at RTC_HORIZON or padded with its last row, which the line repeats on an
-    empty queue. LeRobot's RTCProcessor instead clamps the horizon to a shorter leftover's length
-    (and its rollout pads with zeros). NaN before the row's first chunk."""
+def rtc_horizon(left: np.ndarray | None, replan: bool, delay: int) -> int:
+    """The RTC horizon of a row from its ``DelayLine.left``: 0 before its first chunk (``left``
+    None), else at most D on a replan (ruling R31) and RTC_HORIZON on a refill, clamped to the
+    rows that the line really plays, as LeRobot's RTCProcessor clamps it to the leftover's
+    length. Those are the queue, and at least D rows: on a queue shorter than D the line
+    repeats its last action until the next chunk arrives, D calls later."""
     if left is None:
-        return np.full((RTC_HORIZON, *ACTION_SHAPE), np.nan, np.float32)
-    rows = left[:RTC_HORIZON, ACTION_SHAPE[0] :]
-    return np.pad(rows, ((0, RTC_HORIZON - len(rows)), (0, 0)), mode="edge")
+        return 0
+    return min(delay if replan else RTC_HORIZON, max(len(left), delay))
+
+
+def leftover(left: np.ndarray | None, horizon: int) -> np.ndarray:
+    """The (RTC_HORIZON, 7) RTC leftover of a row from its 14-wide ``DelayLine.left``: the
+    normalized half's first ``horizon`` rows (``rtc_horizon``), a queue shorter than the horizon
+    padded with its last row up to it, and NaN past the horizon, where ``_forward`` cuts. All NaN
+    at horizon 0."""
+    out = np.full((RTC_HORIZON, *ACTION_SHAPE), np.nan, np.float32)
+    if horizon:
+        rows = left[:horizon, ACTION_SHAPE[0] :]
+        out[:horizon] = np.pad(rows, ((0, horizon - len(rows)), (0, 0)), mode="edge")
+    return out
 
 
 def tasks(prompts, rows: int) -> list[str]:
@@ -215,8 +235,8 @@ class SharedServer:
     ``infer_delay`` D serves each lane's chunks D calls after their observation (``DelayLine``),
     whichever forward made them: a plain one, a retry, a still resample or a latched chunk.
     ``rtc`` (0 < D <= RTC_HORIZON, warp 1.0) adds obs["leftover"] (``leftover``) and
-    obs["horizon"] (D for a row on a replan, RTC_HORIZON for one at the refill, 0 for one without
-    a chunk yet) to each forward, which runs each horizon apart and drops both keys at 0, and
+    obs["horizon"] (``rtc_horizon``) to each forward, which runs each horizon apart with the
+    leftover cut there and drops both keys at 0, and
     ``predict_chunk`` returns the (n, n_action_steps, 14) chunk: the served actions, then the
     normalized ones, which the lines keep."""
 
@@ -320,8 +340,8 @@ class SharedServer:
 
     def _forward(self, obs: dict, *scale) -> np.ndarray:
         """The (n, n_action_steps, 7) chunk of ``obs``'s n rows, at the noise ``scale`` (none:
-        the configured one). Under RTC it is 14 wide, and the rows of each horizon forward
-        apart, those at 0 (no leftover) without the RTC keys."""
+        the configured one). Under RTC it is 14 wide, and the rows of each horizon H forward
+        apart with their leftover cut at H, those at 0 (no leftover) without the RTC keys."""
         rows = len(obs["state"])
         horizons = np.unique(obs["horizon"]) if "horizon" in obs else []
         if len(horizons) > 1 or 0 in horizons:
@@ -333,6 +353,8 @@ class SharedServer:
                     {k: v[part] for k, v in obs.items() if h or k not in rtc}, *scale
                 )
             return chunk
+        if len(horizons):  # one horizon H: the model sees no row past it
+            obs = {**obs, "leftover": obs["leftover"][:, : horizons[0]]}
         chunk = np.asarray(self._predict(obs, *scale), dtype=np.float32)
         if chunk.shape != (rows, self._n, self._width):
             want = f"({rows}, {self._n}, {self._width})"
@@ -369,13 +391,11 @@ class SharedServer:
                 obs["prompt"] = np.asarray(ids, dtype=np.int16)
             if self._rtc:  # MS7j: what each row still plays, and how far it guides
                 lefts = [self._lines[lane].left(i) for lane, i in need]
-                obs["leftover"] = np.stack([leftover(left) for left in lefts])
-                obs["horizon"] = np.array(  # R31: a replan guides only the frozen rows
-                    [
-                        0 if left is None else self._delay if again else RTC_HORIZON
-                        for left, again in zip(lefts, replanned)
-                    ]
-                )
+                horizons = [
+                    rtc_horizon(left, again, self._delay) for left, again in zip(lefts, replanned)
+                ]
+                obs["leftover"] = np.stack([leftover(*x) for x in zip(lefts, horizons)])
+                obs["horizon"] = np.array(horizons)
             start = time.perf_counter()
             retried = np.flatnonzero(retrying) if self._retry is not None else []
             try:
@@ -471,7 +491,7 @@ def load_pi05(
     directory. ``sampling`` is the policy id's ``+steps<N>+noise<S>+jawnoise<J>+jawshared`` and
     ``+jawabs<A>``, each part only when its value is off its default (num_steps None means the
     checkpoint's own). ``rtc_delay`` D > 0 turns on LeRobot's RTC (MS7j --rtc): a forward whose
-    obs holds "leftover" (n, RTC_HORIZON, 7) and "horizon" (n,), one value H, is guided toward
+    obs holds "leftover" (n, H, 7) and "horizon" (n,), one value H, is guided toward
     the leftover's first H rows at inference_delay D and execution_horizon H, and every forward
     returns the served chunk and then the model's normalized one, 14 wide.
 

@@ -871,3 +871,42 @@ def test_rtc_guides_only_the_frozen_rows_on_a_replan(stand_in, monkeypatch, caps
         assert torch.equal(left[0, :, 0], want)
     log = [line.split(" ")[-1] for line in capsys.readouterr().out.strip().splitlines()]
     assert log == ["rtc=0:3", "rtc=6:1", "rtc=6:1,25:1"]  # each horizon its own sub-batch
+
+
+class RtcRecorder:
+    """A 14-wide chunk of ``n`` actions whose normalized half is 1000 k + t at forward k and
+    action t (served = 2 n + 1). Records each forward's (leftover, horizon)."""
+
+    def __init__(self, n):
+        self.n, self.calls = n, []
+
+    def __call__(self, obs, *scale):
+        self.calls.append((obs.get("leftover"), obs.get("horizon")))
+        norm = 1000.0 * len(self.calls) + np.arange(self.n, dtype=np.float32)[None, :, None]
+        norm = np.broadcast_to(norm, (len(obs["state"]), self.n, 7))
+        return np.concatenate([2 * norm + 1, norm], axis=-1)
+
+
+@pytest.mark.parametrize("delay, horizon", [(12, 13), (6, 19), (20, 20)])
+def test_rtc_at_25_actions_guides_only_the_rows_the_line_plays(delay, horizon, capsys):
+    model, inference = RtcRecorder(25), {"n_action_steps": 25, "chunk_size": N}
+    s = ps.SharedServer(
+        model, "pi05:/ckpt", 25, inference, "continuous", 1.0, None, 0, None, delay, True
+    )
+    for call in range(delay + 2):  # lane b joins at call D, so both forward at call D + 1
+        s.process([(b"a", *step(0.5))] + [(b"b", *step(0.2))] * (call >= delay))
+    # a: its first chunk whole, then at call 1 its 24 rows left, then at call D + 1 its second
+    # chunk arrives without its first D rows and forwards at once (25 - D rows, at most 25).
+    # b: its first chunk at call D, then its 24 rows left at call D + 1, in a sub-batch apart.
+    horizons = [None if h is None else h.tolist() for _, h in model.calls]
+    assert horizons == [None, [24], None, [horizon], [24]]
+    left = model.calls[3][0]  # cut at the horizon: what the model sees
+    assert left.shape == (1, horizon, 7)
+    # chunk 2's rows from D on, and past its end its last row: padding up to D only (D 20: 5
+    # real rows, then 15 repeats; D 12 and D 6: no padded row)
+    want = 2000 + np.minimum(np.arange(delay, delay + horizon), 24)
+    np.testing.assert_array_equal(left[0, :, 0], want)
+    np.testing.assert_array_equal(model.calls[4][0][0, :, 0], 3000 + np.arange(1, 25))
+    assert capsys.readouterr().out.splitlines()[-1].endswith(f" rtc={horizon}:1,24:1")
+    assert ps.rtc_horizon(np.zeros((40, 14)), True, delay) == delay  # a replan: D, as before
+    assert ps.rtc_horizon(np.zeros((1, 14)), True, delay) == delay  # an empty queue: D
