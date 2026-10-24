@@ -210,27 +210,32 @@ class ActionQueues:
 
     ``action_warp`` X plays each chunk X times faster (``warp_chunk``) before it fills the
     queues; 1.0 queues the chunk unchanged. A shorter queue only means more forwards.
+
+    ``delay`` D is the emulated inference delay of ``DelayLine``, which holds the queues: each
+    chunk arrives D steps after its observation. D must be shorter than the warped chunk. At 0
+    every chunk fills its queue at once, the queue described above.
     """
 
-    def __init__(self, predict_chunk, n_action_steps: int, action_warp: float = 1.0):
+    def __init__(
+        self, predict_chunk, n_action_steps: int, action_warp: float = 1.0, delay: int = 0
+    ):
         if not ACTION_WARP_MIN <= action_warp <= ACTION_WARP_MAX:
             raise ValueError(
                 f"action_warp must be in [{ACTION_WARP_MIN}, {ACTION_WARP_MAX}], got {action_warp}"
             )
+        check_delay(delay, n_action_steps, action_warp)
         self._predict = predict_chunk
         self._n = n_action_steps
         self._warp = action_warp
-        self._queues: list[deque] = []
+        self._line = DelayLine(delay)
 
     def reset(self) -> None:
-        self._queues = []
+        self._line = DelayLine(self._line.delay)
 
     def step(self, obs: dict[str, np.ndarray], replan: np.ndarray | None = None) -> np.ndarray:
         batch = int(obs["state"].shape[0])
-        if len(self._queues) != batch:
-            self._queues = [deque() for _ in range(batch)]
         flags = np.zeros(batch, dtype=bool) if replan is None else np.asarray(replan, dtype=bool)
-        need = [i for i in range(batch) if flags[i] or not self._queues[i]]
+        need = self._line.due(flags)
         if need:
             chunk = np.asarray(self._predict({k: v[need] for k, v in obs.items()}))
             if chunk.shape[:2] != (len(need), self._n):
@@ -239,8 +244,78 @@ class ActionQueues:
                 )
             chunk = warp_chunk(chunk, self._warp)
             for row, i in enumerate(need):
-                self._queues[i] = deque(chunk[row])
-        return np.stack([q.popleft() for q in self._queues])
+                self._line.put(i, chunk[row])
+        return self._line.pop()
+
+
+class DelayLine:
+    """The action queues of one client's env rows under an emulated inference delay of
+    ``delay`` calls, one call a control step (MS7j spec section 6.1). On the real arm the next
+    chunk arrives D steps after its observation. Both servers keep one a client.
+
+    ``due`` starts a call and returns the rows that forward at it: a row whose replan flag is
+    set, or a row with no forward pending whose queue holds D actions or fewer. The forward uses
+    this call's observation. ``put`` hands a row its new warped chunk. The chunk becomes the
+    row's queue D calls later, without its first D actions, and until then the row pops its old
+    queue. A newer forward replaces a pending one, and the wait starts again. ``pop`` ends the
+    call: each row serves the head of its queue, or with an empty queue its last served action.
+    A row with no last action yet (the first chunk after a reset or a new batch) takes its chunk
+    at once and whole. The client's reset drops the line, its last actions and its pending
+    chunks. At D = 0 every chunk fills its queue at once, and a row forwards when its queue is
+    empty or its replan flag is set: the plain queue of before the delay. ``refill`` R (default
+    D) moves the forward to a queue of R actions or fewer: the pi0.5 server's RTC forwards at
+    its RTC_HORIZON."""
+
+    def __init__(self, delay: int, refill: int | None = None):
+        self.delay = delay
+        self.refill = delay if refill is None else refill
+        self._call = 0
+        self._queues: list[deque] = []
+        self._pending: list = []  # per row: None, or (the call it arrives at, its actions)
+        self._last: list = []  # per row: the last served action, None before the first
+
+    def due(self, replan: np.ndarray) -> list[int]:
+        rows = len(replan)
+        if len(self._queues) != rows:
+            self._queues = [deque() for _ in range(rows)]
+            self._pending, self._last = [None] * rows, [None] * rows
+        self._call += 1
+        for i, pending in enumerate(self._pending):
+            if pending is not None and pending[0] == self._call:
+                self._queues[i], self._pending[i] = deque(pending[1]), None
+        return [
+            i
+            for i, queue in enumerate(self._queues)
+            if replan[i] or (self._pending[i] is None and len(queue) <= self.refill)
+        ]
+
+    def put(self, row: int, actions: np.ndarray) -> None:
+        if self._last[row] is None or not self.delay:
+            self._queues[row] = deque(actions)
+        else:
+            self._pending[row] = (self._call + self.delay, actions[self.delay :])
+
+    def left(self, row: int) -> np.ndarray | None:
+        """What ``row`` plays from this call on, after ``due``: its queue, or its last action
+        when the queue is empty (``pop`` repeats it), None before its first chunk."""
+        if self._queues[row]:
+            return np.stack(self._queues[row])
+        return None if self._last[row] is None else self._last[row][None]
+
+    def pop(self) -> np.ndarray:
+        for i, queue in enumerate(self._queues):
+            if queue:
+                self._last[i] = queue.popleft()
+        return np.stack(self._last)
+
+
+def check_delay(delay: int, n_action_steps: int, action_warp: float) -> None:
+    """Refuse an inference delay below 0 or not shorter than the warped chunk."""
+    length = warp_chunk(np.zeros((1, n_action_steps, 1)), action_warp).shape[1]
+    if not 0 <= delay < length:
+        raise ValueError(
+            f"infer_delay must be in [0, {length}), the warped chunk's length, got {delay}"
+        )
 
 
 # MS7f speed track: the policy copies the teacher corpus's pace (about 15.4 s a cycle, 158
@@ -420,6 +495,7 @@ def load_act(
     blank_camera: str | None = None,
     action_warp: float = 1.0,
     ensemble_with: str | None = None,
+    infer_delay: int = 0,
 ):
     """Build (policy_fn, reset_fn, policy_id, n_action_steps, inference, context_dim, action_space,
     gripper).
@@ -437,6 +513,10 @@ def load_act(
     ``act:<checkpoint_dir>`` first and ends ``+ens:<ensemble_with>`` (plus the member's
     ``+ctxnorm``); the inference block gains ``ensemble_with``. None loads one checkpoint
     exactly as before.
+
+    ``infer_delay`` D > 0 (MS7j) serves each queued chunk D steps after its observation
+    (``DelayLine``). The policy id ends ``+delay<D>`` and the inference block gains
+    ``infer_delay``. Temporal ensembling queues one action, so it refuses every D > 0.
     """
     if action_warp != 1.0 and temporal_ensemble_coeff is not None:
         raise ValueError("action_warp plays the queued chunk: temporal ensembling queues none")
@@ -459,7 +539,7 @@ def load_act(
     def predict_chunk(obs: dict) -> np.ndarray:
         return mean_action([m.predict_chunk(obs) for m in members])
 
-    queues = ActionQueues(predict_chunk, first.n_action_steps, action_warp)
+    queues = ActionQueues(predict_chunk, first.n_action_steps, action_warp, infer_delay)
 
     def policy_fn(
         state: np.ndarray,
@@ -486,6 +566,9 @@ def load_act(
     if ensemble_with:
         policy_id += f"+ens:{ensemble_with}" + ("+ctxnorm" if members[1].context_norm else "")
         inference["ensemble_with"] = ensemble_with
+    if infer_delay:
+        policy_id += f"+delay{infer_delay}"
+        inference["infer_delay"] = infer_delay
     return (
         policy_fn,
         reset_fn,
@@ -683,6 +766,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="MS7g D20: a second pretrained_model directory; serve the mean of both "
         "checkpoints' unnormalized actions, each through its own pre/post processor",
     )
+    parser.add_argument(
+        "--infer_delay",
+        type=int,
+        default=0,
+        help="MS7j: serve each chunk this many control steps after its observation, below the "
+        "warped chunk's length (0: at once)",
+    )
     return parser
 
 
@@ -713,6 +803,7 @@ def main() -> int:
             blank_camera=args.blank_camera,
             action_warp=args.action_warp,
             ensemble_with=args.ensemble_with,
+            infer_delay=args.infer_delay,
         )
         server = PolicyServer(
             policy_fn,

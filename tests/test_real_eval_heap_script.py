@@ -97,6 +97,95 @@ def test_the_served_switches_are_the_ms7e_reads():
     assert real_eval_heap.SERVED_ORACLE == {"wall_band_cont": True}
 
 
+OLD_22 = dict.fromkeys(
+    [
+        "select_at_release",
+        "replan_on_switch",
+        "squeeze_floor",
+        "square_wrist",
+        "scripted_rake",
+        "part_failures",
+        "pick_snap",
+        "dwell_close",
+        "adopt_held",
+        "park_done",
+        "rake_turn",
+        "box_filter_xy",
+        "release_gap",
+        "rearm_hold",
+        "box_walls",
+        "marker_bias",
+        "wrist_fix",
+        "class_views",
+        "hold_force",
+        "force_cap",
+        "thin_snap",
+        "snap_closed",
+    ],
+    True,
+)
+
+
+def test_the_served_switches_are_s_without_the_image_classifier():
+    script = real_eval_heap
+    assert script.SERVED_SWITCHES == {
+        **OLD_22,
+        "carry_guard": True,
+        "overhang_guard": True,
+        "missed_lift": True,
+        "cell_failure_cap": 5,
+    }
+    assert script.SERVED_RIG == {"release_lean": True, "carry_via": True, "passenger_check": True}
+    assert script.SERVED_ORACLE == {"wall_band_cont": True}
+    assert script.SERVED_INFERENCE == {"n_action_steps": 50, "action_warp": 1.5}
+    assert not {"classifier", "cls_flip", "vote_weights", "categories"} & set(
+        script.SERVED_SWITCHES
+    )
+
+
+class _Server:
+    def __init__(self, n_action_steps=50, inference=None):
+        self.n_action_steps, self.inference = n_action_steps, inference or {}
+
+
+@pytest.mark.parametrize(
+    "server",
+    [
+        _Server(inference={"action_warp": 1.0}),
+        _Server(inference={}),
+        _Server(1),
+        _Server(inference={"action_warp": 1.5, "infer_delay": 1}),  # an emulated delay
+        _Server(inference={"action_warp": 1.5, "infer_delay": 6, "rtc": 25}),
+        _Server(inference={"action_warp": 1.5, "rtc": 25}),
+    ],
+)
+def test_the_client_refuses_another_serving_or_an_emulated_delay(monkeypatch, capsys, server):
+    env, arm, _ = make_env()
+
+    def build(args, world):
+        world.update(arm=arm, env=env, closers=[])
+        real_eval_heap.check_served_inference(server)
+
+    monkeypatch.setattr(real_eval_heap, "build_world", build)
+    code = real_eval_heap.main([*ARGS, "--release", "now"])
+    tokens = _tokens(capsys.readouterr().out)
+    assert code == 1 and len(tokens) == 1 and '"served_inference"' in tokens[0]
+    assert arm.holds == 1
+
+
+def test_the_client_accepts_the_served_inference():
+    real_eval_heap.check_served_inference(_Server(inference={"action_warp": 1.5}))
+
+
+def test_build_world_checks_the_served_inference_before_it_keeps_the_policy():
+    """The refusal test above stubs build_world, so the real call is pinned in its text."""
+    tree = ast.parse(SCRIPT.read_text())
+    build = next(n for n in tree.body if getattr(n, "name", None) == "build_world")
+    body = [ast.unparse(statement) for statement in build.body]
+    check = body.index("check_served_inference(server)")
+    assert check < body.index("world['policy'] = TimedPolicy(server, env.ticks, env.trip)")
+
+
 @pytest.mark.parametrize("args", [["--heap_k", "10"], [*ARGS[:4], "--dilation", "1.5"]])
 def test_a_usage_error_prints_the_fail_token(args):
     code, lines = _run(*args)

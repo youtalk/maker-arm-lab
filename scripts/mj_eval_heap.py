@@ -74,6 +74,7 @@ from maker_arm_lab.core.loop import (
     rollout,
 )
 from maker_arm_lab.mj.env import MjLegoSortEnv
+from maker_arm_lab.mj.stress import add_stress_arguments, stress_from_args
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 
 
@@ -151,6 +152,7 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
     )
     add_ms7e_arguments(parser)
     add_ms7f_arguments(parser)
+    add_stress_arguments(parser)
     parser.add_argument(
         "--deep_box_floor",
         action="store_true",
@@ -451,6 +453,10 @@ def parse_args(argv=None, parser_cls=_TokenEmittingParser) -> argparse.Namespace
         parser.error("--abandon_cycle is the recorder's: the heap loop survives a rig abandon")
     check_ms7e(parser, args)
     check_ms7f(parser, args)
+    try:
+        stress_from_args(args)  # validate only: args stays JSON-serializable
+    except ValueError as err:
+        parser.error(str(err))
     check_teacher_waits(parser, args)
     if args.carry_guard and args.passenger_drop:
         parser.error("--carry_guard refuses --passenger_drop, which opens over the tray")
@@ -573,6 +579,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
         draw = sample_run_draw(random.Random(args.layout_seed), args.spatial_scale)
         draw["slot_colors"] = perm
         parts = heap_parts(args)
+        stress = stress_from_args(args)
         env = MjLegoSortEnv(
             args.num_envs,
             draw,
@@ -598,6 +605,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             deep_tray=args.deep_tray,
             tray_refill=args.tray_refill,
             pile_pgs=args.pile_pgs,
+            stress=stress,
             export_dir=args.dagger_dir or None,
             shard_name=args.shard_name,
             export_all=bool(args.dagger_dir),
@@ -729,6 +737,7 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
             record_all=args.record_all,
             pi05_prompt=args.pi05_prompt,
             release_handoff=args.release_handoff,
+            obs_delay=stress.obs_delay,
         )
         payload["parts_split"] = args.parts_split
         payload["parts_seed"] = args.parts_seed
@@ -738,6 +747,8 @@ def main(argv=None, parser_cls=_TokenEmittingParser, run=None, episode_s=None) -
         payload["ms7e"] = ms7e_switches(args)
         payload["ms7f"] = ms7f_switches(args)
         payload["deep_box_floor"] = args.deep_box_floor
+        if stress.block():  # off leaves the payload byte-identical to main
+            payload["stress"] = stress.block()
         if args.dagger_dir:
             payload["shard"] = str(Path(args.dagger_dir) / f"{args.shard_name}.hdf5")
         if args.record_all:

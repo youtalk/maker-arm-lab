@@ -12,12 +12,13 @@ keeps the file it names.
 unchanged. Before the first optimizer step it stops the run with ``PREFLIGHT_FAIL <what>``
 (exit 3) unless:
 
-- the weights loaded in full: lerobot 0.5.1 only prints a warning on a failed or partial load
-  and trains on (modeling_pi05.py:1001-1004 and 1050-1053), and prints
-  "All keys loaded successfully!" on a full one;
+- the weights loaded in full: lerobot 0.6.1 only prints a warning on a failed or partial load
+  and trains on (PI05Policy.from_pretrained), and prints "All keys loaded successfully!" on a
+  full one. Under ``--lora`` (peft) the check covers the base load: the adapter is wrapped on
+  after it, in ``wrap_with_peft``, and prints nothing of its own;
 - the action and state statistics of the normalizer and the unnormalizer hash-equal those of
   ``PREFLIGHT_STATS`` (the corpus ``meta/stats.json``): a warm start and a resume take them
-  from the dataset root (lerobot_train.py:279-297). The image statistics are left out: the
+  from the dataset root (lerobot_train.py). The image statistics are left out: the
   images are not normalized, and ``use_imagenet_stats`` replaces them;
 - the tokenizer step pads to ``PREFLIGHT_MAX_LENGTH``, and the longest prompt of the run stays
   under it: lerobot truncates a longer one silently, "Action:" first. The prompts are
@@ -29,7 +30,7 @@ unchanged. Before the first optimizer step it stops the run with ``PREFLIGHT_FAI
 
 It prints one ``PREFLIGHT_OK ...`` line at the first forward. The terminal token is
 TRAIN_OK, TRAIN_FAIL or PREFLIGHT_FAIL (PATCH_OK or PATCH_FAIL for ``patch``).
-Runs in the pi venv, or on Colab with lerobot[pi]==0.5.1.
+Runs in the pi venv, or on Colab with lerobot[pi]==0.6.1.
 """
 
 import contextlib

@@ -1,6 +1,8 @@
 """Heap mode of MjLegoSortEnv and the recorder's heap datasets (design sections 6, 8, 9)."""
 
+import itertools
 import json
+import math
 import random
 
 import h5py
@@ -15,6 +17,7 @@ from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj.context_names import CONTEXT_BOX_NAMES, CONTEXT_DIMS, CONTEXT_TARGET_NAMES
 from maker_arm_lab.mj.env import MjLegoSortEnv
 from maker_arm_lab.mj.recorder import ShardRecorder
+from maker_arm_lab.mj.stress import Stress
 
 PARTS = [
     parts.make_part("brick", 2, 4),
@@ -460,3 +463,33 @@ def test_the_narrow_view_looks_at_its_point_and_changes_no_later_frame_or_draw()
     assert a._np_rng.bit_generator.state == b._np_rng.bit_generator.state
     a.close()
     b.close()
+
+
+@pytest.mark.parametrize("deep", [False, True])
+def test_a_sparse_reset_leaves_ten_upright_parts_apart_in_the_tray(deep):
+    draw = layout.sample_run_draw(random.Random(4))
+    draw["slot_colors"] = (0, 1, 2, 3)
+    ten = parts.sample_parts(random.Random(0), parts.split(parts.catalog(), 20260915)[0], 10)
+    ten[-1] = parts.make_part("slope", 1, 2)  # a hull that is not centred on its box
+    env = MjLegoSortEnv(
+        1,
+        draw,
+        num_bricks=10,
+        parts=ten,
+        cameras=False,
+        tray=True,
+        deep_tray=deep,
+        stress=Stress(sparse_gap=0.035),
+    )
+    env.reset(seed=4)
+    xy = []
+    for b in range(10):
+        data = env.scene[f"brick_{b}"].data
+        xy.append(data.root_pos_w[0, :2])
+        assert env._in_tray(data.root_pos_w[0].tolist())
+        assert data.root_pos_w[0, 2] > 0.003, b  # nothing sank through the floor
+        _, x, y, _ = data.root_quat_w[0].tolist()
+        assert 1.0 - 2.0 * (x * x + y * y) > math.cos(math.radians(10.0)), b
+    for a, b in itertools.combinations(xy, 2):
+        assert float((a - b).norm()) >= 0.035 - 0.003
+    env.close()

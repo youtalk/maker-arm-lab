@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 
+from helpers import load_script
 from maker_arm_lab.core import dagger_loop, desk_boxes, hold, layout, loop, oracle, overlay
 from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.layout import sample_run_draw
@@ -21,11 +22,11 @@ from test_mj_heap_oracle import PARTS, _place, _step
 SPREAD = [(0.195, -0.045, 0.006, 0.3), (0.195, 0.0, 0.006, -0.8), (0.195, 0.045, 0.006, 1.2)]
 
 
-def _env_and_rig(seed=11, budget=4, cameras=False, **env_kwargs):
+def _env_and_rig(seed=11, budget=4, cameras=False, num_envs=1, **env_kwargs):
     draw = sample_run_draw(random.Random(5))
     draw["slot_colors"] = (0, 1, 2, 3)
     env = MjLegoSortEnv(
-        1,
+        num_envs,
         draw,
         parts=PARTS,
         cameras=cameras,
@@ -244,13 +245,15 @@ class _FramePolicy(_HoldPolicy):
 
 
 @pytest.mark.skipif(not _can_render(), reason="no MuJoCo GL context on this host")
-def test_the_policy_reads_the_marker_on_the_loops_target(monkeypatch):
+@pytest.mark.parametrize("delay", [0, 2])  # a delayed frame carries the current marker
+def test_the_policy_reads_the_marker_on_the_loops_target(monkeypatch, delay):
     monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 5)
-    env, rig = _env_and_rig(budget=2, cameras=True)
+    env, rig = _env_and_rig(budget=4, cameras=True)
     _place(env, SPREAD)
     policy = _FramePolicy(env)
-    _rollout(env, rig, policy, budget=2)
+    payload = _rollout(env, rig, policy, budget=4, obs_delay=delay)
     env.close()
+    assert payload["episodes"][0]["cycle_targets"] == [0, 0, 0, 2]  # the marker moves once
     assert len(policy.hits) >= 5 and all(policy.hits), policy.hits
 
 
@@ -1529,3 +1532,112 @@ def test_rake_turn_retries_a_declined_rake_at_the_teachers_next_jaw_heading(monk
     turned, jaws = seen[True]
     assert turned["cycles"] >= 1 and turned["cycle_targets"][0] == 0
     assert jaws[:2] == [0.0, pytest.approx(math.pi / 2)]
+
+
+class _FrameSpyPolicy(_DriftPolicy):
+    """Drifts the base and keeps, per call, the frames it was handed, whether they are the env's
+    own buffers, its state and the joint state at the call."""
+
+    def __init__(self, env):
+        super().__init__()
+        self.env, self.calls = env, []
+
+    def step(self, state, wrist, overhead, context=None, anchor=None):
+        shared = np.shares_memory(wrist, self.env._wrist)
+        shared = shared and np.shares_memory(overhead, self.env._overhead)
+        joints = loop.policy_state(self.env.scene["robot"].data.joint_pos).numpy()
+        self.calls.append((wrist.copy(), overhead.copy(), state.copy(), joints, shared))
+        return super().step(state, wrist, overhead, context, anchor)
+
+
+def _fresh_frames(env):
+    """Fills the camera buffers with a new random frame now and after every env step. Returns
+    the frames, index n the one after n steps, and each step's episode ends."""
+    rng = np.random.default_rng(0)
+    frames, dones = [], []
+    stepped = env.step
+
+    def fill():
+        env._wrist[:] = rng.integers(0, 256, env._wrist.shape, dtype=np.uint8)
+        env._overhead[:] = rng.integers(0, 256, env._overhead.shape, dtype=np.uint8)
+        frames.append((env._wrist.copy(), env._overhead.copy()))
+
+    def env_step(action):
+        out = stepped(action)
+        dones.append((out[2] | out[3]).numpy().copy())
+        fill()
+        return out
+
+    fill()
+    env.step = env_step
+    return frames, dones
+
+
+def _served(frames, dones, i, t, delay):
+    """The frame env i's policy reads at call t: ``delay`` calls back, never before its
+    episode's first frame."""
+    start = max([0] + [n + 1 for n in range(t) if dones[n][i]])
+    return frames[max(t - delay, start)]
+
+
+def test_no_delay_hands_the_policy_the_env_buffers(monkeypatch):
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 5)
+    env, rig = _env_and_rig(budget=2)
+    _place(env, SPREAD)
+    policy = _FrameSpyPolicy(env)
+    payload = _rollout(env, rig, policy, budget=2)
+    env.close()
+    assert len(policy.calls) >= 5 and all(c[4] for c in policy.calls)
+    assert "obs_delay" not in payload["inference"]["loop"]
+
+
+def test_a_delay_of_two_hands_the_policy_the_frame_from_two_steps_before(monkeypatch):
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 5)
+    env, rig = _env_and_rig(budget=2)
+    _place(env, SPREAD)
+    frames, _ = _fresh_frames(env)
+    policy = _FrameSpyPolicy(env)
+    payload = _rollout(env, rig, policy, budget=2, obs_delay=2)
+    env.close()
+    assert len(policy.calls) >= 5
+    for t, (wrist, overhead, state, joints, _) in enumerate(policy.calls):
+        want = frames[max(t - 2, 0)]
+        assert np.array_equal(wrist, want[0]) and np.array_equal(overhead, want[1]), t
+        assert np.array_equal(state, joints), t  # the joint state stays current
+    assert len({float(c[2][0, 0]) for c in policy.calls}) == len(policy.calls)
+    assert "obs_delay" not in payload["inference"]["loop"]
+
+
+def test_a_delayed_frame_never_crosses_a_reset(monkeypatch):
+    """Env 1 times out at its third step and resets while env 0 runs on: from then on env 1's
+    policy reads only its new episode's frames, the reset's frame until two newer exist."""
+    monkeypatch.setattr(loop, "CYCLE_STEP_BUDGET", 10)
+    env, rig = _env_and_rig(budget=2, num_envs=2)
+    _place(env, SPREAD)
+    env.episode_length_buf[1] = env.max_episode_length - 3
+    frames, dones = _fresh_frames(env)
+    policy = _FrameSpyPolicy(env)
+    _rollout(env, rig, policy, budget=2, obs_delay=2)
+    env.close()
+    assert len(policy.calls) >= 8
+    assert [bool(d[1]) for d in dones[:4]] == [False, False, True, False]
+    assert not any(bool(d[0]) for d in dones[: len(policy.calls) - 1])
+    for t, (wrist, overhead, *_) in enumerate(policy.calls):
+        for i in (0, 1):
+            want = _served(frames, dones, i, t, 2)
+            assert np.array_equal(wrist[i], want[0][i]), (t, i)
+            assert np.array_equal(overhead[i], want[1][i]), (t, i)
+
+
+def test_the_heap_client_hands_the_obs_delay_to_the_rollout(capsys):
+    module = load_script("mj_eval_heap")
+    seen = []
+
+    def run(env, rig, policy, **kwargs):
+        seen.append(kwargs["obs_delay"])
+        return {}
+
+    for extra, delay in ((["--obs_delay", "3"], 3), ([], 0)):
+        assert module.main(["--heap_k", "3", "--oracle_driver"] + extra, run=run) == 0
+        assert capsys.readouterr().out.strip().splitlines()[-1].startswith("EVAL_OK ")
+        assert seen.pop() == delay

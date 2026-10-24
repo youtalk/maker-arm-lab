@@ -183,6 +183,40 @@ def test_a_narrow_camera_leaves_the_uncovered_view_black():
     assert tuple(view[0, 0]) == (0, 0, 0) and tuple(view[112, 112]) == (128, 128, 128)
 
 
+def _uncached_apply(warp, image):
+    """``ViewWarp.apply`` as it was before it cached its gathers per frame size."""
+    h_img, w_img = image.shape[:2]
+    scale = w_img / warp.source_size[0]
+    x = warp._su * scale - 0.5
+    y = warp._sv * scale - 0.5
+    x0, y0 = np.floor(x).astype(np.int64), np.floor(y).astype(np.int64)
+    fx, fy = (x - x0)[..., None], (y - y0)[..., None]
+    valid = (x >= -0.5) & (x <= w_img - 0.5) & (y >= -0.5) & (y <= h_img - 0.5)
+    xa, xb = np.clip(x0, 0, w_img - 1), np.clip(x0 + 1, 0, w_img - 1)
+    ya, yb = np.clip(y0, 0, h_img - 1), np.clip(y0 + 1, 0, h_img - 1)
+
+    def at(yy, xx):
+        return image[yy, xx].astype(np.float32)
+
+    top = at(ya, xa) * (1.0 - fx) + at(ya, xb) * fx
+    bottom = at(yb, xa) * (1.0 - fx) + at(yb, xb) * fx
+    out = top * (1.0 - fy) + bottom * fy
+    out[~valid] = 0.0
+    s, n = warp.supersample, warp.size
+    out = out.reshape(n, s, n, s, -1).mean(axis=(1, 3))
+    return np.clip(np.rint(out), 0, 255).astype(np.uint8)
+
+
+def test_the_cached_warp_is_byte_identical_to_the_uncached_one():
+    """At full size and at reduced decodes, in any order: the cache keys on the frame size."""
+    rng = np.random.default_rng(7)
+    warp = overhead_warp(*_real_camera(roll_deg=20.0, f=REAL_F * 2.0))
+    assert 0.0 < warp.coverage < 1.0  # some samples fall outside the frame
+    for shape in ((480, 640, 3), (240, 320, 3), (480, 640, 3), (60, 80, 3)):
+        image = rng.integers(0, 256, shape, dtype=np.uint8)
+        assert np.array_equal(warp.apply(image), _uncached_apply(warp, image))
+
+
 def test_jpeg_reduce_keeps_a_source_pixel_per_sample_point():
     real, real_pose = _real_camera()
     assert overhead_warp(real, real_pose).jpeg_reduce() == 1  # about 360 px across the view

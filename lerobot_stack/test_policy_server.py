@@ -2,6 +2,7 @@ import json
 import subprocess
 import sys
 import threading
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -553,6 +554,155 @@ def test_action_warp_resamples_each_chunk_and_refuses_a_slowdown():
     assert got == [0.0, 2.0, 0.0, 2.0] and forwards == [2, 2]  # a half-length queue
     with pytest.raises(ValueError, match="action_warp"):
         ActionQueues(predict, 4, action_warp=0.5)
+
+
+def _plain_step(queues, predict, n, warp, obs, replan):
+    """``ActionQueues.step`` before the delay, line for line: the reference of a delay of 0."""
+    from policy_server import warp_chunk
+
+    batch = int(obs["state"].shape[0])
+    if len(queues) != batch:
+        queues[:] = [deque() for _ in range(batch)]
+    flags = np.zeros(batch, dtype=bool) if replan is None else np.asarray(replan, dtype=bool)
+    need = [i for i in range(batch) if flags[i] or not queues[i]]
+    if need:
+        chunk = np.asarray(predict({k: v[need] for k, v in obs.items()}))
+        chunk = warp_chunk(chunk, warp)
+        for row, i in enumerate(need):
+            queues[i] = deque(chunk[row])
+    return np.stack([q.popleft() for q in queues])
+
+
+def _recording(forwards):
+    """A 5-action ``_chunk_of`` model that records the rows of each forward."""
+
+    def predict(obs):
+        forwards.append(obs["state"][:, 0].tolist())
+        return _chunk_of(obs["state"], 5)
+
+    return predict
+
+
+def test_delay_zero_is_the_plain_queue():
+    from policy_server import ActionQueues
+
+    rng = np.random.default_rng(1)
+    for warp in (1.0, 1.5):
+        ours, theirs, plain = [], [], []
+        queues = ActionQueues(_recording(ours), 5, warp, delay=0)
+        for call in range(200):
+            batch = {"state": rng.normal(size=(3, 7)).astype(np.float32)}
+            replan = rng.random(3) < 0.15 if call % 3 else None
+            got = queues.step(batch, replan)
+            want = _plain_step(plain, _recording(theirs), 5, warp, batch, replan)
+            np.testing.assert_array_equal(got, want)
+            assert got.dtype == want.dtype
+        assert ours == theirs and len(theirs) > 50
+
+
+def _delayed(delay, batch=1, n=10):
+    """ActionQueues at ``delay`` over a model whose row t of forward f is (f, t, 0, ...). Each
+    call's state[:, 0] is the call index, so ``calls`` lists each forward's rows by the call it
+    ran at. ``step(call, replan)`` returns each env's served (f, t)."""
+    from policy_server import ActionQueues
+
+    calls = []
+
+    def predict(obs):
+        calls.append(obs["state"][:, 0].tolist())
+        chunk = np.zeros((len(obs["state"]), n, 7), np.float32)
+        chunk[:, :, 0] = len(calls) - 1
+        chunk[:, :, 1] = np.arange(n)
+        return chunk
+
+    queues = ActionQueues(predict, n, delay=delay)
+
+    def step(call, replan=None):
+        served = queues.step({"state": np.full((batch, 7), call, np.float32)}, replan)
+        return [(int(a[0]), int(a[1])) for a in served]
+
+    return queues, step, calls
+
+
+def test_a_delayed_chunk_starts_d_calls_later_without_its_first_d_actions():
+    _, step, calls = _delayed(3)
+    served = [step(call)[0] for call in range(24)]
+    assert served[:10] == [(0, t) for t in range(10)]  # A, the first chunk, serves at once
+    assert calls[:2] == [[0.0], [7.0]]  # B forwards at call 7, when A holds 3 actions
+    assert served[10:17] == [(1, t) for t in range(3, 10)]  # B from its row 3, at call 10
+    assert calls[2:] == [[14.0], [21.0]]  # then one forward every 7 calls
+    assert served[17:] == [(2, t) for t in range(3, 10)]  # and the queue never runs dry
+
+
+def test_an_empty_queue_repeats_the_last_action():
+    _, step, calls = _delayed(3)
+    served = [step(call, np.array([call == 8]))[0] for call in range(12)]
+    assert calls == [[0.0], [7.0], [8.0]]  # the D rule at call 7, the replan at call 8
+    assert served[7:10] == [(0, 7), (0, 8), (0, 9)]
+    assert served[10] == (0, 9)  # A is spent and no chunk has arrived: A9 again
+    assert served[11] == (2, 3)  # the call-8 forward replaced B and arrives 3 calls later
+
+
+def test_a_newer_replan_replaces_the_pending_chunk():
+    _, step, calls = _delayed(3, batch=2)
+    served = [step(call, np.array([False, call in (2, 3)])) for call in range(8)]
+    assert calls == [[0.0, 0.0], [2.0], [3.0], [7.0]]  # each env forwards on its own rows
+    assert [s[0] for s in served] == [(0, t) for t in range(8)]
+    # Env 1 pops its old queue once a call while its forwards wait. The call-2 chunk (forward 1)
+    # never serves, and the call-3 chunk (forward 2) arrives at call 6.
+    assert [s[1] for s in served] == [(0, t) for t in range(6)] + [(2, 3), (2, 4)]
+
+
+def test_the_d_rule_fires_only_with_no_forward_pending():
+    # A replan at call 5 leaves 5 actions. At call 7 the queue holds D = 3, but the call-5
+    # forward is still on its way, so no second forward replaces it.
+    _, step, calls = _delayed(3)
+    served = [step(call, np.array([call == 5]))[0] for call in range(9)]
+    assert calls == [[0.0], [5.0]] and served[7:] == [(0, 7), (1, 3)]
+    # A chunk shorter than 2 D never holds exactly D after it arrives. The line forwards at once
+    # instead, so the env repeats an action only while the next chunk is on its way.
+    _, step, calls = _delayed(3, n=4)
+    served = [step(call)[0] for call in range(9)]
+    assert calls == [[0.0], [1.0], [4.0], [7.0]]
+    assert served == [(0, 0), (0, 1), (0, 2), (0, 3), (1, 3), (1, 3), (1, 3), (2, 3), (2, 3)]
+
+
+def test_a_reset_drops_the_pending_chunk_and_the_last_action():
+    queues, step, calls = _delayed(3)
+    for call in range(8):
+        step(call)  # B forwarded at call 7 and waits
+    queues.reset()
+    assert step(8) == [(2, 0)] and calls[-1] == [8.0]  # the first chunk after a reset, at once
+    assert [step(call)[0] for call in range(9, 13)] == [(2, t) for t in range(1, 5)]  # no B
+
+
+def test_the_delay_must_be_shorter_than_the_warped_chunk():
+    from policy_server import ActionQueues
+
+    ActionQueues(_chunk_of, 4, 2.0, delay=1)  # 4 actions at 2.0 play 2
+    for warp, delay in ((1.0, 4), (2.0, 2), (1.0, -1)):
+        with pytest.raises(ValueError, match="infer_delay"):
+            ActionQueues(_chunk_of, 4, warp, delay=delay)
+
+
+def test_the_policy_id_and_ready_block_name_the_delay(monkeypatch, capsys):
+    import policy_server
+
+    _stub_members(monkeypatch, a=_stub_member("a", 1.0))
+    monkeypatch.setattr(
+        policy_server.PolicyServer, "serve_forever", lambda self: self._socket.close(0)
+    )
+    for delay, tail in ((None, ""), ("0", ""), ("2", "+delay2")):
+        argv = ["policy_server.py", "--checkpoint", "a", "--port", "0", "--device", "cpu"]
+        argv += [] if delay is None else ["--infer_delay", delay]
+        monkeypatch.setattr(sys, "argv", argv)
+        assert policy_server.main() == 0
+        ready = json.loads(capsys.readouterr().out.split("SERVER_READY ", 1)[1])
+        assert ready["policy_id"] == "act:a+nas3+ctx16+gap" + tail
+        assert ready["inference"].get("infer_delay") == (2 if tail else None)
+    monkeypatch.setattr(sys, "argv", argv[:-1] + ["3"])  # the stub's chunk is 3 actions
+    assert policy_server.main() == 1
+    assert capsys.readouterr().out.startswith("SERVER_FAIL ValueError: infer_delay")
 
 
 def test_the_step_hands_the_replan_flag_to_the_policy_only_when_sent():

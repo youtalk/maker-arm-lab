@@ -1,9 +1,9 @@
 """The heap gate client on the real arm (MS5 design sections 4.2, 7 and 8): one process runs
 one real episode.
 
-The MS7e served configuration on ``RealEnv``: the unchanged heap loop under ``perceived`` with
-every switch of the MS7d official read, MS7e's serving levers S2 and S3 and the flat study's
-``snap_closed`` (``SERVED_SWITCHES`` and ``SERVED_ORACLE``) and the knob scales at ``all=0``,
+Policy S's served configuration (MS7j) on ``RealEnv``: the unchanged heap loop under
+``perceived`` with every loop rule of S minus the image classifier (``SERVED_SWITCHES``,
+``SERVED_RIG``, ``SERVED_ORACLE`` and ``SERVED_INFERENCE``) and the knob scales at ``all=0``,
 because the noise is the rig's own. The policy server (lerobot_stack) and the perception
 worker run on this host; the arm runs ``Tracking`` in the SDK's loop.
 
@@ -64,11 +64,24 @@ SERVED_SWITCHES = {
     "force_cap": True,
     "thin_snap": True,
     "snap_closed": True,
+    "carry_guard": True,
+    "overhang_guard": True,
+    "missed_lift": True,
+    "cell_failure_cap": 5,
 }
 """The loop's switches, served unchanged on the rig: the MS7d official read's
 (docs/ms7d-perception-levers.md, rule R3 and the nine levers), MS7e's serving lever S2
 (``thin_snap``, docs/ms7e-widened-task.md) and the flat study's ``snap_closed``
-(docs/ms7e-flat-study.md)."""
+(docs/ms7e-flat-study.md), and the later switches of policy S (ACT F5 200k): the carry and
+overhang guards, the missed-lift read and the failure cap per cell. The classifier and what
+needs it (``classifier``, ``cls_flip``, ``vote_weights``, ``categories``) stay out, and so do
+the scene operations the operator does by hand (``box_empty``, ``tray_refill``). Source:
+``inference.loop`` of ``reads/i_S_d2039/eval_020.json``."""
+SERVED_RIG = {"release_lean": True, "carry_via": True, "passenger_check": True}
+"""``OracleRig``'s switches in S's rig."""
+SERVED_INFERENCE = {"n_action_steps": 50, "action_warp": 1.5}
+"""What the policy server must serve with: start it with ``--n_action_steps 50 --action_warp
+1.5``. The client refuses any other server."""
 SERVED_ORACLE = {"wall_band_cont": True}
 """The teacher's switches: MS7e's serving lever S3, the continuous jaws' landing band in the
 grasp model's wall test (docs/ms7e-widened-task.md)."""
@@ -140,6 +153,18 @@ def open_sources(rig, namespace: str, closers: list):
     return overhead, wrist
 
 
+def check_served_inference(server) -> None:
+    """Refuse a policy server that serves with other chunking or warp than S, or that runs an
+    MS7j emulation knob (``infer_delay``, ``rtc``): the real arm has its own inference delay."""
+    served = {
+        "n_action_steps": server.n_action_steps,
+        "action_warp": server.inference.get("action_warp", 1.0),
+        **{k: server.inference[k] for k in ("infer_delay", "rtc") if k in server.inference},
+    }
+    if served != SERVED_INFERENCE:
+        raise EvalFailure("served_inference", f"server serves {served}, need {SERVED_INFERENCE}")
+
+
 def build_world(args, world: dict) -> None:
     """Fill ``world`` step by step, so that a failure halfway still finds the arm to hold."""
     import policy_client
@@ -203,10 +228,11 @@ def build_world(args, world: dict) -> None:
         )
 
     world["rig"] = OracleRig(
-        env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory
+        env, env.cfg.bin_layout, oracle.OracleNoise(), rng, oracle_factory=factory, **SERVED_RIG
     )
     server = policy_client.ServerPolicy(args.server, recv_timeout_ms=POLICY_TIMEOUT_MS)
     world["closers"].append(server.close)
+    check_served_inference(server)
     world["policy"] = TimedPolicy(server, env.ticks, env.trip)
 
 

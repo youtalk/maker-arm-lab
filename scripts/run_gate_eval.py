@@ -40,6 +40,12 @@ heap loop's --retry_noise_at flags draws its arm noise at S), and the cache matc
 --pi05_jaw_latch L reaches the server as --jaw_latch (the jaw commands held after a close), and
 the cache matches it. The heap loop's --pi05_prompt (MS7i Run A: each env's subtask id on the
 wire) goes in --client_flags, needs --pi05, and the cache matches it as a loop switch.
+
+--infer_delay D (MS7j) reaches either server as its --infer_delay: each chunk arrives D control
+steps after its observation. The server records it in its inference block only when D > 0, and
+the cache matches it there. --pi05_rtc reaches the pi0.5 server as --rtc (real-time chunking
+under that delay of at most its RTC_HORIZON, at --action_warp 1.0), which records "rtc": its
+RTC_HORIZON, and the cache matches it.
 """
 
 import argparse
@@ -97,6 +103,7 @@ class GateCfg:
     action_warp: float = 1.0  # the server plays each chunk this many times faster (MS7f speed)
     # MS7g D20: a second pretrained_model dir; the server serves the mean of both checkpoints.
     ensemble_with: str | None = None
+    infer_delay: int = 0  # MS7j: control steps between a chunk's observation and its first action
     # MS7h design 7.3: a pi0.5 checkpoint, served by one shared pi05_server.py to `lanes` clients.
     pi05: bool = False
     lanes: int = 1
@@ -110,6 +117,7 @@ class GateCfg:
     pi05_still_rad: float = 0.15  # the server's STILL_RAD (tests pin the copy)
     pi05_still_open: float = 0.9  # the server's STILL_OPEN
     pi05_jaw_latch: int = 0  # 0: the server's jaw latch is off
+    pi05_rtc: bool = False  # MS7j: the server's real-time chunking, under --infer_delay
     only_processes: tuple | None = None
     eval_timeout_s: float = 4 * 3600
     backend: str = "isaac"  # "mujoco" spawns scripts/mj_eval_policy.py under .venv/bin/python
@@ -421,6 +429,51 @@ def noise_scales_key(text: str) -> str:
     extra = tuple(k for k in PERCEPTION_EXTRA_KNOBS if scales[k] != 1.0)
     names = PERCEPTION_KNOBS + extra
     return ",".join(f"{k}={repr(float(scales[k])).removesuffix('.0')}" for k in names)
+
+
+STRESS_KNOBS = (
+    "sparse_gap",
+    "obs_delay",
+    "overhead_offset",
+    "wrist_offset",
+    "overhead_fov_delta",
+    "wrist_fov_delta",
+    "warp_back",
+    "jpeg_quality",
+    "blur_sigma",
+    "exposure_stops",
+    "hard_light",
+)
+"""``maker_arm_lab.mj.stress.STRESS_KNOBS`` (MS7j), copied and pinned by the test. The knobs reach
+the MuJoCo heap client through --client_flags and are recorded as ``payload["stress"]`` only when
+some knob is on. Pass a negative offset as ``--overhead_offset=-3,0,0,0,0,0``."""
+
+
+def stress_block(client_flags) -> dict:
+    """The stress knobs the client flags turn on, as ``Stress.block()`` writes them: only the
+    knobs off their default, ``{}`` when all are off. A malformed knob raises ValueError, which
+    ``main`` turns into GATE_ERROR."""
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, exit_on_error=False)
+    for name in STRESS_KNOBS:
+        if name in ("warp_back", "hard_light"):
+            parser.add_argument(f"--{name}", action="store_true")
+        elif name.endswith("_offset"):
+            parser.add_argument(f"--{name}", default="")
+        else:
+            kind = int if name in ("obs_delay", "jpeg_quality") else float
+            parser.add_argument(f"--{name}", type=kind, default=0)
+    try:
+        found = vars(parser.parse_known_args(list(client_flags))[0])
+    except argparse.ArgumentError as exc:
+        raise ValueError(f"--client_flags: {exc}") from exc
+    block = {}
+    for name in STRESS_KNOBS:
+        value = found[name]
+        if name.endswith("_offset"):
+            value = [float(v) for v in value.split(",")] if value else 0
+        if value:
+            block[name] = value
+    return block
 
 
 def loop_switches(client_flags) -> dict:
@@ -759,6 +812,8 @@ def _server_command(cfg: GateCfg) -> list[str]:
         cmd += ["--action_warp", str(cfg.action_warp)]
     if cfg.ensemble_with:
         cmd += ["--ensemble_with", cfg.ensemble_with]
+    if cfg.infer_delay:
+        cmd += ["--infer_delay", str(cfg.infer_delay)]
     return cmd
 
 
@@ -804,6 +859,7 @@ def _start_server(cfg: GateCfg) -> _ServerHandle:
 PI05_PYTHON = "lerobot_stack/.venv-pi/bin/python"
 PI05_READY_S = 900  # loading about 9 GB of pi0.5 weights on a busy host takes minutes
 PI05_STILL = ("still_noise_scale", "still_rad", "still_open")  # the server's flags and keys
+PI05_RTC_HORIZON = 25  # the server's RTC_HORIZON, its inference block's "rtc" (tests pin the copy)
 
 
 def _pi05_still(cfg: GateCfg) -> dict:
@@ -847,6 +903,8 @@ def _pi05_server_command(cfg: GateCfg) -> list[str]:
             if cfg.pi05_retry_noise_scale is not None
             else []
         ),
+        *(["--infer_delay", str(cfg.infer_delay)] if cfg.infer_delay else []),
+        *(["--rtc"] if cfg.pi05_rtc else []),
     ]
 
 
@@ -1043,6 +1101,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
             and MS7E_OFF | payload.get("ms7e", {}) == ms7e_block(cfg)
             # The same for the MS7f switches (MS7f design section 12.2).
             and MS7F_OFF | payload.get("ms7f", {}) == ms7f_block(cfg)
+            # A payload without a stress block ran with every MS7j knob off.
+            and payload.get("stress", {}) == stress_block(cfg.client_flags)
         )
     # The served inference configuration is part of what a draw measured. An open-loop read
     # (the checkpoint's own n_action_steps) must never stand in for a temporal-ensemble read.
@@ -1070,6 +1130,10 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     still = {key: served[key] for key in PI05_STILL if key in served}
     same_inference = same_inference and still == _pi05_still(cfg)
     same_inference = same_inference and served.get("jaw_latch", 0) == cfg.pi05_jaw_latch
+    # A payload that predates the inference delay ran without one.
+    same_inference = same_inference and served.get("infer_delay", 0) == cfg.infer_delay
+    rtc = PI05_RTC_HORIZON if cfg.pi05_rtc else None  # recorded only when on
+    same_inference = same_inference and served.get("rtc") == rtc
     if cfg.pi05:
         named = str(payload.get("policy_id", "")).removeprefix(f"pi05:{cfg.checkpoint}")
         same_inference = same_inference and (
@@ -1270,6 +1334,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "server serves the mean of both checkpoints' actions",
     )
     parser.add_argument(
+        "--infer_delay",
+        type=int,
+        default=0,
+        help="MS7j: the server serves each chunk this many control steps after its observation "
+        "(0: at once); for the ACT server and with --pi05",
+    )
+    parser.add_argument(
         "--pi05",
         action="store_true",
         help="MS7h design 7.3: --checkpoint is a pi0.5 pretrained_model dir; one shared "
@@ -1331,6 +1402,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help="with --pi05: hold the jaw command this many actions after a close in each chunk",
     )
+    parser.add_argument(
+        "--pi05_rtc",
+        action="store_true",
+        help="MS7j, with --pi05: real-time chunking under --infer_delay, at --action_warp 1.0",
+    )
     parser.add_argument("--only_processes", type=_process_list, default=None)
     parser.add_argument("--eval_timeout_s", type=float, default=4 * 3600)
     parser.add_argument("--backend", choices=("isaac", "mujoco"), default="isaac")
@@ -1341,8 +1417,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--frame_jitter",
-        action="store_true",
-        help="MuJoCo only: small overhead-camera jitter resampled per rendered frame",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="MuJoCo only: small overhead-camera jitter resampled per rendered frame. A later "
+        "--no-frame_jitter clears the one in fleet.py's PROTOCOL (the MS7j suite)",
     )
     parser.add_argument(
         "--spatial_scale",
@@ -1649,8 +1727,16 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError(f"--pi05_still_rad must be finite and above 0, got {still[1]}")
     if still[2] is not None and not 0.0 <= still[2] <= 1.0:
         raise ValueError(f"--pi05_still_open must be in [0, 1], got {still[2]}")
+    if args.infer_delay < 0:  # the server's own refusal; it also refuses a chunk too short
+        raise ValueError(f"--infer_delay must be at least 0, got {args.infer_delay}")
     if not 1.0 <= args.action_warp <= 3.0:  # the server's ACTION_WARP_MIN and ACTION_WARP_MAX
         raise ValueError(f"--action_warp must be in [1.0, 3.0], got {args.action_warp}")
+    delay_ok = 1 <= args.infer_delay <= PI05_RTC_HORIZON  # the server's own refusal
+    if args.pi05_rtc and (not args.pi05 or not delay_ok or args.action_warp != 1.0):
+        raise ValueError(
+            f"--pi05_rtc needs --pi05, --infer_delay in [1, {PI05_RTC_HORIZON}] and"
+            " --action_warp 1.0"
+        )
     heap = args.heap_k > 0 and args.backend == "mujoco"
     if args.gripper != "binary" and not heap:
         # Only the MuJoCo heap client drives a continuous gripper (phase B design 5.4).

@@ -550,3 +550,29 @@ def test_a_leaning_tray_wall_stands_on_the_interior_edge_and_rises_to_the_rim(le
         assert len(rim) == 2 and torch.allclose(
             (rim[:, axis] - edge) * sign, torch.tensor(grow, dtype=torch.float64)
         )
+
+
+def test_sparse_poses_keep_the_gap_the_clearance_and_the_walls():
+    # Footprints (size_x, size_y) of catalog parts.
+    sizes = [(0.0638, 0.0318), (0.0318, 0.0158), (0.0158, 0.0158), (0.0478, 0.0158)] * 2
+    poses = layout.sample_sparse_poses(random.Random(3), sizes, 0.035)
+    (x0, x1), (y0, y1) = layout.tray_bounds()
+    rects = [layout._corners(*p, sz) for p, sz in zip(poses, sizes)]
+    for rect in rects:
+        for x, y in rect:
+            assert x0 + layout.TRAY_DROP_INSET - 1e-9 <= x <= x1 - layout.TRAY_DROP_INSET + 1e-9
+            assert y0 + layout.TRAY_DROP_INSET - 1e-9 <= y <= y1 - layout.TRAY_DROP_INSET + 1e-9
+    for (i, a), (j, b) in itertools.combinations(enumerate(poses), 2):
+        assert math.dist(a[:2], b[:2]) >= 0.035
+        assert layout._rect_gap(rects[i], rects[j]) >= layout.HEAP_DROP_GAP
+
+
+def test_rect_gap_is_the_edge_distance_and_zero_on_overlap():
+    a = layout._corners(0.0, 0.0, 0.0, (0.02, 0.01))
+    assert layout._rect_gap(a, layout._corners(0.05, 0.0, 0.0, (0.02, 0.01))) == pytest.approx(0.03)
+    assert layout._rect_gap(a, layout._corners(0.01, 0.0, 0.3, (0.02, 0.01))) == 0.0
+
+
+def test_sparse_poses_refuse_an_impossible_layout():
+    with pytest.raises(ValueError):
+        layout.sample_sparse_poses(random.Random(1), [(0.07, 0.07)] * 40, 0.035)

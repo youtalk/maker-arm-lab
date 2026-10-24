@@ -290,6 +290,15 @@ server reads a row's id only when it refills that row's queue, so the switch nev
 flag and the chunk in play keeps its latched jaw (MS7i review C6). A policy that ignores the key
 is served the same steps; the ``inference`` block records the switch only when on.
 
+``obs_delay`` O (MS7j readiness suite; 0 is off) hands the policy each env's camera frames
+from O control steps before, the real overhead frames' 91 to 114 ms. At each
+policy call the loop keeps the unstamped wrist and overhead frames, writes the frame from O calls
+before back into the env's buffers and then stamps the current marker on it. Before O frames
+exist, and after an env's reset, the oldest frame of the episode serves, so a frame never comes
+from the episode before. The joint state, the context row and the perceived state stay current.
+A wrist read of the classifier between the policy call and the step also reads the delayed
+frame. The client's ``stress`` block records the switch, not the ``inference`` block.
+
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
 """
@@ -2408,6 +2417,7 @@ def rollout(
     record_all: bool = False,
     pi05_prompt: bool = False,
     release_handoff: bool = False,
+    obs_delay: int = 0,
 ) -> dict:
     """One lockstep rollout of ``env.num_envs`` heap episodes; returns the EVAL payload.
 
@@ -2480,6 +2490,8 @@ def rollout(
     ``pi05_prompt`` (MS7i) is the module docstring's; it needs a policy and a served target row,
     and with it on the policy's ``step`` takes ``prompt``, the (num_envs,) int16 subtask ids.
     ``release_handoff`` (MS7i) is the module docstring's; it needs ``carry_guard``.
+    ``obs_delay`` (MS7j) is the module docstring's. The client's ``stress`` block records it, so
+    the ``inference`` block does not.
     Raises ``EvalFailure`` on a scene, context, action-space or gripper mismatch, the wall
     clock and an incomplete batch, as the eval loop does.
     """
@@ -2850,6 +2862,8 @@ def rollout(
     sub_cycle = [0] * num_envs
     sub_width = [None] * num_envs
     subtasks = [0] * num_envs
+    # ``obs_delay``: each env's last obs_delay + 1 unstamped camera frames, oldest first.
+    delayed = [deque(maxlen=obs_delay + 1) for _ in range(num_envs)]
 
     started = time.monotonic()
     max_steps = int(env.max_episode_length)
@@ -3144,6 +3158,14 @@ def rollout(
         if policy is not None:
             # The frame the policy reads was rendered unmarked at the end of the last step,
             # and pass 1 may have moved the target since: stamp it now (phase B design 5.2).
+            if obs_delay:
+                # The oldest kept frame goes back into the buffers, so the stamp below draws the
+                # current marker on it, as a real rig stamps the last frame it received.
+                images, views = env.obs_buf["images"], ("wrist_rgb", "overhead_rgb")
+                for i, kept in enumerate(delayed):
+                    kept.append([images[v][i].clone() for v in views])
+                    for v, frame in zip(views, kept[0]):
+                        images[v][i] = frame
             stamp = getattr(env, "stamp_markers", None)
             if stamp is not None:
                 stamp()
@@ -3657,6 +3679,9 @@ def rollout(
         if record_all or pi05_prompt:  # the width each frame recorded (a takeover's: the rig's)
             sub_width = [float(w) for w in ctx_target[:, 5]]
         dones = (terminated | truncated).cpu()
+        if obs_delay:
+            for i in torch.nonzero(dones).flatten().tolist():
+                delayed[i].clear()  # a delayed frame never comes from the episode before a reset
         rig.observe(dones)
         # 4. Takeovers the rig handed back this step.
         for i in range(num_envs):

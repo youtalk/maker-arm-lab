@@ -1,6 +1,7 @@
 """train_pi05.py: the pi0.5 loss ignores padded actions and equals the stock mean without them;
 the mix draws each source's share and keeps the corpus metadata; Run A's prompt codes."""
 
+import re
 from types import SimpleNamespace
 
 import numpy as np
@@ -9,10 +10,13 @@ import torch
 
 from train_pi05 import (
     CODES,
+    LORA_TARGETS,
     PHRASES,
     TASK,
     Mixed,
     forward,
+    lora_flags,
+    main,
     masked_means,
     mixed_maker,
     prompt,
@@ -46,7 +50,11 @@ def test_forward_masks_the_model_losses():
     policy = SimpleNamespace(
         _preprocess_images=lambda batch: (None, None),
         prepare_action=lambda batch: batch["action"],
-        model=SimpleNamespace(forward=lambda *args: out),
+        model=SimpleNamespace(
+            forward=lambda *args: out,
+            sample_noise=lambda shape, device: None,
+            sample_time=lambda n, device: None,
+        ),
         config=SimpleNamespace(output_features={"action": SimpleNamespace(shape=(7,))}),
     )
     batch = {
@@ -167,3 +175,70 @@ def test_the_mix_flags_leave_lerobot_s_argv():
         split_mix(["--prompt_codes"])
     with pytest.raises(SystemExit, match="want --mix=ROOT:SHARE"):
         split_mix(["--mix=0.3"])
+
+
+def test_forward_draws_noise_then_time_and_passes_both():
+    calls, got = [], {}
+    noise, time = torch.zeros(2, 4, 7), torch.ones(2)
+
+    def sample_noise(shape, device):
+        calls.append("noise")
+        return noise
+
+    def sample_time(n, device):
+        calls.append("time")
+        return time
+
+    def model_forward(*args):
+        calls.append("forward")
+        got["noise"], got["time"] = args[-2:]
+        return torch.ones(2, 4, 32)
+
+    policy = SimpleNamespace(
+        _preprocess_images=lambda batch: (None, None),
+        prepare_action=lambda batch: batch["action"],
+        model=SimpleNamespace(
+            forward=model_forward, sample_noise=sample_noise, sample_time=sample_time
+        ),
+        config=SimpleNamespace(output_features={"action": SimpleNamespace(shape=(7,))}),
+    )
+    batch = {
+        "action": torch.zeros(2, 4, 7),
+        "action_is_pad": torch.zeros(2, 4, dtype=torch.bool),
+        "observation.language.tokens": None,
+        "observation.language.attention_mask": None,
+    }
+    forward(policy, batch)
+    assert calls == ["noise", "time", "forward"]
+    assert got["noise"] is noise and got["time"] is time
+
+
+def test_the_lora_regex_takes_the_language_model_and_the_expert_only():
+    hit = "model.paligemma_with_expert.paligemma.model.language_model.layers.3.mlp.up_proj"
+    exp = "model.paligemma_with_expert.gemma_expert.model.layers.17.self_attn.o_proj"
+    sig = (
+        "model.paligemma_with_expert.paligemma.model.vision_tower.vision_model"
+        ".encoder.layers.0.self_attn.q_proj"
+    )
+    assert re.fullmatch(LORA_TARGETS, hit) and re.fullmatch(LORA_TARGETS, exp)
+    assert not re.fullmatch(LORA_TARGETS, sig)
+    assert not re.fullmatch(LORA_TARGETS, "model.action_in_proj")
+
+
+def test_lora_flags_set_alpha_to_the_rank():
+    flags = lora_flags(128)
+    assert "--peft.r=128" in flags and "--peft.lora_alpha=128" in flags
+    assert "--peft.method_type=LORA" in flags
+    assert (
+        '--peft.full_training_modules=["action_in_proj", "action_out_proj", "time_mlp_in", "time_mlp_out"]'
+        in flags
+    )
+
+
+def test_mix_and_prompt_codes_is_refused_on_0_6_1(monkeypatch):
+    import lerobot
+
+    monkeypatch.setattr(lerobot, "__version__", "0.6.1")
+    for flag in ("--mix=/x:0.2", "--prompt_codes"):
+        with pytest.raises(SystemExit, match="EpisodeAwareSampler"):
+            main([flag, "--steps=8"])

@@ -1889,6 +1889,13 @@ def test_the_pi05_server_logs_to_the_out_dir_and_the_supervisor_waits_for_ready(
         (["--pi05_retry_noise_scale", "1"], "need --pi05"),
         (["--pi05", "--pi05_retry_noise_scale", "-1"], "--pi05_retry_noise_scale must be finite"),
         (["--pi05", "--pi05_retry_noise_scale", "inf"], "--pi05_retry_noise_scale must be finite"),
+        (["--pi05_rtc", "--infer_delay", "6"], "--pi05_rtc needs --pi05"),
+        (["--pi05", "--pi05_rtc"], "--pi05_rtc needs"),
+        (["--pi05", "--pi05_rtc", "--infer_delay", "26"], "--pi05_rtc needs"),
+        (
+            ["--pi05", "--pi05_rtc", "--infer_delay", "6", "--action_warp", "1.5"],
+            "--pi05_rtc needs",
+        ),
     ],
 )
 def test_the_pi05_mode_refuses_what_its_server_cannot_serve(
@@ -1899,3 +1906,123 @@ def test_the_pi05_mode_refuses_what_its_server_cannot_serve(
     assert ge.main(_argv(tmp_path) + PI05_HEAP + extra) == 2
     out = capsys.readouterr()
     assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and message in out.err
+
+
+STRESS_EXAMPLES = [
+    [],
+    ["--overhead_offset", "0,3,0,0,0,0", "--jpeg_quality", "85"],
+    ["--wrist_offset=-1,0,0,0,0,0.01", "--wrist_fov_delta", "2", "--warp_back", "--obs_delay", "3"],
+    ["--sparse_gap", "0.05", "--tray", "--blur_sigma", "1.5", "--hard_light"],
+]
+
+
+def test_the_supervisors_stress_copy_matches_the_core_module():
+    import argparse
+
+    from maker_arm_lab.mj import stress
+    from maker_arm_lab.mj.stress import add_stress_arguments, stress_from_args
+
+    assert ge.STRESS_KNOBS == stress.STRESS_KNOBS
+    for flags in STRESS_EXAMPLES:
+        parser = argparse.ArgumentParser()
+        add_stress_arguments(parser)
+        parser.add_argument("--tray", action="store_true")
+        assert ge.stress_block(flags) == stress_from_args(parser.parse_known_args(flags)[0]).block()
+
+
+def test_a_cached_draw_with_another_stress_block_is_not_reused(tmp_path):
+    ledger = _fake_ledger(tmp_path)
+    cfg = _cfg(tmp_path, ledger, processes=1, backend="mujoco", heap_k=50)
+    cfg.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+
+    def cached(cfg, **extra):
+        (cfg.out_dir / "eval_000.json").write_text(json.dumps(_heap_payload(draw, **extra)))
+        return ge._cached_payload(cfg, draw) is not None
+
+    block = {"jpeg_quality": 85}
+    assert cached(cfg) and not cached(cfg, stress=block)
+    cfg.client_flags = ("--jpeg_quality", "85")
+    assert cached(cfg, stress=block) and not cached(cfg)
+
+
+def test_a_malformed_stress_knob_is_a_gate_error_on_a_resumed_read(tmp_path, monkeypatch, capsys):
+    for flags in (["--jpeg_quality", "abc"], ["--overhead_offset", "-3,0,0,0,0,0"]):
+        with pytest.raises(ValueError, match=flags[0]):
+            ge.stress_block(flags)
+    ledger = _fake_ledger(tmp_path)
+    out_dir = tmp_path / "gate"
+    out_dir.mkdir()
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    (out_dir / "eval_000.json").write_text(json.dumps(_heap_payload(draw)))
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server"))
+    argv = ["--checkpoint", "ck", "--out_dir", str(out_dir), "--ledger", str(ledger)]
+    argv += ["--threshold", "0.85", "--seed", str(SELECTION_SEED), "--processes", "1"]
+    argv += HEAP + ["--client_flags", "--jpeg_quality abc"]
+    assert ge.main(argv) == 2
+    out = capsys.readouterr()
+    tokens = [x for x in out.out.splitlines() if x.startswith("GATE_")]
+    assert tokens == ["GATE_ERROR"] and "--jpeg_quality" in out.err
+
+
+def test_the_supervisor_sends_infer_delay_and_keys_the_cache(tmp_path, monkeypatch, capsys):
+    read = _argv(tmp_path) + PI05_HEAP + ["--n_action_steps", "50"]
+    plain = ge._build_cfg(ge._parse_args(read))
+    act = ge._build_cfg(ge._parse_args(read + ["--infer_delay", "1"]))
+    pi05 = ge._build_cfg(ge._parse_args(read + ["--pi05", "--infer_delay", "6"]))
+    assert (plain.infer_delay, act.infer_delay, pi05.infer_delay) == (0, 1, 6)
+    assert "--infer_delay" not in ge._server_command(plain)  # off: the same bytes
+    assert ge._server_command(act) == ge._server_command(plain) + ["--infer_delay", "1"]
+    pi05_plain = ge._build_cfg(ge._parse_args(read + ["--pi05"]))
+    assert "--infer_delay" not in ge._pi05_server_command(pi05_plain)
+    assert ge._pi05_server_command(pi05) == ge._pi05_server_command(pi05_plain) + [
+        "--infer_delay",
+        "6",
+    ]
+    ledger = _fake_ledger(tmp_path)
+    open_loop = {"n_action_steps": None, "temporal_ensemble_coeff": None}
+    off = _cfg(tmp_path, ledger, processes=1, **open_loop)
+    on = _cfg(tmp_path, ledger, processes=1, infer_delay=1, **open_loop)
+    off.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None, "chunk_size": 100}
+
+    def cached(cfg, **inference):
+        payload = _payload(draw, [_episode(6)], policy_id="act:ck+nas50")
+        payload["inference"] = served | inference
+        (off.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    # A payload without the key, every one before the delay, ran without one.
+    assert cached(off) and not cached(off, infer_delay=1)
+    assert cached(on, infer_delay=1) and not cached(on) and not cached(on, infer_delay=6)
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    assert ge.main(_argv(tmp_path) + ["--infer_delay", "-1"]) == 2
+    out = capsys.readouterr()
+    assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--infer_delay" in out.err
+
+
+def test_the_pi05_rtc_reaches_the_server_and_splits_the_cache(tmp_path):
+    read = _argv(tmp_path) + PI05_HEAP + ["--pi05", "--infer_delay", "6"]
+    plain = ge._build_cfg(ge._parse_args(read))
+    rtc = ge._build_cfg(ge._parse_args(read + ["--pi05_rtc"]))
+    assert (plain.pi05_rtc, rtc.pi05_rtc) == (False, True)
+    assert "--rtc" not in ge._pi05_server_command(plain)  # off: the same bytes
+    assert ge._pi05_server_command(rtc) == ge._pi05_server_command(plain) + ["--rtc"]
+    ledger = _fake_ledger(tmp_path)
+    off = _cfg(tmp_path, ledger, processes=1, pi05=True, infer_delay=6)
+    on = _cfg(tmp_path, ledger, processes=1, pi05=True, infer_delay=6, pi05_rtc=True)
+    off.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    served = {"n_action_steps": 1, "temporal_ensemble_coeff": 0.01, "num_inference_steps": 10}
+
+    def cached(cfg, **inference):
+        payload = _payload(draw, [_episode(6)], policy_id="pi05:ck")
+        payload["inference"] = served | {"infer_delay": 6} | inference
+        (off.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    assert cached(off) and not cached(off, rtc=25)
+    assert cached(on, rtc=25) and not cached(on) and not cached(on, rtc=10)
+    source = (Path(__file__).parents[1] / "lerobot_stack" / "pi05_server.py").read_text()
+    assert f"\nRTC_HORIZON = {ge.PI05_RTC_HORIZON}\n" in source
