@@ -1,7 +1,12 @@
 """train_pi05.py: the pi0.5 loss ignores padded actions and equals the stock mean without them;
-the mix draws each source's share and keeps the corpus metadata; Run A's prompt codes."""
+the mix draws each source's share and keeps the corpus metadata; Run A's prompt codes; the MS7k
+levers (a LoRA continuation, close-weighted sampling, the overhead affine) and main without them."""
 
+import copy
+import json
+import math
 import re
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,16 +15,26 @@ import torch
 
 from train_pi05 import (
     CODES,
+    JAW_FULL_GAP,
     LORA_TARGETS,
+    OVERHEAD,
     PHRASES,
+    SIGLIP_TARGETS,
     TASK,
     Mixed,
+    close_sampling,
+    close_weights,
+    continued,
     forward,
+    load_lora,
     lora_flags,
     main,
     masked_means,
     mixed_maker,
+    overhead_aug,
     prompt,
+    random_affine,
+    split_levers,
     split_mix,
 )
 
@@ -242,3 +257,253 @@ def test_mix_and_prompt_codes_is_refused_on_0_6_1(monkeypatch):
     for flag in ("--mix=/x:0.2", "--prompt_codes"):
         with pytest.raises(SystemExit, match="EpisodeAwareSampler"):
             main([flag, "--steps=8"])
+
+
+# --- the MS7k levers (spec section 6.2, ledger K11) ---
+
+SIG = "model.paligemma_with_expert.paligemma.model.vision_tower.vision_model.encoder.layers."
+
+
+def test_the_siglip_regex_takes_every_siglip_linear_and_keeps_the_old_targets():
+    lm = "model.paligemma_with_expert.paligemma.model.language_model.layers.3.mlp.up_proj"
+    wide = lora_flags(128, siglip=True)[3].split("=", 1)[1]
+    for m in ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.out_proj"):
+        assert re.fullmatch(SIGLIP_TARGETS, f"{SIG}26.{m}") and re.fullmatch(wide, f"{SIG}0.{m}")
+    for m in ("mlp.fc1", "mlp.fc2"):
+        assert re.fullmatch(wide, f"{SIG}11.{m}")
+    assert re.fullmatch(wide, lm) and not re.fullmatch(SIGLIP_TARGETS, lm)
+    for other in (
+        "model.paligemma_with_expert.paligemma.model.multi_modal_projector.linear",
+        f"{SIG}0.layer_norm1",
+        "model.action_in_proj",
+    ):
+        assert not re.fullmatch(wide, other)
+    assert lora_flags(128, siglip=False) == lora_flags(128)  # off: the B3 flags
+
+
+class Tiny(torch.nn.Module):
+    """lm stands for the language model and the expert, vision for SigLIP, head for the
+    modules_to_save of the recipe."""
+
+    def __init__(self):
+        super().__init__()
+        self.lm, self.vision, self.head = (torch.nn.Linear(4, 4) for _ in range(3))
+
+    def forward(self, x):
+        return self.head(self.lm(torch.relu(self.vision(x))))
+
+
+def test_a_continued_adapter_is_the_saved_model_at_step_0(tmp_path, capsys):
+    peft = pytest.importorskip("peft")
+
+    def wrap(base, targets=r"lm", alpha=2, save=("head",)):
+        cfg = peft.LoraConfig(
+            r=2, lora_alpha=alpha, target_modules=targets, modules_to_save=list(save)
+        )
+        return peft.get_peft_model(copy.deepcopy(base), cfg)
+
+    torch.manual_seed(0)
+    base, x = Tiny(), torch.randn(5, 4)
+    saved = wrap(base)
+    with torch.no_grad():  # a trained adapter: LoRA A, B and the head copy all moved
+        for p in (p for p in saved.parameters() if p.requires_grad):
+            p.add_(torch.randn_like(p))
+    saved.save_pretrained(tmp_path)
+    want = saved(x)
+    head = saved.base_model.model.head.modules_to_save["default"].weight
+    assert not torch.equal(head, base.head.weight)
+
+    fresh = continued(lambda self, *a, **k: wrap(self), tmp_path, None)(base)  # the run's wrap
+    assert torch.equal(fresh(x), want)
+    assert torch.equal(fresh.base_model.model.head.modules_to_save["default"].weight, head)
+    assert "loaded=4 new=0 trainable=4" in capsys.readouterr().out
+    assert not torch.equal(wrap(base)(x), want)  # without the load, another model
+
+    wide = wrap(base, targets=r"lm|vision")  # L2: the new vision LoRA keeps B = 0
+    load_lora(wide, tmp_path, new=r"\.vision\.")
+    assert torch.equal(wide(x), want)
+    assert "loaded=4 new=2 trainable=6" in capsys.readouterr().out
+    assert not wide.base_model.model.vision.lora_B["default"].weight.any()
+
+    with pytest.raises(ValueError, match="2 adapter tensors did not load"):
+        load_lora(wrap(base, targets=r"lm|vision"), tmp_path)  # new targets need --siglip_lora
+    with pytest.raises(ValueError, match="2 saved tensors found no place"):
+        load_lora(wrap(base, targets=r"vision"), tmp_path, new=r"\.vision\.")  # no lm LoRA
+    with pytest.raises(ValueError, match=r"\(2, 2, \['head'\]\), the run has \(2, 4, "):
+        load_lora(wrap(base, alpha=4), tmp_path)
+    with pytest.raises(ValueError, match=r"the run has \(2, 2, \[\]\)"):
+        load_lora(wrap(base, save=()), tmp_path)  # the head would load into the frozen base
+
+
+def test_close_weights_mark_the_window_around_each_close_in_its_episode():
+    pick, shut, full = 0.024, 0.010, JAW_FULL_GAP
+    gap = [full] * 5 + [pick] * 10 + [shut] * 10 + [pick] * 2 + [full] * 3  # episode 0: 30
+    gap += [shut] * 10 + [full] * 5 + [pick] * 3 + [shut] * 2  # episode 1 starts closed: 20
+    gap += [pick] * 2 + [shut] * 8  # episode 2 closes at its frame 2: 10
+    episode = [0] * 30 + [1] * 20 + [2] * 10
+    w, closes, none = close_weights(gap, episode, fps=10, weight=3.0, before_s=1.0, after_s=0.5)
+    near = np.flatnonzero(w == 3.0).tolist()
+    assert closes == 3 and none == 0  # the open-to-pick falls at frames 5 and 45 are no closes
+    assert near == [*range(5, 21), *range(38, 50), *range(50, 58)]  # clipped to each episode
+    assert set(w.tolist()) == {1.0, 3.0}
+    w, closes, none = close_weights(gap[30:50], episode[30:50], 10, 3.0, 1.0, 0.5)
+    assert (closes, none) == (1, 0)
+    _, closes, none = close_weights([shut] * 5 + [full] * 5, [7] * 10, 10, 3.0, 1.0, 0.5)
+    assert (closes, none) == (0, 1)  # an episode that starts closed shows no close
+
+
+def test_close_sampling_reads_the_corpus_and_draws_near_a_close_w_times_as_often(tmp_path, capsys):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    gap = np.tile(np.r_[[JAW_FULL_GAP] * 20, [0.024] * 20, [0.010] * 60], 4)  # 4 episodes
+    action = np.zeros((len(gap), 7), np.float32)
+    action[:, 6] = gap
+    names = [f"j{i}" for i in range(6)] + ["gripper_gap_m"]
+    (tmp_path / "meta").mkdir()
+    (tmp_path / "meta/info.json").write_text(json.dumps({"features": {"action": {"names": names}}}))
+    for k, part in enumerate((slice(0, 150), slice(150, 400))):  # two files, in index order
+        (tmp_path / f"data/chunk-00{k}").mkdir(parents=True)
+        table = pa.table(
+            {
+                "index": np.arange(400)[part],
+                "episode_index": np.repeat(np.arange(4), 100)[part],
+                "action": pa.array(list(action[part])),
+            }
+        )
+        pq.write_table(table, tmp_path / f"data/chunk-00{k}/file-000.parquet")
+
+    def corpus(n):  # a LeRobotDataset of n frames at the root
+        return type("Corpus", (), {"root": tmp_path, "fps": 10, "__len__": lambda self: n})()
+
+    dataset = corpus(400)
+    module = SimpleNamespace(make_train_eval_datasets=lambda cfg: (dataset, None))
+    close_sampling(module, 3.0, 1.0, 0.5)
+    assert module.make_train_eval_datasets("cfg") == (dataset, None)
+    out = capsys.readouterr().out
+    assert "CLOSE_WEIGHT closes=4 episodes_without=0 frames=400 window_share=0.1600" in out
+    # each close at frame 40 of its episode: frames 30 to 45 weigh 3, 48 of 132 weight units
+    assert "weighted_share=0.3636" in out
+    draws = list(module.EpisodeAwareSampler([0], [400], shuffle=True, seed=5))
+    assert len(draws) == 400 and draws == list(module.EpisodeAwareSampler(seed=5))
+    many = np.concatenate([list(module.EpisodeAwareSampler(seed=s)) for s in range(50)])
+    share = np.isin(many % 100, np.arange(30, 46)).mean()
+    assert abs(share - 48 / 132) < 4 * (0.25 / len(many)) ** 0.5
+    module.make_train_eval_datasets = lambda cfg: (corpus(300), None)  # a subset of the root
+    close_sampling(module, 3.0, 1.0, 0.5)
+    with pytest.raises(ValueError, match="400 weights for 300 frames"):
+        module.make_train_eval_datasets("cfg")
+
+
+def ramps(b, h=40, w=64):
+    """(b, 2, h, w): channel 0 holds each pixel's column, channel 1 its row, in pixels."""
+    rows, cols = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="ij")
+    return torch.stack([cols, rows]).to(torch.float64).expand(b, 2, h, w).clone()
+
+
+def test_random_affine_shifts_and_rolls_within_its_bounds():
+    gen = torch.Generator().manual_seed(0)
+    img = ramps(4000)
+    assert torch.equal(random_affine(img, 0.0, 0.06, 3.0, gen), img)  # P = 0: unchanged
+    out = random_affine(img, 0.5, 0.06, 0.0, gen)
+    assert out.shape == img.shape
+    moved = (out != img).flatten(1).any(1)
+    assert abs(moved.double().mean() - 0.5) < 0.03  # half of the samples
+    centre = out[:, :, 20, 32] - img[:, :, 20, 32]  # where the centre pixel samples from
+    dx, dy = centre[:, 0] / 64, centre[:, 1] / 40  # a share of the frame size
+    assert dx.abs().max() <= 0.06 + 1e-6 and dy.abs().max() <= 0.06 + 1e-6
+    assert dx[moved].abs().max() > 0.059 and dy[moved].abs().mean() == pytest.approx(0.03, 0.1)
+    out = random_affine(img, 1.0, 0.0, 3.0, gen)  # roll only, on a frame that is not square
+    centre = out[:, :, 20, 32] - img[:, :, 20, 32]
+    assert centre.abs().max() < 0.05  # pixel (20, 32) is 0.7 px from the centre (19.5, 31.5)
+    x, y = out[:, 0, 20, 52] - 31.5, out[:, 1, 20, 52] - 19.5  # pixel (20, 52) is at (20.5, 0.5)
+    angle = torch.rad2deg(torch.atan2(y, x)) - math.degrees(math.atan2(0.5, 20.5))
+    assert angle.abs().max() <= 3.0 + 1e-6 and angle.abs().max() > 2.95
+    assert torch.allclose(torch.hypot(x, y), torch.full_like(x, math.hypot(20.5, 0.5)))  # no shear
+
+
+def test_overhead_aug_moves_only_the_overhead_image_and_only_in_training():
+    seen = []
+
+    def stock(self, batch, reduction="mean"):
+        seen.append(batch)
+        return reduction
+
+    wrist = torch.rand(8, 3, 16, 16)
+    batch = {OVERHEAD: ramps(8, 16, 16).float(), "observation.images.wrist": wrist}
+    policy = SimpleNamespace(training=True)
+    torch.manual_seed(7)
+    aug = overhead_aug(stock, 1.0, 0.06, 3.0)
+    assert aug(policy, batch, "none") == "none"
+    after = torch.rand(1)
+    assert seen[-1]["observation.images.wrist"] is wrist
+    assert not torch.equal(seen[-1][OVERHEAD], batch[OVERHEAD])  # the caller's batch stays
+    first = seen[-1][OVERHEAD]
+    torch.manual_seed(7)
+    overhead_aug(stock, 1.0, 0.06, 3.0)(policy, batch)
+    assert torch.equal(seen[-1][OVERHEAD], first)  # seeded from torch.initial_seed()
+    assert torch.equal(torch.rand(1), after)  # the global draws are those of a run without it
+    policy.training = False
+    aug(policy, batch)
+    assert seen[-1] is batch
+
+
+def test_the_levers_leave_lerobot_s_argv_and_bad_values_exit(monkeypatch):
+    import lerobot
+
+    argv = ["--steps=8", "--lora_from=/a", "--siglip_lora", "--close_weight=3,2,1", "--lora=128"]
+    assert split_levers(argv) == (
+        {"--lora_from": "/a", "--siglip_lora": "", "--close_weight": "3,2,1"},
+        ["--steps=8", "--lora=128"],
+    )
+    assert split_levers(["--steps=8"]) == ({}, ["--steps=8"])
+    monkeypatch.setattr(lerobot, "__version__", "0.6.1")
+    for bad, match in (
+        (["--close_weight=3,2"], "want three numbers"),
+        (["--overhead_aug=1.5,0.06,3"], "want three numbers"),
+        (["--siglip_lora=1", "--lora=128"], "takes no value"),
+        (["--lora_from="], "needs one"),
+        (["--lora_from=/a"], "need --lora=R"),
+        (["--siglip_lora"], "need --lora=R"),
+        (["--lora_from=/a", "--lora=128", "--policy.use_peft=true"], "no --policy.use_peft"),
+        (["--lora_from=/a", "--lora=128", "--resume=true"], "--resume"),
+    ):
+        with pytest.raises(SystemExit, match=match):
+            main(bad)
+
+
+def test_main_installs_a_lever_only_when_its_flag_is_given(monkeypatch):
+    import lerobot
+
+    if lerobot.__version__ != "0.6.1":
+        pytest.skip("needs the pi venv (lerobot 0.6.1)")
+    from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+    from lerobot.scripts import lerobot_train
+
+    names = ("forward", "wrap_with_peft")
+    stock = {n: getattr(PI05Policy, n) for n in names}
+    for n in names:
+        monkeypatch.setattr(PI05Policy, n, stock[n])
+    for n in ("EpisodeAwareSampler", "make_train_eval_datasets", "main"):
+        monkeypatch.setattr(lerobot_train, n, getattr(lerobot_train, n))
+    sampler, make = lerobot_train.EpisodeAwareSampler, lerobot_train.make_train_eval_datasets
+    runs = []
+    monkeypatch.setattr(lerobot_train, "main", lambda: runs.append(list(sys.argv[1:])))
+    monkeypatch.setattr(sys, "argv", ["train_pi05.py"])
+    plain = ["--steps=8", "--lora=128", "--seed=1001"]
+    main(plain)  # K14: the masked forward and the B3 flags, nothing else
+    assert PI05Policy.forward is forward and PI05Policy.wrap_with_peft is stock["wrap_with_peft"]
+    assert lerobot_train.EpisodeAwareSampler is sampler
+    assert lerobot_train.make_train_eval_datasets is make
+    assert runs[-1] == ["--steps=8", *lora_flags(128), "--seed=1001"]
+    levers = [
+        "--lora_from=/a",
+        "--siglip_lora",
+        "--close_weight=3,2,1",
+        "--overhead_aug=0.5,0.06,3",
+    ]
+    main([*plain, *levers])
+    assert runs[-1] == ["--steps=8", *lora_flags(128, siglip=True), "--seed=1001"]
+    assert PI05Policy.forward.__qualname__.startswith("overhead_aug")
+    assert PI05Policy.wrap_with_peft.__qualname__.startswith("continued")
+    assert lerobot_train.make_train_eval_datasets.__qualname__.startswith("close_sampling")
