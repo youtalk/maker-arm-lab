@@ -534,6 +534,9 @@ sys.exit(got != ("0.6.1", "5.5.4", "0.21.2", "2.11.0+cu126") or not torch.cuda.i
             --index-url https://download.pytorch.org/whl/cu126 \
             && pip install -q "lerobot[pi,peft,training]==0.6.1" transformers==5.5.4 peft==0.21.2
     } || fail "cannot install the lerobot 0.6.1 stack"
+    # the Colab image ships torchao 0.10.0, and peft 0.21.2 raises an ImportError on any torchao
+    # under 0.16 when it builds a LoRA layer (2026-10-28 smoke); Machine A venv has none
+    pip uninstall -q -y torchao > /dev/null 2>&1 || true
     python3 -c "$stack" || fail "the lerobot 0.6.1 stack is not the pinned one (see the line above)"
 else
     python3 -c 'import lerobot, sys; sys.exit(lerobot.__version__ != "0.5.1")' 2>/dev/null \
