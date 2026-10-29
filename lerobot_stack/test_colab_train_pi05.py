@@ -799,6 +799,7 @@ TORCH = "torch==2.11.0+cu126 torchvision==0.26.0+cu126"
 STACK = [
     f"install -q {TORCH} --index-url https://download.pytorch.org/whl/cu126",
     "install -q lerobot[pi,peft,training]==0.6.1 transformers==5.5.4 peft==0.21.2",
+    "uninstall -q -y torchao",  # the image's torchao 0.10.0 breaks peft 0.21.2's LoRA layers
 ]
 needs_061 = pytest.mark.skipif(
     importlib.metadata.version("lerobot") != "0.6.1", reason="the LoRA flags parse on 0.6.1"
@@ -856,7 +857,7 @@ def test_a_lora_smoke_continues_the_adapter_offline_on_the_pinned_stack(rig):
     assert r.token.startswith("COLAB_TRAIN_OK smoke sec_per_step=3.850 checkpoint_gib=")
     assert "loss200=0.030 batch=32 expert_only=false lora=128 save=" in r.token
     assert "loss band: step 200 loss 0.030 in [0.010, 0.06]" in r.stdout
-    assert len((rig.fake / "pip.log").read_text().splitlines()) == 2  # installed once
+    assert len((rig.fake / "pip.log").read_text().splitlines()) == len(STACK)  # installed once
     assert (rig.fake / "download.log").read_text().count("\n") == 1  # the base once a runtime
     (call,) = _calls(rig)
     want = {
