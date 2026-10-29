@@ -186,6 +186,10 @@ def stress_from_args(args) -> Stress:
             raise ValueError("--couple_overhead refuses --warp_back: the error is uncorrected")
         if not getattr(args, "perceived", False):
             raise ValueError("--couple_overhead moves the perceived state: it needs --perceived")
+        if getattr(args, "classifier", ""):
+            # The classifier's narrow view aims the moved camera at the shifted centre, so its
+            # crop would miss the part by the shift, unlike a crop around the real detection.
+            raise ValueError("--couple_overhead refuses --classifier")
     if stress.obs_delay and (getattr(args, "dagger_dir", "") or getattr(args, "record_all", False)):
         # The recorder would save the delayed frame next to the current state and depth.
         raise ValueError("--obs_delay refuses --dagger_dir and --record_all")

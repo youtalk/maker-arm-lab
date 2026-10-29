@@ -15,6 +15,7 @@ def parse(flags):
     parser.add_argument("--dagger_dir", default="")
     parser.add_argument("--record_all", action="store_true")
     parser.add_argument("--perceived", action="store_true")
+    parser.add_argument("--classifier", default="")
     return parser.parse_args(flags)
 
 
@@ -56,6 +57,14 @@ def test_the_block_names_only_the_knobs_that_are_on():
         ["--couple_overhead", "--perceived", "--overhead_offset", "1,0,0,0.01,0,0"],  # an angle
         ["--couple_overhead", "--overhead_offset", "0,0,0,0.01,0,0"],  # no perceived state
         ["--couple_overhead", "--perceived", "--overhead_offset", "0,0,0,0.01,0,0", "--warp_back"],
+        [
+            "--couple_overhead",
+            "--perceived",
+            "--overhead_offset",
+            "0,0,0,0.01,0,0",
+            "--classifier",
+            "c",
+        ],
     ],
 )
 def test_bad_combinations_are_refused(flags):
