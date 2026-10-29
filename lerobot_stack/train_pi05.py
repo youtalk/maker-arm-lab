@@ -41,8 +41,13 @@ With none of them, main runs exactly as before (ledger K14).
 - ``--siglip_lora`` (L2) adds every SigLIP layer's linears (``SIGLIP_TARGETS``: attention q, k,
   v, out and MLP fc1, fc2, 27 layers, 162 modules) to the ``--lora`` targets. With
   ``--lora_from`` their LoRA keeps PEFT's init (B = 0), so the model at step 0 is still the
-  save's. embed_image runs under gradient checkpointing, so the backward pass recomputes the
-  SigLIP activations of one camera at a time. The memory probe decides if L2 fits.
+  save's. Under ``--policy.gradient_checkpointing=true`` lerobot checkpoints embed_image as one
+  block, and it sets the flag of the vision tower, which transformers 5.5.4 does not read: it
+  reads the flag of each SigLIP layer. So the backward pass of one camera would hold the
+  activations of all 27 layers (about 16 GB at batch 32, an estimate). ``--siglip_lora`` thus
+  also checkpoints each SigLIP layer (``siglip_checkpointing``): the backward pass holds one
+  layer at a time, and SigLIP runs its forward three times a step, not two. The memory probe
+  decides if L2 fits.
   The fallback of ledger K11 needs no code. In 0.6.1, x_t = t * noise + (1 - t) * actions, so
   t = 1 is pure noise and t = 0 is the data, and sampling runs Euler steps from t = 1 to t = 0.
   The time sampler draws t = Beta(alpha, beta) * 0.999 + 0.001, alpha 1.5 and beta 1.0 by
@@ -56,6 +61,11 @@ With none of them, main runs exactly as before (ledger K14).
 - ``--overhead_aug=P,SHIFT,ROLL_DEG`` (L3) gives a share P of the training samples a random
   shift (up to SHIFT of the frame size on each axis) and roll (up to ROLL_DEG degrees about the
   image center) of the overhead image only (``random_affine``). The wrist image is untouched.
+- A resume (``--resume=true``) does not see the lever flags: they leave argv before lerobot
+  reads it, so its train_config.json does not keep them. A resume must give ``--overhead_aug``
+  and ``--siglip_lora`` again (L3 then draws its affines anew from --seed). ``--close_weight``
+  refuses ``--resume``: lerobot restores the data order through the sampler's
+  ``load_state_dict``, and ``WeightedRandomSampler`` has none. Start an L1 run again instead.
 """
 
 import json
@@ -159,12 +169,26 @@ def continued(wrap, adapter_dir, new: str | None):
     return wrap_with_peft
 
 
+def siglip_checkpointing(enable):
+    """``PI05Pytorch.gradient_checkpointing_enable`` (``enable``) that also checkpoints each
+    SigLIP layer (L2). The checkpoint is not reentrant: the layer input does not require grad,
+    so a reentrant checkpoint would give the SigLIP LoRA no gradient."""
+
+    def gradient_checkpointing_enable(self):
+        enable(self)
+        tower = self.paligemma_with_expert.paligemma.model.vision_tower
+        tower.gradient_checkpointing_enable({"use_reentrant": False})
+
+    return gradient_checkpointing_enable
+
+
 def close_weights(gap, episode, fps: float, weight: float, before_s: float, after_s: float):
     """(weights, close count, episodes with no close) of the frames whose commanded jaw gap is
     ``gap`` and episode ``episode`` (both (N,), in frame order). A close command is a frame whose
     gap falls by CLOSE_DROP or more from a previous frame of its episode below full open. The
     frames from ``before_s`` seconds before to ``after_s`` seconds after a close, in its episode,
-    weigh ``weight``, and the others 1. An episode that starts closed shows no close."""
+    weigh ``weight``, and the others 1. The close of an episode that starts with a part held
+    came before its first frame, so it is not seen."""
     gap, episode = np.asarray(gap, np.float64), np.asarray(episode)
     n = len(gap)
     first = np.r_[True, episode[1:] != episode[:-1]]
@@ -210,6 +234,8 @@ def close_sampling(train_module, weight: float, before_s: float, after_s: float)
 
     def make_datasets(cfg):
         dataset, eval_dataset = make(cfg)
+        if len(dataset) > 2**24:  # torch.multinomial draws from at most 2^24 categories
+            raise ValueError(f"{len(dataset)} frames: WeightedRandomSampler takes at most 2^24")
         start = time.perf_counter()
         gap, episode = corpus_gap(dataset.root)
         weights, closes, none = close_weights(gap, episode, dataset.fps, weight, before_s, after_s)
@@ -460,9 +486,11 @@ def main(argv: list[str]) -> None:
         raise SystemExit("--lora_from and --siglip_lora need --lora=R")
     if lora_from and any(a.startswith(("--policy.use_peft", "--resume")) for a in argv):
         raise SystemExit("--lora_from starts a new run on the base: no --policy.use_peft, --resume")
+    if close and any(a.startswith("--resume") for a in argv):
+        raise SystemExit("--close_weight cannot resume: its sampler has no load_state_dict")
     if levers:
         print(f"LEVERS {json.dumps(levers, sort_keys=True)}", flush=True)
-    from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+    from lerobot.policies.pi05.modeling_pi05 import PI05Policy, PI05Pytorch
     from lerobot.scripts import lerobot_train
 
     argv = [
@@ -474,6 +502,9 @@ def main(argv: list[str]) -> None:
     if lora_from:
         new = SIGLIP_TARGETS if siglip else None
         PI05Policy.wrap_with_peft = continued(PI05Policy.wrap_with_peft, lora_from, new)
+    if siglip:
+        enable = PI05Pytorch.gradient_checkpointing_enable
+        PI05Pytorch.gradient_checkpointing_enable = siglip_checkpointing(enable)
     if close:
         close_sampling(lerobot_train, *close)
     sys.argv = [sys.argv[0], *argv]

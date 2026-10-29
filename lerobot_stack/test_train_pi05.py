@@ -34,6 +34,7 @@ from train_pi05 import (
     overhead_aug,
     prompt,
     random_affine,
+    siglip_checkpointing,
     split_levers,
     split_mix,
 )
@@ -335,6 +336,44 @@ def test_a_continued_adapter_is_the_saved_model_at_step_0(tmp_path, capsys):
         load_lora(wrap(base, save=()), tmp_path)  # the head would load into the frozen base
 
 
+def test_siglip_checkpointing_checkpoints_each_layer_and_keeps_the_lora_gradients():
+    transformers = pytest.importorskip("transformers")
+    peft = pytest.importorskip("peft")
+    cfg = transformers.SiglipVisionConfig(
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        image_size=8,
+        patch_size=4,
+    )
+    lora = peft.LoraConfig(r=2, target_modules=SIGLIP_TARGETS, init_lora_weights=False)  # B != 0
+    img = torch.randn(3, 3, 8, 8)
+
+    def lora_grads(layered: bool) -> dict:
+        torch.manual_seed(0)
+        root = tower = transformers.SiglipVisionModel(cfg)
+        for name in ("vision_tower", "model", "paligemma", "paligemma_with_expert", "model"):
+            parent = torch.nn.Module()  # the real module path, so SIGLIP_TARGETS finds them
+            parent.add_module(name, root)
+            root = parent
+        peft.inject_adapter_in_model(lora, root).train()
+        if layered:
+            siglip_checkpointing(lambda self: None)(root.model)
+            assert all(layer.gradient_checkpointing for layer in tower.vision_model.encoder.layers)
+        embed = lambda x: tower(pixel_values=x).last_hidden_state
+        out = torch.utils.checkpoint.checkpoint(  # lerobot's checkpoint of embed_image
+            embed, img, use_reentrant=False, preserve_rng_state=False
+        )
+        out.square().sum().backward()
+        return {n: p.grad for n, p in root.named_parameters() if p.requires_grad}
+
+    plain, layered = lora_grads(False), lora_grads(True)
+    assert len(plain) == 2 * 6 * 2 and plain.keys() == layered.keys()  # A, B of 6 linears a layer
+    for name, grad in layered.items():
+        assert grad.abs().sum() > 0 and torch.allclose(grad, plain[name], atol=1e-6)
+
+
 def test_close_weights_mark_the_window_around_each_close_in_its_episode():
     pick, shut, full = 0.024, 0.010, JAW_FULL_GAP
     gap = [full] * 5 + [pick] * 10 + [shut] * 10 + [pick] * 2 + [full] * 3  # episode 0: 30
@@ -433,16 +472,17 @@ def test_overhead_aug_moves_only_the_overhead_image_and_only_in_training():
     batch = {OVERHEAD: ramps(8, 16, 16).float(), "observation.images.wrist": wrist}
     policy = SimpleNamespace(training=True)
     torch.manual_seed(7)
+    state = torch.get_rng_state()
     aug = overhead_aug(stock, 1.0, 0.06, 3.0)
     assert aug(policy, batch, "none") == "none"
-    after = torch.rand(1)
+    assert torch.equal(torch.get_rng_state(), state)  # no draw from the global generator
     assert seen[-1]["observation.images.wrist"] is wrist
     assert not torch.equal(seen[-1][OVERHEAD], batch[OVERHEAD])  # the caller's batch stays
-    first = seen[-1][OVERHEAD]
-    torch.manual_seed(7)
+    want = random_affine(batch[OVERHEAD], 1.0, 0.06, 3.0, torch.Generator().manual_seed(7))
+    assert torch.equal(seen[-1][OVERHEAD], want)  # its own generator, seeded with --seed
+    torch.manual_seed(8)
     overhead_aug(stock, 1.0, 0.06, 3.0)(policy, batch)
-    assert torch.equal(seen[-1][OVERHEAD], first)  # seeded from torch.initial_seed()
-    assert torch.equal(torch.rand(1), after)  # the global draws are those of a run without it
+    assert not torch.equal(seen[-1][OVERHEAD], want)  # another --seed, another affine
     policy.training = False
     aug(policy, batch)
     assert seen[-1] is batch
@@ -467,6 +507,7 @@ def test_the_levers_leave_lerobot_s_argv_and_bad_values_exit(monkeypatch):
         (["--siglip_lora"], "need --lora=R"),
         (["--lora_from=/a", "--lora=128", "--policy.use_peft=true"], "no --policy.use_peft"),
         (["--lora_from=/a", "--lora=128", "--resume=true"], "--resume"),
+        (["--close_weight=3,2,1", "--resume=true"], "cannot resume"),
     ):
         with pytest.raises(SystemExit, match=match):
             main(bad)
@@ -477,13 +518,15 @@ def test_main_installs_a_lever_only_when_its_flag_is_given(monkeypatch):
 
     if lerobot.__version__ != "0.6.1":
         pytest.skip("needs the pi venv (lerobot 0.6.1)")
-    from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+    from lerobot.policies.pi05.modeling_pi05 import PI05Policy, PI05Pytorch
     from lerobot.scripts import lerobot_train
 
     names = ("forward", "wrap_with_peft")
     stock = {n: getattr(PI05Policy, n) for n in names}
     for n in names:
         monkeypatch.setattr(PI05Policy, n, stock[n])
+    checkpointing = PI05Pytorch.gradient_checkpointing_enable
+    monkeypatch.setattr(PI05Pytorch, "gradient_checkpointing_enable", checkpointing)
     for n in ("EpisodeAwareSampler", "make_train_eval_datasets", "main"):
         monkeypatch.setattr(lerobot_train, n, getattr(lerobot_train, n))
     sampler, make = lerobot_train.EpisodeAwareSampler, lerobot_train.make_train_eval_datasets
@@ -493,6 +536,7 @@ def test_main_installs_a_lever_only_when_its_flag_is_given(monkeypatch):
     plain = ["--steps=8", "--lora=128", "--seed=1001"]
     main(plain)  # K14: the masked forward and the B3 flags, nothing else
     assert PI05Policy.forward is forward and PI05Policy.wrap_with_peft is stock["wrap_with_peft"]
+    assert PI05Pytorch.gradient_checkpointing_enable is checkpointing
     assert lerobot_train.EpisodeAwareSampler is sampler
     assert lerobot_train.make_train_eval_datasets is make
     assert runs[-1] == ["--steps=8", *lora_flags(128), "--seed=1001"]
@@ -506,4 +550,5 @@ def test_main_installs_a_lever_only_when_its_flag_is_given(monkeypatch):
     assert runs[-1] == ["--steps=8", *lora_flags(128, siglip=True), "--seed=1001"]
     assert PI05Policy.forward.__qualname__.startswith("overhead_aug")
     assert PI05Policy.wrap_with_peft.__qualname__.startswith("continued")
+    assert PI05Pytorch.gradient_checkpointing_enable.__qualname__.startswith("siglip_checkpoint")
     assert lerobot_train.make_train_eval_datasets.__qualname__.startswith("close_sampling")
