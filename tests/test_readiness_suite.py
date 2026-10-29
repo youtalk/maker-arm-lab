@@ -400,8 +400,14 @@ def test_a_table_pairs_the_real_rows_with_the_real_condition_baseline(tmp_path):
             stress={"overhead_offset": [0, 0, 0, 0.01, 0, 0], "couple_overhead": True},
         ),
     )
+    chunked = _write(
+        tmp_path / "chunked",
+        _draws((40, 44, 50), stress={"obs_delay": 3}, policy=PI05, delay=6, jitter=3),
+    )
     refused = [  # (baseline, base row, row, why)
-        (base, "real/base/pi05", f"coupled/forward/0.01={coupled}", "lack the base row"),
+        (base, "real/base/pi05", f"coupled/forward/0.01={coupled}", "row base, not real/base"),
+        (pbase, "base", f"real/lag/33={lag}", "row real/base/pi05, not base"),
+        (base, "real/base/pi05", f"real/jitter/3={chunked}", "disagree on RTC"),
         (base, "real/base/act", f"real/jitter/3={jit}", "not a row of the baseline's pi05"),
         (pbase, "real/base/pi05", f"real/jitter/3={jit}", "eval_000.json ran the knobs"),
         (base, "real/base/pi05", f"real/jitter/3={lag}", "eval_000.json ran the knobs"),

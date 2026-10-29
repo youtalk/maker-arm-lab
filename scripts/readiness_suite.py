@@ -13,17 +13,19 @@ Stdlib only, like run_gate_eval.py, and it imports no maker_arm_lab.
         FILE.md and prints SUITE_OK {"out", "draws", "largest", "failed_expected", "rtc"}, where
         "rtc" is true when the rows serve with RTC. --base_row (default "base") names the row
         that the baseline read ran, such as real/base/pi05 (MS7k). The rows are those of the
-        baseline's candidate (its policy id), and each row must run the base row's knobs and
-        its own. A row is refused when its draws are not the baseline's (a missing or extra
-        file, another seed, other parts or another num_envs), when its scene is not the
-        baseline's (ms7e, ms7f, desk_boxes, tray, tray_lean, deep_box_floor, cycle_budget or
-        frame_jitter), when its policy is not the baseline's, when its inference block (the
-        loop switches included) differs from the baseline's in a key other than infer_delay,
-        infer_delay_jitter and rtc, when its payloads ran other knobs than its name says, or
-        when its knobs lack one of the base row's. A table whose rows disagree on RTC is
-        refused too: the RTC rows and the chunked rows go in two tables. A refusal prints
-        SUITE_FAIL {json}, exits 1 and writes no table (an earlier FILE.md is removed first).
-        The tool never pairs a part of the draws.
+        baseline's candidate (its policy id), and each row's baseline must be the base row:
+        real/base/<candidate> for the other real rows, base for every other row. A row is
+        refused when its baseline is not the base row, when its draws are not the baseline's
+        (a missing or extra file, another seed, other parts or another num_envs), when its
+        scene is not the baseline's (ms7e, ms7f, desk_boxes, tray, tray_lean, deep_box_floor,
+        cycle_budget or frame_jitter), when its policy is not the baseline's, when its
+        inference block (the loop switches included) differs from the baseline's in a key other
+        than infer_delay, infer_delay_jitter and rtc, or when its payloads ran other knobs than
+        its name says. A table whose rows disagree on RTC is refused too: the RTC rows and the
+        chunked rows go in two tables. Against a base row other than base, the rows must also
+        agree with the baseline on RTC, because that baseline already serves a delay. A refusal
+        prints SUITE_FAIL {json}, exits 1 and writes no table (an earlier FILE.md is removed
+        first). The tool never pairs a part of the draws.
 
 BASE_ARGS is policy S's supervisor argv (``reads/i_S_d2039/fleet.json``), each flag once at the
 value that argparse kept, without --checkpoint, --seed, --ledger, --processes, --only_processes,
@@ -376,7 +378,6 @@ def table(base_dir: str, specs: list[str], out: str, base_row: str = "base") -> 
     if base_row not in by_name:
         raise ValueError(f"--base_row {base_row!r}: not a row of the baseline's {cand}")
     base = _load(base_dir, by_name[base_row], raw)
-    under = knobs(by_name[base_row])
     results, totals, rtc = {}, {}, set()
     for spec in specs:
         name, _, path = spec.partition("=")
@@ -384,17 +385,20 @@ def table(base_dir: str, specs: list[str], out: str, base_row: str = "base") -> 
             raise ValueError(f"--row {spec!r}: needs NAME=DIR with a row NAME of {cand}")
         if name in results:
             raise ValueError(f"--row {name} given twice")
-        own = knobs(by_name[name])
-        if any(own.get(k) != v for k, v in under.items()):
-            raise ValueError(f"--row {name}: its knobs {own} lack the base row's {under}")
+        row = by_name[name]
+        pair = f"real/base/{cand}" if row.group == "real" and row.axis != "base" else "base"
+        if pair != base_row:
+            raise ValueError(f"--row {name}: its baseline is the row {pair}, not {base_row}")
         payloads = _load(path, by_name[name])
         results[name] = paired(base, payloads)
         totals[name] = _totals(payloads)
         rtc |= {"rtc" in (p.get("inference") or {}) for p in payloads.values()}
     if len(rtc) > 1:  # MS7j Task 12: one table holds the chunked rows, another the RTC rows
         raise ValueError("the rows disagree on RTC: put RTC rows and chunked rows in two tables")
-    rtc = rtc == {True}
-    base_rtc = all("rtc" in (p.get("inference") or {}) for p in base.values())
+    base_rtc = {"rtc" in (p.get("inference") or {}) for p in base.values()}
+    if base_row != "base" and base_rtc != rtc:  # MS7k: the real rows serve as their baseline
+        raise ValueError(f"the rows and the baseline {base_row} disagree on RTC")
+    rtc, base_rtc = rtc == {True}, base_rtc == {True}
     largest = largest_passing(results, tuple(by_name.values()))
     head = "| Row | A1 | n | Correct | Drop | SE | Drop + SE | Rule | Better/same/worse"
     lines = [
