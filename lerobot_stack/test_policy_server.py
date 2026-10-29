@@ -725,6 +725,30 @@ def test_a_jittered_chunk_arrives_d_calls_later_without_its_first_d_actions(dela
     assert runs[1][0] == runs[2][0]  # row 0's delays ignore row 1
 
 
+def test_a_chunk_drawn_at_once_drops_the_pending_one():
+    """MS7k, review finding: under J = D a replan can draw d = 0 while an older chunk waits.
+    The newer chunk plays at once, and the older one never arrives after it."""
+    from policy_server import DelayLine
+
+    class Draws:  # the line's generator, with scripted draws k
+        def __init__(self, *ks):
+            self.ks = list(ks)
+
+        def integers(self, *_args, **_kwargs):
+            return self.ks.pop(0)
+
+    line = DelayLine(1, jitter=1)
+    served = []
+    for call, (replan, base) in enumerate(((0, 100), (1, 200), (1, 300), (0, 0), (0, 0))):
+        if line.due(np.array([bool(replan)])) == [0]:
+            if call == 0:
+                line._rngs[0] = Draws(0, 1, -1)  # the first chunk, then d = 2, then d = 0
+            line.put(0, base + np.arange(10.0)[:, None])
+        served.append(int(line.pop()[0, 0]))
+    # 200 waits for call 4 with d = 2; 300 draws d = 0 at call 3, so 200 never plays.
+    assert served == [100, 101, 300, 301, 302]
+
+
 def test_a_line_without_jitter_draws_nothing():
     from policy_server import DelayLine
 

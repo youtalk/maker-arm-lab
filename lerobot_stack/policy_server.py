@@ -309,8 +309,8 @@ class DelayLine:
         d = self.delay
         if self.jitter:
             d += int(self._rngs[row].integers(-self.jitter, self.jitter, endpoint=True))
-        if self._last[row] is None or not d:
-            self._queues[row] = deque(actions)
+        if self._last[row] is None or not d:  # at once, and the pending chunk is older
+            self._queues[row], self._pending[row] = deque(actions), None
         else:
             self._pending[row] = (self._call + d, actions[d:])
 
