@@ -28,6 +28,7 @@ from maker_arm_lab.core.heap_oracle import HeapOracle
 from maker_arm_lab.core.hold import HoldDetector
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.mj.env import MjLegoSortEnv
+from maker_arm_lab.mj.stress import Stress
 from maker_arm_lab.tasks.manager_based.lego_sort import oracle_runtime
 from maker_arm_lab.tasks.manager_based.lego_sort.oracle_runtime import OracleRig
 from test_heap_loop import SPREAD
@@ -1135,6 +1136,40 @@ def _teacher_scene(
     return env, rig, _Teacher(env, rig.oracle_factory), 4, switches
 
 
+def _coupled_scene(monkeypatch):
+    """The teacher scene under an MS7k calibration error: the overhead camera 1 cm forward of
+    its believed pose, so every perceived position is 1 cm back (``couple_overhead``)."""
+    env, *rest = _teacher_scene(monkeypatch)
+    env.stress = Stress(overhead_offset=(0.0, 0.0, 0.0, 0.01, 0.0, 0.0), couple_overhead=True)
+    return (env, *rest)
+
+
+def test_a_coupled_shift_moves_the_perceived_state_and_leaves_the_truth(monkeypatch):
+    """MS7k ``couple_overhead`` at zero noise: each selection's detections and the perceived
+    boxes are the truth minus the camera's shift d. The perception's input stays the truth."""
+    d = (0.01, -0.005, 0.002)
+    env, rig, policy, budget, switches = _teacher_scene(monkeypatch)
+    env.stress = Stress(overhead_offset=(0.0, 0.0, 0.0, *d), couple_overhead=True)
+    states, truths, real = _selections(monkeypatch), [], loop.perception_truth
+
+    def spy(env, rig, i):
+        truths.append(real(env, rig, i))
+        return truths[-1]
+
+    monkeypatch.setattr(loop, "perception_truth", spy)
+    boxes = env.desk_box_poses[0].copy()
+    _rollout(env, rig, policy, budget=budget, perceived=True, noise_scales=ZERO, **switches)
+    env.close()
+    want = [(x - d[0], y - d[1], yaw) for x, y, yaw in boxes]
+    np.testing.assert_allclose(env.perceived_box_poses[0], want, atol=1e-12)
+    assert len(states) == len(truths) > 0
+    for state, truth in zip(states, truths):
+        assert state.detections
+        for det in state.detections:
+            moved = [t - v for t, v in zip(truth.pos[det.sim_index].tolist(), d)]
+            assert det.centre == pytest.approx(moved, abs=1e-6)
+
+
 def _eight_class_scene(monkeypatch):
     """The teacher scene under the eight MS7e classes, the one MS7e switch this commit builds
     into the loop (MS7e design section 10.2)."""
@@ -1377,6 +1412,7 @@ def test_every_ms7d_switch_at_once_runs_the_teacher_scene_to_its_end(monkeypatch
         _rim_scene,
         _ms7f_scene,
         _ms7g_selector_scene,
+        _coupled_scene,
     ],
 )
 def test_no_decision_reads_the_truth(scene, ms7d, monkeypatch):

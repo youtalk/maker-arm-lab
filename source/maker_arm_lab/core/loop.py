@@ -299,6 +299,11 @@ from the episode before. The joint state, the context row and the perceived stat
 A wrist read of the classifier between the policy call and the step also reads the delayed
 frame. The client's ``stress`` block records the switch, not the ``inference`` block.
 
+The env's MS7k ``couple_overhead`` stress knob (under ``perceived``) is a calibration error of the
+overhead camera: ``backend_of`` hands its shift to every ``Perceiver``, so each detection, each
+perceived box and the gripper marker's look move by ``Stress.perceived_shift``. The served rows,
+the frozen marker and every scripted rule follow; the truth reads do not.
+
 Like the eval loop this runs one episode per env in lockstep and reads the env through the
 duck-typed surface of ``maker_arm_lab.mj.env``. Torch and stdlib only.
 """
@@ -2131,10 +2136,17 @@ class SimPerception:
     ``real.perceive.RealPerception``) replaces all seven members together. Each member looks
     its target up when called, so a test that patches ``loop.perception_truth`` or
     ``perception.Perceiver`` still reaches the loop.
+
+    ``shift`` (m, world x y z) is the env's MS7k ``couple_overhead`` calibration error
+    (``Stress.perceived_shift``), which each ``Perceiver`` adds to what the overhead camera
+    reports. The truth accessors stay on the truth.
     """
 
+    def __init__(self, shift=(0.0, 0.0, 0.0)):
+        self.shift = tuple(shift)
+
     def perceiver(self, run_seed: int, i: int, scales: dict, class_names=BASE_CLASSES):
-        return perception.Perceiver(run_seed, i, scales, class_names)
+        return perception.Perceiver(run_seed, i, scales, class_names, shift=self.shift)
 
     def marker(self, perceiver, run_seed: int, i: int):
         return perception.MarkerBias(perceiver, run_seed, i)
@@ -2157,8 +2169,11 @@ class SimPerception:
 
 
 def backend_of(env):
-    """``env.perception_backend`` when the env carries one, else ``SimPerception()``."""
-    return getattr(env, "perception_backend", None) or SimPerception()
+    """``env.perception_backend`` when the env carries one, else ``SimPerception`` with the
+    env's ``couple_overhead`` shift (MS7k, zero unless the env has that stress knob on)."""
+    stress = getattr(env, "stress", None)
+    shift = (0.0, 0.0, 0.0) if stress is None else stress.perceived_shift()
+    return getattr(env, "perception_backend", None) or SimPerception(shift)
 
 
 def _wrist_look(st: EnvState, env, rig, i: int, pick, row) -> None:

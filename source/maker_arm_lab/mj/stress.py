@@ -1,4 +1,5 @@
 """MS7j stress block: the real-arm conditions the readiness suite turns on, all off by default.
+MS7k adds two knobs at the end: ``track_lag_ms`` and ``couple_overhead``.
 
 ``Stress.block()`` names only the knobs off their default, so a run with every knob off writes no
 ``stress`` key and stays byte-identical to main. ``scripts/run_gate_eval.py`` keeps a stdlib copy
@@ -45,6 +46,16 @@ class Stress:
     blur_sigma: float = 0.0  # px at 224
     exposure_stops: float = 0.0
     hard_light: bool = False
+    # MS7k: the six arm targets pass through a first-order lag of this time constant before the
+    # actuators, at every physics substep (``MjLegoSortEnv.step``). 0 = off.
+    track_lag_ms: float = 0.0
+    # MS7k: a calibration error. The overhead camera sits at its nominal pose plus the shift d of
+    # ``overhead_offset``, and perception believes the nominal pose. A camera moved by +d reports
+    # a world point p at p - d, so every part and box position that perception derives from the
+    # overhead camera moves by -d (``perceived_shift``). The gripper marker's look moves too, so
+    # ``--marker_bias`` measures the shift and takes it off the parts, but not off the boxes.
+    # Shifts only: the three angles of ``overhead_offset`` must be zero.
+    couple_overhead: bool = False
 
     def block(self) -> dict:
         """The knobs off their default as JSON values, ``{}`` when all are off."""
@@ -57,6 +68,13 @@ class Stress:
 
     def overhead_camera_on(self) -> bool:
         return bool(self.overhead_offset) or self.overhead_fov_delta != 0.0
+
+    def perceived_shift(self) -> tuple[float, float, float]:
+        """m, world (x, y, z): what ``couple_overhead`` adds to every perceived overhead
+        position, -d. Zero with the knob off."""
+        if not self.couple_overhead:
+            return (0.0, 0.0, 0.0)
+        return tuple(-v for v in self.overhead_offset[3:])
 
 
 STRESS_KNOBS: tuple[str, ...] = tuple(f.name for f in fields(Stress))
@@ -103,6 +121,12 @@ def add_stress_arguments(parser) -> None:
     parser.add_argument("--blur_sigma", type=float, default=0.0, help="MS7j: px at 224")
     parser.add_argument("--exposure_stops", type=float, default=0.0, help="MS7j: exposure, stops")
     parser.add_argument("--hard_light", action="store_true", help="MS7j: hard light rig")
+    parser.add_argument("--track_lag_ms", type=float, default=0.0, help="MS7k: arm lag, in ms")
+    parser.add_argument(
+        "--couple_overhead",
+        action="store_true",
+        help="MS7k: the overhead shift also moves every perceived position by -d",
+    )
 
 
 def _offset(text: str, name: str) -> tuple[float, ...]:
@@ -129,6 +153,8 @@ def stress_from_args(args) -> Stress:
                 ("blur_sigma", 0.0),
                 ("exposure_stops", 0.0),
                 ("hard_light", False),
+                ("track_lag_ms", 0.0),
+                ("couple_overhead", False),
             )
         },
         overhead_offset=_offset(getattr(args, "overhead_offset", ""), "overhead_offset"),
@@ -145,10 +171,21 @@ def stress_from_args(args) -> Stress:
         raise ValueError("--jpeg_quality must lie in 0 to 100")
     floats = (stress.sparse_gap, stress.overhead_fov_delta, stress.wrist_fov_delta)
     floats += (stress.blur_sigma, stress.exposure_stops, *stress.overhead_offset)
+    floats += (stress.track_lag_ms,)
     if not all(math.isfinite(v) for v in floats + stress.wrist_offset):
         raise ValueError("the stress knobs must be finite")
     if stress.sparse_gap < 0 or stress.blur_sigma < 0 or stress.obs_delay < 0:
         raise ValueError("--sparse_gap, --blur_sigma and --obs_delay must not be negative")
+    if stress.track_lag_ms < 0:
+        raise ValueError("--track_lag_ms must not be negative")
+    if stress.couple_overhead:
+        o = stress.overhead_offset
+        if not o or any(o[:3]) or not any(o[3:]):
+            raise ValueError("--couple_overhead needs an --overhead_offset shift and no angle")
+        if stress.warp_back:
+            raise ValueError("--couple_overhead refuses --warp_back: the error is uncorrected")
+        if not getattr(args, "perceived", False):
+            raise ValueError("--couple_overhead moves the perceived state: it needs --perceived")
     if stress.obs_delay and (getattr(args, "dagger_dir", "") or getattr(args, "record_all", False)):
         # The recorder would save the delayed frame next to the current state and depth.
         raise ValueError("--obs_delay refuses --dagger_dir and --record_all")

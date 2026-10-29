@@ -443,10 +443,13 @@ STRESS_KNOBS = (
     "blur_sigma",
     "exposure_stops",
     "hard_light",
+    "track_lag_ms",
+    "couple_overhead",
 )
-"""``maker_arm_lab.mj.stress.STRESS_KNOBS`` (MS7j), copied and pinned by the test. The knobs reach
-the MuJoCo heap client through --client_flags and are recorded as ``payload["stress"]`` only when
-some knob is on. Pass a negative offset as ``--overhead_offset=-3,0,0,0,0,0``."""
+"""``maker_arm_lab.mj.stress.STRESS_KNOBS`` (MS7j; the last two are MS7k's), copied and pinned by
+the test. The knobs reach the MuJoCo heap client through --client_flags and are recorded as
+``payload["stress"]`` only when some knob is on. Pass a negative offset as
+``--overhead_offset=-3,0,0,0,0,0``."""
 
 
 def stress_block(client_flags) -> dict:
@@ -455,7 +458,7 @@ def stress_block(client_flags) -> dict:
     ``main`` turns into GATE_ERROR."""
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, exit_on_error=False)
     for name in STRESS_KNOBS:
-        if name in ("warp_back", "hard_light"):
+        if name in ("warp_back", "hard_light", "couple_overhead"):
             parser.add_argument(f"--{name}", action="store_true")
         elif name.endswith("_offset"):
             parser.add_argument(f"--{name}", default="")

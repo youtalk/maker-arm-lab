@@ -1913,6 +1913,7 @@ STRESS_EXAMPLES = [
     ["--overhead_offset", "0,3,0,0,0,0", "--jpeg_quality", "85"],
     ["--wrist_offset=-1,0,0,0,0,0.01", "--wrist_fov_delta", "2", "--warp_back", "--obs_delay", "3"],
     ["--sparse_gap", "0.05", "--tray", "--blur_sigma", "1.5", "--hard_light"],
+    ["--track_lag_ms=33", "--overhead_offset=0,0,0,0.01,0,0", "--couple_overhead", "--perceived"],
 ]
 
 
@@ -1927,6 +1928,7 @@ def test_the_supervisors_stress_copy_matches_the_core_module():
         parser = argparse.ArgumentParser()
         add_stress_arguments(parser)
         parser.add_argument("--tray", action="store_true")
+        parser.add_argument("--perceived", action="store_true")
         assert ge.stress_block(flags) == stress_from_args(parser.parse_known_args(flags)[0]).block()
 
 
