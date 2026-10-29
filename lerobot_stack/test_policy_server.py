@@ -600,10 +600,10 @@ def test_delay_zero_is_the_plain_queue():
         assert ours == theirs and len(theirs) > 50
 
 
-def _delayed(delay, batch=1, n=10):
-    """ActionQueues at ``delay`` over a model whose row t of forward f is (f, t, 0, ...). Each
-    call's state[:, 0] is the call index, so ``calls`` lists each forward's rows by the call it
-    ran at. ``step(call, replan)`` returns each env's served (f, t)."""
+def _delayed(delay, batch=1, n=10, jitter=0):
+    """ActionQueues at ``delay`` (and ``jitter``) over a model whose row t of forward f is (f, t,
+    0, ...). Each call's state[:, 0] is the call index, so ``calls`` lists each forward's rows by
+    the call it ran at. ``step(call, replan)`` returns each env's served (f, t)."""
     from policy_server import ActionQueues
 
     calls = []
@@ -615,7 +615,7 @@ def _delayed(delay, batch=1, n=10):
         chunk[:, :, 1] = np.arange(n)
         return chunk
 
-    queues = ActionQueues(predict, n, delay=delay)
+    queues = ActionQueues(predict, n, delay=delay, jitter=jitter)
 
     def step(call, replan=None):
         served = queues.step({"state": np.full((batch, 7), call, np.float32)}, replan)
@@ -683,6 +683,84 @@ def test_the_delay_must_be_shorter_than_the_warped_chunk():
     for warp, delay in ((1.0, 4), (2.0, 2), (1.0, -1)):
         with pytest.raises(ValueError, match="infer_delay"):
             ActionQueues(_chunk_of, 4, warp, delay=delay)
+
+
+def _arrivals(served, calls, row, start=0):
+    """(calls from its forward to its first served action, that action's index t) of each chunk
+    that env ``row`` started to serve in ``served`` (call ``start`` on), after the first one."""
+    out, seen = [], set()
+    for s, actions in enumerate(served, start):
+        f, t = actions[row]
+        if f not in seen:
+            seen.add(f)
+            out.append((s - int(calls[f][0]), t))
+    return out[1:]
+
+
+@pytest.mark.parametrize("delay, jitter", [(3, 2), (1, 1)])
+def test_a_jittered_chunk_arrives_d_calls_later_without_its_first_d_actions(delay, jitter):
+    """MS7k: chunk k of row r waits d = D + the k-th draw of the generator (JITTER_SEED, r), in
+    [D - J, D + J], and plays from its action d; at d = 0 it plays at once and whole. Each row
+    draws alone, and a reset restarts its generator."""
+    from policy_server import JITTER_SEED
+
+    runs = {}
+    for batch in (1, 2):
+        queues, step, calls = _delayed(delay, batch=batch, n=12, jitter=jitter)
+        served = []
+        for call in range(400):
+            if call == 200:
+                queues.reset()
+            served.append(step(call))
+        runs[batch] = [
+            (_arrivals(served[:200], calls, r), _arrivals(served[200:], calls, r, 200))
+            for r in range(batch)
+        ]
+    for row, (got, again) in enumerate(runs[2]):
+        rng = np.random.default_rng((JITTER_SEED, row))
+        draws = rng.integers(-jitter, jitter, size=len(got) + 1, endpoint=True)
+        assert got == [(delay + int(k), delay + int(k)) for k in draws[1:]]  # draw 0: the first
+        assert again == got  # the reset restarts the generator
+        assert {d for d, _ in got} == set(range(delay - jitter, delay + jitter + 1))
+    assert runs[1][0] == runs[2][0]  # row 0's delays ignore row 1
+
+
+def test_a_line_without_jitter_draws_nothing():
+    from policy_server import DelayLine
+
+    line = DelayLine(3)
+    line.due(np.zeros(2, dtype=bool))
+    assert line.jitter == 0 and line._rngs == []
+
+
+def test_the_jitter_must_fit_under_the_delay_and_the_warped_chunk():
+    from policy_server import ActionQueues
+
+    ActionQueues(_chunk_of, 4, 1.0, delay=2, jitter=1)  # the longest delay, 3, is under 4
+    for delay, jitter in ((2, 2), (1, 2), (0, 1), (2, -1)):
+        with pytest.raises(ValueError, match="infer_delay_jitter"):
+            ActionQueues(_chunk_of, 4, 1.0, delay=delay, jitter=jitter)
+
+
+def test_the_policy_id_and_ready_block_name_the_jitter(monkeypatch, capsys):
+    import policy_server
+
+    _stub_members(monkeypatch, a=_stub_member("a", 1.0))
+    monkeypatch.setattr(
+        policy_server.PolicyServer, "serve_forever", lambda self: self._socket.close(0)
+    )
+    argv = ["policy_server.py", "--checkpoint", "a", "--port", "0", "--device", "cpu"]
+    for jitter, tail in (("0", "+delay1"), ("1", "+delay1+jitter1")):
+        monkeypatch.setattr(
+            sys, "argv", argv + ["--infer_delay", "1", "--infer_delay_jitter", jitter]
+        )
+        assert policy_server.main() == 0
+        ready = json.loads(capsys.readouterr().out.split("SERVER_READY ", 1)[1])
+        assert ready["policy_id"] == "act:a+nas3+ctx16+gap" + tail
+        assert ready["inference"].get("infer_delay_jitter") == (1 if "jitter" in tail else None)
+    monkeypatch.setattr(sys, "argv", argv + ["--infer_delay", "1", "--infer_delay_jitter", "2"])
+    assert policy_server.main() == 1
+    assert capsys.readouterr().out.startswith("SERVER_FAIL ValueError: infer_delay_jitter")
 
 
 def test_the_policy_id_and_ready_block_name_the_delay(monkeypatch, capsys):

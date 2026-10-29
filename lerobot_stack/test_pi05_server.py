@@ -654,6 +654,7 @@ STILL_ON = ["--still_noise_scale", "0.7", "--still_rad", "0.1", "--still_open", 
         ),
         (["--infer_delay", "0"], "", {}),
         (["--jaw_latch", "10", "--infer_delay", "6"], "+latch10+delay6", {}),
+        (["--infer_delay", "6", "--infer_delay_jitter", "3"], "+delay6+jitter3", {}),
     ],
 )
 def test_the_policy_id_names_each_switch_off_its_default(
@@ -678,6 +679,7 @@ def test_the_policy_id_names_each_switch_off_its_default(
     assert ready["inference"].get("jaw_latch") == (10 if "+latch" in tail else None)
     assert ready["inference"].get("retry_noise_scale") == (1.0 if "+retry" in tail else None)
     assert ready["inference"].get("infer_delay") == (6 if "+delay" in tail else None)
+    assert ready["inference"].get("infer_delay_jitter") == (3 if "+jitter" in tail else None)
     names = ("still_noise_scale", "still_rad", "still_open")
     assert {k: v for k, v in ready["inference"].items() if k in names} == dict(zip(names, block))
 
@@ -701,6 +703,9 @@ def test_the_policy_id_names_each_switch_off_its_default(
         ["--retry_noise_scale", "-1"],
         ["--retry_noise_scale", "nan"],
         ["--infer_delay", "-1"],
+        ["--infer_delay_jitter", "1"],  # no delay to vary
+        ["--infer_delay_jitter", "3", "--infer_delay", "2"],
+        ["--infer_delay_jitter", "-1", "--infer_delay", "2"],
     ],
 )
 def test_a_bad_sampling_value_fails_with_the_token(flags):
@@ -800,6 +805,51 @@ def test_rtc_names_the_policy_last(stand_in, monkeypatch, capsys):
     ready = json.loads(capsys.readouterr().out.split("SERVER_READY ", 1)[1].splitlines()[0])
     assert ready["policy_id"] == f"pi05:{ckpt}+latch10+delay6+rtc"
     assert (ready["inference"]["infer_delay"], ready["inference"]["rtc"]) == (6, 25)
+
+
+def test_rtc_under_jitter_guides_at_the_nominal_delay_and_drops_the_drawn_one(
+    stand_in, monkeypatch, capsys
+):
+    """MS7k: the server cannot know the next delay, so RTC guides at the nominal D (a replan's
+    horizon is D) while the chunk arrives d = D + its draw calls later without its first d."""
+    from policy_server import JITTER_SEED
+
+    policy, ckpt = stand_in
+    calls = rtc_stand_in(policy, monkeypatch)
+    predict_chunk, n, inference, gripper, _ = ps.load_pi05(ckpt, "cpu", rtc_delay=6)
+    s = ps.SharedServer(
+        predict_chunk,
+        "pi05:/ckpt",
+        n,
+        inference,
+        gripper,
+        infer_delay=6,
+        rtc=True,
+        infer_delay_jitter=3,
+    )
+    assert s.ready(0)["inference"]["infer_delay_jitter"] == 3
+    served = [
+        s.process([(b"a", *step(0.5, replan=[call == 10]))])[0][0][2]["action"][0, 0]
+        for call in range(25)
+    ]
+    assert len(calls) == 2  # the first chunk at call 0, the replan at call 10
+    guide = calls[1][0]
+    assert (guide["inference_delay"], guide["execution_horizon"]) == (6, 6)  # D, not d
+    rng = np.random.default_rng((JITTER_SEED, 0))
+    d = 6 + int(rng.integers(-3, 3, size=2, endpoint=True)[1])  # draw 0 went to the first chunk
+    want = [2 * (100 + t) + 1 for t in range(10 + d)] + [2 * (200 + t) + 1 for t in range(d, 15)]
+    assert served == want
+
+
+def test_rtc_names_the_jitter_before_rtc(stand_in, monkeypatch, capsys):
+    policy, ckpt = stand_in
+    rtc_stand_in(policy, monkeypatch)
+    monkeypatch.setattr(ps.SharedServer, "serve", lambda self, socket: None)
+    argv = ["pi05_server.py", "--checkpoint", ckpt, "--device", "cpu", "--port", "0", "--rtc"]
+    monkeypatch.setattr(sys, "argv", argv + ["--infer_delay", "6", "--infer_delay_jitter", "3"])
+    assert ps.main() == 0
+    ready = json.loads(capsys.readouterr().out.split("SERVER_READY ", 1)[1].splitlines()[0])
+    assert ready["policy_id"] == f"pi05:{ckpt}+delay6+jitter3+rtc"
 
 
 class RtcModel:
