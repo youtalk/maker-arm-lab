@@ -439,6 +439,8 @@ def test_a_fresh_run_passes_every_recipe_flag_and_keeps_one_checkpoint(rig):
         "max_length": 128,
         "batch_size": 32,
         "seed": 1000,
+        "use_peft": False,
+        "peft": None,
     }
     assert {k: call[k] for k in want} == want
     assert call["pretrained_path"] == str(rig.path / "content" / "start_model")
@@ -707,6 +709,17 @@ def test_prepare_copies_the_dataset_and_trains_nothing(rig):
     assert not _calls(rig) and not (rig.path / "content" / "dataset").exists()
 
 
+def test_the_dataset_copy_never_deletes_the_drive_or_the_corpus(rig):
+    corpus, content = rig.drive / "dataset", rig.path / "content"
+    env = {"RUN_NAME": None, "DATASET": f"{corpus}/"}  # a tab-completed path
+    r = _run(rig, "--prepare", **env)
+    assert r.token == f"COLAB_TRAIN_OK prepared data={content / 'dataset'}"
+    for local in (corpus, f"{corpus}/", content, rig.drive.parent):
+        r = _run(rig, "--prepare", **env, LOCAL_DATA=local)
+        assert r.token.startswith("COLAB_TRAIN_FAIL") and f"LOCAL_DATA={local} " in r.token
+    assert (corpus / "meta" / "info.json").exists() and (rig.drive / "train_pi05.py").exists()
+
+
 def _runner(rig, *args, **env):
     full = {**rig.env, **{k: str(v) for k, v in env.items()}}
     full.pop("RUN_NAME")  # the runner's default, checkpoints_dagger
@@ -828,7 +841,7 @@ def test_a_lora_smoke_continues_the_adapter_offline_on_the_pinned_stack(rig):
     assert r.token == f"COLAB_TRAIN_OK prepared data={rig.path / 'content' / 'dataset'}"
     assert (rig.fake / "pip.log").read_text().splitlines() == STACK
     assert (rig.fake / "download.log").read_text() == f"{BASE} {BASE_REV}\n"
-    assert (scratch / "pi05_base" / ".done").exists() and _max_length(scratch / "pi05_base") == 128
+    assert (scratch / "pi05_base" / ".done").exists()
     repo = scratch / "hf_hub" / "models--google--paligemma-3b-pt-224"
     assert (repo / "refs" / "main").read_text() == PALIGEMMA_REV
     assert sorted(p.name for p in (repo / "snapshots" / PALIGEMMA_REV).iterdir()) == sorted(
@@ -920,6 +933,16 @@ def test_a_lora_continuation_that_reads_like_a_fresh_lora_stops_at_step_200(rig)
     assert not (rig.out / "checkpoints" / "000600").exists()
 
 
+@needs_061
+def test_a_lora_run_takes_its_schedule_from_the_env(rig):
+    env = {"PEAK_LR": "4e-5", "WARMUP": 100, "DECAY_STEPS": 250, "DECAY_LR": "2e-5"}
+    r = _run(rig, **{**_lora(rig), **env})
+    assert r.token.startswith("COLAB_TRAIN_OK run=checkpoints_ab steps=300 last=000300")
+    (call,) = _calls(rig)
+    got = [call[k] for k in ("steps", "warmup", "decay", "peak_lr", "decay_lr")]
+    assert got == [300, 100, 250, 4e-5, 2e-5]
+
+
 @pytest.mark.parametrize(
     "args, env, why",
     [
@@ -934,6 +957,12 @@ def test_a_lora_continuation_that_reads_like_a_fresh_lora_stops_at_step_200(rig)
             "LORA: no adapter_model.safetensors in START {drive}/checkpoints/030000",
         ),
         ([], {"TOKENIZER": "k/none"}, "no tokenizer_config.json in TOKENIZER {drive}/k/none"),
+        ([], {"DECAY_STEPS": 301}, "DECAY_STEPS=301: want a step count up to STEPS=300"),
+        (
+            [],
+            {"STEPS": 600, "KEEP_EVERY": 200, "FAKE_DF_KB": 61_000_000},  # 62.5 GB: 60 + 3 x 1
+            "Drive has 62 GB free, a run that keeps 3 more copies needs 63",
+        ),
         ([], {"HELPER": "0.5.1"}, "train_pi05.py is not for lerobot 0.6.1"),
         (
             [],
@@ -946,13 +975,14 @@ def test_each_lora_stop_prints_one_fail_token_before_any_copy(rig, args, env, wh
     lora = _lora(rig)
     if helper := env.pop("HELPER", None):
         _helper(rig.drive, helper)
-    r = _run(rig, *args, **{**lora, **env})
+    r = _run(rig, *args, **{**lora, "FAKE_NO_STACK": 1, **env})
     assert (
         r.rc == 1
         and r.token.startswith("COLAB_TRAIN_FAIL")
         and why.format(drive=rig.drive) in r.token
     )
     assert not _calls(rig) and not (rig.path / "content" / "dataset").exists()
+    assert not (rig.fake / "pip.log").exists()  # no install minutes spent
 
 
 # --- the stand-in trainer ---

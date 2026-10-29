@@ -66,8 +66,10 @@
 #     PREFLIGHT_OK line before it
 #   - a loss outside [LOSS_LO, LOSS_HI] at step 200 (other default bands from pi05_base and for
 #     a LoRA continuation)
-#   - SPAN=1 with no checkpoint past the start step that fits this session, or a KEEP_EVERY that
-#     is not a multiple of the save freq
+#   - SPAN=1 with no checkpoint past the start step that fits this session, a KEEP_EVERY that is
+#     not a multiple of the save freq, or a LoRA DECAY_STEPS past STEPS
+#   - a LOCAL_DATA inside the Drive mount or the corpus, or one that holds them (the dataset copy
+#     deletes LOCAL_DATA first)
 #   - a final Drive sync that still fails after SYNC_RETRY_S
 #
 # The mix mode (MS7h HD59 with one root, MS7i Run A and Run B with two), with MIX="ROOT:SHARE ...":
@@ -93,23 +95,24 @@
 # The LoRA mode (MS7k design 6.1 D5), with LORA=R: the run continues the rank-R adapter START (a
 # pretrained_model folder with adapter_config.json, adapter_model.safetensors and the processors,
 # e.g. MS7j B3's 030000) on lerobot 0.6.1, with a fresh optimizer and its own schedule
-# (--policy.use_peft=true: lerobot loads the base that the adapter config names, then the adapter
-# on it, trainable). It installs the stack of Machine A pi venv: lerobot[pi,peft,training]
-# 0.6.1, transformers 5.5.4, peft 0.21.2, and torch 2.11.0 with torchvision 0.26.0 built for
-# CUDA 12.6 (the download.pytorch.org cu126 wheels: sm_80 for the A100, any CUDA 12 driver). It
-# checks the versions and CUDA before any copy. The base is lerobot/pi05_base at PI05_REV, a
-# public repo, downloaded once a runtime to $OUT_ROOT/pi05_base with its tokenizer step at
-# MAX_LENGTH. The adapter config of the start copy, and of a resumed checkpoint, is set to name
-# that copy, so every save names it too: set base_model_name_or_path to Machine A's base before
-# merge_lora.py. The flags are those of B3 (~/data/maker-arm-ms7/j/bin/b3_lora.sh): --lora=R,
-# train_expert_only false, bfloat16, gradient checkpointing, MAX_LENGTH tokens, batch 32 and the
-# masked loss. The schedule is that of the MS7k ledger K11 unless set: a warmup of WARMUP (200)
-# steps to PEAK_LR (5e-5), then a cosine to DECAY_LR (1e-5) at DECAY_STEPS (STEPS), STEPS 5000,
-# SEED 1001 (B3's 1000 drew B3's sample order), SAVE_FREQ 1000, KEEP_EVERY 5000. TRAIN_EXTRA goes
-# to train_pi05.py word by word (a lever flag of a sibling branch). A run keeps
+# (--policy.use_peft=true: lerobot loads the base that the adapter config names, then the adapter on
+# it, trainable). It installs the stack of Machine A pi venv: lerobot[pi,peft,training] 0.6.1,
+# transformers 5.5.4, peft 0.21.2, and torch 2.11.0 with torchvision 0.26.0 built for CUDA 12.6 (the
+# download.pytorch.org cu126 wheels: sm_80 for the A100, any CUDA 12 driver). It checks the versions
+# and CUDA before any copy. The base is lerobot/pi05_base at PI05_REV, a public repo, downloaded
+# once a runtime to $OUT_ROOT/pi05_base as it is: the run reads only its model.safetensors, and the
+# processors come from the adapter folder. The adapter config of the start copy, and of a resumed
+# checkpoint, is set to name that copy, so every save names it too: set base_model_name_or_path to
+# Machine A's base before merge_lora.py. The flags are those of B3
+# (~/data/maker-arm-ms7/j/bin/b3_lora.sh): --lora=R, train_expert_only false, bfloat16, gradient
+# checkpointing, MAX_LENGTH tokens, batch 32 and the masked loss. The schedule is that of the MS7k
+# ledger K11 unless set: a warmup of WARMUP (200) steps to PEAK_LR (5e-5), then a cosine to DECAY_LR
+# (1e-5) at DECAY_STEPS (STEPS, and not past it: lerobot would scale the warmup and the decay into
+# STEPS), STEPS 5000, SEED 1001 (B3's 1000 drew B3's sample order), SAVE_FREQ 1000, KEEP_EVERY 5000.
+# TRAIN_EXTRA goes to train_pi05.py word by word (a lever flag of a sibling branch). A run keeps
 # "LORA|TRAIN_EXTRA" in $RUN_NAME/lora.txt, and a resume needs the same two. A kept save is the
-# adapter (0.82 GB) and the processors, with SHA256SUMS of its files beside it. The smoke trains
-# the run's first 200 steps: its warmup and peak lr, and a decay of 200 steps, so lerobot does not
+# adapter (0.82 GB) and the processors, with SHA256SUMS of its files beside it. The smoke trains the
+# run's first 200 steps: its warmup and peak lr, and a decay of 200 steps, so lerobot does not
 # rescale the schedule. MIX, PROMPT_CODES, DAGGER and --expert_only stop a LoRA run.
 #
 # The fetch of a kept save (colab download cannot read /content/drive and fails on big files): in
@@ -212,12 +215,21 @@ CONTENT=${CONTENT:-/content}
 DRIVE_ROOT=${DRIVE_ROOT:-$CONTENT/drive/MyDrive}
 DRIVE=$DRIVE_ROOT/$DIR
 DATA=${DATASET:-dataset}
+DATA=${DATA%/} # a tab-completed path: its last name still names the local copy
 case "$DATA" in
     /*) DATA_SRC=$DATA LOCAL_DATA=${LOCAL_DATA:-$CONTENT/${DATA##*/}} ;;
     *) DATA_SRC=$DRIVE/$DATA ;;
 esac
 LOCAL=${OUT_ROOT:-$CONTENT}
 LOCAL_DATA=${LOCAL_DATA:-$CONTENT/$DATA}
+# the dataset copy starts with rm -rf LOCAL_DATA: never inside the Drive mount or the corpus, and
+# never a folder that holds one of them
+local_real=$(realpath -ms "$LOCAL_DATA")
+for p in "$CONTENT/drive" "$DRIVE_ROOT" "$DATA_SRC"; do
+    p=$(realpath -ms "$p")
+    case "$local_real/" in "$p/"*) fail "LOCAL_DATA=$LOCAL_DATA is inside $p" ;; esac
+    case "$p/" in "${local_real%/}/"*) fail "LOCAL_DATA=$LOCAL_DATA holds $p" ;; esac
+done
 BASE_COPY=$LOCAL/pi05_base # LORA: the base that the adapter configs name
 BATCH=${BATCH:-32}
 SAVE_FREQ=${SAVE_FREQ:-2000}
@@ -310,6 +322,9 @@ SEC_PER_STEP=${SEC_PER_STEP:-3.85}
 LOG=$CONTENT/pi05_${RUN_NAME:-smoke}_$(date +%Y%m%d_%H%M%S).log
 
 [ -f "$DATA_SRC/meta/info.json" ] || fail "no $DATA_SRC/meta/info.json (Drive mounted?)"
+case "${TOKENIZER:-}" in "") ;; /*) tok=$TOKENIZER ;; *) tok=$DRIVE/$TOKENIZER ;; esac
+[ -z "${TOKENIZER:-}" ] || [ -f "$tok/tokenizer_config.json" ] \
+    || fail "no tokenizer_config.json in TOKENIZER $tok"
 
 drive_free_kb() { df -Pk "$DRIVE" | awk 'NR == 2 {print $4}'; }
 run_cfg() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$@"; }
@@ -439,6 +454,9 @@ else
             || fail "LORA: no adapter_model.safetensors in START ${src:-$START}"
         rank=$(run_cfg "$src/adapter_config.json" r) || fail "no r in $src/adapter_config.json"
         [ "$rank" = "$LORA" ] || fail "START is a rank $rank adapter, not LORA=$LORA"
+        # past STEPS, lerobot scales the warmup and the decay into STEPS and only logs a warning
+        [ "$SMOKE" -eq 1 ] || [ "${DECAY_STEPS:-$STEPS}" -le "$STEPS" ] \
+            || fail "DECAY_STEPS=$DECAY_STEPS: want a step count up to STEPS=$STEPS"
     fi
     [ -n "$LORA" ] || [ -z "$src" ] || [ -f "$src/model.safetensors" ] \
         || fail "no model.safetensors in START $src"
@@ -501,8 +519,6 @@ else
         || pip install -q "lerobot[pi]==0.5.1"
 fi
 if [ -n "${TOKENIZER:-}" ]; then
-    case "$TOKENIZER" in /*) tok=$TOKENIZER ;; *) tok=$DRIVE/$TOKENIZER ;; esac
-    [ -f "$tok/tokenizer_config.json" ] || fail "no tokenizer_config.json in TOKENIZER $tok"
     # the tokenizer step loads google/paligemma-3b-pt-224 by name: from this cache with no hub
     # request, as the hub answers one without a token with 401 (2026-10-28 on Machine A)
     export HF_HUB_CACHE=$LOCAL/hf_hub
@@ -559,10 +575,7 @@ done
 [ -z "${PROMPT_CODES:-}" ] || cp "$CODES_SRC" "$LOCAL_DATA/meta/prompt_codes.npy"
 if [ -n "$LORA" ] && [ ! -e "$BASE_COPY/.done" ]; then # once a runtime, as the dataset copy
     rm -rf "$BASE_COPY"
-    download_base "$BASE_COPY"
-    # as Machine A's j/pi05_base; the run reads only its model.safetensors
-    python3 "$HERE/pi05_preflight.py" patch "$BASE_COPY" "$MAX_LENGTH" \
-        || fail "cannot set $MAX_LENGTH tokens in $BASE_COPY/policy_preprocessor.json"
+    download_base "$BASE_COPY" # as it is: the processors come from the adapter folder
     touch "$BASE_COPY/.done"
 fi
 df -h "$CONTENT" | tail -1
