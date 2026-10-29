@@ -6,9 +6,12 @@ the stand-in, the pi05_base download copies FAKE_BASE, and with FAKE_NO_STACK th
 fails until pip ran), nvidia-smi, pip (it logs its arguments), df (FAKE_DF_KB) and cp (it logs
 the Drive checkpoints at each copy to Drive, and fails the first FAKE_DIR/cp_fails copies). The
 stand-in trainer is this file run as a script: it parses the trainer's argv with lerobot's own
-parser, writes lerobot's checkpoint layout (an adapter under --policy.use_peft) and log lines,
-and fakes the preflight's outcome (FAKE_PREFLIGHT). The LoRA runs need lerobot 0.6.1's parser
-(0.5.1 has no --peft.lora_alpha), so they skip in the 0.5.1 venv.
+parser, writes lerobot's checkpoint layout and log lines, and fakes the preflight's outcome
+(FAKE_PREFLIGHT). A PEFT run saves an adapter whose config names the base as lerobot's does: a new
+wrap names --policy.pretrained_path, and a resume loads the base that the checkpoint's adapter
+config names, so the stand-in fails when that base is missing. A LoRA argv goes through
+train_pi05.main first, so its lever checks and its --lora expansion run. The LoRA runs need
+lerobot 0.6.1 (0.5.1 has no --peft.lora_alpha), so they skip in the 0.5.1 venv.
 """
 
 import hashlib
@@ -27,7 +30,7 @@ import pytest
 
 import pi05_preflight
 from pi05_preflight import PreflightError, install, patch_max_length, stats_sha
-from train_pi05 import LORA_FULL, LORA_TARGETS
+from train_pi05 import LORA_FULL, LORA_TARGETS, SIGLIP_TARGETS
 
 HERE = Path(__file__).resolve().parent
 FULL = "All keys loaded successfully!"
@@ -870,18 +873,21 @@ def test_a_lora_smoke_continues_the_adapter_offline_on_the_pinned_stack(rig):
         "max_length": 128,
         "batch_size": 32,
         "seed": 1001,
-        "use_peft": True,
+        "use_peft": False,  # a new wrap, as Machine A probes start
         "peft": [128, 128],
         "targets": [LORA_TARGETS],
         "full": list(LORA_FULL),
-        "pretrained_path": str(scratch / "start_model"),
-        "base": str(scratch / "pi05_base"),
+        "pretrained_path": str(scratch / "pi05_base"),
+        "base": None,  # no adapter config names the base
         "dataset_root": str(rig.path / "content" / "dataset"),
         "offline": "1",
         "hub_cache": str(scratch / "hf_hub"),
     }
     assert {k: call[k] for k in want} == want
-    assert _base(rig.drive / "k" / "b3_030000") == B3_BASE  # the Drive copy is never written
+    assert call["argv"][-2:] == ["--lora=128", f"--lora_from={scratch / 'start_model'}"]
+    assert _max_length(scratch / "pi05_base") == 128  # the processors come from the base
+    for adapter in (rig.drive / "k" / "b3_030000", scratch / "start_model"):
+        assert _base(adapter) == B3_BASE  # --lora_from does not read the name, nothing sets it
     save = Path(r.token.split("save=")[1])
     assert save == scratch / "pi05_smoke" / "checkpoints" / "000200"
     sums = (save / "SHA256SUMS").read_text()
@@ -892,37 +898,68 @@ def test_a_lora_smoke_continues_the_adapter_offline_on_the_pinned_stack(rig):
 
 @needs_061
 def test_a_lora_run_keeps_summed_saves_and_resumes_only_with_its_recipe(rig):
-    extra = "--fake_close_weight=3,2,1  --fake_overhead_aug=0.5,0.06,3"
+    extra = "--siglip_lora  --overhead_aug=0.5,0.06,3"
     env = _lora(rig) | {"STEPS": 600, "SAVE_FREQ": 100, "KEEP_EVERY": 200, "TRAIN_EXTRA": extra}
     r = _run(rig, **env, FAKE_DIE_AT=350)
     assert r.token.startswith("COLAB_TRAIN_FAIL") and "the trainer exited 137" in r.token
     assert (rig.run / "lora.txt").read_text() == f"128|{' '.join(extra.split())}\n"
     assert (rig.run / "last.txt").read_text().strip() == "000300"
-    for path in (rig.out, rig.path / "content" / "dataset", rig.path / "content" / "pi05_base"):
+    content = rig.path / "content"
+    for path in (rig.out, content / "dataset", content / "pi05_base"):
         shutil.rmtree(path)  # a new VM, whose base copy sits on another disk
     env["OUT_ROOT"] = scratch = rig.path / "scratch"
-    for other in ({"TRAIN_EXTRA": "--fake_close_weight=2,2,1"}, {"LORA": 64}):
+    for other in ({"TRAIN_EXTRA": "--siglip_lora"}, {"LORA": 64}):
         r = _run(rig, **{**env, **other})
-        assert r.rc == 1 and "trains with LORA|TRAIN_EXTRA '128|--fake_close" in r.token
+        assert r.rc == 1 and "trains with LORA|TRAIN_EXTRA '128|--siglip_lora --overhead" in r.token
     r = _run(rig, **env)
     assert "resuming checkpoints_ab from checkpoint 000300 toward step 600" in r.stdout
     assert r.token.startswith("COLAB_TRAIN_OK run=checkpoints_ab steps=600 last=000600")
     first, second = _calls(rig)
+    # a fresh run: the patched base, a new wrap and --lora_from, as Machine A probes start
+    assert first["argv"][-4:] == [
+        "--lora=128",
+        f"--lora_from={content / 'start_model'}",
+        *extra.split(),
+    ]
+    assert not any(a.startswith(("--policy.use_peft", "--resume")) for a in first["argv"])
+    assert first["pretrained_path"] == str(content / "pi05_base") and first["use_peft"] is False
+    # a resume: lerobot's own PEFT load, from the base that the re-pointed adapter config names,
+    # with --lora (for --siglip_lora) and the levers again, and no --lora_from
+    out = scratch / "pi05_checkpoints_ab"
+    assert second["argv"] == [
+        f"--config_path={out}/checkpoints/last/pretrained_model/train_config.json",
+        "--resume=true",
+        f"--output_dir={out}",
+        f"--dataset.root={content / 'dataset'}",
+        "--lora=128",
+        *extra.split(),
+    ]
     base = str(scratch / "pi05_base")
-    assert first["base"] == str(rig.path / "content" / "pi05_base")
-    assert second["base"] == base  # the resumed adapter names the new VM's base
-    assert second["resume"] is True and second["start"] == 300 and second["use_peft"] is True
+    assert second["resume"] is True and second["start"] == 300
+    assert second["use_peft"] is True and second["base"] == base
     for call in (first, second):
         assert (call["steps"], call["warmup"], call["decay"]) == (600, 200, 600)
         assert (call["peak_lr"], call["decay_lr"], call["seed"]) == (5e-5, 1e-5, 1001)
-        assert call["argv"][-2:] == extra.split()  # word by word, last, on both sessions
+        assert call["targets"] == [f"{LORA_TARGETS}|{SIGLIP_TARGETS}"]
     keep = rig.run / "keep"
     assert sorted(p.name for p in keep.iterdir()) == ["000200", "000400", "000600"]
     for step in keep.iterdir():
         assert sorted(p.name for p in step.iterdir()) == ["SHA256SUMS", "pretrained_model"]
         subprocess.run(["sha256sum", "-c", "--quiet", "SHA256SUMS"], cwd=step, check=True)
+    assert _base(keep / "000200" / "pretrained_model") == str(content / "pi05_base")
     assert _base(keep / "000600" / "pretrained_model") == base
     assert _held(rig) == ["000600", "keep", "last.txt", "lora.txt"]
+
+
+@needs_061
+def test_an_l1_run_never_resumes(rig):
+    env = {**_lora(rig), "TRAIN_EXTRA": "--close_weight=3,2,1"}
+    r = _run(rig, **env, FAKE_DIE_AT=250)
+    assert "the trainer exited 137" in r.token and (rig.run / "000200").is_dir()
+    shutil.rmtree(rig.out)  # a new VM
+    r = _run(rig, **env)
+    assert r.rc == 1 and "trains with --close_weight, which cannot resume: start it" in r.token
+    assert len(_calls(rig)) == 1
 
 
 @needs_061
@@ -960,6 +997,15 @@ def test_a_lora_run_takes_its_schedule_from_the_env(rig):
         ([], {"DECAY_STEPS": 301}, "DECAY_STEPS=301: want a step count up to STEPS=300"),
         (
             [],
+            {
+                "TRAIN_EXTRA": "--overhead_aug=0.5,0.06,3 --close_weight=3,2,1",
+                "SPAN": 1,
+                "STEPS": 20001,
+            },
+            "--close_weight cannot resume, so STEPS=20001 must fit this session: N=20000",
+        ),
+        (
+            [],
             {"STEPS": 600, "KEEP_EVERY": 200, "FAKE_DF_KB": 61_000_000},  # 62.5 GB: 60 + 3 x 1
             "Drive has 62 GB free, a run that keeps 3 more copies needs 63",
         ),
@@ -988,17 +1034,17 @@ def test_each_lora_stop_prints_one_fail_token_before_any_copy(rig, args, env, wh
 # --- the stand-in trainer ---
 
 
-def _save(cfg, step: int, model_dir: Path) -> None:
+def _save(cfg, step: int, model_dir: Path, adapter: dict | None) -> None:
     """lerobot's checkpoint layout: <out>/checkpoints/<step>/{pretrained_model,training_state},
-    then the relative `last` link."""
+    then the relative `last` link. A PEFT run saves ``adapter`` as its adapter config."""
     ckpts = Path(cfg.output_dir) / "checkpoints"
     step_dir = ckpts / f"{step:06d}"
     (step_dir / "pretrained_model").mkdir(parents=True)
     (step_dir / "training_state").mkdir()
     cfg.save_pretrained(step_dir / "pretrained_model")
     shutil.copy(model_dir / "policy_preprocessor.json", step_dir / "pretrained_model")
-    if cfg.policy.use_peft:  # peft saves the adapter and its config, base name included
-        shutil.copy(model_dir / "adapter_config.json", step_dir / "pretrained_model")
+    if adapter is not None:  # peft saves the adapter and its config, base name included
+        (step_dir / "pretrained_model" / "adapter_config.json").write_text(json.dumps(adapter))
         (step_dir / "pretrained_model" / "adapter_model.safetensors").write_bytes(b"%d" % step)
     else:
         (step_dir / "pretrained_model" / "model.safetensors").write_bytes(b"\0" * 1000)
@@ -1010,28 +1056,46 @@ def _save(cfg, step: int, model_dir: Path) -> None:
 
 
 def standin(args: list[str]) -> int:
+    """train_pi05.py on ``args``: a LoRA argv goes through its main, with lerobot_train.main
+    swapped for ``trainer``. The mix modes' argv (0.5.1) goes to ``trainer`` directly."""
+    import train_pi05
+
+    if not any(a.startswith(train_pi05.LORA_FLAG) for a in args):
+        return trainer(args, args)
+    from lerobot.scripts import lerobot_train
+
+    codes = []
+    lerobot_train.main = lambda: codes.append(trainer(sys.argv[1:], args))
+    train_pi05.main(args)
+    return codes[0]
+
+
+def trainer(argv: list[str], args: list[str]) -> int:
+    """lerobot-train on ``argv`` (``args`` as the script passed them)."""
     import lerobot.policies  # noqa: F401 -- registers the pi05 config
     from lerobot.configs import parser
     from lerobot.configs.train import TrainPipelineConfig
+
+    from train_pi05 import split_mix
 
     def parse(cfg: TrainPipelineConfig):
         cfg.validate()
         return cfg
 
-    # train_pi05.py's own flags leave lerobot's argv, and --lora expands as its main() does;
-    # --fake_* stand for the lever flags of TRAIN_EXTRA
-    from train_pi05 import LORA_FLAG, lora_flags, split_mix
-
-    mix, prompts, rest = split_mix(args)
-    rest = [
-        x
-        for a in rest
-        if not a.startswith("--fake_")
-        for x in (lora_flags(int(a[len(LORA_FLAG) :])) if a.startswith(LORA_FLAG) else [a])
-    ]
+    mix, prompts, rest = split_mix(argv)
     sys.argv = ["lerobot-train", *rest]
     cfg = parser.wrap()(parse)()
     model_dir = Path(cfg.policy.pretrained_path)
+    use_peft, adapter, base = cfg.policy.use_peft, None, None
+    if use_peft:  # make_policy loads the base that the adapter config names, then the adapter
+        adapter = json.loads((model_dir / "adapter_config.json").read_text())
+        base = adapter["base_model_name_or_path"]
+        if not (Path(base) / "model.safetensors").is_file():
+            print(f"no model.safetensors in the base {base}", flush=True)
+            return 1
+    elif cfg.peft is not None:  # wrap_with_peft names the base and sets use_peft in the config
+        adapter = {"base_model_name_or_path": str(model_dir), "r": cfg.peft.r}
+        cfg.policy.use_peft = True
     tokens = _max_length(model_dir)
     mode = os.environ.get("FAKE_PREFLIGHT", "ok")
     if mode == "fail":
@@ -1069,17 +1133,15 @@ def standin(args: list[str]) -> int:
         "preflight_max_length": os.environ["PREFLIGHT_MAX_LENGTH"],
         "mix": [[root, share] for root, share in mix],
         "prompt_codes": prompts,
-        "use_peft": cfg.policy.use_peft,
+        "use_peft": use_peft,
         "peft": None if cfg.peft is None else [cfg.peft.r, cfg.peft.lora_alpha],
         "targets": None if cfg.peft is None else [cfg.peft.target_modules],
         "full": None if cfg.peft is None else cfg.peft.full_training_modules,
         "argv": args,
         "offline": os.environ.get("HF_HUB_OFFLINE"),
         "hub_cache": os.environ.get("HF_HUB_CACHE"),
+        "base": base,
     }
-    adapter = model_dir / "adapter_config.json"
-    if adapter.exists():
-        record["base"] = json.loads(adapter.read_text())["base_model_name_or_path"]
     with open(Path(os.environ["FAKE_DIR"]) / "cfg.jsonl", "a") as f:
         f.write(json.dumps(record) + "\n")
     loss = os.environ.get("FAKE_LOSS", "0.032")
@@ -1093,7 +1155,7 @@ def standin(args: list[str]) -> int:
                 flush=True,
             )
         if step % cfg.save_freq == 0 or step == cfg.steps:
-            _save(cfg, step, model_dir)
+            _save(cfg, step, model_dir, adapter)
         if step == die:
             print(f"fake session end at {step}", flush=True)
             return 137

@@ -68,6 +68,8 @@
 #     a LoRA continuation)
 #   - SPAN=1 with no checkpoint past the start step that fits this session, a KEEP_EVERY that is
 #     not a multiple of the save freq, or a LoRA DECAY_STEPS past STEPS
+#   - a LoRA run with --close_weight in TRAIN_EXTRA whose STEPS do not fit this session, and its
+#     resume (train_pi05.py refuses an L1 resume)
 #   - a LOCAL_DATA inside the Drive mount or the corpus, or one that holds them (the dataset copy
 #     deletes LOCAL_DATA first)
 #   - a final Drive sync that still fails after SYNC_RETRY_S
@@ -93,27 +95,38 @@
 # lerobot.
 #
 # The LoRA mode (MS7k design 6.1 D5), with LORA=R: the run continues the rank-R adapter START (a
-# pretrained_model folder with adapter_config.json, adapter_model.safetensors and the processors,
-# e.g. MS7j B3's 030000) on lerobot 0.6.1, with a fresh optimizer and its own schedule
-# (--policy.use_peft=true: lerobot loads the base that the adapter config names, then the adapter on
-# it, trainable). It installs the stack of Machine A pi venv: lerobot[pi,peft,training] 0.6.1,
+# pretrained_model folder with adapter_config.json and adapter_model.safetensors, e.g. MS7j B3's
+# 030000) on lerobot 0.6.1, with a fresh optimizer and its own schedule. A fresh run starts as the
+# Machine A probes L1 to L3 start: --policy.pretrained_path is the base, --lora=R wraps a new adapter
+# on it, and train_pi05.py --lora_from=<the local copy of START> copies the saved adapter into that
+# wrap and checks it. It installs the stack of Machine A pi venv: lerobot[pi,peft,training] 0.6.1,
 # transformers 5.5.4, peft 0.21.2, and torch 2.11.0 with torchvision 0.26.0 built for CUDA 12.6 (the
 # download.pytorch.org cu126 wheels: sm_80 for the A100, any CUDA 12 driver). It checks the versions
 # and CUDA before any copy. The base is lerobot/pi05_base at PI05_REV, a public repo, downloaded
-# once a runtime to $OUT_ROOT/pi05_base as it is: the run reads only its model.safetensors, and the
-# processors come from the adapter folder. The adapter config of the start copy, and of a resumed
-# checkpoint, is set to name that copy, so every save names it too: set base_model_name_or_path to
-# Machine A's base before merge_lora.py. The flags are those of B3
-# (~/data/maker-arm-ms7/j/bin/b3_lora.sh): --lora=R, train_expert_only false, bfloat16, gradient
-# checkpointing, MAX_LENGTH tokens, batch 32 and the masked loss. The schedule is that of the MS7k
+# once a runtime to $OUT_ROOT/pi05_base. A fresh run sets its tokenizer step to MAX_LENGTH, as the
+# Machine A's j/pi05_base is, because the processors come from the base. lerobot's wrap_with_peft
+# names --policy.pretrained_path in the adapter config, so every save names this runtime's base
+# copy: after the fetch and sha256sum -c, set base_model_name_or_path in the save's
+# adapter_config.json to Machine A's j/pi05_base before merge_lora.py.
+# A resume (SPAN=1, or a session that ended) runs lerobot's own --resume=true: it loads the base
+# that the checkpoint's adapter config names, then the adapter, trainable, so the script first sets
+# that config to name this runtime's base copy. The resume passes --lora=R and TRAIN_EXTRA again
+# (train_pi05.py takes its own flags out of argv, so no saved config keeps them, and --siglip_lora
+# needs --lora=R), and never --lora_from (train_pi05.py refuses it next to --resume). An L1 run
+# (--close_weight in TRAIN_EXTRA) cannot resume, as its sampler has no load_state_dict: its STEPS
+# must fit this session, SPAN=1 or not, and its resume stops before any copy. Start it again under a
+# new RUN_NAME. The flags are those of B3 (~/data/maker-arm-ms7/j/bin/b3_lora.sh): --lora=R,
+# train_expert_only false, bfloat16, gradient checkpointing, MAX_LENGTH tokens, batch 32 and the
+# masked loss. The schedule is that of the MS7k
 # ledger K11 unless set: a warmup of WARMUP (200) steps to PEAK_LR (5e-5), then a cosine to DECAY_LR
 # (1e-5) at DECAY_STEPS (STEPS, and not past it: lerobot would scale the warmup and the decay into
 # STEPS), STEPS 5000, SEED 1001 (B3's 1000 drew B3's sample order), SAVE_FREQ 1000, KEEP_EVERY 5000.
-# TRAIN_EXTRA goes to train_pi05.py word by word (a lever flag of a sibling branch). A run keeps
-# "LORA|TRAIN_EXTRA" in $RUN_NAME/lora.txt, and a resume needs the same two. A kept save is the
-# adapter (0.82 GB) and the processors, with SHA256SUMS of its files beside it. The smoke trains the
-# run's first 200 steps: its warmup and peak lr, and a decay of 200 steps, so lerobot does not
-# rescale the schedule. MIX, PROMPT_CODES, DAGGER and --expert_only stop a LoRA run.
+# TRAIN_EXTRA goes to train_pi05.py word by word (its MS7k levers --siglip_lora, --overhead_aug and
+# --close_weight). A run keeps "LORA|TRAIN_EXTRA" in $RUN_NAME/lora.txt, and a resume needs the
+# same two. A kept save is the adapter (0.82 GB) and the processors, with SHA256SUMS of its files
+# beside it. The smoke trains the run's first 200 steps: its warmup and peak lr, and a decay of 200
+# steps, so lerobot does not rescale the schedule. MIX, PROMPT_CODES, DAGGER and --expert_only stop
+# a LoRA run.
 #
 # The fetch of a kept save (colab download cannot read /content/drive and fails on big files): in
 # the runtime, split each file of keep/<step>/pretrained_model into 400 MB parts in /content
@@ -186,10 +199,13 @@ done
 LORA=${LORA:-}
 read -ra EXTRA <<< "${TRAIN_EXTRA:-}"
 LEROBOT=0.5.1
+CLOSE=
 if [ -n "$LORA" ]; then
     [[ "$LORA" =~ ^[1-9][0-9]*$ ]] || fail "LORA=$LORA is not a LoRA rank"
     [ "$EXPERT_ONLY" = false ] || fail "--expert_only: the LoRA recipe trains the VLM's LoRA too"
     LEROBOT=0.6.1
+    # L1: train_pi05.py refuses its resume, so the run must end in one session
+    [[ " ${EXTRA[*]} " != *" --close_weight"* ]] || CLOSE=1
     # the MS7k ledger K11 (the stage 1 probes): 5000 steps, a warmup of 200 to 5e-5, a cosine to
     # 1e-5 at step 5000, a save every 1000 steps (spec 6.4) and a kept one every 5000
     STEPS=${STEPS:-5000} PEAK_LR=${PEAK_LR:-5e-5} WARMUP=${WARMUP:-200} DECAY_LR=${DECAY_LR:-1e-5}
@@ -230,7 +246,7 @@ for p in "$CONTENT/drive" "$DRIVE_ROOT" "$DATA_SRC"; do
     case "$local_real/" in "$p/"*) fail "LOCAL_DATA=$LOCAL_DATA is inside $p" ;; esac
     case "$p/" in "${local_real%/}/"*) fail "LOCAL_DATA=$LOCAL_DATA holds $p" ;; esac
 done
-BASE_COPY=$LOCAL/pi05_base # LORA: the base that the adapter configs name
+BASE_COPY=$LOCAL/pi05_base # LORA: the base a fresh run starts from and the saves name
 BATCH=${BATCH:-32}
 SAVE_FREQ=${SAVE_FREQ:-2000}
 NUM_WORKERS=${NUM_WORKERS:-8}
@@ -335,7 +351,7 @@ snapshot_download(sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3])' \
         "$BASE" "$PI05_REV" "$1" || fail "cannot download $BASE"
     [ -f "$1/model.safetensors" ] || fail "no model.safetensors in $BASE"
 }
-point_base() { # the adapter config in the directory $1 names this runtime's base copy
+point_base() { # the adapter config in the directory $1 names this runtime's base copy (a resume)
     python3 -c 'import json, os, sys
 path = os.path.join(sys.argv[1], "adapter_config.json")
 with open(path) as f:
@@ -442,9 +458,14 @@ if [ "$SMOKE" -eq 0 ] && [ -f "$RUN_DIR/last.txt" ]; then
     recorded=$(cat "$RUN_DIR/lora.txt" 2>/dev/null || echo "|") # no file: a full fine-tune
     [ "$recorded" = "$LORA|${EXTRA[*]}" ] \
         || fail "$RUN_NAME trains with LORA|TRAIN_EXTRA '$recorded': resume it with the same two"
+    [ -z "$CLOSE" ] \
+        || fail "$RUN_NAME trains with --close_weight, which cannot resume: start it again \
+under a new RUN_NAME"
 else
     [ "${SPAN:-0}" = 1 ] || [ "$STEPS" -le "$FIT" ] \
         || fail "STEPS=$STEPS does not fit this session: N=$FIT"
+    [ -z "$CLOSE" ] || [ "$STEPS" -le "$FIT" ] \
+        || fail "--close_weight cannot resume, so STEPS=$STEPS must fit this session: N=$FIT"
     [ "$STEPS" -ge "$BAND_STEP" ] \
         || fail "STEPS=$STEPS: a run needs step $BAND_STEP of the loss band"
     [ -n "${START:-}" ] || fail "set START=<the pretrained_model directory to start from>"
@@ -575,7 +596,7 @@ done
 [ -z "${PROMPT_CODES:-}" ] || cp "$CODES_SRC" "$LOCAL_DATA/meta/prompt_codes.npy"
 if [ -n "$LORA" ] && [ ! -e "$BASE_COPY/.done" ]; then # once a runtime, as the dataset copy
     rm -rf "$BASE_COPY"
-    download_base "$BASE_COPY" # as it is: the processors come from the adapter folder
+    download_base "$BASE_COPY" # a fresh run patches its tokenizer step
     touch "$BASE_COPY/.done"
 fi
 df -h "$CONTENT" | tail -1
@@ -606,9 +627,10 @@ if [ "$RESUME" -eq 1 ]; then
     echo "resuming $RUN_NAME from checkpoint $last toward step $STEPS ($FIT steps fit)"
     # --output_dir: a resumed train_config.json names the first session's output dir;
     # --dataset.root: this session's local copy of the dataset, as a fresh run passes it
-    # TRAIN_EXTRA: train_pi05.py's own flags leave its argv, so no config holds them
+    # --lora and TRAIN_EXTRA: train_pi05.py's own flags leave its argv, so no config holds them,
+    # and --siglip_lora needs --lora; never --lora_from, which train_pi05.py refuses on a resume
     CMD=("${TRAIN[@]}" --config_path="$config" --resume=true --output_dir="$OUT"
-        --dataset.root="$LOCAL_DATA" "${MIX_ARGS[@]}" "${EXTRA[@]}")
+        --dataset.root="$LOCAL_DATA" "${MIX_ARGS[@]}" ${LORA:+--lora="$LORA"} "${EXTRA[@]}")
 else
     if [ "$SMOKE" -eq 0 ]; then
         mkdir -p "$RUN_DIR"
@@ -625,14 +647,15 @@ else
         echo "copying $src to $START_COPY"
         cp -r "$src" "$START_COPY"
     fi
-    python3 "$HERE/pi05_preflight.py" patch "$START_COPY" "$MAX_LENGTH" \
-        || fail "cannot set $MAX_LENGTH tokens in $START_COPY/policy_preprocessor.json"
+    MODEL=$START_COPY
+    [ -z "$LORA" ] || MODEL=$BASE_COPY # --lora_from: the processors come from the base
+    python3 "$HERE/pi05_preflight.py" patch "$MODEL" "$MAX_LENGTH" \
+        || fail "cannot set $MAX_LENGTH tokens in $MODEL/policy_preprocessor.json"
     START_STEP=0
     DECAY=$STEPS LORA_ARGS=()
     if [ -n "$LORA" ]; then
-        point_base "$START_COPY"
         [ "$SMOKE" -eq 1 ] || DECAY=${DECAY_STEPS:-$STEPS}
-        LORA_ARGS=(--policy.use_peft=true --lora="$LORA" "${EXTRA[@]}")
+        LORA_ARGS=(--lora="$LORA" --lora_from="$START_COPY" "${EXTRA[@]}")
     else
         # The pi05 preset's schedule (warmup 1000, decay 30000) scaled into STEPS as lerobot
         # scaled it for M2k (2000 steps: warmup 66); equal steps and decay steps skip that rescale.
@@ -644,7 +667,7 @@ else
         --dataset.root="$LOCAL_DATA"
         --tolerance_s=0.01 # as train_act.sh: float32 timestamps in long v3.0 video files
         --policy.type=pi05
-        --policy.pretrained_path="$START_COPY"
+        --policy.pretrained_path="$MODEL"
         --policy.dtype=bfloat16
         --policy.gradient_checkpointing=true
         --policy.train_expert_only="$EXPERT_ONLY"
