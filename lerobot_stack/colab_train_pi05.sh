@@ -64,9 +64,14 @@
 #     normalizer statistics against the corpus file, MAX_LENGTH tokens with the longest prompt
 #     under it, action_is_pad at the masked forward), or a trainer that logs a step with no
 #     PREFLIGHT_OK line before it
-#   - a loss outside [LOSS_LO, LOSS_HI] at step 200 (another default band from pi05_base)
-#   - SPAN=1 with no checkpoint past the start step that fits this session, or a KEEP_EVERY that
-#     is not a multiple of the save freq
+#   - a loss outside [LOSS_LO, LOSS_HI] at step 200 (other default bands from pi05_base and for
+#     a LoRA continuation)
+#   - SPAN=1 with no checkpoint past the start step that fits this session, a KEEP_EVERY that is
+#     not a multiple of the save freq, or a LoRA DECAY_STEPS past STEPS
+#   - a LoRA run with --close_weight in TRAIN_EXTRA whose STEPS do not fit this session, and its
+#     resume (train_pi05.py refuses an L1 resume)
+#   - a LOCAL_DATA inside the Drive mount or the corpus, or one that holds them (the dataset copy
+#     deletes LOCAL_DATA first)
 #   - a final Drive sync that still fails after SYNC_RETRY_S
 #
 # The mix mode (MS7h HD59 with one root, MS7i Run A and Run B with two), with MIX="ROOT:SHARE ...":
@@ -84,27 +89,79 @@
 # DAGGER=<root> [DAGGER_SHARE=0.3] stays as the one-root MIX that colab_dagger.sh sets on a CLI
 # runtime.
 #
+# The modes above install lerobot 0.5.1. train_pi05.py copies lerobot 0.6.1's forward since
+# 5eed2c0, so they need the train_pi05.py of a53379c next to this script (git show
+# a53379c:lerobot_stack/train_pi05.py). The script stops first on a train_pi05.py of another
+# lerobot.
+#
+# The LoRA mode (MS7k design 6.1 D5), with LORA=R: the run continues the rank-R adapter START (a
+# pretrained_model folder with adapter_config.json and adapter_model.safetensors, e.g. MS7j B3's
+# 030000) on lerobot 0.6.1, with a fresh optimizer and its own schedule. A fresh run starts as the
+# Machine A probes L1 to L3 start: --policy.pretrained_path is the base, --lora=R wraps a new adapter
+# on it, and train_pi05.py --lora_from=<the local copy of START> copies the saved adapter into that
+# wrap and checks it. It installs the stack of Machine A pi venv: lerobot[pi,peft,training] 0.6.1,
+# transformers 5.5.4, peft 0.21.2, and torch 2.11.0 with torchvision 0.26.0 built for CUDA 12.6 (the
+# download.pytorch.org cu126 wheels: sm_80 for the A100, any CUDA 12 driver). It checks the versions
+# and CUDA before any copy. The base is lerobot/pi05_base at PI05_REV, a public repo, downloaded
+# once a runtime to $OUT_ROOT/pi05_base. A fresh run sets its tokenizer step to MAX_LENGTH, as the
+# Machine A's j/pi05_base is, because the processors come from the base. lerobot's wrap_with_peft
+# names --policy.pretrained_path in the adapter config, so every save names this runtime's base
+# copy: after the fetch and sha256sum -c, set base_model_name_or_path in the save's
+# adapter_config.json to Machine A's j/pi05_base before merge_lora.py.
+# A resume (SPAN=1, or a session that ended) runs lerobot's own --resume=true: it loads the base
+# that the checkpoint's adapter config names, then the adapter, trainable, so the script first sets
+# that config to name this runtime's base copy. The resume passes --lora=R and TRAIN_EXTRA again
+# (train_pi05.py takes its own flags out of argv, so no saved config keeps them, and --siglip_lora
+# needs --lora=R), and never --lora_from (train_pi05.py refuses it next to --resume). An L1 run
+# (--close_weight in TRAIN_EXTRA) cannot resume, as its sampler has no load_state_dict: its STEPS
+# must fit this session, SPAN=1 or not, and its resume stops before any copy. Start it again under a
+# new RUN_NAME. The flags are those of B3 (~/data/maker-arm-ms7/j/bin/b3_lora.sh): --lora=R,
+# train_expert_only false, bfloat16, gradient checkpointing, MAX_LENGTH tokens, batch 32 and the
+# masked loss. The schedule is that of the MS7k
+# ledger K11 unless set: a warmup of WARMUP (200) steps to PEAK_LR (5e-5), then a cosine to DECAY_LR
+# (1e-5) at DECAY_STEPS (STEPS, and not past it: lerobot would scale the warmup and the decay into
+# STEPS), STEPS 5000, SEED 1001 (B3's 1000 drew B3's sample order), SAVE_FREQ 1000, KEEP_EVERY 5000.
+# TRAIN_EXTRA goes to train_pi05.py word by word (its MS7k levers --siglip_lora, --overhead_aug and
+# --close_weight). A run keeps "LORA|TRAIN_EXTRA" in $RUN_NAME/lora.txt, and a resume needs the
+# same two. A kept save is the adapter (0.82 GB) and the processors, with SHA256SUMS of its files
+# beside it. The smoke trains the run's first 200 steps: its warmup and peak lr, and a decay of 200
+# steps, so lerobot does not rescale the schedule. MIX, PROMPT_CODES, DAGGER and --expert_only stop
+# a LoRA run.
+#
+# The fetch of a kept save (colab download cannot read /content/drive and fails on big files): in
+# the runtime, split each file of keep/<step>/pretrained_model into 400 MB parts in /content
+# (split -b 400M -d -a 3 <file> /content/fetch/<file>.part) and copy SHA256SUMS there; download
+# the parts, join them into pretrained_model/<file>, and run sha256sum -c SHA256SUMS. A --smoke
+# save in a LoRA run has SHA256SUMS beside its pretrained_model too.
+#
 # The pi05 tokenizer google/paligemma-3b-pt-224 is a gated repo: HF_TOKEN must belong to an
 # account that was granted access (the owner's was, 2026-10-05). The script checks that first,
 # before it copies anything. transformers 5.3's AutoTokenizer reads the repo's config.json as
-# well as the tokenizer files, so an offline host needs config.json in its HF cache too.
+# well as the tokenizer files, so an offline host needs config.json in its HF cache too. With
+# TOKENIZER=<folder> (under $DRIVE, or absolute), no HF_TOKEN is needed: the folder holds the
+# tokenizer files of PALIGEMMA_REV (the snapshot in Machine A's HF cache, copied with cp -L,
+# config.json included), the script makes an HF cache of it in $OUT_ROOT/hf_hub, checks that it
+# loads offline, and runs the trainer with HF_HUB_OFFLINE=1.
 #
-# usage: DIR=<Drive folder> START=<dir | lerobot/pi05_base> RUN_NAME=<name> bash
+# usage: DIR=<Drive folder> START=<dir | lerobot/pi05_base> RUN_NAME=<name> [LORA=R] bash
 #            colab_train_pi05.sh [--smoke | --prepare] [--expert_only]
 #   --smoke        200 steps from START into a local dir, with the preflight and the loss band,
 #                  one checkpoint at the end and no Drive writes; prints seconds a step and the
 #                  checkpoint size. RUN_NAME is not needed.
 #   --prepare      the smoke's checks, the lerobot install, the HF_TOKEN checks and the dataset
-#                  copy, then stop before the trainer: COLAB_TRAIN_OK prepared
+#                  copy (and with LORA the base download), then stop before the trainer:
+#                  COLAB_TRAIN_OK prepared
 #   --expert_only  train_expert_only=true, the A100 40GB fallback (the report must say so)
 # env: STEPS (N), BATCH (32), SAVE_FREQ (2000), NUM_WORKERS (8), SEED (1000, run 1's and M2k's:
-#      the same seed draws the same sample order), DATASET (dataset),
+#      the same seed draws the same sample order), DATASET (dataset: under $DRIVE, or absolute,
+#      e.g. the corpus of another folder; LOCAL_DATA then defaults to $CONTENT/<its name>),
 #      OUT_ROOT (/content): where the local checkpoints and the start copy go, e.g. the
 #      runtime's local-scratch disk (the owner's A100 runtime had 70 GB free on /content after
 #      the dataset copy and 368 GB there), LOSS_LO, LOSS_HI, DRIVE_MIN_GB (60), STATS_MD5,
 #      SPAN (0), KEEP_EVERY (none), MAX_LENGTH (128), DRIVE_ROOT (/content/drive/MyDrive),
 #      LOCAL_DATA ($CONTENT/$DATASET: where the dataset copy goes), MIX (none), PROMPT_CODES
-#      (none), DAGGER (none), DAGGER_SHARE (0.3).
+#      (none), DAGGER (none), DAGGER_SHARE (0.3), SEC_PER_STEP (3.85), TOKENIZER (none), LORA
+#      (none) and, with LORA, TRAIN_EXTRA, PEAK_LR, WARMUP, DECAY_STEPS and DECAY_LR.
 #      CONTENT (/content), UPTIME_FILE (/proc/uptime), POLL_S (60) and SYNC_RETRY_S (1800) are
 #      for the dry-run test (lerobot_stack/test_colab_train_pi05.py).
 # -> one COLAB_TRAIN_OK / COLAB_TRAIN_DONE / COLAB_TRAIN_FAIL line.
@@ -139,16 +196,57 @@ for arg in "$@"; do
     esac
 done
 [ -n "${DIR:-}" ] || fail "set DIR=<folder under DRIVE_ROOT, /content/drive/MyDrive by default>"
+LORA=${LORA:-}
+read -ra EXTRA <<< "${TRAIN_EXTRA:-}"
+LEROBOT=0.5.1
+CLOSE=
+if [ -n "$LORA" ]; then
+    [[ "$LORA" =~ ^[1-9][0-9]*$ ]] || fail "LORA=$LORA is not a LoRA rank"
+    [ "$EXPERT_ONLY" = false ] || fail "--expert_only: the LoRA recipe trains the VLM's LoRA too"
+    LEROBOT=0.6.1
+    # L1: train_pi05.py refuses its resume, so the run must end in one session
+    [[ " ${EXTRA[*]} " != *" --close_weight"* ]] || CLOSE=1
+    # the MS7k ledger K11 (the stage 1 probes): 5000 steps, a warmup of 200 to 5e-5, a cosine to
+    # 1e-5 at step 5000, a save every 1000 steps (spec 6.4) and a kept one every 5000
+    STEPS=${STEPS:-5000} PEAK_LR=${PEAK_LR:-5e-5} WARMUP=${WARMUP:-200} DECAY_LR=${DECAY_LR:-1e-5}
+    SAVE_FREQ=${SAVE_FREQ:-1000} KEEP_EVERY=${KEEP_EVERY:-5000} SEED=${SEED:-1001}
+    # INITIAL: the band of a LoRA continuation, which its step 200 measures again. B3 (MS7j,
+    # j/b3_run.log, 10-step means) read loss 0.021 to 0.034 over steps 28010 to 30000, mean 0.027.
+    # The same LoRA from pi05_base read 0.110 at step 200 and 0.094 to 0.100 at steps 300 to 320,
+    # where its summed lr equals that of a 200-step warmup to 5e-5: an adapter that did not load
+    # reads there. LOSS_HI is about the midpoint of 0.034 and 0.095; LOSS_LO is half of the
+    # smallest, 0.021, rounded down, as the warm band's is.
+    LOSS_LO=${LOSS_LO:-0.010}
+    LOSS_HI=${LOSS_HI:-0.06}
+else
+    [ "${#EXTRA[@]}" -eq 0 ] || fail "TRAIN_EXTRA needs LORA: it holds train_pi05.py flags of 0.6.1"
+fi
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 for f in pi05_preflight.py train_pi05.py; do
     [ -f "$HERE/$f" ] || fail "no $HERE/$f: put it next to this script"
 done
+grep -qx "LEROBOT = \"$LEROBOT\"" "$HERE/train_pi05.py" || fail "$HERE/train_pi05.py is not for \
+lerobot $LEROBOT (without LORA: git show a53379c:lerobot_stack/train_pi05.py)"
 CONTENT=${CONTENT:-/content}
 DRIVE_ROOT=${DRIVE_ROOT:-$CONTENT/drive/MyDrive}
 DRIVE=$DRIVE_ROOT/$DIR
 DATA=${DATASET:-dataset}
+DATA=${DATA%/} # a tab-completed path: its last name still names the local copy
+case "$DATA" in
+    /*) DATA_SRC=$DATA LOCAL_DATA=${LOCAL_DATA:-$CONTENT/${DATA##*/}} ;;
+    *) DATA_SRC=$DRIVE/$DATA ;;
+esac
 LOCAL=${OUT_ROOT:-$CONTENT}
 LOCAL_DATA=${LOCAL_DATA:-$CONTENT/$DATA}
+# the dataset copy starts with rm -rf LOCAL_DATA: never inside the Drive mount or the corpus, and
+# never a folder that holds one of them
+local_real=$(realpath -ms "$LOCAL_DATA")
+for p in "$CONTENT/drive" "$DRIVE_ROOT" "$DATA_SRC"; do
+    p=$(realpath -ms "$p")
+    case "$local_real/" in "$p/"*) fail "LOCAL_DATA=$LOCAL_DATA is inside $p" ;; esac
+    case "$p/" in "${local_real%/}/"*) fail "LOCAL_DATA=$LOCAL_DATA holds $p" ;; esac
+done
+BASE_COPY=$LOCAL/pi05_base # LORA: the base a fresh run starts from and the saves name
 BATCH=${BATCH:-32}
 SAVE_FREQ=${SAVE_FREQ:-2000}
 NUM_WORKERS=${NUM_WORKERS:-8}
@@ -157,6 +255,7 @@ POLL_S=${POLL_S:-60}
 SYNC_RETRY_S=${SYNC_RETRY_S:-1800}
 DRIVE_MIN_GB=${DRIVE_MIN_GB:-60}
 KEEP_GB=10 # a kept pretrained_model: run 1's model.safetensors is 9,354,050,752 bytes
+[ -z "$LORA" ] || KEEP_GB=1 # B3's 030000 adapter_model.safetensors is 818 MiB
 # md5 of h/vla/dataset/meta/stats.json on Machine A, the corpus uploaded to Drive (2026-10-08)
 STATS_MD5=${STATS_MD5:-c10e2a394888ad72532a83779febdc3c}
 # 128 by default: no prompt of the corpus reaches it, the longest is 114 tokens with BOS (review);
@@ -168,8 +267,12 @@ BASE=lerobot/pi05_base
 # preprocessor names relative_actions_processor, a step lerobot 0.5.1 registers as
 # delta_actions_processor, so it fails to load (run 1's pin, da1f27a)
 PI05_REV=a538eb273274eb30f126a118f39dbc0ee212c883
-PEAK_LR=2.5e-5 MIX_WARMUP=
+PALIGEMMA_REV=35e4f46485b4d07967e7e9935bc3786aad50687c # Machine A's cached tokenizer (main)
+[ -n "$LORA" ] || PEAK_LR=2.5e-5 DECAY_LR=2.5e-6
+MIX_WARMUP=
 MIX=${MIX:-${DAGGER:+$DAGGER:${DAGGER_SHARE:-0.3}}}
+[ -z "$LORA" ] || [ -z "$MIX" ] || fail "LORA: MIX and DAGGER need lerobot 0.5.1 (train_pi05.py \
+refuses --mix on 0.6.1)"
 read -ra MIX_ENTRIES <<< "$MIX"
 MIX_ARGS=() MIX_SRC=() MIX_LOCAL=()
 for entry in "${MIX_ENTRIES[@]}"; do
@@ -229,13 +332,35 @@ LOSS_LO=${LOSS_LO:-0.015}
 LOSS_HI=${LOSS_HI:-0.06}
 BAND_STEP=200
 STEPS_MAX=20000
-SEC_PER_STEP=3.85 # the A100 80GB full fine-tune of run 1, batch 32 (MS7h ledger 2026-10-07)
+# the A100 80GB full fine-tune of run 1, batch 32 (MS7h ledger 2026-10-07); INITIAL for LORA, which
+# its smoke measures (B3 read 3.69 s a step on the 5090)
+SEC_PER_STEP=${SEC_PER_STEP:-3.85}
 LOG=$CONTENT/pi05_${RUN_NAME:-smoke}_$(date +%Y%m%d_%H%M%S).log
 
-[ -f "$DRIVE/$DATA/meta/info.json" ] || fail "no $DRIVE/$DATA/meta/info.json (Drive mounted?)"
+[ -f "$DATA_SRC/meta/info.json" ] || fail "no $DATA_SRC/meta/info.json (Drive mounted?)"
+case "${TOKENIZER:-}" in "") ;; /*) tok=$TOKENIZER ;; *) tok=$DRIVE/$TOKENIZER ;; esac
+[ -z "${TOKENIZER:-}" ] || [ -f "$tok/tokenizer_config.json" ] \
+    || fail "no tokenizer_config.json in TOKENIZER $tok"
 
 drive_free_kb() { df -Pk "$DRIVE" | awk 'NR == 2 {print $4}'; }
 run_cfg() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$@"; }
+download_base() { # lerobot/pi05_base at PI05_REV into the directory $1
+    echo "downloading $BASE at $PI05_REV to $1"
+    python3 -c 'import sys; from huggingface_hub import snapshot_download
+snapshot_download(sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3])' \
+        "$BASE" "$PI05_REV" "$1" || fail "cannot download $BASE"
+    [ -f "$1/model.safetensors" ] || fail "no model.safetensors in $BASE"
+}
+point_base() { # the adapter config in the directory $1 names this runtime's base copy (a resume)
+    python3 -c 'import json, os, sys
+path = os.path.join(sys.argv[1], "adapter_config.json")
+with open(path) as f:
+    doc = json.load(f)
+doc["base_model_name_or_path"] = sys.argv[2]
+with open(path + ".tmp", "w") as f:
+    json.dump(doc, f, indent=2)
+os.replace(path + ".tmp", path)' "$1" "$BASE_COPY" || fail "cannot name $BASE_COPY in $1"
+}
 drop_older() { # delete the checkpoint directories older than $1 in each directory that follows
     local keep=$1 dir old
     shift
@@ -268,6 +393,8 @@ sync_last() { # copy a new complete local checkpoint to Drive, then drop the old
     if [ -n "$keep" ]; then
         mkdir -p "$RUN_DIR/keep/.tmp_$last" \
             && cp -r "$OUT/checkpoints/$last/pretrained_model" "$RUN_DIR/keep/.tmp_$last/" \
+            && { [ -z "$LORA" ] || (cd "$OUT/checkpoints/$last" && sha256sum pretrained_model/*) \
+                > "$RUN_DIR/keep/.tmp_$last/SHA256SUMS"; } \
             && mv "$RUN_DIR/keep/.tmp_$last" "$keep" || return 1
         echo "kept the pretrained_model of checkpoint $last in $keep"
     fi
@@ -301,9 +428,9 @@ free_gb=$(($(drive_free_kb) * 1024 / 1000000000))
 [ "$free_gb" -ge "$DRIVE_MIN_GB" ] || fail "Drive has $free_gb GB free, a run needs $DRIVE_MIN_GB"
 # the sync's room check reads the same df: under a checkpoint + 1 GB, the older one goes first
 echo "Drive: $free_gb GB free, as df reads $DRIVE"
-stats_md5=$(md5sum < "$DRIVE/$DATA/meta/stats.json" | cut -d' ' -f1)
+stats_md5=$(md5sum < "$DATA_SRC/meta/stats.json" | cut -d' ' -f1)
 [ "$stats_md5" = "$STATS_MD5" ] \
-    || fail "$DRIVE/$DATA/meta/stats.json md5 $stats_md5 is not the corpus's $STATS_MD5"
+    || fail "$DATA_SRC/meta/stats.json md5 $stats_md5 is not the corpus's $STATS_MD5"
 for src in "${MIX_SRC[@]}"; do
     stats_md5=$(md5sum < "$src/meta/stats.json" | cut -d' ' -f1)
     [ "$stats_md5" = "$STATS_MD5" ] \
@@ -328,14 +455,32 @@ if [ "$SMOKE" -eq 0 ] && [ -f "$RUN_DIR/last.txt" ]; then
     recorded=$(cat "$RUN_DIR/mix.txt" 2>/dev/null || echo "|") # no file: a run without a mix
     [ "$recorded" = "$MIX|${PROMPT_CODES:-}" ] \
         || fail "$RUN_NAME trains on MIX|PROMPT_CODES '$recorded': resume it with the same two"
+    recorded=$(cat "$RUN_DIR/lora.txt" 2>/dev/null || echo "|") # no file: a full fine-tune
+    [ "$recorded" = "$LORA|${EXTRA[*]}" ] \
+        || fail "$RUN_NAME trains with LORA|TRAIN_EXTRA '$recorded': resume it with the same two"
+    [ -z "$CLOSE" ] \
+        || fail "$RUN_NAME trains with --close_weight, which cannot resume: start it again \
+under a new RUN_NAME"
 else
     [ "${SPAN:-0}" = 1 ] || [ "$STEPS" -le "$FIT" ] \
         || fail "STEPS=$STEPS does not fit this session: N=$FIT"
+    [ -z "$CLOSE" ] || [ "$STEPS" -le "$FIT" ] \
+        || fail "--close_weight cannot resume, so STEPS=$STEPS must fit this session: N=$FIT"
     [ "$STEPS" -ge "$BAND_STEP" ] \
         || fail "STEPS=$STEPS: a run needs step $BAND_STEP of the loss band"
     [ -n "${START:-}" ] || fail "set START=<the pretrained_model directory to start from>"
     case "$START" in "$BASE") src= ;; /*) src=$START ;; *) src=$DRIVE/$START ;; esac
-    [ -z "$src" ] || [ -f "$src/model.safetensors" ] || fail "no model.safetensors in START $src"
+    if [ -n "$LORA" ]; then
+        [ -n "$src" ] && [ -f "$src/adapter_model.safetensors" ] \
+            || fail "LORA: no adapter_model.safetensors in START ${src:-$START}"
+        rank=$(run_cfg "$src/adapter_config.json" r) || fail "no r in $src/adapter_config.json"
+        [ "$rank" = "$LORA" ] || fail "START is a rank $rank adapter, not LORA=$LORA"
+        # past STEPS, lerobot scales the warmup and the decay into STEPS and only logs a warning
+        [ "$SMOKE" -eq 1 ] || [ "${DECAY_STEPS:-$STEPS}" -le "$STEPS" ] \
+            || fail "DECAY_STEPS=$DECAY_STEPS: want a step count up to STEPS=$STEPS"
+    fi
+    [ -n "$LORA" ] || [ -z "$src" ] || [ -f "$src/model.safetensors" ] \
+        || fail "no model.safetensors in START $src"
     if [ "$SMOKE" -eq 0 ]; then
         for f in "$RUN_DIR"/[0-9]* "$RUN_DIR"/.tmp_* "$RUN_DIR"/keep; do
             if [ -e "$f" ]; then
@@ -368,21 +513,56 @@ if [ "$SMOKE" -eq 0 ] && { [ "${SPAN:-0}" = 1 ] || [ -n "${KEEP_EVERY:-}" ]; }; 
     fi
 fi
 
-python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' || fail "lerobot 0.5.1: Python 3.12"
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' \
+    || fail "lerobot $LEROBOT: Python 3.12"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 memory=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)
-if [ "$EXPERT_ONLY" = false ] && [ "$memory" -lt 70000 ]; then
+if [ -n "$LORA" ]; then
+    [ "$memory" -ge 30000 ] \
+        || fail "the LoRA run needs 30 GB of GPU (B3 peaked at 22.1 GB), this GPU has $memory MiB"
+elif [ "$EXPERT_ONLY" = false ] && [ "$memory" -lt 70000 ]; then
     fail "the full fine-tune needs an A100 80GB, this GPU has $memory MiB (--expert_only?)"
 fi
-python3 -c 'import lerobot, sys; sys.exit(lerobot.__version__ != "0.5.1")' 2>/dev/null \
-    || pip install -q "lerobot[pi]==0.5.1"
-[ -n "${HF_TOKEN:-}" ] || fail "HF_TOKEN is not set: export it from the Colab secret (cell 2)"
-# A secret pasted with a newline sends a bad header, which the hub answers 401 "Please log in".
-HF_TOKEN=$(printf %s "$HF_TOKEN" | tr -d '[:space:]')
-export HF_TOKEN
-# The owner's first smoke (2026-10-05) failed here on a 401 with HF_TOKEN set: tell a bad token
-# from an account or token without access to the gated repo before the tokenizer reads it.
-python3 -c 'import os, sys
+if [ -n "$LORA" ]; then
+    # the versions of Machine A pi venv (setup_pi_env.sh) that trained B3, with a CUDA 12 torch
+    stack='import lerobot, peft, sys, torch, transformers
+got = (lerobot.__version__, transformers.__version__, peft.__version__, torch.__version__)
+print("lerobot %s transformers %s peft %s torch %s" % got, "cuda", torch.cuda.is_available())
+sys.exit(got != ("0.6.1", "5.5.4", "0.21.2", "2.11.0+cu126") or not torch.cuda.is_available())'
+    python3 -c "$stack" > /dev/null 2>&1 || {
+        pip install -q torch==2.11.0+cu126 torchvision==0.26.0+cu126 \
+            --index-url https://download.pytorch.org/whl/cu126 \
+            && pip install -q "lerobot[pi,peft,training]==0.6.1" transformers==5.5.4 peft==0.21.2 \
+            && { pip uninstall -q -y torchao > /dev/null 2>&1 || true; }
+        # the Colab image ships torchao 0.10.0, and peft 0.21.2 raises an ImportError on any
+        # torchao under 0.16 when it builds a LoRA layer (2026-10-28 smoke); Machine A venv has
+        # none, so the install removes it once a runtime
+    } || fail "cannot install the lerobot 0.6.1 stack"
+    python3 -c "$stack" || fail "the lerobot 0.6.1 stack is not the pinned one (see the line above)"
+else
+    python3 -c 'import lerobot, sys; sys.exit(lerobot.__version__ != "0.5.1")' 2>/dev/null \
+        || pip install -q "lerobot[pi]==0.5.1"
+fi
+if [ -n "${TOKENIZER:-}" ]; then
+    # the tokenizer step loads google/paligemma-3b-pt-224 by name: from this cache with no hub
+    # request, as the hub answers one without a token with 401 (2026-10-28 on Machine A)
+    export HF_HUB_CACHE=$LOCAL/hf_hub
+    repo=$HF_HUB_CACHE/models--google--paligemma-3b-pt-224
+    rm -rf "$repo" && mkdir -p "$repo/refs" "$repo/snapshots" \
+        && cp -r "$tok" "$repo/snapshots/$PALIGEMMA_REV" \
+        && printf %s "$PALIGEMMA_REV" > "$repo/refs/main" || fail "cannot copy $tok to $repo"
+    HF_HUB_OFFLINE=1 python3 -c 'from transformers import AutoTokenizer
+AutoTokenizer.from_pretrained("google/paligemma-3b-pt-224")' \
+        || fail "TOKENIZER $tok does not load as google/paligemma-3b-pt-224 offline"
+    echo "TOKENIZER: google/paligemma-3b-pt-224 from $tok, the trainer runs offline"
+else
+    [ -n "${HF_TOKEN:-}" ] || fail "HF_TOKEN is not set: export it from the Colab secret (cell 2)"
+    # A secret pasted with a newline sends a bad header, which the hub answers 401 "Please log in".
+    HF_TOKEN=$(printf %s "$HF_TOKEN" | tr -d '[:space:]')
+    export HF_TOKEN
+    # The owner's first smoke (2026-10-05) failed here on a 401 with HF_TOKEN set: tell a bad token
+    # from an account or token without access to the gated repo before the tokenizer reads it.
+    python3 -c 'import os, sys
 from huggingface_hub import auth_check, whoami
 try:
     name = whoami(token=os.environ["HF_TOKEN"])["name"]
@@ -394,16 +574,17 @@ except Exception as err:
     sys.exit(f"account {name}: no access to google/paligemma-3b-pt-224 ({type(err).__name__}); "
              "a fine-grained token needs read access to public gated repos")
 print(f"HF_TOKEN: account {name} has access to google/paligemma-3b-pt-224")' \
-    || fail "HF_TOKEN cannot read google/paligemma-3b-pt-224 (see the line above)"
-python3 -c 'from transformers import AutoTokenizer
+        || fail "HF_TOKEN cannot read google/paligemma-3b-pt-224 (see the line above)"
+    python3 -c 'from transformers import AutoTokenizer
 AutoTokenizer.from_pretrained("google/paligemma-3b-pt-224")' \
-    || fail "no google/paligemma-3b-pt-224: HF_TOKEN of an account that accepted its licence"
+        || fail "no google/paligemma-3b-pt-224: HF_TOKEN of an account that accepted its licence"
+fi
 
 if [ ! -e "$LOCAL_DATA/.copied" ]; then
     rm -rf "$LOCAL_DATA"
     mkdir -p "$(dirname "$LOCAL_DATA")"
-    echo "copying $DRIVE/$DATA to $LOCAL_DATA"
-    cp -r "$DRIVE/$DATA" "$LOCAL_DATA"
+    echo "copying $DATA_SRC to $LOCAL_DATA"
+    cp -r "$DATA_SRC" "$LOCAL_DATA"
     touch "$LOCAL_DATA/.copied"
 fi
 for i in "${!MIX_SRC[@]}"; do
@@ -417,6 +598,11 @@ for i in "${!MIX_SRC[@]}"; do
     fi
 done
 [ -z "${PROMPT_CODES:-}" ] || cp "$CODES_SRC" "$LOCAL_DATA/meta/prompt_codes.npy"
+if [ -n "$LORA" ] && [ ! -e "$BASE_COPY/.done" ]; then # once a runtime, as the dataset copy
+    rm -rf "$BASE_COPY"
+    download_base "$BASE_COPY" # a fresh run patches its tokenizer step
+    touch "$BASE_COPY/.done"
+fi
 df -h "$CONTENT" | tail -1
 if [ "$PREPARE" -eq 1 ]; then
     RESULT="prepared data=$LOCAL_DATA"
@@ -426,7 +612,7 @@ fi
 # checkpointing: out of memory after step 1 with the default allocator, 18.45 GiB allocated and
 # 19.41 reserved at 3.0 s a step with expandable segments
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-export PREFLIGHT_STATS=$DRIVE/$DATA/meta/stats.json PREFLIGHT_MAX_LENGTH=$MAX_LENGTH
+export PREFLIGHT_STATS=$DATA_SRC/meta/stats.json PREFLIGHT_MAX_LENGTH=$MAX_LENGTH
 export PYTHONUNBUFFERED=1
 TRAIN=(python3 "$HERE/pi05_preflight.py" train)
 
@@ -438,46 +624,54 @@ if [ "$RESUME" -eq 1 ]; then
         cp -r "$RUN_DIR/$last" "$OUT/checkpoints/$last"
     fi
     ln -sfn "$last" "$OUT/checkpoints/last"
+    [ -z "$LORA" ] || point_base "$OUT/checkpoints/$last/pretrained_model"
     config=$OUT/checkpoints/last/pretrained_model/train_config.json
     STEPS=$(run_cfg "$config" steps)
     START_STEP=$((10#$last))
     echo "resuming $RUN_NAME from checkpoint $last toward step $STEPS ($FIT steps fit)"
     # --output_dir: a resumed train_config.json names the first session's output dir;
     # --dataset.root: this session's local copy of the dataset, as a fresh run passes it
+    # --lora and TRAIN_EXTRA: train_pi05.py's own flags leave its argv, so no config holds them,
+    # and --siglip_lora needs --lora; never --lora_from, which train_pi05.py refuses on a resume
     CMD=("${TRAIN[@]}" --config_path="$config" --resume=true --output_dir="$OUT"
-        --dataset.root="$LOCAL_DATA" "${MIX_ARGS[@]}")
+        --dataset.root="$LOCAL_DATA" "${MIX_ARGS[@]}" ${LORA:+--lora="$LORA"} "${EXTRA[@]}")
 else
     if [ "$SMOKE" -eq 0 ]; then
         mkdir -p "$RUN_DIR"
-        rm -f "$RUN_DIR/mix.txt"
+        rm -f "$RUN_DIR/mix.txt" "$RUN_DIR/lora.txt"
         [ -z "$MIX" ] || echo "$MIX|${PROMPT_CODES:-}" > "$RUN_DIR/mix.txt"
+        [ -z "$LORA" ] || echo "$LORA|${EXTRA[*]}" > "$RUN_DIR/lora.txt"
     fi
     START_COPY=$LOCAL/start_model
     # a fresh run: nothing local to keep, and a smoke checkpoint (22.8 GiB) would crowd /content
     rm -rf "$START_COPY" "$OUT" "$LOCAL/pi05_smoke"
     if [ -z "$src" ]; then
-        echo "downloading $BASE at $PI05_REV to $START_COPY"
-        python3 -c 'import sys; from huggingface_hub import snapshot_download
-snapshot_download(sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3])' \
-            "$BASE" "$PI05_REV" "$START_COPY" || fail "cannot download $BASE"
-        [ -f "$START_COPY/model.safetensors" ] || fail "no model.safetensors in $BASE"
+        download_base "$START_COPY"
     else
         echo "copying $src to $START_COPY"
         cp -r "$src" "$START_COPY"
     fi
-    python3 "$HERE/pi05_preflight.py" patch "$START_COPY" "$MAX_LENGTH" \
-        || fail "cannot set $MAX_LENGTH tokens in $START_COPY/policy_preprocessor.json"
+    MODEL=$START_COPY
+    [ -z "$LORA" ] || MODEL=$BASE_COPY # --lora_from: the processors come from the base
+    python3 "$HERE/pi05_preflight.py" patch "$MODEL" "$MAX_LENGTH" \
+        || fail "cannot set $MAX_LENGTH tokens in $MODEL/policy_preprocessor.json"
     START_STEP=0
-    # The pi05 preset's schedule (warmup 1000, decay 30000) scaled into STEPS as lerobot scaled
-    # it for M2k (2000 steps: warmup 66); equal steps and decay steps skip that rescale.
-    WARMUP=${MIX_WARMUP:-$((1000 * STEPS / 30000))}
+    DECAY=$STEPS LORA_ARGS=()
+    if [ -n "$LORA" ]; then
+        [ "$SMOKE" -eq 1 ] || DECAY=${DECAY_STEPS:-$STEPS}
+        LORA_ARGS=(--lora="$LORA" --lora_from="$START_COPY" "${EXTRA[@]}")
+    else
+        # The pi05 preset's schedule (warmup 1000, decay 30000) scaled into STEPS as lerobot
+        # scaled it for M2k (2000 steps: warmup 66); equal steps and decay steps skip that rescale.
+        WARMUP=${MIX_WARMUP:-$((1000 * STEPS / 30000))}
+    fi
     CMD=(
         "${TRAIN[@]}"
         --dataset.repo_id=youtalk/maker-arm-legosort
         --dataset.root="$LOCAL_DATA"
         --tolerance_s=0.01 # as train_act.sh: float32 timestamps in long v3.0 video files
         --policy.type=pi05
-        --policy.pretrained_path="$START_COPY"
+        --policy.pretrained_path="$MODEL"
         --policy.dtype=bfloat16
         --policy.gradient_checkpointing=true
         --policy.train_expert_only="$EXPERT_ONLY"
@@ -486,8 +680,8 @@ snapshot_download(sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3])' \
         --policy.tokenizer_max_length="$MAX_LENGTH"
         --policy.optimizer_lr="$PEAK_LR"
         --policy.scheduler_warmup_steps="$WARMUP"
-        --policy.scheduler_decay_steps="$STEPS"
-        --policy.scheduler_decay_lr=2.5e-6
+        --policy.scheduler_decay_steps="$DECAY"
+        --policy.scheduler_decay_lr="$DECAY_LR"
         --policy.device=cuda
         --policy.push_to_hub=false
         --output_dir="$OUT"
@@ -501,6 +695,7 @@ snapshot_download(sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3])' \
         --log_freq="$LOG_FREQ"
         --wandb.enable=false
         "${MIX_ARGS[@]}"
+        "${LORA_ARGS[@]}"
     )
 fi
 if [ "$SMOKE" -eq 0 ]; then cp "$LOCAL_DATA/meta/action_space.json" "$DRIVE/action_space.json"; fi
@@ -530,6 +725,7 @@ session_end() { # SPAN=1: stop once this session's last checkpoint that fits is 
 }
 
 echo "trainer log $LOG"
+[ -z "${TOKENIZER:-}" ] || export HF_HUB_OFFLINE=1 # after every download
 "${CMD[@]}" > "$LOG" 2>&1 &
 train_pid=$!
 tail -n +1 -f --pid="$train_pid" "$LOG" &
@@ -569,6 +765,12 @@ if [ "$SMOKE" -eq 1 ]; then
     gib=$(du -sb "$OUT/checkpoints/last/" | awk '{printf "%.2f", $1 / 2^30}')
     RESULT="smoke sec_per_step=$sec checkpoint_gib=$gib loss$BAND_STEP=$LOSS200 batch=$BATCH"
     RESULT+=" expert_only=$EXPERT_ONLY"
+    if [ -n "$LORA" ]; then # the save to fetch, as a kept one
+        save=$(cd "$OUT/checkpoints/last" && pwd -P)
+        (cd "$save" && sha256sum pretrained_model/*) > "$save/SHA256SUMS" \
+            || fail "cannot write $save/SHA256SUMS"
+        RESULT+=" lora=$LORA save=$save"
+    fi
     exit 0
 fi
 

@@ -15,7 +15,10 @@ unchanged. Before the first optimizer step it stops the run with ``PREFLIGHT_FAI
 - the weights loaded in full: lerobot 0.6.1 only prints a warning on a failed or partial load
   and trains on (PI05Policy.from_pretrained), and prints "All keys loaded successfully!" on a
   full one. Under ``--lora`` (peft) the check covers the base load: the adapter is wrapped on
-  after it, in ``wrap_with_peft``, and prints nothing of its own;
+  after it, in ``wrap_with_peft``, and prints nothing of its own. With ``--lora_from`` (a
+  continuation), ``train_pi05.load_lora`` then copies the saved adapter into that wrap and
+  refuses any tensor that does not match. lerobot's own continuation
+  (``--policy.use_peft=true``) loads the adapter in ``make_policy`` after the base, unchecked;
 - the action and state statistics of the normalizer and the unnormalizer hash-equal those of
   ``PREFLIGHT_STATS`` (the corpus ``meta/stats.json``): a warm start and a resume take them
   from the dataset root (lerobot_train.py). The image statistics are left out: the

@@ -4,7 +4,8 @@
 # long steps run under nohup into $JOBS/<step>.log and return at once; call the step again, or
 # status, to poll. A step that is running or done reports so and starts nothing; a failed step
 # starts again only with RETRY=1. Put this file, colab_train_pi05.sh, pi05_preflight.py and
-# train_pi05.py in one folder on the runtime (/content/dag).
+# train_pi05.py in one folder on the runtime (/content/dag). The DAgger mode runs lerobot 0.5.1,
+# so train_pi05.py is that of a53379c (git show a53379c:lerobot_stack/train_pi05.py).
 #   setup                 the GPU (80 GB) and $SCRATCH (SCRATCH_MIN_GB free) checks, then
 #                         colab_train_pi05.sh --prepare (lerobot, HF_TOKEN, START on Drive, the
 #                         corpus copy to $SCRATCH/dataset)       DAGGER_SETUP_<STATE>

@@ -1,15 +1,21 @@
-"""colab_train_pi05.sh and pi05_preflight.py (MS7h recipe 5.6 and 9).
+"""colab_train_pi05.sh and pi05_preflight.py (MS7h recipe 5.6 and 9, MS7k design 6.1 D5).
 
 The preflight checks run on stub policies and pipelines. The script runs in a temp dir that
 stands in for /content, with shims first on PATH: python3 (the HF checks pass, the trainer is
-the stand-in, and the pi05_base download copies FAKE_BASE), nvidia-smi, pip, df (FAKE_DF_KB) and
-cp (it logs the Drive checkpoints at each copy to Drive, and fails the first FAKE_DIR/cp_fails
-copies). The stand-in trainer is this file run as a script: it parses the trainer's argv with
-lerobot's own parser, writes lerobot's checkpoint layout and log lines, and fakes the preflight's
-outcome (FAKE_PREFLIGHT).
+the stand-in, the pi05_base download copies FAKE_BASE, and with FAKE_NO_STACK the lerobot check
+fails until pip ran), nvidia-smi, pip (it logs its arguments), df (FAKE_DF_KB) and cp (it logs
+the Drive checkpoints at each copy to Drive, and fails the first FAKE_DIR/cp_fails copies). The
+stand-in trainer is this file run as a script: it parses the trainer's argv with lerobot's own
+parser, writes lerobot's checkpoint layout and log lines, and fakes the preflight's outcome
+(FAKE_PREFLIGHT). A PEFT run saves an adapter whose config names the base as lerobot's does: a new
+wrap names --policy.pretrained_path, and a resume loads the base that the checkpoint's adapter
+config names, so the stand-in fails when that base is missing. A LoRA argv goes through
+train_pi05.main first, so its lever checks and its --lora expansion run. The LoRA runs need
+lerobot 0.6.1 (0.5.1 has no --peft.lora_alpha), so they skip in the 0.5.1 venv.
 """
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import shutil
@@ -24,6 +30,7 @@ import pytest
 
 import pi05_preflight
 from pi05_preflight import PreflightError, install, patch_max_length, stats_sha
+from train_pi05 import LORA_FULL, LORA_TARGETS, SIGLIP_TARGETS
 
 HERE = Path(__file__).resolve().parent
 FULL = "All keys loaded successfully!"
@@ -214,13 +221,16 @@ case "$1 $2" in *pi05_preflight.py\\ train) shift 2; exec "$FAKE_PY" "$FAKE_STAN
 case "$*" in *snapshot_download*)
     echo "$3 $4" >> "$FAKE_DIR/download.log"; mkdir -p "$5"; exec cp -r "$FAKE_BASE"/. "$5" ;;
 esac
-case "$*" in *huggingface_hub*|*AutoTokenizer*|*"import lerobot"*) exit 0 ;; esac
+case "$*" in *"import lerobot"*)
+    [ -z "${FAKE_NO_STACK:-}" ] || [ -s "$FAKE_DIR/pip.log" ] || exit 1; exit 0 ;;
+esac
+case "$*" in *huggingface_hub*|*AutoTokenizer*) exit 0 ;; esac
 exec "$FAKE_PY" "$@"
 """,
     "nvidia-smi": """
 case "$*" in *nounits*) echo 81920 ;; *) echo "NVIDIA A100-SXM4-80GB, 81920 MiB" ;; esac
 """,
-    "pip": "exit 0\n",
+    "pip": 'echo "$*" >> "$FAKE_DIR/pip.log"\n',
     "df": """
 [ -n "${FAKE_DF_KB:-}" ] || PATH=$REAL_PATH exec df "$@"
 echo "Filesystem 1024-blocks Used Available Capacity Mounted"
@@ -250,6 +260,7 @@ def rig(tmp_path):
         d.mkdir(parents=True)
     for name in ("colab_train_pi05.sh", "pi05_preflight.py", "train_pi05.py"):
         shutil.copy(HERE / name, drive / name)
+    _helper(drive, "0.5.1")  # the modes without LORA run a53379c's train_pi05.py
     (meta / "info.json").write_text("{}")
     (meta / "stats.json").write_text(json.dumps(STATS))
     (meta / "action_space.json").write_text('{"action_space": "absolute", "gripper": "continuous"}')
@@ -292,6 +303,14 @@ def rig(tmp_path):
         start=start,
         fake=tmp_path / "fake",
         env=env,
+    )
+
+
+def _helper(drive: Path, version: str) -> None:
+    """train_pi05.py on the Drive as the script checks it: its version line."""
+    text = (HERE / "train_pi05.py").read_text()
+    (drive / "train_pi05.py").write_text(
+        text.replace('LEROBOT = "0.6.1"', f'LEROBOT = "{version}"')
     )
 
 
@@ -423,6 +442,8 @@ def test_a_fresh_run_passes_every_recipe_flag_and_keeps_one_checkpoint(rig):
         "max_length": 128,
         "batch_size": 32,
         "seed": 1000,
+        "use_peft": False,
+        "peft": None,
     }
     assert {k: call[k] for k in want} == want
     assert call["pretrained_path"] == str(rig.path / "content" / "start_model")
@@ -511,6 +532,7 @@ def test_the_final_sync_retries_then_fails_after_its_window(rig):
     "args, env, why",
     [
         (["--bogus"], {}, "unknown argument --bogus"),
+        ([], {"TRAIN_EXTRA": "--close_weight=3,2,1"}, "TRAIN_EXTRA needs LORA"),
         ([], {"DIR": None}, "set DIR="),
         ([], {"RUN_NAME": None}, "set RUN_NAME="),
         ([], {"START": None}, "set START="),
@@ -690,6 +712,17 @@ def test_prepare_copies_the_dataset_and_trains_nothing(rig):
     assert not _calls(rig) and not (rig.path / "content" / "dataset").exists()
 
 
+def test_the_dataset_copy_never_deletes_the_drive_or_the_corpus(rig):
+    corpus, content = rig.drive / "dataset", rig.path / "content"
+    env = {"RUN_NAME": None, "DATASET": f"{corpus}/"}  # a tab-completed path
+    r = _run(rig, "--prepare", **env)
+    assert r.token == f"COLAB_TRAIN_OK prepared data={content / 'dataset'}"
+    for local in (corpus, f"{corpus}/", content, rig.drive.parent):
+        r = _run(rig, "--prepare", **env, LOCAL_DATA=local)
+        assert r.token.startswith("COLAB_TRAIN_FAIL") and f"LOCAL_DATA={local} " in r.token
+    assert (corpus / "meta" / "info.json").exists() and (rig.drive / "train_pi05.py").exists()
+
+
 def _runner(rig, *args, **env):
     full = {**rig.env, **{k: str(v) for k, v in env.items()}}
     full.pop("RUN_NAME")  # the runner's default, checkpoints_dagger
@@ -757,19 +790,265 @@ def test_the_cli_runner_takes_a_dagger_tar_to_a_kept_run(rig):
     assert call["output_dir"] == str(scratch / "pi05_checkpoints_dagger")
 
 
+# --- the LoRA mode (MS7k) ---
+
+B3_BASE = "~/data/maker-arm-ms7/j/pi05_base"  # what B3's adapter config names
+PALIGEMMA_REV = "35e4f46485b4d07967e7e9935bc3786aad50687c"
+TOKENIZER_FILES = ("config.json", "tokenizer.json", "tokenizer_config.json")
+TORCH = "torch==2.11.0+cu126 torchvision==0.26.0+cu126"
+STACK = [
+    f"install -q {TORCH} --index-url https://download.pytorch.org/whl/cu126",
+    "install -q lerobot[pi,peft,training]==0.6.1 transformers==5.5.4 peft==0.21.2",
+    "uninstall -q -y torchao",  # the image's torchao 0.10.0 breaks peft 0.21.2's LoRA layers
+]
+needs_061 = pytest.mark.skipif(
+    importlib.metadata.version("lerobot") != "0.6.1", reason="the LoRA flags parse on 0.6.1"
+)
+
+
+def _lora(rig, rank: int = 128) -> dict:
+    """B3's 030000 as the LoRA mode reads it from the Drive, the tokenizer folder, and the 0.6.1
+    train_pi05.py next to the script: the env of a run with no HF token."""
+    _helper(rig.drive, "0.6.1")
+    adapter = rig.drive / "k" / "b3_030000"
+    adapter.mkdir(parents=True)
+    config = {"base_model_name_or_path": B3_BASE, "r": rank, "lora_alpha": rank}
+    (adapter / "adapter_config.json").write_text(json.dumps(config))
+    (adapter / "adapter_model.safetensors").write_bytes(b"\1" * 1000)
+    (adapter / "policy_preprocessor.json").write_text(json.dumps(_preprocessor_json(128)))
+    tokenizer = rig.drive / "k" / "paligemma_tokenizer"
+    tokenizer.mkdir()
+    for name in TOKENIZER_FILES:
+        (tokenizer / name).write_text("{}")
+    return {
+        "LORA": rank,
+        "START": "k/b3_030000",
+        "TOKENIZER": "k/paligemma_tokenizer",
+        "HF_TOKEN": None,
+        "FAKE_LOSS": "0.030",
+    }
+
+
+def _base(path: Path) -> str:
+    return json.loads((path / "adapter_config.json").read_text())["base_model_name_or_path"]
+
+
+@needs_061
+def test_a_lora_smoke_continues_the_adapter_offline_on_the_pinned_stack(rig):
+    # the operator's layout: the corpus of another Drive folder, read in place
+    corpus = rig.path / "content" / "drive" / "MyDrive" / "ms7h_old" / "dataset"
+    shutil.move(rig.drive / "dataset", corpus)
+    scratch = rig.path / "scratch"
+    env = _lora(rig) | {"DATASET": corpus, "OUT_ROOT": scratch, "FAKE_NO_STACK": 1}
+    env |= {"DECAY_STEPS": 5000}  # a run's: the smoke keeps a decay of its own 200 steps
+    r = _run(rig, "--prepare", RUN_NAME=None, **env)
+    assert r.token == f"COLAB_TRAIN_OK prepared data={rig.path / 'content' / 'dataset'}"
+    assert (rig.fake / "pip.log").read_text().splitlines() == STACK
+    assert (rig.fake / "download.log").read_text() == f"{BASE} {BASE_REV}\n"
+    assert (scratch / "pi05_base" / ".done").exists()
+    repo = scratch / "hf_hub" / "models--google--paligemma-3b-pt-224"
+    assert (repo / "refs" / "main").read_text() == PALIGEMMA_REV
+    assert sorted(p.name for p in (repo / "snapshots" / PALIGEMMA_REV).iterdir()) == sorted(
+        TOKENIZER_FILES
+    )
+    assert not _calls(rig)
+
+    r = _run(rig, "--smoke", RUN_NAME=None, **env)
+    assert r.token.startswith("COLAB_TRAIN_OK smoke sec_per_step=3.850 checkpoint_gib=")
+    assert "loss200=0.030 batch=32 expert_only=false lora=128 save=" in r.token
+    assert "loss band: step 200 loss 0.030 in [0.010, 0.06]" in r.stdout
+    assert len((rig.fake / "pip.log").read_text().splitlines()) == len(STACK)  # installed once
+    assert (rig.fake / "download.log").read_text().count("\n") == 1  # the base once a runtime
+    (call,) = _calls(rig)
+    want = {
+        "resume": False,
+        "steps": 200,
+        "warmup": 200,  # the run's first 200 steps: its warmup, no rescale by lerobot
+        "decay": 200,
+        "peak_lr": 5e-5,
+        "decay_lr": 1e-5,
+        "dtype": "bfloat16",
+        "gradient_checkpointing": True,
+        "train_expert_only": False,
+        "tokenizer_max_length": 128,
+        "max_length": 128,
+        "batch_size": 32,
+        "seed": 1001,
+        "use_peft": False,  # a new wrap, as Machine A probes start
+        "peft": [128, 128],
+        "targets": [LORA_TARGETS],
+        "full": list(LORA_FULL),
+        "pretrained_path": str(scratch / "pi05_base"),
+        "base": None,  # no adapter config names the base
+        "dataset_root": str(rig.path / "content" / "dataset"),
+        "offline": "1",
+        "hub_cache": str(scratch / "hf_hub"),
+    }
+    assert {k: call[k] for k in want} == want
+    assert call["argv"][-2:] == ["--lora=128", f"--lora_from={scratch / 'start_model'}"]
+    assert _max_length(scratch / "pi05_base") == 128  # the processors come from the base
+    for adapter in (rig.drive / "k" / "b3_030000", scratch / "start_model"):
+        assert _base(adapter) == B3_BASE  # --lora_from does not read the name, nothing sets it
+    save = Path(r.token.split("save=")[1])
+    assert save == scratch / "pi05_smoke" / "checkpoints" / "000200"
+    sums = (save / "SHA256SUMS").read_text()
+    assert "pretrained_model/adapter_model.safetensors" in sums and "training_state" not in sums
+    subprocess.run(["sha256sum", "-c", "--quiet", "SHA256SUMS"], cwd=save, check=True)
+    assert not (rig.drive / "action_space.json").exists()
+
+
+@needs_061
+def test_a_lora_run_keeps_summed_saves_and_resumes_only_with_its_recipe(rig):
+    extra = "--siglip_lora  --overhead_aug=0.5,0.06,3"
+    env = _lora(rig) | {"STEPS": 600, "SAVE_FREQ": 100, "KEEP_EVERY": 200, "TRAIN_EXTRA": extra}
+    r = _run(rig, **env, FAKE_DIE_AT=350)
+    assert r.token.startswith("COLAB_TRAIN_FAIL") and "the trainer exited 137" in r.token
+    assert (rig.run / "lora.txt").read_text() == f"128|{' '.join(extra.split())}\n"
+    assert (rig.run / "last.txt").read_text().strip() == "000300"
+    content = rig.path / "content"
+    for path in (rig.out, content / "dataset", content / "pi05_base"):
+        shutil.rmtree(path)  # a new VM, whose base copy sits on another disk
+    env["OUT_ROOT"] = scratch = rig.path / "scratch"
+    for other in ({"TRAIN_EXTRA": "--siglip_lora"}, {"LORA": 64}):
+        r = _run(rig, **{**env, **other})
+        assert r.rc == 1 and "trains with LORA|TRAIN_EXTRA '128|--siglip_lora --overhead" in r.token
+    r = _run(rig, **env)
+    assert "resuming checkpoints_ab from checkpoint 000300 toward step 600" in r.stdout
+    assert r.token.startswith("COLAB_TRAIN_OK run=checkpoints_ab steps=600 last=000600")
+    first, second = _calls(rig)
+    # a fresh run: the patched base, a new wrap and --lora_from, as Machine A probes start
+    assert first["argv"][-4:] == [
+        "--lora=128",
+        f"--lora_from={content / 'start_model'}",
+        *extra.split(),
+    ]
+    assert not any(a.startswith(("--policy.use_peft", "--resume")) for a in first["argv"])
+    assert first["pretrained_path"] == str(content / "pi05_base") and first["use_peft"] is False
+    # a resume: lerobot's own PEFT load, from the base that the re-pointed adapter config names,
+    # with --lora (for --siglip_lora) and the levers again, and no --lora_from
+    out = scratch / "pi05_checkpoints_ab"
+    assert second["argv"] == [
+        f"--config_path={out}/checkpoints/last/pretrained_model/train_config.json",
+        "--resume=true",
+        f"--output_dir={out}",
+        f"--dataset.root={content / 'dataset'}",
+        "--lora=128",
+        *extra.split(),
+    ]
+    base = str(scratch / "pi05_base")
+    assert second["resume"] is True and second["start"] == 300
+    assert second["use_peft"] is True and second["base"] == base
+    for call in (first, second):
+        assert (call["steps"], call["warmup"], call["decay"]) == (600, 200, 600)
+        assert (call["peak_lr"], call["decay_lr"], call["seed"]) == (5e-5, 1e-5, 1001)
+        assert call["targets"] == [f"{LORA_TARGETS}|{SIGLIP_TARGETS}"]
+    keep = rig.run / "keep"
+    assert sorted(p.name for p in keep.iterdir()) == ["000200", "000400", "000600"]
+    for step in keep.iterdir():
+        assert sorted(p.name for p in step.iterdir()) == ["SHA256SUMS", "pretrained_model"]
+        subprocess.run(["sha256sum", "-c", "--quiet", "SHA256SUMS"], cwd=step, check=True)
+    assert _base(keep / "000200" / "pretrained_model") == str(content / "pi05_base")
+    assert _base(keep / "000600" / "pretrained_model") == base
+    assert _held(rig) == ["000600", "keep", "last.txt", "lora.txt"]
+
+
+@needs_061
+def test_an_l1_run_never_resumes(rig):
+    env = {**_lora(rig), "TRAIN_EXTRA": "--close_weight=3,2,1"}
+    r = _run(rig, **env, FAKE_DIE_AT=250)
+    assert "the trainer exited 137" in r.token and (rig.run / "000200").is_dir()
+    shutil.rmtree(rig.out)  # a new VM
+    r = _run(rig, **env)
+    assert r.rc == 1 and "trains with --close_weight, which cannot resume: start it" in r.token
+    assert len(_calls(rig)) == 1
+
+
+@needs_061
+def test_a_lora_continuation_that_reads_like_a_fresh_lora_stops_at_step_200(rig):
+    # B3 from pi05_base read 0.094 to 0.100 where its summed lr meets this warmup's
+    r = _run(rig, **{**_lora(rig), "STEPS": 600, "FAKE_LOSS": "0.095"})
+    assert "loss band: step 200 loss 0.095 outside [0.010, 0.06]" in r.token
+    assert not (rig.out / "checkpoints" / "000600").exists()
+
+
+@needs_061
+def test_a_lora_run_takes_its_schedule_from_the_env(rig):
+    env = {"PEAK_LR": "4e-5", "WARMUP": 100, "DECAY_STEPS": 250, "DECAY_LR": "2e-5"}
+    r = _run(rig, **{**_lora(rig), **env})
+    assert r.token.startswith("COLAB_TRAIN_OK run=checkpoints_ab steps=300 last=000300")
+    (call,) = _calls(rig)
+    got = [call[k] for k in ("steps", "warmup", "decay", "peak_lr", "decay_lr")]
+    assert got == [300, 100, 250, 4e-5, 2e-5]
+
+
+@pytest.mark.parametrize(
+    "args, env, why",
+    [
+        ([], {"LORA": "r8"}, "LORA=r8 is not a LoRA rank"),
+        (["--expert_only"], {}, "--expert_only: the LoRA recipe trains the VLM's LoRA too"),
+        ([], {"DAGGER": "/nowhere"}, "LORA: MIX and DAGGER need lerobot 0.5.1"),
+        ([], {"LORA": 64}, "START is a rank 128 adapter, not LORA=64"),
+        ([], {"START": BASE}, "LORA: no adapter_model.safetensors in START lerobot/pi05_base"),
+        (
+            [],
+            {"START": "checkpoints/030000/pretrained_model"},
+            "LORA: no adapter_model.safetensors in START {drive}/checkpoints/030000",
+        ),
+        ([], {"TOKENIZER": "k/none"}, "no tokenizer_config.json in TOKENIZER {drive}/k/none"),
+        ([], {"DECAY_STEPS": 301}, "DECAY_STEPS=301: want a step count up to STEPS=300"),
+        (
+            [],
+            {
+                "TRAIN_EXTRA": "--overhead_aug=0.5,0.06,3 --close_weight=3,2,1",
+                "SPAN": 1,
+                "STEPS": 20001,
+            },
+            "--close_weight cannot resume, so STEPS=20001 must fit this session: N=20000",
+        ),
+        (
+            [],
+            {"STEPS": 600, "KEEP_EVERY": 200, "FAKE_DF_KB": 61_000_000},  # 62.5 GB: 60 + 3 x 1
+            "Drive has 62 GB free, a run that keeps 3 more copies needs 63",
+        ),
+        ([], {"HELPER": "0.5.1"}, "train_pi05.py is not for lerobot 0.6.1"),
+        (
+            [],
+            {"LORA": None, "START": "checkpoints/030000/pretrained_model"},
+            "train_pi05.py is not for lerobot 0.5.1 (without LORA: git show a53379c:",
+        ),
+    ],
+)
+def test_each_lora_stop_prints_one_fail_token_before_any_copy(rig, args, env, why):
+    lora = _lora(rig)
+    if helper := env.pop("HELPER", None):
+        _helper(rig.drive, helper)
+    r = _run(rig, *args, **{**lora, "FAKE_NO_STACK": 1, **env})
+    assert (
+        r.rc == 1
+        and r.token.startswith("COLAB_TRAIN_FAIL")
+        and why.format(drive=rig.drive) in r.token
+    )
+    assert not _calls(rig) and not (rig.path / "content" / "dataset").exists()
+    assert not (rig.fake / "pip.log").exists()  # no install minutes spent
+
+
 # --- the stand-in trainer ---
 
 
-def _save(cfg, step: int, model_dir: Path) -> None:
+def _save(cfg, step: int, model_dir: Path, adapter: dict | None) -> None:
     """lerobot's checkpoint layout: <out>/checkpoints/<step>/{pretrained_model,training_state},
-    then the relative `last` link."""
+    then the relative `last` link. A PEFT run saves ``adapter`` as its adapter config."""
     ckpts = Path(cfg.output_dir) / "checkpoints"
     step_dir = ckpts / f"{step:06d}"
     (step_dir / "pretrained_model").mkdir(parents=True)
     (step_dir / "training_state").mkdir()
     cfg.save_pretrained(step_dir / "pretrained_model")
     shutil.copy(model_dir / "policy_preprocessor.json", step_dir / "pretrained_model")
-    (step_dir / "pretrained_model" / "model.safetensors").write_bytes(b"\0" * 1000)
+    if adapter is not None:  # peft saves the adapter and its config, base name included
+        (step_dir / "pretrained_model" / "adapter_config.json").write_text(json.dumps(adapter))
+        (step_dir / "pretrained_model" / "adapter_model.safetensors").write_bytes(b"%d" % step)
+    else:
+        (step_dir / "pretrained_model" / "model.safetensors").write_bytes(b"\0" * 1000)
     (step_dir / "training_state" / "step").write_text(str(step))
     last = ckpts / "last"
     if last.is_symlink():
@@ -778,20 +1057,46 @@ def _save(cfg, step: int, model_dir: Path) -> None:
 
 
 def standin(args: list[str]) -> int:
+    """train_pi05.py on ``args``: a LoRA argv goes through its main, with lerobot_train.main
+    swapped for ``trainer``. The mix modes' argv (0.5.1) goes to ``trainer`` directly."""
+    import train_pi05
+
+    if not any(a.startswith(train_pi05.LORA_FLAG) for a in args):
+        return trainer(args, args)
+    from lerobot.scripts import lerobot_train
+
+    codes = []
+    lerobot_train.main = lambda: codes.append(trainer(sys.argv[1:], args))
+    train_pi05.main(args)
+    return codes[0]
+
+
+def trainer(argv: list[str], args: list[str]) -> int:
+    """lerobot-train on ``argv`` (``args`` as the script passed them)."""
     import lerobot.policies  # noqa: F401 -- registers the pi05 config
     from lerobot.configs import parser
     from lerobot.configs.train import TrainPipelineConfig
+
+    from train_pi05 import split_mix
 
     def parse(cfg: TrainPipelineConfig):
         cfg.validate()
         return cfg
 
-    from train_pi05 import split_mix  # train_pi05.py's own flags leave lerobot's argv
-
-    mix, prompts, rest = split_mix(args)
+    mix, prompts, rest = split_mix(argv)
     sys.argv = ["lerobot-train", *rest]
     cfg = parser.wrap()(parse)()
     model_dir = Path(cfg.policy.pretrained_path)
+    use_peft, adapter, base = cfg.policy.use_peft, None, None
+    if use_peft:  # make_policy loads the base that the adapter config names, then the adapter
+        adapter = json.loads((model_dir / "adapter_config.json").read_text())
+        base = adapter["base_model_name_or_path"]
+        if not (Path(base) / "model.safetensors").is_file():
+            print(f"no model.safetensors in the base {base}", flush=True)
+            return 1
+    elif cfg.peft is not None:  # wrap_with_peft names the base and sets use_peft in the config
+        adapter = {"base_model_name_or_path": str(model_dir), "r": cfg.peft.r}
+        cfg.policy.use_peft = True
     tokens = _max_length(model_dir)
     mode = os.environ.get("FAKE_PREFLIGHT", "ok")
     if mode == "fail":
@@ -829,6 +1134,14 @@ def standin(args: list[str]) -> int:
         "preflight_max_length": os.environ["PREFLIGHT_MAX_LENGTH"],
         "mix": [[root, share] for root, share in mix],
         "prompt_codes": prompts,
+        "use_peft": use_peft,
+        "peft": None if cfg.peft is None else [cfg.peft.r, cfg.peft.lora_alpha],
+        "targets": None if cfg.peft is None else [cfg.peft.target_modules],
+        "full": None if cfg.peft is None else cfg.peft.full_training_modules,
+        "argv": args,
+        "offline": os.environ.get("HF_HUB_OFFLINE"),
+        "hub_cache": os.environ.get("HF_HUB_CACHE"),
+        "base": base,
     }
     with open(Path(os.environ["FAKE_DIR"]) / "cfg.jsonl", "a") as f:
         f.write(json.dumps(record) + "\n")
@@ -843,7 +1156,7 @@ def standin(args: list[str]) -> int:
                 flush=True,
             )
         if step % cfg.save_freq == 0 or step == cfg.steps:
-            _save(cfg, step, model_dir)
+            _save(cfg, step, model_dir, adapter)
         if step == die:
             print(f"fake session end at {step}", flush=True)
             return 137

@@ -19,6 +19,8 @@ def test_the_pi05_jaw_latch_reads_the_target_width_and_the_full_gap():
     assert len(names) == cn.CONTEXT_DIMS["camera_box_target"]  # the served 16-wide context
     assert f"\nTARGET_WIDTH = {7 + names.index('target_width')}\n" in text
     assert "\nJAW_FULL_GAP = 2 * 0.0524125\n" in text and JAW_FULL_GAP == 2 * 0.0524125
+    # the close rule of train_pi05.py --close_weight (MS7k L1) reads the same full gap
+    assert "\nJAW_FULL_GAP = 2 * 0.0524125  #" in (CONVERT.parent / "train_pi05.py").read_text()
 
 
 def test_gripper_travel_pin_matches_urdf():

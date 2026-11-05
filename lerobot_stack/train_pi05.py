@@ -23,10 +23,56 @@ each source's ``meta/prompt_codes.npy``, one code a frame by its index, and give
 task string ``prompt(code)`` of MS7i design rev1 5.2: TASK, the subtask phrase and the advantage
 sentence of its tag, which a tagged frame leaves out at the rate DROP. Without the flags nothing
 changes.
+
+The MS7k stage 1 levers (spec section 6.2, ledger K11). Each one is off unless its flag is given.
+With none of them, main runs exactly as before (ledger K14).
+
+- ``--lora_from=DIR`` continues a LoRA save with a fresh optimizer and schedule (no --resume).
+  DIR is the save's ``pretrained_model`` folder. Give it with ``--lora=R`` and with
+  ``--policy.pretrained_path`` set to the base, as for a new run. The base then loads through
+  lerobot's own path, so the preflight still reads its full-load line. ``wrap_with_peft`` wraps
+  a new adapter, and ``load_lora`` copies the saved values into it, the modules_to_save included.
+  At step 0 the model is the save's model. ``load_lora`` refuses a save with another rank or
+  alpha, a saved tensor that finds no place, and an adapter tensor that stays at its init.
+  lerobot's own continuation (``--policy.pretrained_path=DIR --policy.use_peft=true``) has none
+  of these checks: PEFT warns only on a missing LoRA tensor, ignores a tensor that finds no
+  place, and does not report a missing modules_to_save tensor. It also loads the base from the
+  absolute path in DIR's adapter_config.json, which does not exist on Colab.
+- ``--siglip_lora`` (L2) adds every SigLIP layer's linears (``SIGLIP_TARGETS``: attention q, k,
+  v, out and MLP fc1, fc2, 27 layers, 162 modules) to the ``--lora`` targets. With
+  ``--lora_from`` their LoRA keeps PEFT's init (B = 0), so the model at step 0 is still the
+  save's. Under ``--policy.gradient_checkpointing=true`` lerobot checkpoints embed_image as one
+  block, and it sets the flag of the vision tower, which transformers 5.5.4 does not read: it
+  reads the flag of each SigLIP layer. So the backward pass of one camera would hold the
+  activations of all 27 layers (about 16 GB at batch 32, an estimate). ``--siglip_lora`` thus
+  also checkpoints each SigLIP layer (``siglip_checkpointing``): the backward pass holds one
+  layer at a time, and SigLIP runs its forward three times a step, not two. The memory probe
+  decides if L2 fits.
+  The fallback of ledger K11 needs no code. In 0.6.1, x_t = t * noise + (1 - t) * actions, so
+  t = 1 is pure noise and t = 0 is the data, and sampling runs Euler steps from t = 1 to t = 0.
+  The time sampler draws t = Beta(alpha, beta) * 0.999 + 0.001, alpha 1.5 and beta 1.0 by
+  default: mean 0.6, about 9 % of the draws under t = 0.2. Low noise is small t, so the fallback
+  swaps the two: ``--policy.time_sampling_beta_alpha=1.0 --policy.time_sampling_beta_beta=1.5``
+  (mean 0.4, about 28 % of the draws under t = 0.2 and 9 % over t = 0.8).
+- ``--close_weight=W,BEFORE_S,AFTER_S`` (L1) replaces lerobot's sampler with a seeded
+  ``WeightedRandomSampler`` (with replacement, one epoch = the dataset's length, seed = lerobot's
+  --seed). Each frame from BEFORE_S seconds before to AFTER_S seconds after a close command, in
+  the same episode, has weight W, and every other frame has weight 1 (``close_weights``).
+- ``--overhead_aug=P,SHIFT,ROLL_DEG`` (L3) gives a share P of the training samples a random
+  shift (up to SHIFT of the frame size on each axis) and roll (up to ROLL_DEG degrees about the
+  image center) of the overhead image only (``random_affine``). The wrist image is untouched.
+- A resume (``--resume=true``) does not see the lever flags: they leave argv before lerobot
+  reads it, so its train_config.json does not keep them. A resume must give ``--overhead_aug``
+  and ``--siglip_lora`` again (L3 then draws its affines anew from --seed). ``--close_weight``
+  refuses ``--resume``: lerobot restores the data order through the sampler's
+  ``load_state_dict``, and ``WeightedRandomSampler`` has none. Start an L1 run again instead.
 """
 
 import json
+import math
+import re
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +93,17 @@ TAGS = ("", " Advantage: positive", " Advantage: negative")  # by code % 3: unta
 POSITIVE = 1
 DROP = 0.2  # MS7i design rev3 6.1: a tagged frame leaves its advantage sentence out at this rate
 CODES = "meta/prompt_codes.npy"  # int8 a frame of a root, by its index: 3 * subtask + tag
+LEVERS = ("--lora_from", "--siglip_lora", "--close_weight", "--overhead_aug")
+SIGLIP_TARGETS = (
+    r"model\.paligemma_with_expert\.paligemma\.model\.vision_tower\.vision_model\.encoder"
+    r"\.layers\.\d+\.(self_attn\.(q|k|v|out)_proj|mlp\.fc(1|2))"
+)
+JAW_FULL_GAP = 2 * 0.0524125  # the full-open command of the continuous gripper (test pins it)
+# A close command: the commanded gap falls by at least CLOSE_DROP from below full open. In the V
+# corpus every such fall is 14.0 mm (11.2 mm where the gap stops at 0). A fall from full open is
+# the jaw shaping to the part's pick opening, not a close.
+CLOSE_DROP = 0.005
+OVERHEAD = "observation.images.overhead"
 
 
 def prompt(code: int, drop: bool = False) -> str:
@@ -55,15 +112,221 @@ def prompt(code: int, drop: bool = False) -> str:
     return f"{TASK}. {PHRASES[subtask]}." + ("" if drop else TAGS[tag])
 
 
-def lora_flags(rank: int) -> list[str]:
-    """The lerobot-train flags of the LoRA recipe at ``rank``, alpha equal to it."""
+def lora_flags(rank: int, siglip: bool = False) -> list[str]:
+    """The lerobot-train flags of the LoRA recipe at ``rank``, alpha equal to it; with
+    ``siglip``, the SigLIP linears are targets too (L2)."""
+    targets = f"{LORA_TARGETS}|{SIGLIP_TARGETS}" if siglip else LORA_TARGETS
     return [
         "--peft.method_type=LORA",
         f"--peft.r={rank}",
         f"--peft.lora_alpha={rank}",
-        f"--peft.target_modules={LORA_TARGETS}",
+        f"--peft.target_modules={targets}",
         f"--peft.full_training_modules={json.dumps(list(LORA_FULL))}",
     ]
+
+
+def load_lora(model, adapter_dir, new: str | None = None) -> None:
+    """Copy the LoRA save in ``adapter_dir`` into the PEFT ``model`` (``--lora_from``). Every
+    saved tensor must find its place, and every trainable tensor of ``model`` must load, except
+    those that the regex ``new`` finds in their name: they keep PEFT's init (B = 0)."""
+    from peft.utils import set_peft_model_state_dict
+    from safetensors.torch import load_file
+
+    adapter_dir = Path(adapter_dir)
+    saved = json.loads((adapter_dir / "adapter_config.json").read_text())
+    peft = model.peft_config["default"]
+    # A saved modules_to_save tensor that the run does not save would load into the frozen base.
+    have = (saved["r"], saved["lora_alpha"], sorted(saved["modules_to_save"] or []))
+    want = (peft.r, peft.lora_alpha, sorted(peft.modules_to_save or []))
+    if have != want:
+        raise ValueError(f"{adapter_dir}: r, alpha, modules_to_save {have}, the run has {want}")
+    weights = load_file(adapter_dir / "adapter_model.safetensors")
+    result = set_peft_model_state_dict(model, weights)
+    trainable = {n for n, p in model.named_parameters() if p.requires_grad}
+    missing = [k for k in result.missing_keys if k in trainable]
+    unloaded = [k for k in missing if not (new and re.search(new, k))]
+    if result.unexpected_keys or unloaded:
+        raise ValueError(
+            f"{adapter_dir}: {len(result.unexpected_keys)} saved tensors found no place "
+            f"{result.unexpected_keys[:2]}, {len(unloaded)} adapter tensors did not load "
+            f"{unloaded[:2]}"
+        )
+    print(
+        f"LORA_FROM {adapter_dir} loaded={len(weights)} new={len(missing)}"
+        f" trainable={len(trainable)}",
+        flush=True,
+    )
+
+
+def continued(wrap, adapter_dir, new: str | None):
+    """``wrap_with_peft`` that then loads the LoRA save in ``adapter_dir`` (``load_lora``)."""
+
+    def wrap_with_peft(self, *args, **kwargs):
+        model = wrap(self, *args, **kwargs)
+        load_lora(model, adapter_dir, new)
+        return model
+
+    return wrap_with_peft
+
+
+def siglip_checkpointing(enable):
+    """``PI05Pytorch.gradient_checkpointing_enable`` (``enable``) that also checkpoints each
+    SigLIP layer (L2). The checkpoint is not reentrant: the layer input does not require grad,
+    so a reentrant checkpoint would give the SigLIP LoRA no gradient."""
+
+    def gradient_checkpointing_enable(self):
+        enable(self)
+        tower = self.paligemma_with_expert.paligemma.model.vision_tower
+        tower.gradient_checkpointing_enable({"use_reentrant": False})
+
+    return gradient_checkpointing_enable
+
+
+def close_weights(gap, episode, fps: float, weight: float, before_s: float, after_s: float):
+    """(weights, close count, episodes with no close) of the frames whose commanded jaw gap is
+    ``gap`` and episode ``episode`` (both (N,), in frame order). A close command is a frame whose
+    gap falls by CLOSE_DROP or more from a previous frame of its episode below full open. The
+    frames from ``before_s`` seconds before to ``after_s`` seconds after a close, in its episode,
+    weigh ``weight``, and the others 1. The close of an episode that starts with a part held
+    came before its first frame, so it is not seen."""
+    gap, episode = np.asarray(gap, np.float64), np.asarray(episode)
+    n = len(gap)
+    first = np.r_[True, episode[1:] != episode[:-1]]
+    starts = np.flatnonzero(first)
+    ep = np.cumsum(first) - 1  # the episode's rank, frame by frame
+    last = np.r_[starts[1:], n] - 1
+    prev = np.r_[np.inf, gap[:-1]]
+    close = np.flatnonzero(~first & (prev - gap >= CLOSE_DROP) & (prev < JAW_FULL_GAP - CLOSE_DROP))
+    lo = np.maximum(close - round(before_s * fps), starts[ep[close]])
+    hi = np.minimum(close + round(after_s * fps), last[ep[close]])
+    edges = np.zeros(n + 1, np.int64)
+    np.add.at(edges, lo, 1)
+    np.add.at(edges, hi + 1, -1)
+    near = np.cumsum(edges[:-1]) > 0
+    none = len(starts) - len(np.unique(ep[close]))
+    return np.where(near, weight, 1.0), len(close), none
+
+
+def corpus_gap(root) -> tuple:
+    """(commanded jaw gap, episode index) of every frame of the LeRobot root ``root``, in index
+    order, read from its parquet files."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    root = Path(root)
+    names = json.loads((root / "meta/info.json").read_text())["features"]["action"]["names"]
+    files = sorted((root / "data").glob("*/*.parquet"))
+    table = pa.concat_tables(
+        pq.read_table(f, columns=["index", "episode_index", "action"]) for f in files
+    )
+    if not np.array_equal(table["index"].to_numpy(), np.arange(len(table))):
+        raise ValueError(f"{root}: the frame index is not 0 to N - 1 in file order")
+    action = table["action"].combine_chunks()
+    action = np.asarray(action.flatten()).reshape(len(action), -1)
+    return action[:, names.index("gripper_gap_m")], table["episode_index"].to_numpy()
+
+
+def close_sampling(train_module, weight: float, before_s: float, after_s: float) -> None:
+    """L1: ``train_module`` (lerobot_train) builds its datasets, then the weights of
+    ``close_weights``, and samples through a ``WeightedRandomSampler`` in place of its
+    ``EpisodeAwareSampler``, seeded with the seed lerobot gives the sampler (--seed)."""
+    make = train_module.make_train_eval_datasets
+
+    def make_datasets(cfg):
+        dataset, eval_dataset = make(cfg)
+        if len(dataset) > 2**24:  # torch.multinomial draws from at most 2^24 categories
+            raise ValueError(f"{len(dataset)} frames: WeightedRandomSampler takes at most 2^24")
+        start = time.perf_counter()
+        gap, episode = corpus_gap(dataset.root)
+        weights, closes, none = close_weights(gap, episode, dataset.fps, weight, before_s, after_s)
+        if len(weights) != len(dataset):
+            raise ValueError(f"{len(weights)} weights for {len(dataset)} frames: a subset?")
+        near = weights != 1.0
+        share = weights[near].sum() / weights.sum()
+        print(
+            f"CLOSE_WEIGHT closes={closes} episodes_without={none} frames={len(weights)}"
+            f" window_share={near.mean():.4f} weighted_share={share:.4f}"
+            f" seconds={time.perf_counter() - start:.1f}",
+            flush=True,
+        )
+        weights = torch.as_tensor(weights)
+
+        def sampler(*args, seed=0, **kwargs):
+            gen = torch.Generator().manual_seed(seed)
+            return torch.utils.data.WeightedRandomSampler(
+                weights, len(weights), replacement=True, generator=gen
+            )
+
+        train_module.EpisodeAwareSampler = sampler
+        return dataset, eval_dataset
+
+    train_module.make_train_eval_datasets = make_datasets
+
+
+def random_affine(img, share: float, shift: float, roll_deg: float, gen):
+    """L3 on a (B, C, H, W) batch: a share ``share`` of the samples, drawn from ``gen``, rolls
+    up to ``roll_deg`` degrees about the image center and shifts up to ``shift`` of the frame
+    size on each axis. The border pixels are replicated: a moved camera sees more desk, never a
+    black band that no real frame shows. The other samples come back unchanged."""
+    b, _, h, w = img.shape
+    u = torch.rand(b, 4, generator=gen, device=img.device)
+    on = u[:, 0] < share
+    roll = (2 * u[:, 1] - 1) * math.radians(roll_deg)
+    move = (2 * u[:, 2:] - 1) * 2 * shift  # affine_grid spans the frame from -1 to 1
+    cos, sin = roll.cos(), roll.sin()
+    theta = torch.stack(  # a rotation in pixels, written in the grid's [-1, 1] units
+        [
+            torch.stack([cos, -sin * h / w, move[:, 0]], 1),
+            torch.stack([sin * w / h, cos, move[:, 1]], 1),
+        ],
+        1,
+    ).to(img.dtype)
+    grid = torch.nn.functional.affine_grid(theta, img.shape, align_corners=False)
+    out = torch.nn.functional.grid_sample(img, grid, padding_mode="border", align_corners=False)
+    return torch.where(on[:, None, None, None], out, img)
+
+
+def overhead_aug(forward, share: float, shift: float, roll_deg: float):
+    """``forward`` with L3 (``random_affine``) on the overhead image, in training mode only. It
+    draws from its own generator, seeded at the first call with torch.initial_seed(): lerobot's
+    --seed, as set_seed runs before the first step. The noise and time draws stay as without it."""
+    gen = None
+
+    def augmented(self, batch: dict, reduction: str = "mean") -> tuple:
+        nonlocal gen
+        if self.training:
+            img = batch[OVERHEAD]
+            if gen is None:
+                gen = torch.Generator(img.device).manual_seed(torch.initial_seed())
+            batch = {**batch, OVERHEAD: random_affine(img, share, shift, roll_deg, gen)}
+        return forward(self, batch, reduction)
+
+    return augmented
+
+
+def split_levers(argv: list[str]) -> tuple[dict, list[str]]:
+    """({flag: value} of the LEVERS flags, argv without them). A flag with no value maps to ""."""
+    levers, rest = {}, []
+    for a in argv:
+        name, _, value = a.partition("=")
+        if name in LEVERS:
+            levers[name] = value
+        else:
+            rest.append(a)
+    return levers, rest
+
+
+def lever_values(levers: dict, flag: str, test) -> tuple | None:
+    """The three floats of ``flag``, or None without it; SystemExit unless ``test(*values)``."""
+    if flag not in levers:
+        return None
+    try:
+        values = tuple(float(v) for v in levers[flag].split(","))
+    except ValueError:
+        values = ()
+    if len(values) != 3 or not test(*values):
+        raise SystemExit(f"{flag}={levers[flag]}: want three numbers in range (train_pi05.py)")
+    return values
 
 
 def masked_means(losses: torch.Tensor, is_pad: torch.Tensor) -> tuple:
@@ -213,15 +476,37 @@ def main(argv: list[str]) -> None:
             f"{MIX_FLAG}/{PROMPTS_FLAG} are not supported on lerobot {LEROBOT}: its "
             "EpisodeAwareSampler draws from meta.episodes, so Mixed never samples its extra roots"
         )
-    from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+    levers, argv = split_levers(argv)
+    close = lever_values(levers, "--close_weight", lambda w, b, a: w > 0 and b >= 0 and a >= 0)
+    aug = lever_values(levers, "--overhead_aug", lambda p, s, r: 0 <= p <= 1 and min(s, r) >= 0)
+    lora_from, siglip = levers.get("--lora_from"), "--siglip_lora" in levers
+    if levers.get("--siglip_lora", "") or lora_from == "":
+        raise SystemExit("--siglip_lora takes no value, --lora_from needs one")
+    if (lora_from or siglip) and not any(a.startswith(LORA_FLAG) for a in argv):
+        raise SystemExit("--lora_from and --siglip_lora need --lora=R")
+    if lora_from and any(a.startswith(("--policy.use_peft", "--resume")) for a in argv):
+        raise SystemExit("--lora_from starts a new run on the base: no --policy.use_peft, --resume")
+    if close and any(a.startswith("--resume") for a in argv):
+        raise SystemExit("--close_weight cannot resume: its sampler has no load_state_dict")
+    if levers:
+        print(f"LEVERS {json.dumps(levers, sort_keys=True)}", flush=True)
+    from lerobot.policies.pi05.modeling_pi05 import PI05Policy, PI05Pytorch
     from lerobot.scripts import lerobot_train
 
     argv = [
         x
         for a in argv
-        for x in (lora_flags(int(a[len(LORA_FLAG) :])) if a.startswith(LORA_FLAG) else [a])
+        for x in (lora_flags(int(a[len(LORA_FLAG) :]), siglip) if a.startswith(LORA_FLAG) else [a])
     ]
-    PI05Policy.forward = forward
+    PI05Policy.forward = forward if aug is None else overhead_aug(forward, *aug)
+    if lora_from:
+        new = SIGLIP_TARGETS if siglip else None
+        PI05Policy.wrap_with_peft = continued(PI05Policy.wrap_with_peft, lora_from, new)
+    if siglip:
+        enable = PI05Pytorch.gradient_checkpointing_enable
+        PI05Pytorch.gradient_checkpointing_enable = siglip_checkpointing(enable)
+    if close:
+        close_sampling(lerobot_train, *close)
     sys.argv = [sys.argv[0], *argv]
     lerobot_train.main()
 
