@@ -1913,6 +1913,7 @@ STRESS_EXAMPLES = [
     ["--overhead_offset", "0,3,0,0,0,0", "--jpeg_quality", "85"],
     ["--wrist_offset=-1,0,0,0,0,0.01", "--wrist_fov_delta", "2", "--warp_back", "--obs_delay", "3"],
     ["--sparse_gap", "0.05", "--tray", "--blur_sigma", "1.5", "--hard_light"],
+    ["--track_lag_ms=33", "--overhead_offset=0,0,0,0.01,0,0", "--couple_overhead", "--perceived"],
 ]
 
 
@@ -1927,6 +1928,7 @@ def test_the_supervisors_stress_copy_matches_the_core_module():
         parser = argparse.ArgumentParser()
         add_stress_arguments(parser)
         parser.add_argument("--tray", action="store_true")
+        parser.add_argument("--perceived", action="store_true")
         assert ge.stress_block(flags) == stress_from_args(parser.parse_known_args(flags)[0]).block()
 
 
@@ -2000,6 +2002,50 @@ def test_the_supervisor_sends_infer_delay_and_keys_the_cache(tmp_path, monkeypat
     assert ge.main(_argv(tmp_path) + ["--infer_delay", "-1"]) == 2
     out = capsys.readouterr()
     assert out.out.strip().splitlines()[-1] == "GATE_ERROR" and "--infer_delay" in out.err
+
+
+def test_the_jitter_reaches_both_servers_and_splits_the_cache(tmp_path, monkeypatch, capsys):
+    """MS7k --infer_delay_jitter: off, both server commands are the same bytes; on, each gains
+    the flag, and the cache never mixes a jittered read with a fixed-delay one."""
+    read = _argv(tmp_path) + PI05_HEAP + ["--n_action_steps", "50", "--infer_delay", "1"]
+    act = ge._build_cfg(ge._parse_args(read))
+    jit = ge._build_cfg(ge._parse_args(read + ["--infer_delay_jitter", "1"]))
+    assert (act.infer_delay_jitter, jit.infer_delay_jitter) == (0, 1)
+    assert "--infer_delay_jitter" not in ge._server_command(act)
+    assert ge._server_command(jit) == ge._server_command(act) + ["--infer_delay_jitter", "1"]
+    pi05 = read[:-1] + ["6", "--pi05", "--pi05_rtc", "--action_warp", "1.0"]
+    plain = ge._build_cfg(ge._parse_args(pi05))
+    rtc = ge._build_cfg(ge._parse_args(pi05 + ["--infer_delay_jitter", "3"]))
+    assert "--infer_delay_jitter" not in ge._pi05_server_command(plain)
+    cmd = ge._pi05_server_command(rtc)
+    assert cmd[-3:] == ["--infer_delay_jitter", "3", "--rtc"]
+    assert cmd[:-3] + cmd[-1:] == ge._pi05_server_command(plain)
+    ledger = _fake_ledger(tmp_path)
+    open_loop = {"n_action_steps": None, "temporal_ensemble_coeff": None, "infer_delay": 1}
+    off = _cfg(tmp_path, ledger, processes=1, **open_loop)
+    on = _cfg(tmp_path, ledger, processes=1, infer_delay_jitter=1, **open_loop)
+    off.out_dir.mkdir(parents=True)
+    draw = ge.make_eval_draws(1, SELECTION_SEED)[0]
+    served = {"n_action_steps": 50, "temporal_ensemble_coeff": None, "infer_delay": 1}
+
+    def cached(cfg, **inference):
+        payload = _payload(draw, [_episode(6)], policy_id="act:ck+nas50+delay1")
+        payload["inference"] = served | inference
+        (off.out_dir / "eval_000.json").write_text(json.dumps(payload))
+        return ge._cached_payload(cfg, draw) is not None
+
+    assert cached(off) and not cached(off, infer_delay_jitter=1)
+    assert cached(on, infer_delay_jitter=1) and not cached(on)
+    assert not cached(on, infer_delay_jitter=2)
+    monkeypatch.setattr(ge, "_start_server", lambda cfg: pytest.fail("no server on a usage error"))
+    for extra in (
+        ["--infer_delay_jitter", "1"],
+        ["--infer_delay", "1", "--infer_delay_jitter", "2"],
+    ):
+        assert ge.main(_argv(tmp_path) + extra) == 2
+        out = capsys.readouterr()
+        assert out.out.strip().splitlines()[-1] == "GATE_ERROR"
+        assert "--infer_delay_jitter" in out.err
 
 
 def test_the_pi05_rtc_reaches_the_server_and_splits_the_cache(tmp_path):

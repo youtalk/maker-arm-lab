@@ -14,6 +14,8 @@ def parse(flags):
     parser.add_argument("--tray_refill", action="store_true")
     parser.add_argument("--dagger_dir", default="")
     parser.add_argument("--record_all", action="store_true")
+    parser.add_argument("--perceived", action="store_true")
+    parser.add_argument("--classifier", default="")
     return parser.parse_args(flags)
 
 
@@ -48,6 +50,21 @@ def test_the_block_names_only_the_knobs_that_are_on():
         ["--wrist_offset", "0,0,0,0,0,nan", "--warp_back"],
         ["--obs_delay", "2", "--dagger_dir", "d"],
         ["--obs_delay", "2", "--record_all"],
+        ["--track_lag_ms=-1"],
+        ["--track_lag_ms", "nan"],
+        ["--couple_overhead", "--perceived"],  # no shift
+        ["--couple_overhead", "--perceived", "--overhead_offset", "0,0,0,0,0,0"],
+        ["--couple_overhead", "--perceived", "--overhead_offset", "1,0,0,0.01,0,0"],  # an angle
+        ["--couple_overhead", "--overhead_offset", "0,0,0,0.01,0,0"],  # no perceived state
+        ["--couple_overhead", "--perceived", "--overhead_offset", "0,0,0,0.01,0,0", "--warp_back"],
+        [
+            "--couple_overhead",
+            "--perceived",
+            "--overhead_offset",
+            "0,0,0,0.01,0,0",
+            "--classifier",
+            "c",
+        ],
     ],
 )
 def test_bad_combinations_are_refused(flags):
@@ -66,6 +83,21 @@ def test_the_heap_client_reports_a_bad_stress_flag_as_a_usage_failure(capsys):
     with pytest.raises(SystemExit):
         mod.parse_args(["--heap_k", "5", "--warp_back"])
     assert 'EVAL_FAIL {"reason": "usage"' in capsys.readouterr().out
+
+
+def test_the_ms7k_knobs_are_recorded_only_when_on():
+    flags = ["--track_lag_ms", "33", "--overhead_offset", "0,0,0,0.01,-0.02,0.005"]
+    s = stress_from_args(parse([*flags, "--couple_overhead", "--perceived"]))
+    assert s.block() == {
+        "overhead_offset": [0.0, 0.0, 0.0, 0.01, -0.02, 0.005],
+        "track_lag_ms": 33.0,
+        "couple_overhead": True,
+    }
+    # A camera moved by +d but believed nominal reports a world point p at p - d.
+    assert s.perceived_shift() == (-0.01, 0.02, -0.005)
+    uncoupled = stress_from_args(parse(flags))
+    assert "couple_overhead" not in uncoupled.block()
+    assert uncoupled.perceived_shift() == Stress().perceived_shift() == (0.0, 0.0, 0.0)
 
 
 def _textured():

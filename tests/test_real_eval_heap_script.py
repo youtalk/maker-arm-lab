@@ -157,6 +157,7 @@ class _Server:
         _Server(inference={"action_warp": 1.5, "infer_delay": 1}),  # an emulated delay
         _Server(inference={"action_warp": 1.5, "infer_delay": 6, "rtc": 25}),
         _Server(inference={"action_warp": 1.5, "rtc": 25}),
+        _Server(inference={"action_warp": 1.5, "infer_delay_jitter": 1}),  # MS7k
     ],
 )
 def test_the_client_refuses_another_serving_or_an_emulated_delay(monkeypatch, capsys, server):

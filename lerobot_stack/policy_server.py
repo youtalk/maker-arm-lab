@@ -213,24 +213,30 @@ class ActionQueues:
 
     ``delay`` D is the emulated inference delay of ``DelayLine``, which holds the queues: each
     chunk arrives D steps after its observation. D must be shorter than the warped chunk. At 0
-    every chunk fills its queue at once, the queue described above.
+    every chunk fills its queue at once, the queue described above. ``jitter`` J (MS7k) varies
+    each chunk's delay in D - J to D + J (``DelayLine``).
     """
 
     def __init__(
-        self, predict_chunk, n_action_steps: int, action_warp: float = 1.0, delay: int = 0
+        self,
+        predict_chunk,
+        n_action_steps: int,
+        action_warp: float = 1.0,
+        delay: int = 0,
+        jitter: int = 0,
     ):
         if not ACTION_WARP_MIN <= action_warp <= ACTION_WARP_MAX:
             raise ValueError(
                 f"action_warp must be in [{ACTION_WARP_MIN}, {ACTION_WARP_MAX}], got {action_warp}"
             )
-        check_delay(delay, n_action_steps, action_warp)
+        check_delay(delay, n_action_steps, action_warp, jitter)
         self._predict = predict_chunk
         self._n = n_action_steps
         self._warp = action_warp
-        self._line = DelayLine(delay)
+        self._line = DelayLine(delay, jitter=jitter)
 
     def reset(self) -> None:
-        self._line = DelayLine(self._line.delay)
+        self._line = DelayLine(self._line.delay, jitter=self._line.jitter)
 
     def step(self, obs: dict[str, np.ndarray], replan: np.ndarray | None = None) -> np.ndarray:
         batch = int(obs["state"].shape[0])
@@ -264,21 +270,31 @@ class DelayLine:
     chunks. At D = 0 every chunk fills its queue at once, and a row forwards when its queue is
     empty or its replan flag is set: the plain queue of before the delay. ``refill`` R (default
     D) moves the forward to a queue of R actions or fewer: the pi0.5 server's RTC forwards at
-    its RTC_HORIZON."""
+    its RTC_HORIZON.
 
-    def __init__(self, delay: int, refill: int | None = None):
+    ``jitter`` J > 0 (MS7k) draws each chunk's delay d = D + k, k a uniform integer in [-J, J],
+    from a generator per row seeded with (JITTER_SEED, row). A new line or a new batch restarts
+    the generators, so a row's delays depend on nothing but its own chunks. The chunk arrives d
+    calls later without its first d actions, and at d = 0 it fills the queue at once and whole.
+    The forward rule and ``refill`` keep the nominal D: the client cannot know the next delay."""
+
+    def __init__(self, delay: int, refill: int | None = None, jitter: int = 0):
         self.delay = delay
         self.refill = delay if refill is None else refill
+        self.jitter = jitter
         self._call = 0
         self._queues: list[deque] = []
         self._pending: list = []  # per row: None, or (the call it arrives at, its actions)
         self._last: list = []  # per row: the last served action, None before the first
+        self._rngs: list = []  # per row: its delay generator, under jitter only
 
     def due(self, replan: np.ndarray) -> list[int]:
         rows = len(replan)
         if len(self._queues) != rows:
             self._queues = [deque() for _ in range(rows)]
             self._pending, self._last = [None] * rows, [None] * rows
+            if self.jitter:
+                self._rngs = [np.random.default_rng((JITTER_SEED, i)) for i in range(rows)]
         self._call += 1
         for i, pending in enumerate(self._pending):
             if pending is not None and pending[0] == self._call:
@@ -290,10 +306,13 @@ class DelayLine:
         ]
 
     def put(self, row: int, actions: np.ndarray) -> None:
-        if self._last[row] is None or not self.delay:
-            self._queues[row] = deque(actions)
+        d = self.delay
+        if self.jitter:
+            d += int(self._rngs[row].integers(-self.jitter, self.jitter, endpoint=True))
+        if self._last[row] is None or not d:  # at once, and the pending chunk is older
+            self._queues[row], self._pending[row] = deque(actions), None
         else:
-            self._pending[row] = (self._call + self.delay, actions[self.delay :])
+            self._pending[row] = (self._call + d, actions[d:])
 
     def left(self, row: int) -> np.ndarray | None:
         """What ``row`` plays from this call on, after ``due``: its queue, or its last action
@@ -309,12 +328,22 @@ class DelayLine:
         return np.stack(self._last)
 
 
-def check_delay(delay: int, n_action_steps: int, action_warp: float) -> None:
-    """Refuse an inference delay below 0 or not shorter than the warped chunk."""
+JITTER_SEED = 20261028
+"""MS7k: the first word of each ``DelayLine`` row generator's seed, the row index the second."""
+
+
+def check_delay(delay: int, n_action_steps: int, action_warp: float, jitter: int = 0) -> None:
+    """Refuse an inference delay below 0 or not shorter than the warped chunk, and a jitter
+    below 0 or above the delay, or whose longest delay is not shorter than the warped chunk."""
     length = warp_chunk(np.zeros((1, n_action_steps, 1)), action_warp).shape[1]
     if not 0 <= delay < length:
         raise ValueError(
             f"infer_delay must be in [0, {length}), the warped chunk's length, got {delay}"
+        )
+    if not 0 <= jitter <= delay or delay + jitter >= length:
+        raise ValueError(
+            f"infer_delay_jitter must be in [0, infer_delay {delay}], and infer_delay plus it"
+            f" under the warped chunk's length {length}, got {jitter}"
         )
 
 
@@ -496,6 +525,7 @@ def load_act(
     action_warp: float = 1.0,
     ensemble_with: str | None = None,
     infer_delay: int = 0,
+    infer_delay_jitter: int = 0,
 ):
     """Build (policy_fn, reset_fn, policy_id, n_action_steps, inference, context_dim, action_space,
     gripper).
@@ -517,6 +547,9 @@ def load_act(
     ``infer_delay`` D > 0 (MS7j) serves each queued chunk D steps after its observation
     (``DelayLine``). The policy id ends ``+delay<D>`` and the inference block gains
     ``infer_delay``. Temporal ensembling queues one action, so it refuses every D > 0.
+    ``infer_delay_jitter`` J > 0 (MS7k, J <= D) varies each chunk's delay in D - J to D + J
+    (``DelayLine``). The policy id gains ``+jitter<J>`` after ``+delay<D>``, and the inference
+    block ``infer_delay_jitter``.
     """
     if action_warp != 1.0 and temporal_ensemble_coeff is not None:
         raise ValueError("action_warp plays the queued chunk: temporal ensembling queues none")
@@ -539,7 +572,9 @@ def load_act(
     def predict_chunk(obs: dict) -> np.ndarray:
         return mean_action([m.predict_chunk(obs) for m in members])
 
-    queues = ActionQueues(predict_chunk, first.n_action_steps, action_warp, infer_delay)
+    queues = ActionQueues(
+        predict_chunk, first.n_action_steps, action_warp, infer_delay, infer_delay_jitter
+    )
 
     def policy_fn(
         state: np.ndarray,
@@ -569,6 +604,9 @@ def load_act(
     if infer_delay:
         policy_id += f"+delay{infer_delay}"
         inference["infer_delay"] = infer_delay
+    if infer_delay_jitter:
+        policy_id += f"+jitter{infer_delay_jitter}"
+        inference["infer_delay_jitter"] = infer_delay_jitter
     return (
         policy_fn,
         reset_fn,
@@ -773,6 +811,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="MS7j: serve each chunk this many control steps after its observation, below the "
         "warped chunk's length (0: at once)",
     )
+    parser.add_argument(
+        "--infer_delay_jitter",
+        type=int,
+        default=0,
+        help="MS7k: each chunk's delay is --infer_delay plus a seeded uniform integer in [-J, J]",
+    )
     return parser
 
 
@@ -804,6 +848,7 @@ def main() -> int:
             action_warp=args.action_warp,
             ensemble_with=args.ensemble_with,
             infer_delay=args.infer_delay,
+            infer_delay_jitter=args.infer_delay_jitter,
         )
         server = PolicyServer(
             policy_fn,

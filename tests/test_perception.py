@@ -183,6 +183,36 @@ def test_at_tool_zero_one_look_reads_the_bias_and_the_detections_keep_only_their
         assert [c - t for c, t in zip(f.centre, true)] == pytest.approx(noise, abs=1e-12)
 
 
+def test_a_coupled_shift_moves_every_part_box_and_marker_look_and_draws_nothing():
+    """MS7k ``couple_overhead``: a camera moved by +d but believed nominal reports a point p at
+    p - d. The ``Perceiver``'s shift (-d) moves every detection, each box's x and y and the
+    gripper marker's look by it, on the same draws; the marker then takes it off the parts only.
+    """
+    shift = (-0.01, 0.02, -0.005)
+    truth = _truth(SPREAD)
+    plain = _perceiver(7)
+    moved = Perceiver(7, 0, None, shift=shift)
+    moved.reset_episode(BOXES)
+    a, b = plain.perceive(truth), moved.perceive(truth)
+    assert plain.rng.getstate() == moved.rng.getstate()  # paired: it draws nothing
+    assert [d.sim_index for d in a.detections] == [d.sim_index for d in b.detections]
+    for x, y in zip(a.detections, b.detections):
+        assert [m - c for m, c in zip(y.centre, x.centre)] == pytest.approx(shift, abs=1e-12)
+        assert (x.quat, x.size, x.cls) == (y.quat, y.size, y.cls)
+    for (x, y, yaw), (mx, my, myaw) in zip(a.box_poses, b.box_poses):
+        assert (mx - x, my - y, myaw) == pytest.approx((shift[0], shift[1], yaw), abs=1e-12)
+    assert [m - c for m, c in zip(moved.bias, plain.bias)] == pytest.approx(shift, abs=1e-12)
+    marker = perception.MarkerBias(moved, 7, 0)
+    marker.look(TOOL_POINT)
+    fixed = marker.correct(b)
+    want = perception.MarkerBias(plain, 7, 0)
+    want.look(TOOL_POINT)
+    for f, w in zip(fixed.detections, want.correct(a).detections):
+        assert f.centre == pytest.approx(w.centre, abs=1e-12)
+    assert fixed.box_poses == b.box_poses  # the boxes keep the shift
+    assert Perceiver(7, 0).shift == (0.0, 0.0, 0.0)
+
+
 def test_the_marker_estimate_error_falls_with_the_looks():
     """MS7d L3 at the nominal ``tool``: the estimate is the mean of the looks, so its error on
     each axis falls as TOOL_SIGMA_M / sqrt(looks), within a loose 25 % over 300 seeds."""

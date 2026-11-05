@@ -93,6 +93,7 @@ SPOT = {
     "fov/wrist/-10": {"wrist_fov_delta": -10, "warp_back": True},
     "image/exposure/-1": {"exposure_stops": -1},
     "light/hard/on": {"hard_light": True},
+    "coupled/lateral/0.05": {"overhead_offset": [0, 0, 0, 0, 0.05, 0], "couple_overhead": True},
 }
 
 
@@ -111,16 +112,24 @@ def _client(row, heap, pi05):
 
 def test_every_row_parses_with_the_clients_stress_parser():
     heap = load_script("mj_eval_heap")
-    assert len({r.name for r in suite.ROWS}) == len(suite.ROWS) == 59
+    assert len(suite.ROWS) == 71  # MS7j's 59, 4 coupled rows and 4 real rows per candidate
+    assert len([r for r in suite.ROWS if r.group not in ("coupled", "real")]) == 59
+    for cand in ("act", "pi05"):  # a name is unique within a candidate's rows
+        names = [r.name for r in suite.ROWS if getattr(r, cand)]
+        assert len(set(names)) == len(names), cand
     for row in (suite.BASE, *suite.ROWS):
         for pi05 in [p for p, on in ((False, row.act), (True, row.pi05)) if on]:
             cfg, args = _client(row, heap, pi05)
             assert not (cfg.frame_jitter or args.frame_jitter), row.name  # PROTOCOL's is cleared
             assert args.perceived and (args.desk_boxes, args.heap_k) == (4, 10), row.name
-            assert cfg.pi05 == pi05 and cfg.infer_delay == (int(row.level) if row.server else 0)
+            knobs = suite.knobs(row)
+            assert cfg.pi05 == pi05 and cfg.infer_delay == knobs.get("infer_delay", 0)
+            assert cfg.infer_delay_jitter == knobs.get("infer_delay_jitter", 0), row.name
             block = stress_from_args(args).block()
             assert block == ge.stress_block(cfg.client_flags), row.name  # the cache key
         assert block.pop("sparse_gap") == 0.035
+        if row.group == "real":
+            continue  # test_the_real_rows_add_one_condition_to_their_baseline
         # one knob, the client's or the server's, and none for the base
         assert bool(block) + bool(row.server) == (row != suite.BASE), row.name
         if row.server:
@@ -130,6 +139,25 @@ def test_every_row_parses_with_the_clients_stress_parser():
             assert [v for v in on if v is not True and v != 0] == [float(row.level)], row.name
         if row.name in SPOT:
             assert block == SPOT[row.name], row.name
+
+
+def test_the_real_rows_add_one_condition_to_their_baseline():
+    """MS7k ledger K7 and K10: real/base/<candidate> is the observation delay 3 and the
+    candidate's inference delay; each other real row adds one knob to it. RTC stays the
+    caller's flag, as in MS7j."""
+    rows = {(r.name, c): r for r in suite.ROWS for c in ("act", "pi05") if getattr(r, c)}
+    for cand, delay, jitter in (("act", 1, 1), ("pi05", 6, 3)):
+        base = suite.knobs(rows[f"real/base/{cand}", cand])
+        assert base == {"sparse_gap": 0.035, "obs_delay": 3, "infer_delay": delay}
+        assert rows[f"real/base/{cand}", cand].expected
+        row = rows[f"real/jitter/{jitter}", cand]
+        assert suite.knobs(row) == {**base, "infer_delay_jitter": jitter} and row.expected
+        for lag, expected in (("33", True), ("100", False)):
+            row = rows[f"real/lag/{lag}", cand]
+            assert suite.knobs(row) == {**base, "track_lag_ms": float(lag)}
+            assert row.expected == expected
+    assert sum(r.group == "real" for r in suite.ROWS) == 8
+    assert not any("--pi05_rtc" in suite.argv(r) for r in suite.ROWS)
 
 
 EXPECTED = {
@@ -156,6 +184,13 @@ EXPECTED = {
     "image/exposure/1",
     "image/exposure/-1",
     "light/hard/on",
+    "coupled/forward/0.01",
+    "coupled/lateral/0.01",
+    "real/base/act",
+    "real/base/pi05",
+    "real/jitter/1",
+    "real/jitter/3",
+    "real/lag/33",
 }
 
 
@@ -168,17 +203,21 @@ def _cli(*args):
 
 def test_the_expected_rows_are_the_a1_levels():
     assert {r.name for r in suite.ROWS if r.expected} == EXPECTED
-    only = {r.name: (r.act, r.pi05) for r in suite.ROWS if not (r.act and r.pi05)}
+    only = {(r.name, r.act, r.pi05) for r in suite.ROWS if not (r.act and r.pi05)}
     assert only == {
-        "infer_delay/steps/1": (True, False),
-        "infer_delay/steps/6": (False, True),
-        "infer_delay/steps/12": (False, True),
+        ("infer_delay/steps/1", True, False),
+        ("infer_delay/steps/6", False, True),
+        ("infer_delay/steps/12", False, True),
+        *((f"real/{n}", True, False) for n in ("base/act", "jitter/1", "lag/33", "lag/100")),
+        *((f"real/{n}", False, True) for n in ("base/pi05", "jitter/3", "lag/33", "lag/100")),
     }
     code, lines = _cli("rows", "--candidate", "pi05", "--expected")
     assert code == 0 and lines[-1].startswith("SUITE_OK ")
     rows = [json.loads(line) for line in lines[:-1]]
     assert rows[0]["name"] == "base" and {r["name"] for r in rows[1:]} == EXPECTED - {
-        "infer_delay/steps/1"
+        "infer_delay/steps/1",
+        "real/base/act",
+        "real/jitter/1",
     }
     tilt = next(r for r in rows if r["name"] == "overhead_pose/tilt/-1")
     assert tilt["argv"] == [
@@ -205,17 +244,21 @@ def _episode(correct, parts=50, steps=300):
 
 
 POLICY = "act:/ckpt/pretrained_model+nas50+warp1.5+ctx16+gap"
+PI05 = "pi05:/ckpt/pretrained_model+steps10"
 
 
-def _payload(i, correct, stress=None, run_seed=None, policy=POLICY, num_envs=1, delay=0):
+def _payload(i, correct, stress=None, run_seed=None, policy=POLICY, num_envs=1, delay=0, jitter=0):
+    inference = {"n_action_steps": 50, **({"infer_delay": delay} if delay else {})}
     return {
         "run_seed": 100 + i if run_seed is None else run_seed,
         "layout_seed": 600 + i,
         "permutation": [0, 1, 2, 3],
         "num_envs": num_envs,
         "parts": ["brick_2x4"] * 50,
-        "policy_id": policy + (f"+delay{delay}" if delay else ""),
-        "inference": {"n_action_steps": 50, **({"infer_delay": delay} if delay else {})},
+        "policy_id": policy
+        + (f"+delay{delay}" if delay else "")
+        + (f"+jitter{jitter}" * bool(jitter)),
+        "inference": {**inference, **({"infer_delay_jitter": jitter} if jitter else {})},
         "stress": {"sparse_gap": 0.035, **(stress or {})},
         "episodes": [_episode(correct)],
     }
@@ -307,10 +350,11 @@ def _rtc(draws):
 
 
 def test_a_table_refuses_rows_that_disagree_on_rtc_and_names_rtc_rows(tmp_path):
-    base = _write(tmp_path / "base", _draws((40, 45, 50)))
-    six = _write(tmp_path / "six", _rtc(_draws((40, 44, 50), delay=6)))
-    chunked = _write(tmp_path / "chunked", _draws((40, 44, 50), delay=12))
-    twelve = _write(tmp_path / "twelve", _rtc(_draws((40, 44, 50), delay=12)))
+    # The delay 6 and 12 rows are pi0.5's: the table reads the rows of the baseline's policy.
+    base = _write(tmp_path / "base", _draws((40, 45, 50), policy=PI05))
+    six = _write(tmp_path / "six", _rtc(_draws((40, 44, 50), delay=6, policy=PI05)))
+    chunked = _write(tmp_path / "chunked", _draws((40, 44, 50), delay=12, policy=PI05))
+    twelve = _write(tmp_path / "twelve", _rtc(_draws((40, 44, 50), delay=12, policy=PI05)))
     out = tmp_path / "t.md"
     rows = ["--row", f"infer_delay/steps/6={six}", "--row", f"infer_delay/steps/12={chunked}"]
     code, lines = _cli("table", "--base", base, *rows, "--out", out)
@@ -320,6 +364,81 @@ def test_a_table_refuses_rows_that_disagree_on_rtc_and_names_rtc_rows(tmp_path):
     code, lines = _cli("table", "--base", base, *rows, "--out", out)
     assert code == 0 and json.loads(lines[-1].split(" ", 1)[1])["rtc"] is True, lines
     assert out.read_text().splitlines()[0] == "# Readiness suite: tolerance table, RTC rows"
+
+
+def _real(counts, stress=None, jitter=0):
+    """pi0.5 payloads at the real-condition serving: observation delay 3, inference delay 6
+    (``jitter`` on it), RTC."""
+    stress = {"obs_delay": 3, **(stress or {})}
+    return _rtc(_draws(counts, stress=stress, policy=PI05, delay=6, jitter=jitter))
+
+
+def test_a_table_pairs_the_real_rows_with_the_real_condition_baseline(tmp_path):
+    base = _write(tmp_path / "rbase", _real((40, 45, 50)))
+    jit = _write(tmp_path / "jit", _real((40, 44, 50), jitter=3))
+    lag = _write(tmp_path / "lag", _real((39, 45, 50), stress={"track_lag_ms": 33.0}))
+    out = tmp_path / "t.md"
+    rows = ["--row", f"real/jitter/3={jit}", "--row", f"real/lag/33={lag}"]
+    code, lines = _cli("table", "--base", base, "--base_row", "real/base/pi05", *rows, "--out", out)
+    assert code == 0, lines
+    token = json.loads(lines[-1].split(" ", 1)[1])
+    assert token["rtc"] is True and token["failed_expected"] == []
+    assert token["largest"] == {"real/jitter": "3", "real/lag": "33"}
+    text = out.read_text()
+    assert "row real/base/pi05" in text and "the baseline too." in text
+    assert "\n| real/base/pi05 |  | 3 | 135/150 |" in text
+    # The real-condition baseline is itself a row against the perception baseline.
+    pbase = _write(tmp_path / "pbase", _draws((40, 45, 50), policy=PI05))
+    code, lines = _cli("table", "--base", pbase, "--row", f"real/base/pi05={base}", "--out", out)
+    assert code == 0, lines
+    assert json.loads(lines[-1].split(" ", 1)[1])["largest"] == {"real/base": "pi05"}
+    coupled = _write(
+        tmp_path / "coupled",
+        _draws(
+            (40, 45, 50),
+            policy=PI05,
+            stress={"overhead_offset": [0, 0, 0, 0.01, 0, 0], "couple_overhead": True},
+        ),
+    )
+    chunked = _write(
+        tmp_path / "chunked",
+        _draws((40, 44, 50), stress={"obs_delay": 3}, policy=PI05, delay=6, jitter=3),
+    )
+    refused = [  # (baseline, base row, row, why)
+        (base, "real/base/pi05", f"coupled/forward/0.01={coupled}", "row base, not real/base"),
+        (pbase, "base", f"real/lag/33={lag}", "row real/base/pi05, not base"),
+        (base, "real/base/pi05", f"real/jitter/3={chunked}", "disagree on RTC"),
+        (base, "real/base/act", f"real/jitter/3={jit}", "not a row of the baseline's pi05"),
+        (pbase, "real/base/pi05", f"real/jitter/3={jit}", "eval_000.json ran the knobs"),
+        (base, "real/base/pi05", f"real/jitter/3={lag}", "eval_000.json ran the knobs"),
+        (base, "real/base/pi05", f"real/jitter/1={jit}", "a row NAME of pi05"),  # S's row
+        (base, "real/base/pi05", f"real/base/pi05={base}", "a row NAME of pi05"),
+    ]
+    for under, base_row, row, why in refused:
+        out.write_text("an earlier table\n")
+        argv = ["--base", under, "--base_row", base_row, "--row", row, "--out", out]
+        code, lines = _cli("table", *argv)
+        assert code == 1 and lines[0].startswith("SUITE_FAIL ") and not out.exists(), lines
+        assert why in lines[0], lines
+
+
+def test_a_coupled_row_pairs_with_the_perception_baseline(tmp_path):
+    base = _write(tmp_path / "base", _draws((40, 45, 50)))
+    shift = {"overhead_offset": [0, 0, 0, 0.01, 0, 0], "couple_overhead": True}
+    row = _write(tmp_path / "row", _draws((40, 44, 50), stress=shift))
+    uncoupled = _write(
+        tmp_path / "plain",
+        _draws((40, 44, 50), stress={"overhead_offset": shift["overhead_offset"]}),
+    )
+    out = tmp_path / "t.md"
+    code, lines = _cli(
+        "table", "--base", base, "--row", f"coupled/forward/0.01={row}", "--out", out
+    )
+    assert code == 0 and json.loads(lines[-1].split(" ", 1)[1])["failed_expected"] == [], lines
+    code, lines = _cli(
+        "table", "--base", base, "--row", f"coupled/forward/0.01={uncoupled}", "--out", out
+    )
+    assert code == 1 and lines[0].startswith("SUITE_FAIL "), lines
 
 
 def _passes(*names_and_flags):

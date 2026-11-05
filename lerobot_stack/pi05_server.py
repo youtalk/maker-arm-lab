@@ -45,6 +45,11 @@ MS7j: --infer_delay D emulates the real arm's inference delay (``policy_server.D
 lane's chunk arrives D control steps after its observation, without its first D actions, retry
 forwards and still resamples included. D must be shorter than the warped chunk. Its policy id part
 is ``+delay<D>``, and the inference block gains ``infer_delay``.
+MS7k: --infer_delay_jitter J (J <= D) varies each chunk's delay in D - J to D + J, from a seeded
+generator per lane row (``policy_server.DelayLine``). Only the arrival and the dropped first actions
+follow the drawn delay: the forward rule and the RTC guidance keep D, which is all the server can
+know. Its policy id part is ``+jitter<J>``, right after ``+delay<D>``, and the inference block
+gains ``infer_delay_jitter``.
 MS7j: --rtc adds LeRobot's real-time chunking (RTC) under that delay, at --action_warp 1.0 only,
 so a queue row is a chunk row, and with D at most RTC_HORIZON. A lane forwards once its queue
 holds RTC_HORIZON actions or fewer, and the forward passes inference_delay D, an
@@ -234,6 +239,7 @@ class SharedServer:
     flag is set with ``predict_chunk(obs of those rows, S)``, in a forward of their own.
     ``infer_delay`` D serves each lane's chunks D calls after their observation (``DelayLine``),
     whichever forward made them: a plain one, a retry, a still resample or a latched chunk.
+    ``infer_delay_jitter`` J varies each chunk's delay in D - J to D + J; RTC keeps D.
     ``rtc`` (0 < D <= RTC_HORIZON, warp 1.0) adds obs["leftover"] (``leftover``) and
     obs["horizon"] (``rtc_horizon``) to each forward, which runs each horizon apart with the
     leftover cut there and drops both keys at 0, and
@@ -253,12 +259,13 @@ class SharedServer:
         retry_noise_scale: float | None = None,
         infer_delay: int = 0,
         rtc: bool = False,
+        infer_delay_jitter: int = 0,
     ):
         if not ACTION_WARP_MIN <= action_warp <= ACTION_WARP_MAX:
             raise ValueError(
                 f"action_warp must be in [{ACTION_WARP_MIN}, {ACTION_WARP_MAX}], got {action_warp}"
             )
-        check_delay(infer_delay, n_action_steps, action_warp)
+        check_delay(infer_delay, n_action_steps, action_warp, infer_delay_jitter)
         self._predict = predict_chunk
         self._policy_id = policy_id
         self._n = n_action_steps
@@ -272,6 +279,8 @@ class SharedServer:
             self._inference["jaw_latch"] = jaw_latch
         if infer_delay:
             self._inference["infer_delay"] = infer_delay
+        if infer_delay_jitter:
+            self._inference["infer_delay_jitter"] = infer_delay_jitter
         if rtc:
             self._inference["rtc"] = RTC_HORIZON
         self._still = still
@@ -280,6 +289,7 @@ class SharedServer:
         self._gripper = gripper
         self._warp = action_warp
         self._delay = infer_delay
+        self._jitter = infer_delay_jitter
         self._rtc = rtc
         self._refill = RTC_HORIZON if rtc else None
         self._width = ACTION_SHAPE[0] * (2 if rtc else 1)
@@ -369,7 +379,7 @@ class SharedServer:
             batch = int(arrays["state"].shape[0])
             replan = arrays.get(REPLAN_KEY, np.zeros(batch, dtype=bool))
             retry = arrays.get(RETRY_KEY, np.zeros(batch, dtype=bool))
-            line = self._lines.setdefault(lane, DelayLine(self._delay, self._refill))
+            line = self._lines.setdefault(lane, DelayLine(self._delay, self._refill, self._jitter))
             due = line.due(replan)
             need += [(lane, i) for i in due]
             retrying += [bool(retry[i]) for i in due]
@@ -636,6 +646,7 @@ def main() -> int:
     parser.add_argument("--still_open", type=float, default=STILL_OPEN)
     parser.add_argument("--jaw_latch", type=int, default=0, help="actions held after a close")
     parser.add_argument("--infer_delay", type=int, default=0, help="MS7j: steps a chunk waits")
+    parser.add_argument("--infer_delay_jitter", type=int, default=0, help="MS7k: delay +- J")
     parser.add_argument("--rtc", action="store_true", help="MS7j: real-time chunking")
     try:
         args = parser.parse_args()
@@ -654,6 +665,9 @@ def main() -> int:
             parser.error(f"--jaw_latch must be at least 0, got {args.jaw_latch}")
         if args.infer_delay < 0:
             parser.error(f"--infer_delay must be at least 0, got {args.infer_delay}")
+        jitter = args.infer_delay_jitter
+        if not 0 <= jitter <= args.infer_delay:  # before the minutes of the load
+            parser.error(f"--infer_delay_jitter must be in [0, --infer_delay], got {jitter}")
         if args.rtc and not (1 <= args.infer_delay <= RTC_HORIZON and args.action_warp == 1.0):
             # the leftover is cut at RTC_HORIZON, so a longer delay leaves frozen rows unguided
             parser.error(f"--rtc needs --infer_delay in [1, {RTC_HORIZON}] and --action_warp 1.0")
@@ -675,6 +689,7 @@ def main() -> int:
         policy_id += "" if still is None else "+still{}r{}o{}".format(*still)
         policy_id += f"+latch{args.jaw_latch}" if args.jaw_latch else ""
         policy_id += f"+delay{args.infer_delay}" if args.infer_delay else ""
+        policy_id += f"+jitter{args.infer_delay_jitter}" if args.infer_delay_jitter else ""
         policy_id += "+rtc" if args.rtc else ""
         server = SharedServer(
             predict_chunk,
@@ -688,6 +703,7 @@ def main() -> int:
             retry,
             args.infer_delay,
             args.rtc,
+            args.infer_delay_jitter,
         )
         socket = zmq.Context.instance().socket(zmq.ROUTER)
         socket.bind(f"tcp://127.0.0.1:{args.port}")

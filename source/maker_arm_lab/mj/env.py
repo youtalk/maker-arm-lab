@@ -64,7 +64,8 @@ Semantics carried over from ``ManagerBasedRLEnv`` because the rig depends on the
 env is auto-reset INSIDE ``step`` (its state tensors already show the next episode when
 ``step`` returns, and the ``success`` term keeps the terminating step's value until the next
 ``step``); the six arm targets pass through ``core.profile``'s Rust clamp and the per-env
-``clamped`` flag says whether that changed the target this step.
+``clamped`` flag says whether that changed the target this step. Under the MS7k stress knob
+``track_lag_ms`` the clamped targets then pass through a first-order lag (``lag_alpha``).
 
 Batching is a Python loop over one ``MjModel``/``MjData`` pair per env. Per-env models are
 what make per-episode physics randomization (brick mass and friction, desk color) possible;
@@ -150,6 +151,13 @@ FRAME_CAM_JITTER_DEG = 1.0
 # The privileged channel's target rule measures from THIS point, not from the tool body, so it
 # is the same distance `EnvOracle._next_brick` takes its nearest candidate by.
 _PICK_OFFSET = torch.tensor(PICK_OFFSET_MEASURED)
+
+
+def lag_alpha(dt: float, lag_ms: float) -> float:
+    """MS7k ``track_lag_ms``: the step gain of a first-order lag of time constant ``lag_ms``
+    sampled every ``dt`` s, 1 - exp(-dt / tau). A step command then reaches 1 - 1/e of its
+    size after tau."""
+    return -math.expm1(-dt / (lag_ms / 1000.0))
 
 
 def _rot6(q: np.ndarray) -> np.ndarray:
@@ -646,13 +654,23 @@ class MjLegoSortEnv:
                 )
         step_limit = GRIPPER_RATE_M_PER_S / CONTROL_HZ
         self._grip_ctrl += np.clip(targets[:, 6:] - self._grip_ctrl, -step_limit, step_limit)
+        arm, lag = list(h.arm_actuators), self.stress.track_lag_ms
         for i in range(self.num_envs):
             d = self.datas[i]
-            d.ctrl[list(h.arm_actuators)] = targets[i, :6]
+            if not lag:
+                d.ctrl[arm] = targets[i, :6]
             d.ctrl[list(h.gripper_actuators)] = self._grip_ctrl[i]
             if self.pile_pgs:
                 self._pick_solver(i)
-            mujoco.mj_step(self.models[i], d, nstep=scene.CONTROL_SUBSTEPS)
+            if not lag:
+                mujoco.mj_step(self.models[i], d, nstep=scene.CONTROL_SUBSTEPS)
+                continue
+            # MS7k track_lag_ms: the arm's actuator target y follows the command u through
+            # y += alpha (u - y) at each substep; the reset sets y to the measured joints.
+            alpha = lag_alpha(self.models[i].opt.timestep, lag)
+            for _ in range(scene.CONTROL_SUBSTEPS):
+                d.ctrl[arm] += alpha * (targets[i, :6] - d.ctrl[arm])
+                mujoco.mj_step(self.models[i], d)
         self.episode_length_buf += 1
         self._refresh(range(self.num_envs), images=False)
         stowed = per_brick_stowed(self)

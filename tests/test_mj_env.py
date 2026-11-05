@@ -5,6 +5,7 @@ plus one cameras-on shard round trip so the HDF5 layout is pinned against the co
 """
 
 import json
+import math
 import random
 
 import h5py
@@ -17,7 +18,9 @@ from maker_arm_lab.core import layout
 from maker_arm_lab.core.layout import sample_run_draw
 from maker_arm_lab.core.quat import quat_apply
 from maker_arm_lab.core.stowed import per_brick_stowed
-from maker_arm_lab.mj.env import MjLegoSortEnv
+from maker_arm_lab.mj import scene
+from maker_arm_lab.mj.env import MjLegoSortEnv, lag_alpha
+from maker_arm_lab.mj.stress import Stress
 from maker_arm_lab.robots import frames
 from test_mj_heap_env import _can_render
 
@@ -118,6 +121,36 @@ def test_out_of_range_target_is_clamped_and_flagged(env):
     flags = env.action_manager.get_term("arm_action").clamped
     assert bool(flags[0]) and not bool(flags[1])
     assert float(env.datas[0].ctrl[env.handles.arm_actuators[0]]) <= 2.8 + 1e-9
+
+
+def test_lag_alpha_reaches_one_minus_one_over_e_after_tau():
+    y = 0.0
+    for _ in range(24):  # tau 100 ms at 240 Hz
+        y += lag_alpha(1.0 / 240.0, 100.0) * (1.0 - y)
+    assert y == pytest.approx(1.0 - math.exp(-1.0), rel=1e-12)
+
+
+def test_track_lag_filters_the_arm_targets_at_every_substep():
+    """MS7k ``track_lag_ms``: the arm's actuator target starts at the measured pose of the
+    reset and follows the command through y += alpha (u - y) at each of the step's physics
+    substeps. The jaws and every env without the knob get the command at once."""
+    lagged = MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False, stress=Stress(track_lag_ms=100))
+    plain = MjLegoSortEnv(1, _draw(), num_bricks=2, cameras=False)
+    h = plain.handles
+    arm, jaws = list(h.arm_actuators), list(h.gripper_actuators)
+    for env in (lagged, plain):
+        env.reset(seed=3)
+    y0 = lagged.datas[0].ctrl[arm].copy()
+    assert (y0 == lagged.datas[0].qpos[list(h.joint_qpos[:6])]).all()
+    action = _hold_action(plain)
+    action[0, 0] += 0.2
+    for env in (lagged, plain):
+        env.step(action)
+    u = plain.datas[0].ctrl[arm]
+    keep = (1.0 - lag_alpha(scene.PHYSICS_DT, 100.0)) ** scene.CONTROL_SUBSTEPS
+    np.testing.assert_allclose(lagged.datas[0].ctrl[arm], u + (y0 - u) * keep, atol=1e-12)
+    assert lagged.datas[0].ctrl[arm[0]] < u[0] - 0.1  # a 0.2 rad step: about 72 % still to go
+    assert (lagged.datas[0].ctrl[jaws] == plain.datas[0].ctrl[jaws]).all()
 
 
 def test_success_terminates_and_auto_resets(env):

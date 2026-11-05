@@ -45,7 +45,10 @@ wire) goes in --client_flags, needs --pi05, and the cache matches it as a loop s
 steps after its observation. The server records it in its inference block only when D > 0, and
 the cache matches it there. --pi05_rtc reaches the pi0.5 server as --rtc (real-time chunking
 under that delay of at most its RTC_HORIZON, at --action_warp 1.0), which records "rtc": its
-RTC_HORIZON, and the cache matches it.
+RTC_HORIZON, and the cache matches it. --infer_delay_jitter J (MS7k, J <= D) reaches either
+server as its --infer_delay_jitter: each chunk's delay is D plus a seeded uniform integer in
+[-J, J]. The server records it in its inference block and its policy id (+jitter<J>) only when on,
+and the cache matches it there.
 """
 
 import argparse
@@ -104,6 +107,7 @@ class GateCfg:
     # MS7g D20: a second pretrained_model dir; the server serves the mean of both checkpoints.
     ensemble_with: str | None = None
     infer_delay: int = 0  # MS7j: control steps between a chunk's observation and its first action
+    infer_delay_jitter: int = 0  # MS7k: each chunk's delay is infer_delay +- this, 0 = fixed
     # MS7h design 7.3: a pi0.5 checkpoint, served by one shared pi05_server.py to `lanes` clients.
     pi05: bool = False
     lanes: int = 1
@@ -443,10 +447,13 @@ STRESS_KNOBS = (
     "blur_sigma",
     "exposure_stops",
     "hard_light",
+    "track_lag_ms",
+    "couple_overhead",
 )
-"""``maker_arm_lab.mj.stress.STRESS_KNOBS`` (MS7j), copied and pinned by the test. The knobs reach
-the MuJoCo heap client through --client_flags and are recorded as ``payload["stress"]`` only when
-some knob is on. Pass a negative offset as ``--overhead_offset=-3,0,0,0,0,0``."""
+"""``maker_arm_lab.mj.stress.STRESS_KNOBS`` (MS7j; the last two are MS7k's), copied and pinned by
+the test. The knobs reach the MuJoCo heap client through --client_flags and are recorded as
+``payload["stress"]`` only when some knob is on. Pass a negative offset as
+``--overhead_offset=-3,0,0,0,0,0``."""
 
 
 def stress_block(client_flags) -> dict:
@@ -455,7 +462,7 @@ def stress_block(client_flags) -> dict:
     ``main`` turns into GATE_ERROR."""
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, exit_on_error=False)
     for name in STRESS_KNOBS:
-        if name in ("warp_back", "hard_light"):
+        if name in ("warp_back", "hard_light", "couple_overhead"):
             parser.add_argument(f"--{name}", action="store_true")
         elif name.endswith("_offset"):
             parser.add_argument(f"--{name}", default="")
@@ -814,6 +821,8 @@ def _server_command(cfg: GateCfg) -> list[str]:
         cmd += ["--ensemble_with", cfg.ensemble_with]
     if cfg.infer_delay:
         cmd += ["--infer_delay", str(cfg.infer_delay)]
+    if cfg.infer_delay_jitter:
+        cmd += ["--infer_delay_jitter", str(cfg.infer_delay_jitter)]
     return cmd
 
 
@@ -904,6 +913,7 @@ def _pi05_server_command(cfg: GateCfg) -> list[str]:
             else []
         ),
         *(["--infer_delay", str(cfg.infer_delay)] if cfg.infer_delay else []),
+        *(["--infer_delay_jitter", str(cfg.infer_delay_jitter)] if cfg.infer_delay_jitter else []),
         *(["--rtc"] if cfg.pi05_rtc else []),
     ]
 
@@ -1132,6 +1142,8 @@ def _cached_payload(cfg: GateCfg, draw: EvalDraw) -> dict | None:
     same_inference = same_inference and served.get("jaw_latch", 0) == cfg.pi05_jaw_latch
     # A payload that predates the inference delay ran without one.
     same_inference = same_inference and served.get("infer_delay", 0) == cfg.infer_delay
+    jitter = served.get("infer_delay_jitter", 0)  # recorded only when on (MS7k)
+    same_inference = same_inference and jitter == cfg.infer_delay_jitter
     rtc = PI05_RTC_HORIZON if cfg.pi05_rtc else None  # recorded only when on
     same_inference = same_inference and served.get("rtc") == rtc
     if cfg.pi05:
@@ -1339,6 +1351,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=0,
         help="MS7j: the server serves each chunk this many control steps after its observation "
         "(0: at once); for the ACT server and with --pi05",
+    )
+    parser.add_argument(
+        "--infer_delay_jitter",
+        type=int,
+        default=0,
+        help="MS7k: each chunk's delay is --infer_delay plus a seeded uniform integer in [-J, J],"
+        " J at most --infer_delay (0: a fixed delay)",
     )
     parser.add_argument(
         "--pi05",
@@ -1729,6 +1748,10 @@ def _build_cfg(args: argparse.Namespace) -> GateCfg:
         raise ValueError(f"--pi05_still_open must be in [0, 1], got {still[2]}")
     if args.infer_delay < 0:  # the server's own refusal; it also refuses a chunk too short
         raise ValueError(f"--infer_delay must be at least 0, got {args.infer_delay}")
+    if not 0 <= args.infer_delay_jitter <= args.infer_delay:  # the server's own refusal
+        raise ValueError(
+            f"--infer_delay_jitter must be in [0, --infer_delay], got {args.infer_delay_jitter}"
+        )
     if not 1.0 <= args.action_warp <= 3.0:  # the server's ACTION_WARP_MIN and ACTION_WARP_MAX
         raise ValueError(f"--action_warp must be in [1.0, 3.0], got {args.action_warp}")
     delay_ok = 1 <= args.infer_delay <= PI05_RTC_HORIZON  # the server's own refusal

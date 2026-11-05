@@ -259,6 +259,10 @@ class Perceiver:
     heading, 3 size, 1 miss and 2 class draws, per box 3. A scale only multiplies what was
     drawn, so two reads that differ in one knob see the same underlying noise, which is what
     a knob sweep compares on.
+
+    ``shift`` (MS7k ``couple_overhead``, m, world x y z) is a calibration error of the overhead
+    camera: it is added to the episode bias, so to every detection and to the gripper marker's
+    look (``MarkerBias``), and to each box's x and y. It draws nothing.
     """
 
     def __init__(
@@ -267,6 +271,7 @@ class Perceiver:
         env_index: int,
         scales: dict[str, float] | None = None,
         classes: Sequence[str] = BASE_CLASSES,
+        shift: Sequence[float] = (0.0, 0.0, 0.0),
     ):
         unknown = set(scales or {}) - set(KNOBS + EXTRA_KNOBS)
         if unknown:
@@ -274,6 +279,7 @@ class Perceiver:
         self.scales = {**dict.fromkeys(KNOBS + EXTRA_KNOBS, 1.0), **(scales or {})}
         self.rng = random.Random(f"perceive:{run_seed}:{env_index}")
         self.classes = tuple(classes)  # the active class list a wrong class is drawn from
+        self.shift = tuple(float(v) for v in shift)
         self._bias = (0.0, 0.0, 0.0)
         self._box_poses: tuple[tuple[float, float, float], ...] = ()
         self._box_sizes: tuple[tuple[float, float, float], ...] = ()
@@ -292,8 +298,8 @@ class Perceiver:
 
     @property
     def bias(self) -> tuple[float, float, float]:
-        """The episode's position bias (x, y, z) on every detection, fixed until
-        ``reset_episode``."""
+        """The episode's position bias (x, y, z) on every detection, ``shift`` included, fixed
+        until ``reset_episode``."""
         return self._bias
 
     def _gauss(self) -> float:
@@ -325,6 +331,10 @@ class Perceiver:
                     float(yaw) + box * BOX_YAW_SIGMA_RAD * dyaw,
                 )
             )
+        if any(self.shift):  # MS7k: off, every sum stays as it was, bit for bit
+            sx, sy, _ = self.shift
+            self._bias = tuple(b + d for b, d in zip(self._bias, self.shift))
+            poses = [(x + sx, y + sy, yaw) for x, y, yaw in poses]
         self._box_poses = tuple(poses)
         self._box_sizes = tuple(
             tuple(float(v) + box * BOX_SIGMA_M * self._gauss() for v in size) for size in true_sizes
