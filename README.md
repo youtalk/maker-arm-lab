@@ -1,8 +1,30 @@
 # maker-arm-lab
 
-Research layer for the [MakerMods Maker Arm](https://github.com/makermods-robotics/maker-arm-sdk): simulation, system identification, model learning and gated milestone experiments. The aim is sim-to-real. The simulation uses the vendor URDF and the arm's own joint coordinates. Thus a trained policy can run on the physical arm through the [maker-arm-rs](https://github.com/youtalk/maker-arm-rs) SDK.
+maker-arm-lab teaches the [MakerMods Maker Arm](https://github.com/makermods-robotics/maker-arm-sdk) to sort a heap of mixed LEGO parts into boxes by class. The arm has 6 joints and a parallel gripper. The work happens in simulation first. A scripted teacher records demonstrations, imitation-learning policies train on them, and a gate scores every milestone against a bar that was set before the read.
 
-Gains, torque caps and the command clamp come from `maker_arm_rs.profile()` at import time. This repository does not restate them. Thus every recorded action is a command that the real arm accepts. There is no fallback table, and a missing `maker_arm_rs` fails at import.
+The aim is sim-to-real. The simulation uses the vendor URDF and the arm's own joint coordinates. Thus a trained policy can run on the physical arm through the [maker-arm-rs](https://github.com/youtalk/maker-arm-rs) SDK.
+
+## Results
+
+Each milestone has a report in [`docs/`](docs/), and the reports keep the failed milestones too. The [milestone table](#milestones) lists all of them. These are the main results:
+
+- MS3, six bricks into bins by color. After the port from Isaac Lab to MuJoCo, an ACT policy sorts 605 of 720 bricks (0.840) against a bar of 0.70.
+- MS6, picking from a heap. An ACT policy stows 2759 of 3000 parts (0.920) from 50-part heaps, at 1.198 cycles per stowed part. The bar was 0.80.
+- MS7d, sorting from a perceived state. The loop decides only from what a real rig can sense: noisy part poses, and a hold that it reads from the jaw gap. The policy puts 5521 of 6000 parts (0.920) into the correct box, at 1.123 cycles per correct stow.
+- MS7e, a wider task. With 4 to 8 boxes, 8 classes, and round, LDraw and flat parts, the policy puts 5299 of 6000 parts (0.883) into the correct box.
+- MS7k, a vision-language-action policy. A π0.5 LoRA places 5126 of 6000 parts under real-arm serving, against 5073 for the best ACT policy (difference +53, standard error 44.15). The ACT policy is faster, at 332 to 344 correct stows an hour against 208 to 225.
+
+## How it works
+
+- The teacher. `core/oracle.py` decides the next goal. `OracleRig` turns each goal into a joint plan with a global IK solver from maker-arm-rs and a minimum-jerk walk. For a heap, the teacher also selects the target, synthesizes grasps from the part geometry and remembers the cells where a grasp failed.
+- The policies. `lerobot_stack/` trains LeRobot ACT policies and π0.5 LoRAs, and serves them over ZMQ to the simulation clients.
+- The loop and the grader. `core/loop.py` runs a heap episode. The policy drives each cycle, and a grader that sees the true state scores it. The loop itself reads only the perceived state, and a test enforces this boundary.
+- Two backends. The Isaac Lab task stays at its MS3 features. The MuJoCo backend carries every milestone after MS3.
+- The SDK. Gains, torque caps and the command clamp come from `maker_arm_rs.profile()` at import time. Thus every recorded action is a command that the real arm accepts. There is no fallback table, and a missing `maker_arm_rs` fails at import.
+
+## What comes next
+
+MS5 moves this system to the physical Maker Arm. It covers real sensing, which maps an iPhone and a wrist camera to the simulator's views and to the perceived state. It also covers the control stack of maker-arm-rs: gravity compensation, admittance and a disturbance observer.
 
 ## Milestones
 
@@ -483,3 +505,7 @@ The reports are in milestone order.
 - [`docs/ms7f-real-scale-sorting.md`](docs/ms7f-real-scale-sorting.md): MS7f, 150-part heaps, six categories over 66 kinds, a classifier trained on renders, and speed. The staged bars are 0.85 share, 200 correct stows an hour and 0.80 held-out. The final candidate 6 reads 2522 of 3000 (0.841) at 308.0 an hour in the refilled deep tray, and 620 of 785 (0.790) held-out. The owner closed MS7f as failed (D25), and the official read did not run. Wrong boxes hold 342 of the 478 misses.
 - [`docs/ms7j-real-arm-readiness.md`](docs/ms7j-real-arm-readiness.md): MS7j, the readiness suite and the π0.5 LoRA. S passes every row at the levels that the rig expects, so no retrain ran. The report gives the calibration and mount limits for MS5, for example an uncorrected overhead tilt of 1 degree at most. The LoRA trains on the RTX 5090 in 30 h 46 min. Its 30k save equals the full fine-tune on the screen and is faster. Chunked π0.5 fails an inference delay of 6 and 12 steps on both candidates. Real-time chunking passes at 12 steps for the fresh 30k and at 6 steps for the LoRA.
 - [`docs/ms7k-pi05-accuracy-sim2real.md`](docs/ms7k-pi05-accuracy-sim2real.md): MS7k, π0.5 against S on accuracy and sim2real. Stage 1 found no training lever better than a plain 5000-step continuation of the LoRA 30k. A 10000-step Colab run past it gave no gain. The continuation, C, beats S on correct placements under real-arm serving by 1.2 pooled SE and loses less than S on the sim2real rows. In the suite, C tolerates an uncorrected overhead camera up to 6 degrees and +5 cm off, where S needs 1 degree and 1 cm. The report also records the Colab LoRA path on LeRobot 0.6.1 and the MS5 tolerance columns for both policies.
+
+## License
+
+This repository is under the Apache License 2.0 ([`LICENSE`](LICENSE)). Two vendored parts keep their own licenses: [`assets/vendor/maker_arm_description/`](assets/vendor/maker_arm_description/) (Apache-2.0, from the MakerMods SDK) and [`assets/parts/`](assets/parts/) (CC BY 4.0, from the LDraw parts library).
