@@ -402,10 +402,10 @@ A payload records the checkpoint path as its policy id. Thus every path must be 
 
 ```bash
 python3 scripts/fleet.py sync --sha "$(git rev-parse origin/main)"             # SYNC_OK {...}
-python3 scripts/fleet.py ship <dir> aarch64:<dir> --streams 4                   # SHIP_OK {...}
-python3 scripts/fleet.py run aarch64 <name> -- <command>                        # RUN_OK {...}
+python3 scripts/fleet.py ship <dir> c:<dir> --streams 4                         # SHIP_OK {...}
+python3 scripts/fleet.py run c <name> -- <command>                              # RUN_OK {...}
 python3 scripts/fleet.py read --ckpt <abs pretrained_model> --tag <TAG> --seed 20261700 \
-    --draws 0-11 --hosts c,a,b [-- <more run_gate_eval.py flags>]  # GATE_OK {...}
+    --draws 0-11 --hosts c,a,b [-- <more run_gate_eval.py flags>]               # GATE_OK {...}
 python3 scripts/fleet.py status                                                 # STATUS_OK
 ```
 

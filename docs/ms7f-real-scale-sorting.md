@@ -389,13 +389,13 @@ fresh TAG. Every paired table takes its base on its own architecture, because x8
 physics differ. The MS6 negatives and the generic abort on contact stay closed.
 
 Rule R15 keeps `scripts/fleet.py` and `~/data/maker-arm-ms7/hosts.json`, with track aliases
-`a_fN`, `b_fN` and `aarch64_fN`.
+`a_fN`, `b_fN` and `c_fN`.
 
 | host | hardware | MS7f work |
 | --- | --- | --- |
 | Machine A | 24 cores, RTX 5090 | the controller and the ledger, the P tables, the classifier training, the retrains F1 to F5, read lanes. Half of wave 1, half of waves 3, 4 and 6. |
 | Machine B | 24 cores, RTX 5080 | read lanes (half of candidate 1's checked read, the D11, D13 and D14 screens), half of wave 1, most of wave 2. Half of waves 3, 4 and 6, all of wave 5, the D18 PGS screen, the refill-scene pair screens, v8 renders and the D24 recording. |
-| Machine C, also called Machine C | 128 cores, A2000 12 GB | the night render set, the S0 teacher census, 12 processes of wave 2, the wave 2 conversions, the control read, the F2 screens. The D24 recording with GPU policy servers. |
+| Machine C | 128 cores, A2000 12 GB | the night render set, the S0 teacher census, 12 processes of wave 2, the wave 2 conversions, the control read, the F2 screens. The D24 recording with GPU policy servers. |
 
 Machine C runs at most 40 camera processes in all. The Thor runs MS5 and is not used.
 
@@ -1427,7 +1427,7 @@ and 3099 frames. It converted with CONVERT_OK 13 episodes, with features equal t
 The D18 amendment of 22:16 keeps the wave on Newton, because the policies and corpora are Newton's.
 Job f_wave3_chain was to start wave 3 at the end of f_chk_F3: Machine A with p 0 to 44 on 14 lanes
 and Machine B with p 45 to 89 on 10 lanes, 5 h each. Machine A's half started at 23:26 (unit
-ms7f-wave3-Machine A, out f/w3/shards), while candidate 3's last Machine B heap still read. The waiting
+ms7f-wave3-a, out f/w3/shards), while candidate 3's last Machine B heap still read. The waiting
 chain was stopped before it started anything. The Machine B half started at 23:30, after f_chk_F3 ended.
 
 Wave 3 ended at 06:17 (F2 150k with candidate 3's flags driving, Newton):
@@ -2570,7 +2570,7 @@ At 23:10 the ledger pre-registered three more steps, with no number of any of th
 3. The first checked read that passes gets the official read. A chain that finds `reads/f_official`
    already started does not start another, so the read stays one shot.
 
-At 23:12 the ledger chained the units. Unit ms7f-w6-Machine A runs Machine A's share and started at
+At 23:12 the ledger chained the units. Unit ms7f-w6-a runs Machine A's share and started at
 23:11. Machine B job f_dag_w6_b starts after the D24 recording, on 5 lanes, and then converts. Unit
 ms7f-retrain6 (job f_retrain6, `bin/retrain6_chain.sh`) converts, pulls, trains retrain F6, screens
 it, picks candidate 7 and reads f_F7R_chk. The official read follows only on a pass.
