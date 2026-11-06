@@ -28,9 +28,9 @@ rules are the MS7a design's hosts and data flow:
 A job's log ends with the wrapper's own "JOB_EXIT rc=N" line after the job's token, so a job
 that dies without a token still reads as finished; a log with neither reads as RUNNING.
 
-Every path is the same absolute path on every host (every host uses the same home directory). A payload
-records its policy as act:<checkpoint path>, and the aggregate pass reuses a payload only if
-that id matches the checkpoint it is given.
+Every path is the same absolute path on every host (every host uses the same home
+directory). A payload records its policy as act:<checkpoint path>, and the aggregate pass
+reuses a payload only if that id matches the checkpoint it is given.
 """
 
 import argparse
