@@ -194,8 +194,15 @@ def test_the_script_writes_layouts_and_templates(tmp_path):
     assert len(lines) == 1 and lines[0].startswith("LAYOUTS_OK"), r.stdout + r.stderr
     assert json.loads(lines[0].split(" ", 1)[1])["unmatched"] == ["odd gear"]
     names = sorted(p.name for p in out.iterdir())
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        board = None
+    else:
+        board = "board.png"
+    assert json.loads(lines[0].split(" ", 1)[1])["board"] == (board and str(out / board))
     assert names == [
-        "board.png",
+        *([board] if board else []),
         "cluster0.json",
         "cluster0.png",
         "empty.png",

@@ -1,8 +1,11 @@
 """Calibrate the overhead camera on the iPad tag board (MS5 sensing plan task 3).
 
-    bash -c 'source ~/campaign/desk/zenv.sh && PYTHONPATH=$PWD/source:$PYTHONPATH \
-        .venv/bin/python scripts/real_calibrate_overhead.py --rig rig.json --placements 3 \
-        --frames 10 --rig_out rig_cal.json --report cal_report.json'
+    PYTHONPATH=$PWD/source:$PYTHONPATH .venv/bin/python scripts/real_calibrate_overhead.py \\
+        --rig rig.json --placements 3 \\
+        --frames 10 --rig_out rig_cal.json --report cal_report.json
+
+Run it with ROS 2 Jazzy sourced, ``RMW_IMPLEMENTATION=rmw_zenoh_cpp`` and the
+``ROS_DOMAIN_ID`` of the Conduit setup; keep the ROS Python path in ``PYTHONPATH``.
 
 The iPad shows ``board.png`` (``scripts/real_layouts.py`` writes it) one to one. Placement 0 is
 the iPad on its taped reference spot, at ``real.layouts.nominal_screen_pose(rig)``; the others
@@ -11,7 +14,7 @@ lie flat anywhere in the camera's view. Before each placement the script waits f
 shows in more than half of the frames; its corners are the median). The camera K is the first
 ``camera_info``'s, read with ``Pinhole.from_ros_k``, and the image is used as published.
 ``real.tags.calibrate`` gives the pose. ``--rig_out`` is the input rig with ``overhead_pos``,
-``overhead_quat`` and ``overhead_size`` replaced; ``overhead_k`` stays null, so the warp keeps
+``overhead_quat`` and ``overhead_size`` replaced and ``overhead_k`` set to null, so the warp keeps
 following ``camera_info``. The input rig is never written. Prints exactly one
 ``CALIB_OK {plane_rms_mm, check_rms_px, check_rms_mm, check_rms_view_px, coverage}`` or
 ``CALIB_FAIL {reason}`` line and leaves through ``os._exit``. ``check_rms_view_px`` is the check
@@ -51,19 +54,16 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def placement_corners(frames, tap_camera, min_tags):
-    """{id: median corners} of the tags that show in more than half of ``frames``."""
-    from maker_arm_lab.real.sources import decode_jpeg
-    from maker_arm_lab.real.tags import detect_tags
+def placement_corners(frames, camera, board, min_tags):
+    """{id: median corners} of the board's tags that show in more than half of ``frames``;
+    a tag of another board is not counted."""
+    from maker_arm_lab.real.tags import detect_in_jpeg
 
     seen: dict[int, list] = {}
     for f in frames:
-        rgb, size = decode_jpeg(f.data)
-        if size != (tap_camera.width, tap_camera.height):
-            raise ValueError(f"a {size[0]}x{size[1]} JPEG for the {tap_camera.width}x"
-                             f"{tap_camera.height} camera info")  # fmt: skip
-        for i, c in detect_tags(rgb).items():
-            seen.setdefault(i, []).append(c)
+        for i, c in detect_in_jpeg(camera, f.data).items():
+            if i in board.tags:
+                seen.setdefault(i, []).append(c)
     corners = {i: np.median(cs, axis=0) for i, cs in seen.items() if len(cs) * 2 > len(frames)}
     if len(corners) < min_tags:
         raise ValueError(f"{len(corners)} tags in the frames of a placement, need {min_tags}")
@@ -105,7 +105,7 @@ def _run(args) -> tuple[str, int]:
             if len(frames) < args.frames or tap.camera is None:
                 reason = f"{len(frames)} of {args.frames} frames, camera info {tap.camera}"
                 return "CALIB_FAIL " + json.dumps({"reason": reason, "error": sub.error}), 1
-            placements.append(placement_corners(frames, tap.camera, MIN_TAGS))
+            placements.append(placement_corners(frames, tap.camera, IPAD_BOARD, MIN_TAGS))
     finally:
         sub.close()
     camera = tap.camera
@@ -120,7 +120,11 @@ def _run(args) -> tuple[str, int]:
     view_rms = float(np.sqrt((np.array(d) ** 2).sum(axis=1).mean()))
     pos, quat = tuple(float(v) for v in res.pose.pos), res.pose.quat()
     new = dataclasses.replace(
-        rig, overhead_pos=pos, overhead_quat=quat, overhead_size=(camera.width, camera.height)
+        rig,
+        overhead_pos=pos,
+        overhead_quat=quat,
+        overhead_k=None,
+        overhead_size=(camera.width, camera.height),
     )
     coverage = overhead_warp(camera, res.pose, rig.desk_z, rig.overhead_back_m).coverage
     result = {

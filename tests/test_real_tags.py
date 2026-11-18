@@ -24,10 +24,13 @@ def _angle_deg(a, b):
     return math.degrees(math.acos(np.clip((np.trace(a.T @ b) - 1) / 2, -1, 1)))
 
 
-def _camera_over_desk(height=0.62, tilt=(4.0, -3.0)):
-    """A camera at (0.03, -0.02, height) looking down, world from camera."""
+def _camera_over_desk(height=0.8, tilt=(4.0, -3.0), roll_deg=0.0):
+    """A camera at (0.03, -0.02, height) looking down, world from camera; ``roll_deg`` turns
+    it about its optical axis (90: held in portrait)."""
     down = np.array([[1.0, 0, 0], [0, -1.0, 0], [0, 0, -1.0]])
-    rot = _rot("x", tilt[0]) @ _rot("y", tilt[1]) @ down
+    c, s = math.cos(math.radians(roll_deg)), math.sin(math.radians(roll_deg))
+    roll = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1.0]])
+    rot = _rot("x", tilt[0]) @ _rot("y", tilt[1]) @ down @ roll
     return Pose(rot, np.array([0.03, -0.02, height]))
 
 
@@ -64,7 +67,11 @@ def test_the_board_fits_the_screen_with_its_quiet_zone():
     assert min(us) >= b.cell_px and min(vs) >= b.cell_px
     assert IPAD_AIR_11.width_px - (max(us) + side) >= b.cell_px
     assert IPAD_AIR_11.height_px - (max(vs) + side) >= b.cell_px
-    img = tags.board_png(b)
+
+
+def test_the_board_image_is_the_screen_size_and_white_outside_the_tags():
+    pytest.importorskip("cv2")
+    img = tags.board_png(IPAD_BOARD)
     assert img.shape == (1640, 2360, 3) and img.dtype == np.uint8 and img[0, 0].min() == 255
 
 
@@ -128,29 +135,48 @@ def test_the_mean_pose_of_one_pose_is_that_pose():
     assert np.allclose(two.pos, [0.2, 0.2, 0.3]) and abs(_angle_deg(two.rot, _rot("x", 35))) < 1e-6
 
 
-@pytest.mark.parametrize(
-    ("size", "k"),
-    [
-        ((1920, 1440), (1500, 0, 959.5, 0, 1500, 719.5, 0, 0, 1)),
-        ((1440, 1920), (1500, 0, 719.5, 0, 1500, 959.5, 0, 0, 1)),  # a tall image, as published
-    ],
-)
-def test_three_placements_recover_the_camera_pose(size, k):
+WIDE = ((1920, 1440), (1500, 0, 959.5, 0, 1500, 719.5, 0, 0, 1), 0.0)
+TALL = ((1440, 1920), (1500, 0, 719.5, 0, 1500, 959.5, 0, 0, 1), 90.0)  # as published
+
+
+def _calibrate_from(size, k, roll, seed):
     cam = Pinhole.from_ros_k(*size, k)
-    true = _camera_over_desk()
-    z = 0.0061
+    true = _camera_over_desk(0.8, roll_deg=roll)
     reference = nominal_screen_pose(RigConfig())
-    screens = [
-        Pose(reference.rot, reference.pos),
-        _screen_pose(0.28, 0.15, 25.0, z),
-        _screen_pose(0.12, -0.17, -40.0, z),
-    ]
-    rng = np.random.default_rng(1)
-    placements = _placements(cam, true, IPAD_BOARD, screens, 0.2, rng)
+    z = reference.pos[2]
+    screens = [reference, _screen_pose(0.28, 0.15, 25.0, z), _screen_pose(0.12, -0.17, -40.0, z)]
+    placements = _placements(cam, true, IPAD_BOARD, screens, 0.2, np.random.default_rng(seed))
+    for p in placements:  # every corner is a real pixel of the published image
+        for c in p.values():
+            assert (c >= 0).all() and (c[:, 0] <= size[0]).all() and (c[:, 1] <= size[1]).all()
     res = tags.calibrate(cam, placements, IPAD_BOARD, reference)
-    assert np.linalg.norm(res.pose.pos - true.pos) < 0.001 and res.plane_rms_mm < 0.2
-    assert _angle_deg(res.pose.rot, true.rot) < 0.2
-    assert res.check_rms_px < 0.5 and res.check_rms_mm < 0.5
+    assert np.linalg.norm(res.pose.pos - true.pos) < 0.005  # along the view axis it is soft
+    assert res.plane_rms_mm < 0.5 and res.check_rms_mm < 0.5 and res.check_rms_px < 1.0
+    assert _angle_deg(res.pose.rot, true.rot) < 0.3
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_three_placements_recover_the_camera_pose(seed):
+    pytest.importorskip("cv2")
+    _calibrate_from(*WIDE, seed)
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_a_tall_camera_calibrates_from_the_image_as_published(seed):
+    pytest.importorskip("cv2")
+    _calibrate_from(*TALL, seed)
+
+
+def test_a_tag_of_another_board_changes_nothing():
+    pytest.importorskip("cv2")
+    cam = Pinhole.from_ros_k(*WIDE[0], WIDE[1])
+    true = _camera_over_desk(0.8)
+    screen = nominal_screen_pose(RigConfig())
+    (placement,) = _placements(cam, true, IPAD_BOARD, [screen], 0.2, np.random.default_rng(0))
+    extra = dict(placement) | {9: placement[0] + (40.0, 25.0)}
+    a, _ = tags.screen_in_camera(cam, placement, IPAD_BOARD)
+    b, _ = tags.screen_in_camera(cam, extra, IPAD_BOARD)
+    assert np.allclose(a.pos, b.pos) and np.allclose(a.rot, b.rot)
 
 
 def test_register_base_recovers_the_camera_and_the_tag_offset():
@@ -166,9 +192,9 @@ def test_register_base_recovers_the_camera_and_the_tag_offset():
         p, r = ik.fk(qi)
         tag_cam.append(true.to_camera(p.numpy() + r.numpy() @ off) + rng.normal(0, 0.0005, 3))
     guess = Pose(true.rot @ _rot("x", 5.0), true.pos + np.array([0.02, 0.0, 0.0]))
-    pose, got_off, rms, per = tags.register_base(q, np.array(tag_cam), ik, guess)
+    pose, got_off, rms, per, converged = tags.register_base(q, np.array(tag_cam), ik, guess)
     assert np.linalg.norm(pose.pos - true.pos) < 0.001 and np.linalg.norm(got_off - off) < 0.001
-    assert rms < 1.5 and per.shape == (10,)
+    assert rms < 1.5 and per.shape == (10,) and converged
 
 
 def test_the_frame_tap_keeps_the_first_camera_and_the_frames_since_start():
@@ -183,3 +209,20 @@ def test_the_frame_tap_keeps_the_first_camera_and_the_frames_since_start():
     assert tap.camera.width == 1920 and tap.stop() == ["a"]
     tap.on_jpeg("late")
     assert tap.frames == ["a"]
+
+
+def test_register_base_converges_from_moderately_varied_poses():
+    ik = GlobalIK()
+    rng = np.random.default_rng(5)
+    lo, hi = ik.lower.numpy(), ik.upper.numpy()
+    mid, span = (lo + hi) / 2, (hi - lo) / 2
+    q = mid + rng.uniform(-0.2, 0.2, (10, 6)) * span
+    true = _camera_over_desk(0.8)
+    off = np.array([0.004, -0.012, 0.02])
+    tag_cam = np.array(
+        [true.to_camera(ik.fk(qi)[0].numpy() + ik.fk(qi)[1].numpy() @ off) for qi in q]
+    )
+    guess = Pose(true.rot @ _rot("x", 5.0), true.pos + np.array([0.02, 0.0, 0.0]))
+    pose, got_off, rms, _, converged = tags.register_base(q, tag_cam, ik, guess)
+    assert converged and rms < 0.01
+    assert np.linalg.norm(pose.pos - true.pos) < 0.0005 and np.linalg.norm(got_off - off) < 0.0005

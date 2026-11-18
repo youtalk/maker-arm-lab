@@ -7,7 +7,8 @@
 and a ``"label"`` is a real part with no catalog counterpart: it stays out of the draws and is
 listed under ``unmatched``. Writes ``<name>.json`` for every layout, ``<name>.png`` for every
 sparse and cluster layout, and ``empty.png`` (the tray outline and the scale bar) and ``board.png`` (the AprilTag board of
-``real.tags``, for the overhead calibration). Prints
+``real.tags``, for the overhead calibration; skipped, with ``"board": null`` in the token,
+when OpenCV is not installed). Prints
 ``LAYOUTS_OK`` with the paths, or ``LAYOUTS_FAIL``, on every exit path and exits through
 ``os._exit``. A heap layout uses every counted part once; a sparse or cluster layout draws
 ``SPARSE_COUNT`` or ``CLUSTER_COUNT`` of them.
@@ -81,13 +82,21 @@ def main(argv=None) -> int:
                     paths.append(str(out / f"{lay.name}.png"))
         template_png(Layout("empty", "sparse", [], []), rig, IPAD_AIR_11).save(out / "empty.png")
         paths.append(str(out / "empty.png"))
-        import cv2
+        board = None
+        try:
+            import cv2
+        except ImportError:  # the `real` group is not installed: no board.png
+            pass
+        else:
+            from maker_arm_lab.real.tags import IPAD_BOARD, board_png
 
-        from maker_arm_lab.real.tags import IPAD_BOARD, board_png
-
-        cv2.imwrite(str(out / "board.png"), board_png(IPAD_BOARD)[..., ::-1])
-        paths.append(str(out / "board.png"))
-        print("LAYOUTS_OK " + json.dumps({"paths": paths, "unmatched": unmatched}), flush=True)
+            board = str(out / "board.png")
+            cv2.imwrite(board, board_png(IPAD_BOARD)[..., ::-1])
+            paths.append(board)
+        print(
+            "LAYOUTS_OK " + json.dumps({"paths": paths, "unmatched": unmatched, "board": board}),
+            flush=True,
+        )
         return 0
     except Exception as exc:  # noqa: BLE001 -- every failure must still print a token
         print("LAYOUTS_FAIL " + json.dumps({"reason": f"{type(exc).__name__}: {exc}"}), flush=True)

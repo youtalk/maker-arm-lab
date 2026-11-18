@@ -1,9 +1,12 @@
 """The iPad's screen pose in the base frame, from the calibrated overhead camera (MS5 sensing
 plan task 3).
 
-    bash -c 'source ~/campaign/desk/zenv.sh && PYTHONPATH=$PWD/source:$PYTHONPATH \
-        .venv/bin/python scripts/real_screen_pose.py --rig rig_cal.json --frames 10 \
-        --out screen.json'
+    PYTHONPATH=$PWD/source:$PYTHONPATH .venv/bin/python scripts/real_screen_pose.py \\
+        --rig rig_cal.json --frames 10 \\
+        --out screen.json
+
+Run it with ROS 2 Jazzy sourced, ``RMW_IMPLEMENTATION=rmw_zenoh_cpp`` and the
+``ROS_DOMAIN_ID`` of the Conduit setup; keep the ROS Python path in ``PYTHONPATH``.
 
 With ``board.png`` on the iPad, the script keeps ``--frames`` JPEGs, solves the screen pose in
 each (``real.tags.screen_in_camera``) and composes it with the rig's overhead pose. ``--out``
@@ -45,11 +48,10 @@ def _run(args) -> tuple[str, int]:
     from maker_arm_lab.real import ros
     from maker_arm_lab.real.camera_model import Pose
     from maker_arm_lab.real.rig import RigConfig
-    from maker_arm_lab.real.sources import decode_jpeg
     from maker_arm_lab.real.tags import (
         IPAD_BOARD,
         FrameTap,
-        detect_tags,
+        detect_in_jpeg,
         mean_pose,
         screen_in_camera,
     )
@@ -76,8 +78,8 @@ def _run(args) -> tuple[str, int]:
         return "SCREEN_FAIL " + json.dumps({"reason": reason, "error": sub.error}), 1
     poses = []
     for f in frames:
-        corners = detect_tags(decode_jpeg(f.data)[0])
-        if len(corners) < 4:
+        corners = detect_in_jpeg(tap.camera, f.data)
+        if sum(i in IPAD_BOARD.tags for i in corners) < 4:
             continue
         p, _ = screen_in_camera(tap.camera, corners, IPAD_BOARD)
         poses.append(Pose(cam_pose.rot @ p.rot, cam_pose.rot @ p.pos + cam_pose.pos))

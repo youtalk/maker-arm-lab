@@ -1,6 +1,6 @@
 """Register the overhead camera to the arm's base from a gripper tag (MS5 sensing plan task 3).
 
-    PYTHONPATH=$PWD/source:$PYTHONPATH .venv/bin/python scripts/real_register_base.py \
+    PYTHONPATH=$PWD/source:$PYTHONPATH .venv/bin/python scripts/real_register_base.py \\
         --rig rig.json --pairs pairs.json --rig_out rig_base.json --report base_report.json
 
 ``pairs.json`` is ``[{"q": [6 joints], "tag_cam": [x, y, z]}, ...]``: the arm's joint vector
@@ -64,7 +64,9 @@ def _run(args) -> tuple[str, int]:
     guess = Pose.from_pos_quat(rig.overhead_pos, rig.overhead_quat)
     q = np.array([p["q"] for p in pairs], dtype=np.float64)
     tag_cam = np.array([p["tag_cam"] for p in pairs], dtype=np.float64)
-    pose, off, rms, per = register_base(q, tag_cam, GlobalIK(), guess)
+    pose, off, rms, per, converged = register_base(q, tag_cam, GlobalIK(), guess)
+    if not converged:
+        return "REGISTER_FAIL " + json.dumps({"reason": "not_converged", "rms_mm": rms}), 1
     rel = pose.rot @ guess.rot.T  # the turn in the base frame
     result = {
         "rms_mm": rms,

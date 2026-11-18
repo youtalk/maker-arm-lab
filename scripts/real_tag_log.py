@@ -1,8 +1,11 @@
 """Log one AprilTag's pose from the overhead camera, a line per frame (MS5 sensing plan task 3).
 
-    bash -c 'source ~/campaign/desk/zenv.sh && PYTHONPATH=$PWD/source:$PYTHONPATH \
-        .venv/bin/python scripts/real_tag_log.py --rig rig_cal.json --tag_id 6 \
-        --tag_size 0.03 --seconds 20 --out tag.jsonl'
+    PYTHONPATH=$PWD/source:$PYTHONPATH .venv/bin/python scripts/real_tag_log.py \\
+        --rig rig_cal.json --tag_id 6 \\
+        --tag_size 0.03 --seconds 20 --out tag.jsonl
+
+Run it with ROS 2 Jazzy sourced, ``RMW_IMPLEMENTATION=rmw_zenoh_cpp`` and the
+``ROS_DOMAIN_ID`` of the Conduit setup; keep the ROS Python path in ``PYTHONPATH``.
 
 The tag is a 36h11 tag of side ``--tag_size`` m (the black border's outer edge). Each line of
 ``--out`` holds ``stamp_ns``, ``arrival_mono_ns``, ``rms_px``, ``cam_pos`` (the tag centre in
@@ -47,8 +50,7 @@ def _run(args) -> tuple[str, int]:
     from maker_arm_lab.real import ros
     from maker_arm_lab.real.camera_model import Pose
     from maker_arm_lab.real.rig import RigConfig
-    from maker_arm_lab.real.sources import decode_jpeg
-    from maker_arm_lab.real.tags import FrameTap, detect_tags, solve_pose
+    from maker_arm_lab.real.tags import FrameTap, detect_in_jpeg, solve_pose
 
     if args.seconds <= 0 or args.tag_size <= 0:
         detail = "--seconds and --tag_size must be positive"
@@ -75,7 +77,7 @@ def _run(args) -> tuple[str, int]:
     for f in frames:
         row = {"stamp_ns": f.at.stamp_ns, "arrival_mono_ns": f.at.arrival_mono_ns, "rms_px": None,
                "cam_pos": None, "pos": None, "quat": None}  # fmt: skip
-        corners = detect_tags(decode_jpeg(f.data)[0]).get(args.tag_id)
+        corners = detect_in_jpeg(tap.camera, f.data).get(args.tag_id)
         if corners is not None:
             tag_in_cam, rms = solve_pose(tap.camera, corners, tag_xyz)  # camera in the tag frame
             r_ct = tag_in_cam.rot.T  # camera from tag

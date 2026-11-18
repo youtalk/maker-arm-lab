@@ -97,6 +97,17 @@ def detect_tags(rgb: np.ndarray) -> dict[int, np.ndarray]:
     return {int(i): c.reshape(4, 2).astype(np.float64) + 0.5 for i, c in zip(ids.ravel(), corners)}
 
 
+def detect_in_jpeg(camera: Pinhole, data: bytes) -> dict[int, np.ndarray]:
+    """``detect_tags`` of a JPEG that must be the size ``camera`` was published for: a tall
+    frame for a wide camera info would give wrong poses, so it raises ValueError."""
+    from maker_arm_lab.real.sources import decode_jpeg
+
+    rgb, size = decode_jpeg(data)
+    if size != (camera.width, camera.height):
+        raise ValueError(f"a {size[0]}x{size[1]} JPEG for a {camera.width}x{camera.height} camera")
+    return detect_tags(rgb)
+
+
 def solve_pose(
     camera: Pinhole, image_points: np.ndarray, world_points: np.ndarray
 ) -> tuple[Pose, float]:
@@ -123,7 +134,7 @@ def screen_in_camera(
     camera: Pinhole, corners: dict[int, np.ndarray], board: TagBoard
 ) -> tuple[Pose, float]:
     """The screen frame in the camera frame (camera from screen), and the RMS error, px."""
-    ids = sorted(corners)
+    ids = sorted(i for i in corners if i in board.tags)  # a tag of another board is ignored
     img = np.concatenate([corners[i] for i in ids])
     xyz = np.concatenate(
         [np.column_stack([tag_corners_screen(board, i), np.zeros(4)]) for i in ids]
@@ -230,31 +241,45 @@ def _kabsch(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 def register_base(
     q: np.ndarray, tag_cam: np.ndarray, ik, guess: Pose, iters: int = 50
-) -> tuple[Pose, np.ndarray, float, np.ndarray]:
+) -> tuple[Pose, np.ndarray, float, np.ndarray, bool]:
     """The camera in the base frame and the tag offset in the ``grasp_center`` frame, from N
     joint vectors (N, 6) and the gripper tag's centre in the camera frame at each (N, 3).
-    Two closed-form steps alternate: with the offset fixed, Kabsch aligns the camera points
-    with ``fk(q) + R_fk @ offset``; with the pose fixed, least squares gives the offset. It
-    stops when the RMS changes by under 1e-6 m. Returns (pose, offset, rms_mm, per-pose mm);
-    the pose starts at ``guess``, which only has to be near enough for the alternation."""
+    A linear solve of ``M c_i + t - R_i off = p_i`` (M, t and off, 15 unknowns; M projected to
+    a rotation) starts two closed-form steps that alternate: with the offset fixed, Kabsch
+    aligns the camera points with ``fk(q) + R_fk @ offset``; with the pose fixed, least squares
+    gives the offset. It stops when the RMS changes by under 1e-6 m. Returns (pose, offset,
+    rms_mm, per-pose mm, converged); ``converged`` is False when ``iters`` ran out. ``guess``
+    is the fallback start when the linear solve is rank deficient (poses too alike)."""
     q = np.asarray(q, np.float64).reshape(-1, 6)
     cam = np.asarray(tag_cam, np.float64).reshape(-1, 3)
     fk = [ik.fk(qi) for qi in q]
     p = np.array([a.numpy() for a, _ in fk])
     r = np.array([b.numpy() for _, b in fk])
-    rot, pos = guess.rot, guess.pos
-    prev = np.inf
+    n = len(q)
+    lin = np.zeros((3 * n, 15))
+    for i in range(n):
+        lin[3 * i : 3 * i + 3, :9] = np.kron(np.eye(3), cam[i])  # row k of M dot c_i
+        lin[3 * i : 3 * i + 3, 9:12] = np.eye(3)
+        lin[3 * i : 3 * i + 3, 12:] = -r[i]
+    sol, _, rank, _ = np.linalg.lstsq(lin, p.reshape(-1), rcond=None)
+    if rank == 15:
+        u, _, vt = np.linalg.svd(sol[:9].reshape(3, 3))
+        rot = u @ np.diag([1.0, 1.0, np.sign(np.linalg.det(u @ vt))]) @ vt
+        pos = sol[9:12]
+    else:
+        rot, pos = guess.rot, guess.pos
+    prev, converged = np.inf, False
     for _ in range(iters):
         rhs = (cam @ rot.T + pos - p).reshape(-1)  # R_fk @ off = rot @ cam + pos - p
         off = np.linalg.lstsq(r.reshape(-1, 3), rhs, rcond=None)[0]
         rot, pos = _kabsch(cam, p + r @ off)
         err = np.linalg.norm(cam @ rot.T + pos - (p + r @ off), axis=1)
         now = float(np.sqrt((err**2).mean()))
-        done = abs(prev - now) < 1e-6
+        converged = abs(prev - now) < 1e-6
         prev = now
-        if done:
+        if converged:
             break
-    return Pose(rot, pos), off, now * 1000.0, err * 1000.0
+    return Pose(rot, pos), off, now * 1000.0, err * 1000.0, converged
 
 
 class FrameTap:
