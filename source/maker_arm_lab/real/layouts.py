@@ -124,6 +124,18 @@ def nominal_screen_pose(rig: RigConfig) -> Pose:
     return Pose(rot, np.array([rig.tray_centre[0], rig.tray_centre[1], rig.ipad_z]))
 
 
+def tray_on_screen(rig: RigConfig, screen: Screen = IPAD_AIR_11) -> bool:
+    """The tray interior's four corners lie on ``screen`` at ``nominal_screen_pose``."""
+    pose = nominal_screen_pose(rig)
+    cx, cy = rig.tray_centre
+    hx, hy = (v / 2 for v in rig.tray_interior)
+    for sx, sy in ((1, 1), (-1, 1), (-1, -1), (1, -1)):
+        u, v = screen.to_px(pose.to_camera([cx + sx * hx, cy + sy * hy, rig.ipad_z])[:2])
+        if not (0 <= u <= screen.width_px and 0 <= v <= screen.height_px):
+            return False
+    return True
+
+
 def _size(name: str) -> tuple[float, float, float]:
     return parts_mod.by_name([name])[0].size
 

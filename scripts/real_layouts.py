@@ -3,12 +3,15 @@
     uv run python scripts/real_layouts.py --rig rig.json --parts parts.json --seed 1 \\
         --sparse 3 --cluster 3 --heap 2 --out_dir ~/data/maker-arm-ms5/layouts
 
-``parts.json`` is ``[{"name": "<catalog name>", "count": n}]``. An entry with ``"name": null``
-and a ``"label"`` is a real part with no catalog counterpart: it stays out of the draws and is
-listed under ``unmatched``. Writes ``<name>.json`` for every layout, ``<name>.png`` for every
-sparse and cluster layout, and ``empty.png`` (the tray outline and the scale bar) and ``board.png`` (the AprilTag board of
-``real.tags``, for the overhead calibration; skipped, with ``"board": null`` in the token,
-when OpenCV is not installed). Prints
+``parts.json`` is ``[{"name": "<catalog name>", "count": n}]``. Every catalog part must map to
+one of ``core.parts.BASE_CLASSES``, the classes the worker reads (MS5 design section 7.1). An
+entry with ``"name": null`` and a ``"label"`` is a real part with no catalog counterpart: it
+stays out of the draws and is listed under ``unmatched``. The tray interior must fit the iPad
+screen at its nominal pose. Writes ``<name>.json`` for every layout, ``<name>.png`` for every
+sparse and cluster layout, ``empty.json`` and ``empty.png`` (a sparse layout with no parts and
+no boxes: the tray outline and the scale bar, for the empty-screen read) and ``board.png``
+(the AprilTag board of ``real.tags``, for the overhead calibration; skipped, with
+``"board": null`` in the token, when OpenCV is not installed). Prints
 ``LAYOUTS_OK`` with the paths, or ``LAYOUTS_FAIL``, on every exit path and exits through
 ``os._exit``. A heap layout uses every counted part once; a sparse or cluster layout draws
 ``SPARSE_COUNT`` or ``CLUSTER_COUNT`` of them.
@@ -51,10 +54,21 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     try:
         from maker_arm_lab.core import parts as parts_mod
-        from maker_arm_lab.real.layouts import IPAD_AIR_11, Layout, draw_layout, template_png
+        from maker_arm_lab.real.layouts import (
+            IPAD_AIR_11,
+            Layout,
+            draw_layout,
+            template_png,
+            tray_on_screen,
+        )
         from maker_arm_lab.real.rig import RigConfig
 
         rig = RigConfig.from_json(args.rig)
+        if not tray_on_screen(rig, IPAD_AIR_11):
+            raise ValueError(
+                f"the tray interior {rig.tray_interior} (x, y) does not fit the iPad screen at "
+                "its nominal pose; are x and y swapped?"
+            )
         entries = json.loads(Path(args.parts).read_text())
         names, unmatched = [], []
         for e in entries:
@@ -62,7 +76,14 @@ def main(argv=None) -> int:
                 unmatched.append(e["label"])
             else:
                 names += [e["name"]] * int(e["count"])
-        parts_mod.by_name(names)  # raises KeyError for a name outside the catalog
+        parts = parts_mod.by_name(names)  # raises KeyError for a name outside the catalog
+        other = sorted(
+            {p.name for p in parts if parts_mod.part_class(p) not in parts_mod.BASE_CLASSES}
+        )
+        if other:
+            raise ValueError(f"parts outside the base classes {parts_mod.BASE_CLASSES}: {other}")
+        if not names:
+            raise ValueError("no catalog part to draw")
         out = Path(args.out_dir).expanduser()
         out.mkdir(parents=True, exist_ok=True)
         rng = random.Random(f"ms5-layouts:{args.seed}")
@@ -80,8 +101,10 @@ def main(argv=None) -> int:
                 if kind != "heap":
                     template_png(lay, rig, IPAD_AIR_11).save(out / f"{lay.name}.png")
                     paths.append(str(out / f"{lay.name}.png"))
-        template_png(Layout("empty", "sparse", [], []), rig, IPAD_AIR_11).save(out / "empty.png")
-        paths.append(str(out / "empty.png"))
+        empty = Layout("empty", "sparse", [], [])
+        (out / "empty.json").write_text(empty.to_json())
+        template_png(empty, rig, IPAD_AIR_11).save(out / "empty.png")
+        paths += [str(out / "empty.json"), str(out / "empty.png")]
         board = None
         try:
             import cv2
@@ -98,6 +121,9 @@ def main(argv=None) -> int:
             flush=True,
         )
         return 0
+    except KeyboardInterrupt:
+        print("LAYOUTS_FAIL " + json.dumps({"reason": "interrupted"}), flush=True)
+        return 1
     except Exception as exc:  # noqa: BLE001 -- every failure must still print a token
         print("LAYOUTS_FAIL " + json.dumps({"reason": f"{type(exc).__name__}: {exc}"}), flush=True)
         traceback.print_exc()

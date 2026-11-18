@@ -56,7 +56,7 @@ def _grid(cell_px: int, cols: int, rows: int, gap_px: int, screen: Screen) -> Ta
 
 
 IPAD_BOARD = _grid(64, 3, 2, 128, IPAD_AIR_11)
-"""Six 49.26 mm tags in a 3x2 grid, 128 px (12.2 mm) apart."""
+"""Six 49.26 mm tags in a 3x2 grid, 128 px (12.32 mm) apart."""
 
 
 def _dictionary(cv2):

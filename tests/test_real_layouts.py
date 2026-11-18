@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from helpers import load_script
 from maker_arm_lab.core import desk_boxes
 from maker_arm_lab.real.camera_model import Pose
 from maker_arm_lab.real.layouts import (
@@ -205,12 +206,15 @@ def test_the_script_writes_layouts_and_templates(tmp_path):
         *([board] if board else []),
         "cluster0.json",
         "cluster0.png",
+        "empty.json",
         "empty.png",
         "heap0.json",
         "sparse0.json",
         "sparse0.png",
     ]
     assert len(Layout.from_json(out / "heap0.json").parts) == 5
+    empty = Layout.from_json(out / "empty.json")  # the empty screen reads as a sparse layout
+    assert (empty.name, empty.kind, empty.parts, empty.boxes) == ("empty", "sparse", [], [])
 
 
 def test_every_footprint_keeps_the_edge_margin_on_the_owners_tray():
@@ -246,3 +250,56 @@ def test_a_rig_json_without_the_new_fields_loads_with_defaults(tmp_path):
     assert rig.tray_interior == (0.13, 0.20) and rig.ipad_z == 0.0061
     assert rig.tray_centre == (0.195, 0.0) and rig.tray_floor_z == 0.0
     assert rig.box_interior == RigConfig().box_interior
+
+
+def _layouts_main(tmp_path, capsys, entries, rig=None):
+    """``real_layouts.main`` in process: (exit code, the one token line)."""
+    script = load_script("real_layouts")
+    (tmp_path / "rig.json").write_text((rig or RigConfig()).to_json())
+    (tmp_path / "parts.json").write_text(json.dumps(entries))
+    code = script.main(
+        ["--rig", str(tmp_path / "rig.json"), "--parts", str(tmp_path / "parts.json"),
+         "--seed", "1", "--sparse", "1", "--cluster", "1", "--heap", "1",
+         "--out_dir", str(tmp_path / "o")]
+    )  # fmt: skip
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("LAYOUTS_")]
+    assert len(lines) == 1
+    return code, lines[0]
+
+
+def test_a_part_outside_the_base_classes_fails_naming_each_one(tmp_path, capsys):
+    entries = [
+        {"name": "brick_2x4", "count": 3},
+        {"name": "plate_2x4", "count": 1},
+        {"name": "tile_1x2", "count": 2},
+        {"name": "ldraw_3700", "count": 1},
+    ]
+    code, line = _layouts_main(tmp_path, capsys, entries)
+    assert code == 1 and line.startswith("LAYOUTS_FAIL ")
+    for name in ("plate_2x4", "tile_1x2", "ldraw_3700"):
+        assert name in line
+    assert "brick_2x4" not in line
+
+
+@pytest.mark.parametrize("entries", [[], [{"name": None, "label": "odd gear"}]])
+def test_a_part_list_with_no_catalog_part_fails(tmp_path, capsys, entries):
+    code, line = _layouts_main(tmp_path, capsys, entries)
+    assert code == 1 and line.startswith("LAYOUTS_FAIL ") and "no catalog part" in line
+
+
+def test_a_tray_interior_off_the_screen_fails(tmp_path, capsys):
+    rig = RigConfig(tray_interior=(0.18, 0.14))  # x and y swapped: 0.18 m > the 0.158 m screen
+    code, line = _layouts_main(tmp_path, capsys, [{"name": "brick_2x4", "count": 5}], rig)
+    assert code == 1 and line.startswith("LAYOUTS_FAIL ") and "screen" in line
+    assert not (tmp_path / "o").exists()
+
+
+def test_ctrl_c_prints_the_fail_token(tmp_path, capsys, monkeypatch):
+    import maker_arm_lab.real.layouts as layouts_mod
+
+    def interrupt(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(layouts_mod, "draw_layout", interrupt)
+    code, line = _layouts_main(tmp_path, capsys, [{"name": "brick_2x4", "count": 5}])
+    assert code == 1 and line == "LAYOUTS_FAIL " + json.dumps({"reason": "interrupted"})
