@@ -12,9 +12,9 @@ import numpy as np
 from maker_arm_lab.core import parts as parts_mod
 from maker_arm_lab.core import perception as perc
 from maker_arm_lab.real.layouts import Layout, TruthBox
-from maker_arm_lab.real.rig import label_boxes
 
 MATCH_RADIUS_M = 0.025
+BOX_MATCH_RADIUS_M = 0.04
 
 LIMITS = {
     "pos_bias_mm": (6.5, 6.5, 6.5),
@@ -23,6 +23,7 @@ LIMITS = {
     "size_mm": 4.0,
     "box_mm": 12.0,
     "box_deg": 8.0,
+    "box_miss": 0.20,
     "miss": 0.20,
     "class": 0.12,
 }
@@ -33,6 +34,7 @@ NOMINALS = {
     "size_mm": 1000 * perc.SIZE_SIGMA_M,
     "box_mm": 1000 * perc.BOX_SIGMA_M,
     "box_deg": math.degrees(perc.BOX_YAW_SIGMA_RAD),
+    "box_miss": 0.0,
     "miss": perc.MISS_PROBABILITY,
     "class": perc.CLASS_ERROR_PROBABILITY,
 }
@@ -79,9 +81,25 @@ def match_parts(detections, truth, radius_m: float = MATCH_RADIUS_M):
     return pairs, missed, extra
 
 
-def match_boxes(poses, truth: list[TruthBox]):
-    """Detected (x, y, yaw) poses paired with the truth boxes by label order."""
-    return list(zip(label_boxes(poses), truth, strict=True))
+def match_boxes(poses, truth: list[TruthBox], radius_m: float = BOX_MATCH_RADIUS_M):
+    """(pairs, missed truth boxes, extra poses), greedy by nearest xy first within ``radius_m``."""
+    cands = sorted(
+        (math.hypot(p[0] - t.x, p[1] - t.y), i, j)
+        for i, p in enumerate(poses)
+        for j, t in enumerate(truth)
+    )
+    used_p, used_t, pairs = set(), set(), []
+    for dist, i, j in cands:
+        if dist > radius_m:
+            break
+        if i in used_p or j in used_t:
+            continue
+        used_p.add(i)
+        used_t.add(j)
+        pairs.append((poses[i], truth[j]))
+    missed = [t for j, t in enumerate(truth) if j not in used_t]
+    extra = [p for i, p in enumerate(poses) if i not in used_p]
+    return pairs, missed, extra
 
 
 def _yaw(quat) -> float:
@@ -93,13 +111,14 @@ def _rms(values) -> float:
     return float(np.sqrt(np.mean(np.square(values)))) if len(values) else math.nan
 
 
-def knob_table(frames: list[FrameResult]) -> dict:
+def knob_table(frames: list[FrameResult], box_period: float = math.pi / 2) -> dict:
     """The knob rows over the sparse and cluster frames. A heap frame (NaN truth positions)
     reports only its detection count against the poured count, under ``counts.heap``. A row
-    with no sample reads NaN."""
+    with no sample reads NaN. ``box_period`` folds the box yaw error: a quarter turn for a square
+    box interior, a half turn otherwise."""
     pos, head, size, cls_err = [], [], [], []
     box_xy, box_yaw = [], []
-    n_parts = n_missed = n_extra = n_frames = 0
+    n_parts = n_missed = n_extra = n_frames = n_boxes = n_box_missed = n_box_extra = 0
     heap = {"detected": 0, "poured": 0}
     for f in frames:
         if f.layout.kind == "heap":
@@ -118,13 +137,13 @@ def knob_table(frames: list[FrameResult]) -> dict:
             truth_size = (*sorted(s[:2], reverse=True), s[2])
             size.extend(1000 * (a - b) for a, b in zip(d["size"], truth_size, strict=True))
             cls_err.append(d["cls"] != t.cls)
-        try:
-            boxes = match_boxes(f.boxes, f.layout.boxes)
-        except ValueError:
-            continue  # not four boxes in label order: no box sample
-        for (x, y, yaw), t in boxes:
+        pairs, b_missed, b_extra = match_boxes(f.boxes, f.layout.boxes)
+        n_boxes += len(f.layout.boxes)
+        n_box_missed += len(b_missed)
+        n_box_extra += len(b_extra)
+        for (x, y, yaw), t in pairs:
             box_xy.append(1000 * math.hypot(x - t.x, y - t.y))
-            box_yaw.append(math.degrees(fold_angle(yaw - t.yaw, math.pi)))
+            box_yaw.append(math.degrees(fold_angle(yaw - t.yaw, box_period)))
     pos = np.array(pos).reshape(-1, 3)
     nan3 = [math.nan] * 3
     return {
@@ -134,6 +153,7 @@ def knob_table(frames: list[FrameResult]) -> dict:
         "size_mm": _rms(size),
         "box_mm": _rms(box_xy),
         "box_deg": _rms(box_yaw),
+        "box_miss": n_box_missed / n_boxes if n_boxes else math.nan,
         "miss": n_missed / n_parts if n_parts else math.nan,
         "class": float(np.mean(cls_err)) if cls_err else math.nan,
         "counts": {
@@ -141,17 +161,22 @@ def knob_table(frames: list[FrameResult]) -> dict:
             "parts": n_parts,
             "matched": n_parts - n_missed,
             "extra": n_extra,
+            "box_miss": n_box_missed,
+            "box_extra": n_box_extra,
             "heap": heap,
         },
     }
 
 
 def verdict(table: dict) -> tuple[bool, list[str]]:
-    """(all rows within their limit, the rows over it). A NaN row has no sample and is not over."""
+    """(all rows within their limit, the rows over it). A NaN row measured nothing and counts
+    as over."""
     over = []
     for row, limit in LIMITS.items():
         if isinstance(limit, tuple):
-            over += [f"{row}.{AXES[i]}" for i, lim in enumerate(limit) if abs(table[row][i]) > lim]
-        elif abs(table[row]) > limit:
+            over += [
+                f"{row}.{AXES[i]}" for i, lim in enumerate(limit) if not abs(table[row][i]) <= lim
+            ]
+        elif not abs(table[row]) <= limit:
             over.append(row)
     return not over, over

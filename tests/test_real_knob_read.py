@@ -8,6 +8,7 @@ from maker_arm_lab.real.knob_read import (
     fold_angle,
     heading_period,
     knob_table,
+    match_boxes,
     match_parts,
     verdict,
 )
@@ -68,6 +69,7 @@ def test_two_touching_parts_merged_into_one_detection_count_one_miss():
 def test_a_frame_with_no_detection_reads_a_miss_of_one():
     table = knob_table([FrameResult(_layout(), [], [])])
     assert table["miss"] == 1.0 and math.isnan(table["heading_deg"])
+    assert "heading_deg" in verdict(table)[1]
 
 
 def test_a_square_part_folds_its_heading_to_a_quarter_turn():
@@ -81,6 +83,7 @@ def test_heap_frames_stay_out_of_the_table():
     table = knob_table([FrameResult(heap, [_det(_part("brick_2x2", 0, 0, 0))] * 2, _poses())])
     assert table["counts"]["heap"] == {"detected": 2, "poured": 3}
     assert table["counts"]["parts"] == 0 and math.isnan(table["miss"])
+    assert not verdict(table)[0]
 
 
 def test_a_wrong_class_and_a_box_offset_show_in_their_rows():
@@ -92,3 +95,38 @@ def test_a_wrong_class_and_a_box_offset_show_in_their_rows():
     assert table["class"] == 0.5
     assert table["box_mm"] == pytest.approx(10.0)
     assert "box_mm" not in verdict(table)[1]
+
+
+def test_a_read_that_measured_nothing_fails_every_row():
+    ok, rows = verdict(knob_table([]))
+    assert not ok and "miss" in rows and "box_miss" in rows and "pos_bias_mm.x" in rows
+
+
+def test_a_frame_with_no_boxes_fails_its_box_rows():
+    f = _frame(_layout())
+    f.boxes = []
+    ok, rows = verdict(knob_table([f]))
+    assert not ok and {"box_mm", "box_deg", "box_miss"} <= set(rows)
+
+
+def test_three_of_four_boxes_found_reads_a_quarter_box_miss():
+    f = _frame(_layout())
+    f.boxes = f.boxes[:3]
+    table = knob_table([f])
+    assert table["box_miss"] == 0.25 and table["box_mm"] == pytest.approx(0.0)
+    assert table["counts"]["box_miss"] == 1
+
+
+def test_a_fifth_pose_counts_one_extra_box():
+    f = _frame(_layout())
+    f.boxes.append([0.5, 0.5, 0.0])
+    pairs, missed, extra = match_boxes(f.boxes, BOXES)
+    assert len(pairs) == 4 and missed == [] and len(extra) == 1
+    assert knob_table([f])["counts"]["box_extra"] == 1
+
+
+def test_a_square_box_found_a_quarter_turn_off_reads_no_heading_error():
+    f = _frame(_layout())
+    f.boxes[0][2] += math.pi / 2
+    assert knob_table([f])["box_deg"] == pytest.approx(0.0, abs=1e-6)
+    assert knob_table([f], box_period=math.pi)["box_deg"] > 40
