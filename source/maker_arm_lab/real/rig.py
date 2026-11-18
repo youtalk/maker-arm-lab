@@ -48,8 +48,13 @@ class RigConfig:
         cameras.OVERHEAD_CAM_ROT
     )  # INITIAL: A2
     overhead_k: tuple[float, ...] | None = None
-    """None: Conduit's ``camera/wide/camera_info`` gives it (P6 measures it)."""
+    """None: Conduit's ``camera/wide/camera_info`` gives it (P6 measures it). A K given here is
+    in the ROS/OpenCV convention (the centre of pixel (0, 0) at (0, 0)); ``Pinhole.from_ros_k``
+    reads it."""
     overhead_size: tuple[int, int] | None = None
+    overhead_back_m: float = cameras.OVERHEAD_B2_BACK_M
+    """The target view's shift back from the nominal camera, m: the release lean's B2 view the
+    policy trained on. 0.0 is the MS7d camera."""
     wrist_k: tuple[float, ...] | None = None
     """None: the wrist source already serves the simulated wrist view (the twin, wave 2)."""
     wrist_size: tuple[int, int] | None = None

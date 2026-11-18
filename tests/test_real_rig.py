@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from maker_arm_lab.core import desk_boxes
+from maker_arm_lab.core import cameras, desk_boxes
 from maker_arm_lab.core.parts import BASE_CLASSES
 from maker_arm_lab.real import rig
 
@@ -50,6 +50,10 @@ def test_the_sheet_carries_each_class_to_the_box_the_draw_gave_it():
     classes = desk_boxes.class_map(rng, 4)
     for c, box in enumerate(classes):
         assert sheet["box_poses"][sheet["class_to_box"][c]] == pytest.approx(list(drawn[box]))
+
+
+def test_the_rig_defaults_to_the_release_lean_target():
+    assert rig.RigConfig().overhead_back_m == cameras.OVERHEAD_B2_BACK_M
 
 
 def test_the_rig_config_round_trips_through_json_and_refuses_unknown_keys(tmp_path):

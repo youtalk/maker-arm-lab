@@ -37,7 +37,7 @@ def _image(seed=0, shape=(480, 640, 3)):
 
 
 def _info(camera):
-    k = (camera.fx, 0.0, camera.cx, 0.0, camera.fy, camera.cy, 0.0, 0.0, 1.0)
+    k = camera.ros_k()
     return CameraInfo(Arrival(0, 0, 0), camera.width, camera.height, k, FRAME_ID)
 
 
@@ -72,12 +72,15 @@ def test_the_first_camera_info_builds_the_warp_and_a_jpeg_becomes_the_view():
     assert np.array_equal(latest.view, want) and latest.raw == data and latest.stamp_ns == 5
 
 
-def test_a_later_camera_info_records_drift_and_keeps_the_warp():
+def test_a_changed_camera_info_rebuilds_the_warp_and_counts_it():
     src = ConduitOverhead(POSE)
-    src.on_info(_info(REAL))
-    warp = src.warp
-    src.on_info(_info(replace(REAL, fx=REAL.fx * 1.01, fy=REAL.fy * 1.01)))
-    assert src.warp is warp and src.k_drift == pytest.approx(0.01)
+    src.on_info(_info(replace(REAL, fx=1326.0)))
+    first = src.warp
+    src.on_info(_info(replace(REAL, fx=1336.0)))
+    assert src.warp is not first and src.rebuilds == 1
+    assert src.k_drift == pytest.approx(10.0 / 1326.0)
+    src.on_info(_info(replace(REAL, fx=1336.2)))  # under K_REBUILD_PX
+    assert src.rebuilds == 1
 
 
 def test_a_calibrated_camera_wins_over_camera_info():

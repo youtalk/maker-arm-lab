@@ -54,7 +54,7 @@ def test_construction_reads_the_arm_through_fk_and_the_transmission():
 
 
 def test_the_context_serves_the_nominal_camera_and_the_target_row_is_a_view():
-    env, _, _ = make_env()
+    env, _, _ = make_env(rig=RigConfig(overhead_back_m=0.0))
     want = [*cameras.OVERHEAD_CAM_POS, *rpy_from_quat(cameras.OVERHEAD_CAM_ROT)]
     assert env.obs_buf["context"][0, :6].tolist() == pytest.approx(want, abs=1e-6)
     env.context_target[0] = 1.0
@@ -122,7 +122,7 @@ def test_the_marker_stamps_at_the_nominal_projection_and_nan_stamps_nothing():
     point = (0.25, 0.05, 0.0)
     env.marker_points[0] = torch.tensor(point)
     env.stamp_markers()
-    u, v = camera_model.project(*camera_model.sim_overhead(), point)
+    u, v = camera_model.project(*camera_model.sim_overhead(env.rig.overhead_back_m), point)
     assert env.obs_buf["images"]["overhead_rgb"][0, int(v), int(u)].tolist() == [255, 255, 255]
 
 
@@ -349,3 +349,8 @@ def test_a_pick_point_under_the_desk_holds_the_arm():
 def test_class_to_box_must_be_a_permutation_of_the_four_boxes():
     with pytest.raises(ValueError):
         make_env(class_to_box=(0, 0, 1, 2))
+
+
+def test_the_real_env_context_camera_follows_the_rig_target():
+    env, _, _ = make_env(rig=RigConfig(overhead_back_m=0.139))
+    assert env.context_camera[0, 0] == pytest.approx(cameras.OVERHEAD_CAM_POS[0] - 0.139)
