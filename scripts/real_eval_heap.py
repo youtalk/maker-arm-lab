@@ -268,6 +268,7 @@ def real_block(args, world: dict) -> dict:
         "telemetry": arm.telemetry(),
         "overhead_coverage": env.overhead_coverage,
         "k_drift": getattr(world.get("overhead"), "k_drift", None),
+        "rebuilds": getattr(world.get("overhead"), "rebuilds", None),
     }
 
 

@@ -25,7 +25,8 @@ an opening fraction), pushes one row due one period ahead on the arm clock, wait
 tick and observes. After its last row the plan holds it, so a stalled loop holds the arm where
 the last command put it, as the lockstep simulator's time stands still. ``dilation`` below 1
 stretches the period (0.5 runs 15 steps a second, MS5 design section 8). The overhead view
-emulates the simulator's nominal overhead camera (``camera_model.sim_overhead``): the
+emulates the simulator's nominal overhead camera (``camera_model.sim_overhead``) moved back
+by the rig's ``overhead_back_m`` (the B2 view): the
 context's camera row is that camera's pose and the marker projects through it.
 
 Every step checks the watchdogs of MS5 design section 8. One that trips calls ``trip``: the

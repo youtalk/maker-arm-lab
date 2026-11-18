@@ -4,8 +4,8 @@ kept by a background thread and warped to the view the policy was trained on.
 ``LatestFrame`` is the one-slot store a source writes and the env reads. ``ConduitOverhead``
 takes the Conduit messages: ``real.ros.ConduitSubscriber`` calls it on its executor thread,
 tests call it directly. The first camera info builds the overhead warp unless the rig gave a
-calibrated camera; later ones only record how far fx drifted (ARKit refocuses). Each JPEG is
-decoded at the warp's DCT reduction and warped. A JPEG before any camera model, or of another
+calibrated camera; a later one that moves fx, fy, cx or cy past ``K_REBUILD_PX`` rebuilds
+the warp, and every one records how far fx drifted (ARKit refocuses). Each JPEG is decoded at the warp's DCT reduction and warped. A JPEG before any camera model, or of another
 size than the camera's, is dropped (``dropped``, ``error``); so is a message whose
 conversion or callback raised (``on_error``, which ``real.ros.ConduitSubscriber`` calls), so
 the frame-age watchdog names the cause. ``bundle`` hands the worker the raw JPEG, the depth
