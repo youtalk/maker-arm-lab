@@ -6,11 +6,13 @@ import json
 import os
 import subprocess
 import sys
+import types
 
 import numpy as np
 import pytest
 from PIL import Image
 
+import maker_arm_lab.real
 from helpers import ROOT, load_script
 from maker_arm_lab.real.camera_model import Pinhole
 from maker_arm_lab.real.frames import Arrival, JpegFrame
@@ -199,3 +201,36 @@ def test_a_wrong_size_stream_ends_in_a_fail_that_names_the_size_and_calibrates_n
     )
     kept, reason = script.wait_for_views(src, sub, cv2, (9, 6), args)
     assert kept == [] and "320x240" in reason and sub.closed == 1
+
+
+def test_run_on_a_wrong_size_stream_returns_one_fail_line_and_writes_no_rig(tmp_path, monkeypatch):
+    pytest.importorskip("cv2")
+    script = load_script(SCRIPT)
+    buf = io.BytesIO()
+    Image.fromarray(np.zeros((240, 320, 3), np.uint8)).save(buf, "JPEG")
+
+    class Subscriber:
+        error, failures = None, 0
+
+        def __init__(self, on_wrist=None, **kw):
+            self.on_wrist = on_wrist
+
+        def start(self):
+            self.on_wrist(JpegFrame(Arrival(1, 2, 3), buf.getvalue(), "wrist_camera"))
+            return self
+
+        def close(self):
+            pass
+
+    fake = types.ModuleType("maker_arm_lab.real.ros")
+    fake.WRIST_TOPIC, fake.ConduitSubscriber = "/wrist_camera/image_raw/compressed", Subscriber
+    monkeypatch.setitem(sys.modules, "maker_arm_lab.real.ros", fake)
+    monkeypatch.setattr(maker_arm_lab.real, "ros", fake, raising=False)
+    rig, out = tmp_path / "rig.json", tmp_path / "out.json"
+    rig.write_text(RigConfig().to_json())
+    args = script.build_parser().parse_args(
+        ["--rig", str(rig), "--rig_out", str(out), "--timeout_s", "0.2"]
+    )
+    token, code = script._run(args)
+    assert token.startswith("WRIST_K_FAIL ") and "320x240" in token and "\n" not in token
+    assert code != 0 and not out.exists()
