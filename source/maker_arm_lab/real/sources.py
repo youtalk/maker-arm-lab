@@ -34,6 +34,8 @@ from maker_arm_lab.real.frames import CameraInfo, DepthFrame, FrameBundle, JpegF
 from maker_arm_lab.real.perceive import camera_block
 
 DEPTH_KEEP = 8
+K_REBUILD_PX = 0.5
+"""A camera info whose fx, fy, cx or cy moves more than this many pixels rebuilds the warp."""
 """Depth frames kept to match a JPEG's stamp."""
 
 
@@ -70,15 +72,25 @@ def decode_jpeg(data: bytes, reduce: int = 1) -> tuple[np.ndarray, tuple[int, in
 
 
 class ConduitOverhead:
-    def __init__(self, pose: Pose, camera: Pinhole | None = None, plane_z: float = 0.0):
-        self.pose, self.plane_z = pose, float(plane_z)
+    def __init__(
+        self,
+        pose: Pose,
+        camera: Pinhole | None = None,
+        plane_z: float = 0.0,
+        back_m: float = 0.0,
+    ):
+        self.pose, self.plane_z, self.back_m = pose, float(plane_z), float(back_m)
+        self._fixed = camera is not None
+        self.rebuilds = 0
+        """How many times a changed camera info rebuilt the warp."""
+        self._first_fx: float | None = None
         self.frames = LatestFrame()
         self.camera: Pinhole | None = None
         self.warp: ViewWarp | None = None
         self.depth_camera: Pinhole | None = None
         self._depths: deque[DepthFrame] = deque(maxlen=DEPTH_KEEP)
         self.k_drift = 0.0
-        """The largest relative change of fx a camera info showed against the camera in use."""
+        """The largest relative change of fx a camera info showed against the first one."""
         self.dropped = 0
         self.error: str | None = None
         if camera is not None:
@@ -86,17 +98,33 @@ class ConduitOverhead:
 
     def _use(self, camera: Pinhole) -> None:
         self.camera = camera
-        self.warp = camera_model.overhead_warp(camera, self.pose, self.plane_z)
+        self.warp = camera_model.overhead_warp(camera, self.pose, self.plane_z, self.back_m)
 
     def on_info(self, info: CameraInfo) -> None:
-        camera = Pinhole.from_k(info.width, info.height, info.k)
+        camera = Pinhole.from_ros_k(info.width, info.height, info.k)
+        if self._first_fx is None:
+            self._first_fx = camera.fx
+        self.k_drift = max(self.k_drift, abs(camera.fx / self._first_fx - 1.0))
         if self.camera is None:
             self._use(camera)
-        else:
-            self.k_drift = max(self.k_drift, abs(camera.fx / self.camera.fx - 1.0))
+        elif not self._fixed and self._moved(camera):
+            self._use(camera)
+            self.rebuilds += 1
+
+    def _moved(self, camera: Pinhole) -> bool:
+        old = self.camera
+        return (
+            max(
+                abs(a - b)
+                for a, b in zip(
+                    (camera.fx, camera.fy, camera.cx, camera.cy), (old.fx, old.fy, old.cx, old.cy)
+                )
+            )
+            > K_REBUILD_PX
+        )
 
     def on_depth_info(self, info: CameraInfo) -> None:
-        self.depth_camera = Pinhole.from_k(info.width, info.height, info.k)
+        self.depth_camera = Pinhole.from_ros_k(info.width, info.height, info.k)
 
     def on_depth(self, frame: DepthFrame) -> None:
         self._depths.append(frame)

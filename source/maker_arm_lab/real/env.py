@@ -268,9 +268,9 @@ class RealEnv:
         self.ik = ik if ik is not None else GlobalIK()
         self.dynamics = dynamics if dynamics is not None else dm.dynamics(dm.urdf_bodies())
         self.scene = _Scene(int(num_slots))
-        self._sim_camera, self._sim_pose = camera_model.sim_overhead()
+        self._sim_camera, self._sim_pose = camera_model.sim_overhead(rig.overhead_back_m)
         self.context_camera = np.array(
-            [[*cameras.OVERHEAD_CAM_POS, *rpy_from_quat(cameras.OVERHEAD_CAM_ROT)]],
+            [[*self._sim_pose.pos, *rpy_from_quat(cameras.OVERHEAD_CAM_ROT)]],
             dtype=np.float32,
         )
         self.context_box = np.zeros((1, 3), dtype=np.float32)

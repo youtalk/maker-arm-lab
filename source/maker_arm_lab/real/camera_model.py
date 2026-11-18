@@ -3,8 +3,9 @@
 
 Conventions. A camera pose is world from camera in the ROS optical frame (x right, y down,
 z forward), as ``core.cameras.OVERHEAD_CAM_ROT`` is. Pixel coordinates are continuous with the
-origin at the top-left corner of the image, the ARKit and Conduit convention and
-``core.overlay.project_point``'s: the centre of pixel (0, 0) is (0.5, 0.5).
+origin at the top-left corner of the image, ``core.overlay.project_point``'s and MuJoCo's: the
+centre of pixel (0, 0) is (0.5, 0.5). A K from outside the lab (``CameraInfo``, OpenCV, the rig
+JSON) puts that centre at (0, 0); ``Pinhole.from_ros_k`` is the one entry that converts it.
 
 The policy saw 224x224 frames from the simulator's cameras. A real frame reaches it through a
 ``ViewWarp``: for every output pixel, the source pixel that shows the same thing, sampled
@@ -40,12 +41,17 @@ class Pinhole:
     cy: float
 
     @classmethod
-    def from_k(cls, width: int, height: int, k: Sequence[float]) -> Pinhole:
-        """From a row-major 3x3 ``k`` (``sensor_msgs/CameraInfo.k``) with zero skew."""
+    def from_ros_k(cls, width: int, height: int, k: Sequence[float]) -> Pinhole:
+        """From a row-major 3x3 zero-skew ``k`` in the ROS and OpenCV convention
+        (``sensor_msgs/CameraInfo.k``): the principal point moves half a pixel."""
         k = [float(v) for v in k]
         if len(k) != 9 or k[1] != 0.0 or k[3] != 0.0 or k[6:] != [0.0, 0.0, 1.0]:
             raise ValueError(f"not a zero-skew pinhole K: {k}")
-        return cls(int(width), int(height), k[0], k[4], k[2], k[5])
+        return cls(int(width), int(height), k[0], k[4], k[2] + 0.5, k[5] + 0.5)
+
+    def ros_k(self) -> tuple[float, ...]:
+        """The inverse of ``from_ros_k``: a row-major 3x3 K in the ROS convention."""
+        return (self.fx, 0.0, self.cx - 0.5, 0.0, self.fy, self.cy - 0.5, 0.0, 0.0, 1.0)
 
     @classmethod
     def sim(cls, fovy_deg: float, size: int = SIM_SIZE) -> Pinhole:
@@ -127,9 +133,12 @@ def project(camera: Pinhole, pose: Pose, point) -> tuple[float, float] | None:
     return (camera.cx + camera.fx * x / z, camera.cy + camera.fy * y / z)
 
 
-def sim_overhead() -> tuple[Pinhole, Pose]:
-    """The simulator's nominal overhead camera: the view a warped real frame emulates."""
-    pose = Pose.from_pos_quat(cameras.OVERHEAD_CAM_POS, cameras.OVERHEAD_CAM_ROT)
+def sim_overhead(back_m: float = 0.0) -> tuple[Pinhole, Pose]:
+    """The simulator's nominal overhead camera, its x ``back_m`` further back
+    (``cameras.OVERHEAD_B2_BACK_M`` is the release lean's): the view a warped real frame
+    emulates."""
+    pos = (cameras.OVERHEAD_CAM_POS[0] - back_m, *cameras.OVERHEAD_CAM_POS[1:])
+    pose = Pose.from_pos_quat(pos, cameras.OVERHEAD_CAM_ROT)
     return Pinhole.sim(cameras.OVERHEAD_FOV_DEG), pose
 
 
@@ -230,9 +239,12 @@ class ViewWarp:
         return corners, fx, 1.0 - fx, fy, 1.0 - fy, ~valid
 
 
-def overhead_warp(camera: Pinhole, pose: Pose, plane_z: float = 0.0) -> ViewWarp:
-    """The real overhead frame to the simulator's nominal overhead view, on the desk plane."""
-    sim, sim_pose = sim_overhead()
+def overhead_warp(
+    camera: Pinhole, pose: Pose, plane_z: float = 0.0, back_m: float = 0.0
+) -> ViewWarp:
+    """The real overhead frame to the simulator's nominal overhead view (moved back by
+    ``back_m``), on the desk plane."""
+    sim, sim_pose = sim_overhead(back_m)
     h = plane_homography(camera, pose, sim, sim_pose, plane_z)
     return ViewWarp(h, (camera.width, camera.height))
 

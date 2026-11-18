@@ -7,7 +7,7 @@ import random
 import numpy as np
 import pytest
 
-from maker_arm_lab.core import overlay
+from maker_arm_lab.core import cameras, overlay
 from maker_arm_lab.core.cameras import WRIST_FOV_DEG
 from maker_arm_lab.real.camera_model import (
     Pinhole,
@@ -44,11 +44,22 @@ def _real_camera(roll_deg=90.0, f=REAL_F):
     return Pinhole(640, 480, f, f, 320.0, 240.0), Pose(sim_pose.rot @ _rz(roll_deg), sim_pose.pos)
 
 
-def test_from_k_reads_a_camera_info_k_and_refuses_skew():
-    cam = Pinhole.from_k(640, 480, (500.0, 0.0, 320.0, 0.0, 510.0, 240.0, 0.0, 0.0, 1.0))
-    assert (cam.fx, cam.fy, cam.cx, cam.cy) == (500.0, 510.0, 320.0, 240.0)
+def test_from_ros_k_reads_a_camera_info_k_and_refuses_skew():
+    cam = Pinhole.from_ros_k(640, 480, (500.0, 0.0, 320.0, 0.0, 510.0, 240.0, 0.0, 0.0, 1.0))
+    assert (cam.fx, cam.fy) == (500.0, 510.0)
     with pytest.raises(ValueError):
-        Pinhole.from_k(640, 480, (500.0, 1.0, 320.0, 0.0, 510.0, 240.0, 0.0, 0.0, 1.0))
+        Pinhole.from_ros_k(640, 480, (500.0, 1.0, 320.0, 0.0, 510.0, 240.0, 0.0, 0.0, 1.0))
+
+
+def test_from_ros_k_moves_the_principal_point_half_a_pixel():
+    cam = Pinhole.from_ros_k(1920, 1440, (1326.0, 0, 959.5, 0, 1326.0, 719.5, 0, 0, 1))
+    assert (cam.cx, cam.cy) == (960.0, 720.0)
+    assert cam.ros_k() == (1326.0, 0.0, 959.5, 0.0, 1326.0, 719.5, 0.0, 0.0, 1.0)
+
+
+def test_the_target_view_moves_back_by_the_b2_shift():
+    _, pose = sim_overhead(cameras.OVERHEAD_B2_BACK_M)
+    assert pose.pos[0] == pytest.approx(cameras.OVERHEAD_CAM_POS[0] - 0.139)
 
 
 def test_the_sim_pinhole_has_the_mujoco_fovy():
@@ -257,3 +268,33 @@ def test_the_warp_of_a_wider_4_3_render_matches_the_native_224_view():
     # One camera centre, so the homography is exact at every depth; what is left is resampling.
     # If this fails, save both images and look before touching the bound.
     assert np.abs(got.astype(int) - want.astype(int)).mean() < 8.0
+
+
+@pytest.mark.skipif(not _can_render(), reason="no MuJoCo GL context on this host")
+def test_a_desk_point_renders_where_the_ros_k_projects_it():
+    import mujoco
+
+    w, h, f = 480, 360, 331.5
+    centre = (0.25, 0.05, 0.004)
+    pos = (0.301, 0.0, 0.80)
+    rot = quat_matrix(cameras.OVERHEAD_CAM_ROT) @ np.diag([1.0, -1.0, -1.0])
+    xml = f"""<mujoco><visual><global offwidth="{w}" offheight="{h}"/></visual><worldbody>
+<light pos="0 0 2" dir="0 0 -1"/>
+<geom type="plane" size="1 1 0.1" rgba="0.5 0.5 0.5 1"/>
+<geom type="sphere" size="0.004" pos="{centre[0]} {centre[1]} {centre[2]}" rgba="1 0 0 1"/>
+<camera name="c" pos="{pos[0]} {pos[1]} {pos[2]}" mode="fixed" fovy="{math.degrees(2 * math.atan(180 / f))}"
+ xyaxes="{" ".join(f"{v:.9f}" for v in (*rot[:, 0], *rot[:, 1]))}"/>
+</worldbody></mujoco>"""
+    model = mujoco.MjModel.from_xml_string(xml)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    renderer = mujoco.Renderer(model, h, w)
+    renderer.update_scene(data, camera="c")
+    img = renderer.render().astype(float)
+    renderer.close()
+    red = np.clip(img[..., 0] - np.maximum(img[..., 1], img[..., 2]), 0.0, None)
+    ys, xs = np.mgrid[0:h, 0:w]
+    got = ((xs + 0.5) * red).sum() / red.sum(), ((ys + 0.5) * red).sum() / red.sum()
+    cam = Pinhole.from_ros_k(w, h, (f, 0, 239.5, 0, f, 179.5, 0, 0, 1))
+    want = project(cam, Pose(quat_matrix(cameras.OVERHEAD_CAM_ROT), np.array(pos)), centre)
+    assert got == pytest.approx(want, abs=0.2)

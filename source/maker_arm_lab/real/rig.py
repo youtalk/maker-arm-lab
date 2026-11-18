@@ -50,6 +50,9 @@ class RigConfig:
     overhead_k: tuple[float, ...] | None = None
     """None: Conduit's ``camera/wide/camera_info`` gives it (P6 measures it)."""
     overhead_size: tuple[int, int] | None = None
+    overhead_back_m: float = cameras.OVERHEAD_B2_BACK_M
+    """The target view's shift back from the nominal camera, m: the release lean's B2 view the
+    policy trained on. 0.0 is the MS7d camera."""
     wrist_k: tuple[float, ...] | None = None
     """None: the wrist source already serves the simulated wrist view (the twin, wave 2)."""
     wrist_size: tuple[int, int] | None = None

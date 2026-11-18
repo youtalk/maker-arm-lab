@@ -131,9 +131,11 @@ def open_sources(rig, namespace: str, closers: list):
     from maker_arm_lab.real.ros import ConduitSubscriber
     from maker_arm_lab.real.sources import ConduitOverhead, UvcWrist
 
-    camera = None if rig.overhead_k is None else Pinhole.from_k(*rig.overhead_size, rig.overhead_k)
+    camera = (
+        None if rig.overhead_k is None else Pinhole.from_ros_k(*rig.overhead_size, rig.overhead_k)
+    )
     pose = Pose.from_pos_quat(rig.overhead_pos, rig.overhead_quat)
-    overhead = ConduitOverhead(pose, camera, rig.desk_z)
+    overhead = ConduitOverhead(pose, camera, rig.desk_z, rig.overhead_back_m)
     subscriber = ConduitSubscriber(
         namespace,
         on_jpeg=overhead.on_jpeg,
@@ -146,7 +148,7 @@ def open_sources(rig, namespace: str, closers: list):
     if rig.wrist_k is None:
         wrist_camera, warp = Pinhole.sim(WRIST_FOV_DEG), None
     else:
-        wrist_camera = Pinhole.from_k(*rig.wrist_size, rig.wrist_k)
+        wrist_camera = Pinhole.from_ros_k(*rig.wrist_size, rig.wrist_k)
         warp = wrist_warp(wrist_camera, quat_matrix(rig.wrist_rot).T)
     wrist = UvcWrist(rig.wrist_device, wrist_camera, warp).start()
     closers.append(wrist.close)
