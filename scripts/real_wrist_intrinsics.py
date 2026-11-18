@@ -253,9 +253,6 @@ def save_views(save_dir, rgbs, corners, calib=None):
 
 
 def _run(args) -> tuple[str, int]:
-    import cv2
-
-    from maker_arm_lab.real import ros
     from maker_arm_lab.real.camera_model import Pinhole, quat_matrix, wrist_warp
     from maker_arm_lab.real.rig import RigConfig
     from maker_arm_lab.real.sources import WristFrames
@@ -281,6 +278,10 @@ def _run(args) -> tuple[str, int]:
     if save_dir.exists() or not save_dir.parent.is_dir():
         detail = f"{save_dir} exists" if save_dir.exists() else f"{save_dir.parent} is not a folder"
         return "WRIST_K_FAIL " + json.dumps({"reason": "save_dir", "detail": detail}), 1
+    import cv2
+
+    from maker_arm_lab.real import ros
+
     rig = RigConfig.from_json(Path(args.rig).expanduser())
     # The source reads only the size of this placeholder camera.
     src = WristFrames(
