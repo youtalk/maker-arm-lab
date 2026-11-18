@@ -10,12 +10,15 @@ Run it with ROS 2 Jazzy sourced, ``RMW_IMPLEMENTATION=rmw_zenoh_cpp`` and the
 perception worker (``perception_stack/worker.py``) must already run.
 
 The script subscribes to the iPhone's Conduit stream, warps each new frame, asks the worker for
-the boxes and the parts, and matches them against the truth layout (``real.knob_read``). With
-``--screen`` (from ``real_screen_pose.py``) the truth is the layout moved by the screen's
-measured pose. ``--out`` gets the per-frame detections, the knob table, ``k_drift``,
-``rebuilds``, the warp's ``coverage`` and the p50 and p95 of arrival minus capture stamp (these
-include the offset between the iPhone's clock and the host's). A frame counts only when its
-bundle carries depth, which the worker needs for the parts. With
+the boxes and the parts, and matches them against the truth layout (``real.knob_read``). The
+rig must come from ``real_calibrate_overhead.py`` (it sets ``overhead_size``) and the stream
+must have that size: a turned phone fails. With ``--screen`` (from ``real_screen_pose.py``)
+the truth is the layout moved by the screen's measured pose. ``--out`` gets the per-frame
+detections, the knob table, ``k_drift``, ``rebuilds``, ``k_first`` and ``k_last`` (the K, ROS
+convention, that the warp used at the first and the last frame), the rig's ``tray_floor_z``
+(the floor the worker should have), the warp's ``coverage`` and the p50 and p95 of arrival
+minus capture stamp (these include the offset between the iPhone's clock and the host's). A
+frame counts only when its bundle carries depth, which the worker needs for the parts. With
 ``--save_dir`` it also writes the warped 224 view (``view_NNN.png``) and the raw JPEG
 (``raw_NNN.jpg``) of frame 0 and of every fifth frame. Prints exactly one
 ``PERCEPTION_READ_OK {table}`` or ``PERCEPTION_READ_FAIL {reason}`` line and leaves through
@@ -61,9 +64,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def box_period(rig) -> float:
-    """A quarter turn for a square box interior, a half turn otherwise."""
+    """A quarter turn for a square box interior (sides within 5 mm, as a caliper reads a square
+    box), a half turn otherwise."""
     x, y, _ = rig.box_interior
-    return math.pi / 2 if math.isclose(x, y, rel_tol=1e-3) else math.pi
+    return math.pi / 2 if abs(x - y) < 0.005 else math.pi
 
 
 def truth_layout(rig, layout, screen_path):
@@ -95,14 +99,16 @@ def run_read(
     clock=time.monotonic,
     sleep=time.sleep,
     period: float = math.pi / 2,
+    size: tuple[int, int] | None = None,
 ) -> dict:
     """Wait for ``frames`` JPEGs with distinct stamps, ask ``client`` for the boxes and the
-    parts of each, and return the payload. Raises ``TimeoutError`` when they do not arrive."""
+    parts of each, and return the payload. Raises ``TimeoutError`` when they do not arrive and
+    ``ValueError`` when the camera is not ``size`` (the calibration's)."""
     from maker_arm_lab.real.knob_read import FrameResult, knob_table
 
     end = clock() + timeout_s
     seen: set = set()
-    results, rows, lags = [], [], []
+    results, rows, lags, ks = [], [], [], []
     while len(rows) < frames:
         latest = overhead.frames.get()
         key = latest and (latest.arrival_mono_ns if latest.stamp_ns is None else latest.stamp_ns)
@@ -118,6 +124,13 @@ def run_read(
                 )
             sleep(0.01)
             continue
+        camera = overhead.camera
+        if size is not None and (camera.width, camera.height) != tuple(size):
+            raise ValueError(
+                f"the stream is {camera.width}x{camera.height}, the rig was calibrated at "
+                f"{size[0]}x{size[1]}: did the phone turn?"
+            )
+        ks.append(list(camera.ros_k()))
         seen.add(key)
         if save_dir is not None and len(rows) % SAVE_EVERY == 0:
             _save(Path(save_dir), len(rows), latest)
@@ -137,6 +150,8 @@ def run_read(
         "box_period": period,
         "k_drift": overhead.k_drift,
         "rebuilds": overhead.rebuilds,
+        "k_first": ks[0],
+        "k_last": ks[-1],
         "coverage": getattr(warp, "coverage", math.nan),
         "latency_ms": {"p50": float(p50), "p95": float(p95)},
     }
@@ -157,8 +172,8 @@ def _run(args) -> tuple[str, int]:
     rig = RigConfig.from_json(Path(args.rig).expanduser())
     layout = truth_layout(rig, Layout.from_json(Path(args.layout).expanduser()), args.screen)
     camera = None
-    if rig.overhead_k is not None and rig.overhead_size is None:
-        detail = "overhead_k is set but overhead_size is not"
+    if rig.overhead_size is None:
+        detail = "the rig has no overhead_size: calibrate first (real_calibrate_overhead.py)"
         return "PERCEPTION_READ_FAIL " + json.dumps({"reason": "rig", "detail": detail}), 1
     if rig.overhead_k is not None:
         camera = Pinhole.from_ros_k(*rig.overhead_size, rig.overhead_k)
@@ -187,14 +202,16 @@ def _run(args) -> tuple[str, int]:
             Path(args.save_dir).expanduser() if args.save_dir else None,
             args.timeout_s,
             period=box_period(rig),
+            size=rig.overhead_size,
         )
-    except TimeoutError as err:
+    except (TimeoutError, ValueError) as err:
         return "PERCEPTION_READ_FAIL " + json.dumps(
             {"reason": str(err), "error": overhead.error}
         ), 1
     finally:
         sub.close()
         client.close()
+    payload["tray_floor_z"] = rig.tray_floor_z
     out.write_text(json.dumps(payload, indent=2))
     return "PERCEPTION_READ_OK " + json.dumps(payload["table"]), 0
 

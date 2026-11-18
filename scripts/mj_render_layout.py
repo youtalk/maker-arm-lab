@@ -80,6 +80,9 @@ def main(argv=None) -> int:
         canvas.save(args.out)
         print("RENDER_OK " + json.dumps({"out": args.out, "parts": len(parts)}), flush=True)
         return 0
+    except KeyboardInterrupt:
+        print("RENDER_FAIL " + json.dumps({"reason": "interrupted"}), flush=True)
+        return 1
     except Exception as exc:  # noqa: BLE001 -- every failure must still print a token
         print("RENDER_FAIL " + json.dumps({"reason": f"{type(exc).__name__}: {exc}"}), flush=True)
         traceback.print_exc()

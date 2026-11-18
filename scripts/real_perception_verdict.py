@@ -5,12 +5,15 @@
 
 Each READ.json is the ``--out`` of ``real_perception_read.py``. The frames of every sparse and
 cluster read pool into one knob table (``real.knob_read``), which is judged against the
-limits. ``--check_rms_mm`` is the calibration error of the overhead camera: the table keeps the
-measured ``pos_bias_mm`` and adds ``pos_bias_checked_mm`` (each axis's |bias| plus it), which
-meets the ``pos_bias_mm`` limit. A row with no sample fails. A heap read
-has no truth positions: its detection and poured counts go under ``report_only``. Prints
-exactly one ``PERCEPTION_PASS {table, rows}`` or ``PERCEPTION_FAIL {table, rows}`` line (a
-usage or input error prints ``PERCEPTION_FAIL {reason}``) and leaves through ``os._exit``.
+limits; the rule needs at least one read of each kind. ``--check_rms_mm`` is the calibration
+error of the overhead camera: the table keeps the measured ``pos_bias_mm`` and adds
+``pos_bias_checked_mm`` (each axis's |bias| plus it), which meets the ``pos_bias_mm`` limit. A
+row with no sample fails. A heap read has no truth positions: its detection and poured counts
+go under ``report_only``. So does an
+empty layout (no parts, the empty-screen read): its ``extra`` detections. ``reads`` lists the
+files of each kind. Prints exactly one ``PERCEPTION_PASS {table, rows, report_only, reads}`` or
+``PERCEPTION_FAIL {table, rows, report_only, reads}`` line (a missing kind, a usage or an input
+error prints ``PERCEPTION_FAIL {reason}``) and leaves through ``os._exit``.
 """
 
 import argparse
@@ -43,6 +46,7 @@ def _run(args) -> tuple[str, int]:
     from maker_arm_lab.real.layouts import Layout, TruthBox, TruthPart
 
     frames, report_only, period = [], {}, math.pi / 2
+    reads = {"sparse": [], "cluster": [], "heap": [], "empty": []}
     for path in args.reads:
         read = json.loads(Path(path).expanduser().read_text())
         d = read["layout"]
@@ -54,17 +58,25 @@ def _run(args) -> tuple[str, int]:
             d.get("frame", "nominal"),
         )
         rows = [FrameResult(lay, f["detections"], f["boxes"]) for f in read["frames"]]
-        if lay.kind == "heap":
+        kind = lay.kind if lay.parts else "empty"
+        reads[kind].append(path)
+        if kind == "heap":
             report_only[Path(path).stem] = knob_table(rows)["counts"]["heap"]
+        elif kind == "empty":
+            report_only[Path(path).stem] = {"extra": knob_table(rows)["counts"]["extra"]}
         else:
             frames += rows
             period = read["box_period"]
+    missing = [k for k in ("sparse", "cluster") if not reads[k]]
+    if missing:
+        reason = f"no {' and no '.join(missing)} read: the rule pools sparse and cluster"
+        return "PERCEPTION_FAIL " + json.dumps({"reason": reason, "reads": reads}), 1
     table = knob_table(frames, period)
     checked = [abs(b) + args.check_rms_mm for b in table["pos_bias_mm"]]
     table["pos_bias_checked_mm"] = checked
     ok, over = verdict({**table, "pos_bias_mm": checked})
     over = [r.replace("pos_bias_mm", "pos_bias_checked_mm") for r in over]
-    payload = {"table": table, "rows": over, "report_only": report_only}
+    payload = {"table": table, "rows": over, "report_only": report_only, "reads": reads}
     return ("PERCEPTION_PASS " if ok else "PERCEPTION_FAIL ") + json.dumps(payload), 0 if ok else 1
 
 
@@ -72,6 +84,8 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     try:
         token, code = _run(args)
+    except KeyboardInterrupt:
+        token, code = "PERCEPTION_FAIL " + json.dumps({"reason": "interrupted"}), 1
     except Exception as err:  # noqa: BLE001 -- any uncaught error must still print a token
         detail = f"{err}\n{traceback.format_exc()}"
         token = "PERCEPTION_FAIL " + json.dumps({"reason": "exception", "detail": detail})

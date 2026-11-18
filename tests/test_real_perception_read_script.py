@@ -7,6 +7,7 @@ import math
 import os
 import subprocess
 import sys
+import types
 
 import numpy as np
 import pytest
@@ -14,7 +15,7 @@ from PIL import Image
 
 from helpers import ROOT
 from maker_arm_lab.core import parts as parts_mod
-from maker_arm_lab.real.camera_model import Pose
+from maker_arm_lab.real.camera_model import Pose, sim_overhead
 from maker_arm_lab.real.layouts import Layout, TruthBox, TruthPart, nominal_screen_pose
 from maker_arm_lab.real.perceive import WorkerClient
 from maker_arm_lab.real.rig import RigConfig
@@ -185,35 +186,141 @@ def _verdict(*paths, rms="0"):
     return code, tokens[0].split(" ", 1)[0], json.loads(tokens[0].split(" ", 1)[1])
 
 
-def test_the_verdict_pools_sparse_and_cluster_and_reports_the_heap(tmp_path):
+def _pair(tmp_path, **kw):
+    """A sparse and a cluster read of the same detections: the least the verdict pools."""
+    return (
+        _write(tmp_path, "s0", layout=_layout("sparse"), **kw),
+        _write(tmp_path, "c0", layout=_layout("cluster"), **kw),
+    )
+
+
+def test_the_verdict_pools_sparse_and_cluster_and_reports_the_heap_and_the_empty_screen(
+    tmp_path,
+):
     heap = Layout(
         "h0", "heap", [TruthPart(NAME, "wide", math.nan, math.nan, math.nan, 0.0)] * 2, []
     )
     paths = [
-        _write(tmp_path, "s0", layout=_layout("sparse")),
-        _write(tmp_path, "c0", layout=_layout("cluster")),
+        *_pair(tmp_path),
         _write(tmp_path, "h0", layout=heap),
+        _write(tmp_path, "e0", layout=Layout("empty", "sparse", [], [])),
     ]
     code, token, out = _verdict(*paths)
     assert token == "PERCEPTION_PASS" and code == 0, out
-    assert out["table"]["counts"]["frames"] == 6
+    assert out["table"]["counts"]["frames"] == 6  # the empty screen is not pooled
     assert out["report_only"]["h0"] == {"detected": 3, "poured": 6}
+    assert out["report_only"]["e0"] == {"extra": 3}  # one false part in each of 3 frames
+    want = {"sparse": [paths[0]], "cluster": [paths[1]], "heap": [paths[2]], "empty": [paths[3]]}
+    assert out["reads"] == {k: [str(p) for p in v] for k, v in want.items()}
+
+
+@pytest.mark.parametrize("kind", ["sparse", "cluster"])
+def test_the_verdict_needs_a_read_of_each_pooled_kind(tmp_path, kind):
+    code, token, out = _verdict(_write(tmp_path, "r0", layout=_layout(kind)))
+    other = "cluster" if kind == "sparse" else "sparse"
+    assert token == "PERCEPTION_FAIL" and code == 1 and other in out["reason"]
+    assert out["reads"][kind] and not out["reads"][other]
 
 
 def test_the_verdict_adds_the_calibration_error_to_the_bias_rows(tmp_path):
-    path = _write(tmp_path, "s0", x=0.2055)  # 5.5 mm bias in x against a 6.5 mm limit
-    assert _verdict(path, rms="0")[1] == "PERCEPTION_PASS"
-    code, token, out = _verdict(path, rms="2")
+    paths = _pair(tmp_path, x=0.2055)  # 5.5 mm bias in x against a 6.5 mm limit
+    assert _verdict(*paths, rms="0")[1] == "PERCEPTION_PASS"
+    code, token, out = _verdict(*paths, rms="2")
     assert token == "PERCEPTION_FAIL" and code == 1 and out["rows"] == ["pos_bias_checked_mm.x"]
     assert out["table"]["pos_bias_mm"][0] == pytest.approx(5.5, abs=0.1)
     assert out["table"]["pos_bias_checked_mm"][0] == pytest.approx(7.5, abs=0.1)
 
 
 def test_the_verdict_fails_on_one_row_over_its_limit(tmp_path):
-    _, token, out = _verdict(_write(tmp_path, "s0", x=0.30))
+    _, token, out = _verdict(*_pair(tmp_path, x=0.30))
     assert token == "PERCEPTION_FAIL" and "miss" in out["rows"]
 
 
 def test_a_read_that_measured_nothing_fails(tmp_path):
-    _, token, out = _verdict(_write(tmp_path, "s0", detect=False))
+    _, token, out = _verdict(*_pair(tmp_path, detect=False))
     assert token == "PERCEPTION_FAIL" and "pos_bias_checked_mm.x" in out["rows"]
+
+
+def test_ctrl_c_ends_the_verdict_with_its_fail_token(tmp_path, monkeypatch, capsys):
+    import maker_arm_lab.real.layouts as layouts_mod
+
+    def interrupt(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(layouts_mod, "Layout", interrupt)
+    path = tmp_path / "r.json"
+    path.write_text(
+        json.dumps({"layout": {"name": "s", "kind": "sparse", "parts": [], "boxes": []}})
+    )
+    code = _load(VERDICT).main([str(path), "--check_rms_mm", "0"])
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("PERCEPTION_")]
+    assert code == 1 and lines == ["PERCEPTION_FAIL " + json.dumps({"reason": "interrupted"})]
+
+
+def test_a_near_square_box_folds_its_yaw_by_a_quarter_turn():
+    assert read.box_period(RigConfig(box_interior=(0.0746, 0.0753, 0.075))) == math.pi / 2
+    assert read.box_period(RigConfig(box_interior=(0.11, 0.07, 0.04))) == math.pi
+
+
+def _read_run(tmp_path, monkeypatch, rig):
+    """``_run`` against a fake 224 x 224 stream of three frames and a fake worker; no ROS."""
+    import maker_arm_lab.real
+    from maker_arm_lab.real import sources
+
+    class Sub:
+        error = None
+
+        def __init__(self, **kw):
+            pass
+
+        def start(self):
+            return self
+
+        def close(self):
+            pass
+
+    fake = types.ModuleType("maker_arm_lab.real.ros")
+    fake.ConduitSubscriber = Sub
+    monkeypatch.setitem(sys.modules, "maker_arm_lab.real.ros", fake)
+    monkeypatch.setattr(maker_arm_lab.real, "ros", fake, raising=False)
+
+    def overhead(*a, **k):
+        o = StreamOverhead([1, 2, 3])
+        o.on_jpeg = o.on_info = o.on_depth = o.on_depth_info = o.on_error = None  # Sub ignores
+        return o
+
+    monkeypatch.setattr(sources, "ConduitOverhead", overhead)
+    (tmp_path / "rig.json").write_text(rig.to_json())
+    (tmp_path / "lay.json").write_text(_layout().to_json())
+    worker = FakeWorker(boxes=[[0.1, 0.2, 0.0]], detections=[_detection()])
+    try:
+        args = read.build_parser().parse_args(
+            ["--rig", str(tmp_path / "rig.json"), "--layout", str(tmp_path / "lay.json"),
+             "--worker", worker.endpoint, "--frames", "3", "--timeout_s", "5",
+             "--out", str(tmp_path / "out.json")]
+        )  # fmt: skip
+        return read._run(args)
+    finally:
+        worker.close()
+
+
+def test_a_rig_without_an_overhead_size_fails_before_the_session(tmp_path, monkeypatch):
+    token, code = _read_run(tmp_path, monkeypatch, RigConfig())
+    assert code == 1 and token.startswith("PERCEPTION_READ_FAIL ") and "calibrate first" in token
+    assert not (tmp_path / "out.json").exists()
+
+
+def test_a_stream_of_another_size_than_the_calibration_fails_the_read(tmp_path, monkeypatch):
+    token, code = _read_run(tmp_path, monkeypatch, RigConfig(overhead_size=(1920, 1440)))
+    assert code == 1 and token.startswith("PERCEPTION_READ_FAIL ")
+    assert "224x224" in token and "1920x1440" in token
+    assert not (tmp_path / "out.json").exists()
+
+
+def test_the_read_records_the_k_and_the_floor_it_read_with(tmp_path, monkeypatch):
+    rig = RigConfig(overhead_size=(224, 224), tray_floor_z=0.0061)
+    token, code = _read_run(tmp_path, monkeypatch, rig)
+    assert code == 0 and token.startswith("PERCEPTION_READ_OK "), token
+    out = json.loads((tmp_path / "out.json").read_text())
+    k = list(sim_overhead()[0].ros_k())
+    assert out["k_first"] == k and out["k_last"] == k and out["tray_floor_z"] == 0.0061

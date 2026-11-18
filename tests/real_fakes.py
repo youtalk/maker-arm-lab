@@ -200,6 +200,7 @@ class StreamOverhead(FakeOverhead):
     def __init__(self, stamps, coverage=0.9, age_s=0.0, depth=True):
         super().__init__(age_s)
         self.depth, self.depth_camera, self.dropped = depth, None, 0
+        self.camera = sim_overhead()[0]  # the camera its bundles report
         self.frames = _Stream(self, stamps)
         self.warp = types.SimpleNamespace(coverage=coverage)
         self.rebuilds, self.k_drift = 0, 0.0

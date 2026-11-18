@@ -67,3 +67,18 @@ def test_the_render_script_fails_with_a_token_on_a_missing_layout(tmp_path):
     tokens = [ln for ln in r.stdout.splitlines() if ln.startswith(("RENDER_OK", "RENDER_FAIL"))]
     assert r.returncode != 0 and len(tokens) == 1 and tokens[0].startswith("RENDER_FAIL")
     json.loads(tokens[0].split(" ", 1)[1])
+
+
+def test_ctrl_c_ends_the_render_script_with_its_fail_token(tmp_path, monkeypatch, capsys):
+    from helpers import load_script
+    from maker_arm_lab.real.rig import RigConfig
+
+    def interrupt(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(RigConfig, "from_json", interrupt)
+    code = load_script(SCRIPT).main(
+        ["--layout", "l", "--rig", "r", "--real", "v", "--out", str(tmp_path / "o.png")]
+    )
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("RENDER_")]
+    assert code == 1 and lines == ["RENDER_FAIL " + json.dumps({"reason": "interrupted"})]
