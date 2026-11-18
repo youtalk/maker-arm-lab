@@ -77,6 +77,17 @@ def collect(src, subscriber, cv2, board, frames, gap_s, timeout_s):
     return kept
 
 
+def calibrate_views(views, board, square_m, size):
+    """(K row-major in the ROS and OpenCV convention, the five distortion coefficients, rms_px)
+    from the board's corners in each view, ``board`` inner corners wide by high."""
+    import cv2
+
+    obj = np.zeros((board[0] * board[1], 3), np.float32)
+    obj[:, :2] = np.mgrid[0 : board[0], 0 : board[1]].T.reshape(-1, 2) * square_m
+    rms, k, dist, _, _ = cv2.calibrateCamera([obj] * len(views), views, size, None, None)
+    return tuple(float(v) for v in k.ravel()), tuple(float(v) for v in dist.ravel()[:5]), rms
+
+
 def _run(args) -> tuple[str, int]:
     import cv2
 
@@ -109,14 +120,9 @@ def _run(args) -> tuple[str, int]:
         if causes:
             reason += "; " + "; ".join(causes)
         return "WRIST_K_FAIL " + json.dumps({"reason": reason}), 1
-    obj = np.zeros((board[0] * board[1], 3), np.float32)
-    obj[:, :2] = np.mgrid[0 : board[0], 0 : board[1]].T.reshape(-1, 2) * args.square
-    rms, k, dist, _, _ = cv2.calibrateCamera([obj] * len(kept), kept, (w, h), None, None)
-    cam = Pinhole.from_ros_k(w, h, k.ravel())
-    dist = tuple(float(v) for v in dist.ravel())
-    rig = dataclasses.replace(
-        rig, wrist_k=tuple(float(v) for v in k.ravel()), wrist_size=(w, h), wrist_dist=dist
-    )
+    k, dist, rms = calibrate_views(kept, board, args.square, (w, h))
+    cam = Pinhole.from_ros_k(w, h, k)
+    rig = dataclasses.replace(rig, wrist_k=k, wrist_size=(w, h), wrist_dist=dist)
     with open(out_path, "x") as f:
         f.write(rig.to_json())
     result = {"rms_px": rms, "fov_deg": cam.fov_deg()[0], "frames": len(kept)}

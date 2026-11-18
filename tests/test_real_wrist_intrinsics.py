@@ -9,7 +9,7 @@ import sys
 import numpy as np
 import pytest
 
-from helpers import ROOT
+from helpers import ROOT, load_script
 from maker_arm_lab.real.camera_model import Pinhole
 from maker_arm_lab.real.layouts import IPAD_AIR_11, checker_png
 from maker_arm_lab.real.rig import RigConfig
@@ -130,3 +130,44 @@ def test_the_intrinsics_script_has_no_device_argument():
 def test_the_intrinsics_usage_error_prints_one_fail_line():
     code, tokens = _run([])
     assert code == 2 and len(tokens) == 1 and tokens[0].startswith("WRIST_K_FAIL")
+
+
+def _board_object_points():
+    obj = np.zeros((54, 3))
+    obj[:, :2] = np.mgrid[0:9, 0:6].T.reshape(-1, 2) * 0.02001
+    return obj - obj.mean(axis=0)
+
+
+def test_calibrate_views_recovers_a_known_camera():
+    cv2 = pytest.importorskip("cv2")
+    script = load_script(SCRIPT)
+    k, dist = np.array(K).reshape(3, 3), np.array((-0.2, 0.05, 0, 0, 0))
+    rng, obj, views = np.random.default_rng(7), _board_object_points(), []
+    while len(views) < 14:
+        rvec = np.radians(rng.uniform(-30, 30, 3))
+        tvec = np.array(
+            [rng.uniform(-0.03, 0.03), rng.uniform(-0.02, 0.02), rng.uniform(0.15, 0.3)]
+        )
+        pts = cv2.projectPoints(obj, rvec, tvec, k, dist)[0].reshape(-1, 2)
+        if pts.min() >= 5 and pts[:, 0].max() < 635 and pts[:, 1].max() < 475:
+            views.append((pts + rng.normal(0, 0.1, pts.shape)).astype(np.float32).reshape(-1, 1, 2))
+    got_k, got_dist, rms = script.calibrate_views(views, (9, 6), 0.02001, (640, 480))
+    assert len(got_dist) == 5 and rms < 0.3
+    for got, want in zip((got_k[0], got_k[4], got_k[2], got_k[5]), (500, 500, 319.5, 239.5)):
+        assert got == pytest.approx(want, abs=1.0)
+
+
+def test_a_rendered_checker_frame_is_detected():
+    cv2 = pytest.importorskip("cv2")
+    board = np.asarray(checker_png().convert("L"))
+    src = np.float32([[140, 92], [2220, 92], [2220, 1548], [140, 1548]])
+    dst = np.float32([[110, 90], [530, 130], [510, 380], [130, 410]])
+    frame = cv2.warpPerspective(
+        board,
+        cv2.getPerspectiveTransform(src, dst),
+        (640, 480),
+        flags=cv2.INTER_AREA,
+        borderValue=255,
+    )
+    found, corners = cv2.findChessboardCorners(frame, (9, 6))
+    assert found and len(corners) == 54
