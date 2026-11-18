@@ -1,6 +1,7 @@
 """MS5 sensing plan task 11: the wrist camera's undistortion, its rig field, the iPad's
 checkerboard and ``scripts/real_wrist_intrinsics.py``'s one token line."""
 
+import io
 import json
 import os
 import subprocess
@@ -8,9 +9,11 @@ import sys
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from helpers import ROOT, load_script
 from maker_arm_lab.real.camera_model import Pinhole
+from maker_arm_lab.real.frames import Arrival, JpegFrame
 from maker_arm_lab.real.layouts import IPAD_AIR_11, checker_png
 from maker_arm_lab.real.rig import RigConfig
 from maker_arm_lab.real.sources import UvcWrist, WristFrames
@@ -171,3 +174,28 @@ def test_a_rendered_checker_frame_is_detected():
     )
     found, corners = cv2.findChessboardCorners(frame, (9, 6))
     assert found and len(corners) == 54
+
+
+def test_a_wrong_size_stream_ends_in_a_fail_that_names_the_size_and_calibrates_nothing():
+    cv2 = pytest.importorskip("cv2")
+    script = load_script(SCRIPT)
+    w, h = 640, 480
+    src = WristFrames(
+        Pinhole.from_ros_k(w, h, (1, 0, w / 2 - 0.5, 0, 1, h / 2 - 0.5, 0, 0, 1)), None
+    )
+    buf = io.BytesIO()
+    Image.fromarray(np.zeros((240, 320, 3), np.uint8)).save(buf, "JPEG")
+    src.on_jpeg(JpegFrame(Arrival(1, 2, 3), buf.getvalue(), "wrist_camera"))
+
+    class Sub:
+        error, closed = None, 0
+
+        def close(self):
+            self.closed += 1
+
+    sub = Sub()
+    args = script.build_parser().parse_args(
+        ["--rig", "r", "--rig_out", "o", "--frames", "5", "--timeout_s", "0.2"]
+    )
+    kept, reason = script.wait_for_views(src, sub, cv2, (9, 6), args)
+    assert kept == [] and "320x240" in reason and sub.closed == 1

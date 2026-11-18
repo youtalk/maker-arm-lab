@@ -77,6 +77,20 @@ def collect(src, subscriber, cv2, board, frames, gap_s, timeout_s):
     return kept
 
 
+def wait_for_views(src, sub, cv2, board, args):
+    """(kept corner sets, None), or (what was kept, the reason it fell short). Closes ``sub``;
+    the reason quotes the source's and the subscriber's ``error``."""
+    try:
+        kept = collect(src, sub, cv2, board, args.frames, args.gap_s, args.timeout_s)
+    finally:
+        sub.close()
+    if len(kept) >= args.frames:
+        return kept, None
+    reason = f"{len(kept)} of {args.frames} frames with the board before the timeout"
+    causes = [e for e in (src.error, sub.error) if e]
+    return kept, "; ".join([reason, *causes])
+
+
 def calibrate_views(views, board, square_m, size):
     """(K row-major in the ROS and OpenCV convention, the five distortion coefficients, rms_px)
     from the board's corners in each view, ``board`` inner corners wide by high."""
@@ -110,15 +124,8 @@ def _run(args) -> tuple[str, int]:
         Pinhole.from_ros_k(w, h, (1, 0, w / 2 - 0.5, 0, 1, h / 2 - 0.5, 0, 0, 1)), None
     )
     sub = ros.ConduitSubscriber(on_wrist=src.on_jpeg).start()
-    try:
-        kept = collect(src, sub, cv2, board, args.frames, args.gap_s, args.timeout_s)
-        causes = [e for e in (src.error, sub.error) if e]
-    finally:
-        sub.close()
-    if len(kept) < args.frames:
-        reason = f"{len(kept)} of {args.frames} frames with the board before the timeout"
-        if causes:
-            reason += "; " + "; ".join(causes)
+    kept, reason = wait_for_views(src, sub, cv2, board, args)
+    if reason:
         return "WRIST_K_FAIL " + json.dumps({"reason": reason}), 1
     k, dist, rms = calibrate_views(kept, board, args.square, (w, h))
     cam = Pinhole.from_ros_k(w, h, k)
