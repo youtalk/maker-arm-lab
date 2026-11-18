@@ -150,7 +150,7 @@ def open_sources(rig, namespace: str, closers: list):
     else:
         wrist_camera = Pinhole.from_ros_k(*rig.wrist_size, rig.wrist_k)
         warp = wrist_warp(wrist_camera, quat_matrix(rig.wrist_rot).T)
-    wrist = UvcWrist(rig.wrist_device, wrist_camera, warp).start()
+    wrist = UvcWrist(rig.wrist_device, wrist_camera, warp, rig.wrist_dist).start()
     closers.append(wrist.close)
     return overhead, wrist
 

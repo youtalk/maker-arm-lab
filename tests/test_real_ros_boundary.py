@@ -71,6 +71,18 @@ def test_the_topics_are_the_conduit_contract():
     }
 
 
+def test_the_wrist_topic_is_the_wrist_camera_contract():
+    tree = ast.parse(ROS_PY.read_text())
+    values = {
+        node.targets[0].id: ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "WRIST_TOPIC"
+    }
+    assert values == {"WRIST_TOPIC": "/wrist_camera/image_raw/compressed"}
+
+
 def test_every_subscription_goes_through_the_guarded_relay():
     """MS5 final review M3: each callback is ``frames.relay``, which catches, so one bad
     message cannot end the executor's thread."""

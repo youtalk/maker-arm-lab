@@ -13,7 +13,9 @@ frame of the same capture stamp (else the latest) and both cameras; the depth sh
 frame's pose (one ARKit frame, one optical frame). ``UvcWrist`` reads a V4L2 camera with
 OpenCV on its own thread and warps each frame to the simulated wrist view; ``WristFrames``
 checks each frame against the camera first, and a frame of another size (a camera that
-ignored the requested size) is dropped the same way. OpenCV comes from the ``real`` group and
+ignored the requested size) is dropped the same way. ``WristFrames.on_jpeg`` is the entry for
+the ROS wrist topic (a decode error raises, so ``relay`` drops the message). A rig with
+``wrist_dist`` undistorts each frame before the warp. OpenCV comes from the ``real`` group and
 is imported only there.
 """
 
@@ -23,6 +25,7 @@ import io
 import threading
 import time
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -42,7 +45,7 @@ K_REBUILD_PX = 0.5
 @dataclass(frozen=True)
 class Latest:
     view: np.ndarray  # (224, 224, 3) uint8, what the policy reads
-    raw: object  # the camera's own frame: JPEG bytes (overhead) or (H, W, 3) uint8 (wrist)
+    raw: object  # the camera's own frame: JPEG bytes (overhead) or (H, W, 3) uint8 (wrist, undistorted with dist)
     arrival_mono_ns: int
     stamp_ns: int | None  # the capture stamp; None for a camera without one
 
@@ -162,13 +165,33 @@ class ConduitOverhead:
 class WristFrames:
     """The wrist camera's frames: ``camera`` is its raw frame's pinhole; ``warp`` None means
     the camera already serves the simulated 224x224 wrist view. A frame that is not
-    ``camera``'s size, or whose warp raises, is dropped (``dropped``, ``error``)."""
+    ``camera``'s size, or whose warp raises, is dropped (``dropped``, ``error``). With ``dist``
+    (OpenCV's coefficients for ``camera``'s K) each frame is undistorted, to the same K, before
+    the warp; OpenCV is imported only then."""
 
-    def __init__(self, camera: Pinhole, warp: ViewWarp | None):
+    def __init__(self, camera: Pinhole, warp: ViewWarp | None, dist: Sequence[float] | None = None):
         self.camera, self.warp = camera, warp
+        self._maps: tuple[np.ndarray, np.ndarray] | None = None
+        if dist is not None:
+            import cv2
+
+            k = np.array(camera.ros_k()).reshape(3, 3)
+            self._maps = cv2.initUndistortRectifyMap(
+                k,
+                np.asarray(dist, np.float64),
+                None,
+                k,
+                (camera.width, camera.height),
+                cv2.CV_32FC1,
+            )
+            self._cv2 = cv2
         self.frames = LatestFrame()
         self.dropped = 0
         self.error: str | None = None
+
+    def on_jpeg(self, frame: JpegFrame) -> None:
+        """The ROS topic's entry: a decode error raises, so ``relay`` drops the message."""
+        self.on_frame(decode_jpeg(frame.data)[0], frame.at.arrival_mono_ns)
 
     def on_frame(self, rgb: np.ndarray, arrival_mono_ns: int) -> None:
         want = (self.camera.height, self.camera.width, 3)
@@ -180,6 +203,8 @@ class WristFrames:
             )
             return
         try:
+            if self._maps is not None:
+                rgb = self._cv2.remap(rgb, *self._maps, self._cv2.INTER_LINEAR)
             view = rgb if self.warp is None else self.warp.apply(rgb)
         except Exception as err:  # noqa: BLE001 -- the capture thread must keep running
             self.dropped += 1
@@ -191,10 +216,16 @@ class WristFrames:
 class UvcWrist(WristFrames):
     """A V4L2 wrist camera, read with OpenCV on its own thread."""
 
-    def __init__(self, device: str, camera: Pinhole, warp: ViewWarp | None):
+    def __init__(
+        self,
+        device: str,
+        camera: Pinhole,
+        warp: ViewWarp | None,
+        dist: Sequence[float] | None = None,
+    ):
         import cv2
 
-        super().__init__(camera, warp)
+        super().__init__(camera, warp, dist)
         self._cv2 = cv2
         self._cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
         if not self._cap.isOpened():
