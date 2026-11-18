@@ -147,23 +147,92 @@ def _board_object_points():
     return obj - obj.mean(axis=0)
 
 
-def test_calibrate_views_recovers_a_known_camera():
+def _synthetic_views(n, bad_noise=None, seed=7):
+    """n views through K (500, ..., 319.5, 239.5) with 0.1 px noise, plus one 5 px view."""
     cv2 = pytest.importorskip("cv2")
-    script = load_script(SCRIPT)
     k, dist = np.array(K).reshape(3, 3), np.array((-0.2, 0.05, 0, 0, 0))
-    rng, obj, views = np.random.default_rng(7), _board_object_points(), []
-    while len(views) < 14:
+    rng, obj, views = np.random.default_rng(seed), _board_object_points(), []
+    while len(views) < n + (bad_noise is not None):
+        noise = bad_noise if bad_noise is not None and len(views) == n else 0.1
         rvec = np.radians(rng.uniform(-30, 30, 3))
         tvec = np.array(
             [rng.uniform(-0.03, 0.03), rng.uniform(-0.02, 0.02), rng.uniform(0.15, 0.3)]
         )
         pts = cv2.projectPoints(obj, rvec, tvec, k, dist)[0].reshape(-1, 2)
         if pts.min() >= 5 and pts[:, 0].max() < 635 and pts[:, 1].max() < 475:
-            views.append((pts + rng.normal(0, 0.1, pts.shape)).astype(np.float32).reshape(-1, 1, 2))
-    got_k, got_dist, rms = script.calibrate_views(views, (9, 6), 0.02001, (640, 480))
-    assert len(got_dist) == 5 and rms < 0.3
-    for got, want in zip((got_k[0], got_k[4], got_k[2], got_k[5]), (500, 500, 319.5, 239.5)):
+            views.append(
+                (pts + rng.normal(0, noise, pts.shape)).astype(np.float32).reshape(-1, 1, 2)
+            )
+    return views
+
+
+def _assert_recovers(c):
+    for got, want in zip((c.k[0], c.k[4], c.k[2], c.k[5]), (500, 500, 319.5, 239.5)):
         assert got == pytest.approx(want, abs=1.0)
+
+
+def test_calibrate_views_recovers_a_known_camera():
+    script = load_script(SCRIPT)
+    c = script.calibrate_views(_synthetic_views(14), (9, 6), 0.02001, (640, 480))
+    assert len(c.dist) == 5 and c.rms_px < 0.3 and c.dropped == ()
+    _assert_recovers(c)
+
+
+def test_one_bad_view_is_dropped_and_the_camera_still_recovers():
+    script = load_script(SCRIPT)
+    c = script.calibrate_views(_synthetic_views(16, 5.0), (9, 6), 0.02001, (640, 480))
+    assert c.dropped == (16,) and len(c.view_rms_px) == 17 and c.rms_px < 0.3
+    _assert_recovers(c)
+
+
+def test_the_std_devs_are_small_for_a_good_set():
+    script = load_script(SCRIPT)
+    c = script.calibrate_views(_synthetic_views(14), (9, 6), 0.02001, (640, 480))
+    assert set(c.std_px) == {"fx", "fy", "cx", "cy"}
+    assert all(0 < v < 1.0 for v in c.std_px.values())
+
+
+def test_still_accepts_a_still_board_and_rejects_a_moving_one():
+    script = load_script(SCRIPT)
+    rng = np.random.default_rng(1)
+    base = rng.uniform(0, 600, (54, 1, 2)).astype(np.float32)
+    hist = [base + rng.normal(0, 0.05, base.shape).astype(np.float32) for _ in range(3)]
+    assert script.still(hist, 0.5) is True
+    moved = [*hist[:2], hist[2] + np.float32([1.0, 0.0])]
+    assert script.still(moved, 0.5) is False
+    assert script.still(hist[:2], 0.5) is False
+
+
+def test_an_existing_save_dir_fails_before_the_session(tmp_path, monkeypatch):
+    script = load_script(SCRIPT)
+    monkeypatch.setitem(sys.modules, "maker_arm_lab.real.ros", types.ModuleType("ros"))
+    (tmp_path / "views").mkdir()
+    args = script.build_parser().parse_args(
+        [
+            "--rig",
+            "r",
+            "--rig_out",
+            str(tmp_path / "out.json"),
+            "--save_dir",
+            str(tmp_path / "views"),
+        ]
+    )
+    token, code = script._run(args)
+    assert token.startswith("WRIST_K_FAIL ") and "save_dir" in token and code == 1
+
+
+def test_views_json_lists_every_kept_view(tmp_path):
+    script = load_script(SCRIPT)
+    rgbs = [np.full((480, 640, 3), 10 * i, np.uint8) for i in range(3)]
+    corners = [np.full((54, 1, 2), float(i), np.float32) for i in range(3)]
+    calib = script.Calib((1,) * 9, (0,) * 5, 0.2, (0.1, 0.1, 2.0), {}, (2,))
+    save = tmp_path / "views"
+    script.save_views(save, rgbs, corners, calib)
+    assert sorted(p.name for p in save.glob("*.png")) == [f"view_0{i}.png" for i in range(3)]
+    entries = json.loads((save / "views.json").read_text())
+    assert [e["file"] for e in entries] == [f"view_0{i}.png" for i in range(3)]
+    assert [e.get("dropped", False) for e in entries] == [False, False, True]
+    assert entries[2]["rms_px"] == 2.0 and len(entries[1]["corners"]) == 54
 
 
 def test_a_rendered_checker_frame_is_detected():
