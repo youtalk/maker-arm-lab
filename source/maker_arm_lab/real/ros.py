@@ -38,6 +38,9 @@ TOPICS = {
     "depth": "camera/wide/depth/image_raw",
     "depth_info": "camera/wide/depth/camera_info",
 }
+WRIST_TOPIC = "/wrist_camera/image_raw/compressed"
+"""maker_arm_ros2's wrist camera node (``real.launch.py wrist_camera:=<device>``), outside the
+Conduit namespace."""
 
 
 def _arrival(header) -> Arrival:
@@ -68,7 +71,8 @@ def _info(msg) -> CameraInfo:
 
 class ConduitSubscriber:
     """Subscribes to each topic it has a callback for and spins them on a daemon thread.
-    ``on_error(key, err)`` hears of every dropped message; it must not raise."""
+    ``on_error(key, err)`` hears of every dropped message; it must not raise. With ``on_wrist``
+    it also carries the arm's wrist camera from maker_arm_ros2, so one executor serves both."""
 
     def __init__(
         self,
@@ -78,6 +82,8 @@ class ConduitSubscriber:
         on_info=None,
         on_depth=None,
         on_depth_info=None,
+        on_wrist=None,
+        wrist_topic: str = WRIST_TOPIC,
         on_error=None,
         node_name: str = "maker_arm_lab_conduit",
     ):
@@ -94,11 +100,13 @@ class ConduitSubscriber:
             ("depth", Image, on_depth, _depth),
             ("depth_info", CameraInfoMsg, on_depth_info, _info),
         )
+        topics = {k: f"{ns}/{t}" for k, t in TOPICS.items()} | {"wrist": wrist_topic}
+        wiring += (("wrist", CompressedImage, on_wrist, _jpeg),)
         for key, msg_type, callback, convert in wiring:
             if callback is not None:
                 self._node.create_subscription(
                     msg_type,
-                    f"{ns}/{TOPICS[key]}",
+                    topics[key],
                     relay(key, convert, callback, self._failed),
                     qos_profile_sensor_data,
                 )

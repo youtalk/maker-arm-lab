@@ -170,6 +170,10 @@ class WristFrames:
         self.dropped = 0
         self.error: str | None = None
 
+    def on_jpeg(self, frame: JpegFrame) -> None:
+        """The ROS topic's entry: a decode error raises, so ``relay`` drops the message."""
+        self.on_frame(decode_jpeg(frame.data)[0], frame.at.arrival_mono_ns)
+
     def on_frame(self, rgb: np.ndarray, arrival_mono_ns: int) -> None:
         want = (self.camera.height, self.camera.width, 3)
         if rgb.shape != want:
