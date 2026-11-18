@@ -30,8 +30,16 @@ BOX_DARK_MAX = 80  # INITIAL: plan task 9 (the sparse read) measures it
 BOX_WALL_M = (
     0.005  # INITIAL: plan task 9 (the sparse read) measures it; the real boxes have 1-2 mm walls
 )
-BOX_DEPTH_MIN_CELLS = 3
+BOX_DEPTH_MIN_CELLS = 3  # INITIAL: plan task 9 (the sparse read) measures it
 """Valid depth cells a box component needs before its depth rim is checked."""
+PROMPT_GRID_M = 0.008  # INITIAL: plan task 9 (the cluster read) measures it
+"""The xy grid of SAM prompts over a depth blob: one prompt per square it covers."""
+PART_MAX_FOOTPRINT_M = (0.0958, 0.0318)
+"""The longest and the widest footprint side of a base-class part the layouts accept
+(``core.parts.by_name``: brick_1x12 and brick_4x4), pinned by tests/test_perception_rules.py."""
+MASK_FOOTPRINT_MARGIN_M = 0.010  # INITIAL: plan task 9 (the cluster read) measures it
+MASK_IOU_MAX = 0.5  # INITIAL: plan task 9 (the cluster read) measures it
+"""Two masks overlapping by more than this IoU are one part."""
 
 
 def _intrinsics(k):
@@ -116,6 +124,46 @@ def blobs_above(
             idx = np.array(cells)
             blobs.append(np.stack([idx // w, idx % w], axis=-1))
     return blobs
+
+
+def grid_prompts(points: np.ndarray, cell_m: float = PROMPT_GRID_M) -> np.ndarray:
+    """(m, 3) prompt points of a blob's (n, 3) world points: in each ``cell_m`` square of the xy
+    grid that the blob covers, the blob point nearest the mean of its points in that square. A
+    blob point stands on a part, where the mean of two touching parts can fall in their gap."""
+    keys = np.floor(points[:, :2] / cell_m).astype(np.int64)
+    _, group = np.unique(keys, axis=0, return_inverse=True)
+    group = group.ravel()
+    out = []
+    for g in range(group.max() + 1):
+        pts = points[group == g]
+        out.append(pts[np.argmin(((pts[:, :2] - pts[:, :2].mean(axis=0)) ** 2).sum(axis=1))])
+    return np.array(out)
+
+
+def distinct_masks(masks: np.ndarray, scores: Sequence[float], iou_max: float = MASK_IOU_MAX):
+    """Indices of the (N, H, W) ``masks`` that are distinct parts: in order of score (on a tie
+    the smaller mask, so a lone part outranks a merged pair), a mask is kept unless its IoU with
+    a kept mask is over ``iou_max``. Empty masks are dropped."""
+    areas = masks.reshape(len(masks), -1).sum(axis=1)
+    boxes = []
+    for m in masks:
+        rows, cols = np.nonzero(m.any(axis=1))[0], np.nonzero(m.any(axis=0))[0]
+        boxes.append((rows[0], rows[-1] + 1, cols[0], cols[-1] + 1) if len(rows) else None)
+    kept: list[int] = []
+    for i in sorted(range(len(masks)), key=lambda i: (-scores[i], areas[i])):
+        if boxes[i] is None:
+            continue
+        for j in kept:
+            r0, r1 = max(boxes[i][0], boxes[j][0]), min(boxes[i][1], boxes[j][1])
+            c0, c1 = max(boxes[i][2], boxes[j][2]), min(boxes[i][3], boxes[j][3])
+            if r0 >= r1 or c0 >= c1:
+                continue
+            inter = np.count_nonzero(masks[i, r0:r1, c0:c1] & masks[j, r0:r1, c0:c1])
+            if inter / (areas[i] + areas[j] - inter) > iou_max:
+                break
+        else:
+            kept.append(i)
+    return kept
 
 
 def _hull(points: np.ndarray) -> np.ndarray:
@@ -205,6 +253,30 @@ def part_detection(xy: np.ndarray, heights: np.ndarray, floor_z: float) -> dict:
     }
 
 
+def _box_walls(xy_rim: np.ndarray, xy_desk: np.ndarray, nadir) -> tuple[float, ...]:
+    """(centre x, centre y, yaw, length, width) of a box's outer walls from its dark blocks,
+    each projected onto the rim plane (``xy_rim``) and onto the desk (``xy_desk``).
+
+    The rim-plane fit gives the box frame. The camera also sees each outer wall that faces its
+    ``nadir`` (its xy), and on the rim plane that wall falls short of the rim towards the nadir.
+    So each edge that faces the nadir is taken from the desk projection, where the wall meets the
+    desk, and each edge that faces away from the nadir from the rim projection, where the rim is
+    the outline."""
+    cx, cy, yaw, _, _ = min_area_rect(xy_rim)
+    centre = np.array([cx, cy])
+    axes = np.array([[math.cos(yaw), math.sin(yaw)], [-math.sin(yaw), math.cos(yaw)]])
+    rim, desk = (xy_rim - centre) @ axes.T, (xy_desk - centre) @ axes.T
+    to_nadir = (np.asarray(nadir, dtype=np.float64) - centre) @ axes.T
+    hi = np.where(to_nadir > rim.max(axis=0), desk.max(axis=0), rim.max(axis=0))
+    lo = np.where(to_nadir < rim.min(axis=0), desk.min(axis=0), rim.min(axis=0))
+    centre = centre + ((hi + lo) / 2) @ axes
+    length, width = hi - lo
+    if width > length:  # the yaw is the long side's, in (-pi/2, pi/2] as min_area_rect's
+        yaw = yaw - math.pi / 2 if yaw > 0 else yaw + math.pi / 2
+        length, width = width, length
+    return (float(centre[0]), float(centre[1]), yaw, float(length), float(width))
+
+
 def box_detections(
     rgb_luma: np.ndarray,
     k,
@@ -220,28 +292,35 @@ def box_detections(
     """(x, y, yaw) of each box: the dark outline in the (H, W) luma frame, against the desk.
 
     The frame is block-averaged by ``step`` for speed. Dark blocks (at most ``BOX_DARK_MAX``)
-    whose desk-plane projection lies in a side band (x_min, x_max, y_min, y_max) form 4-connected
-    components. Each component's blocks are projected onto the rim plane, z = ``desk_z`` +
-    ``interior[2]``, and a minimum-area rectangle is fitted. It is a box when its outer size is
-    the interior plus two ``wall_m`` walls within ``BOX_SIZE_TOL_M``. ``depth_world`` (the
-    ``deproject`` output, optional) is only a check: with at least ``BOX_DEPTH_MIN_CELLS`` valid
-    cells in the component, the highest must rise more than ``BOX_MIN_HEIGHT_M`` above the desk
-    (the rim is a thin part of the component, so the median would read the box floor). With no
-    valid depth the box stands on the outline alone. Looking only at the bands keeps a dark part
-    in the tray from reading as a box."""
+    form 4-connected components inside a side band (x_min, x_max, y_min, y_max): a block is in
+    the band when its projection onto the desk or onto the rim plane, z = ``desk_z`` +
+    ``interior[2]``, is (a box's far rim projects onto the desk past the band). ``_box_walls``
+    fits the outer walls. It is a box when its outer size is the interior plus two ``wall_m``
+    walls within ``BOX_SIZE_TOL_M``. ``depth_world`` (the ``deproject`` output, optional) is only
+    a check: with at least ``BOX_DEPTH_MIN_CELLS`` valid cells in the component, the highest
+    must rise more than ``BOX_MIN_HEIGHT_M`` above the desk (the rim is a thin part of the
+    component, so the median would read the box floor). With no valid depth the box stands on
+    the outline alone. Looking only at the bands keeps a dark part in the tray from reading as
+    a box."""
     h, w = (rgb_luma.shape[0] // step) * step, (rgb_luma.shape[1] // step) * step
     blocks = rgb_luma[:h, :w].astype(np.float64).reshape(h // step, step, w // step, step)
     dark = blocks.mean(axis=(1, 3)) <= BOX_DARK_MAX
     v, u = np.mgrid[0 : h // step, 0 : w // step] * step + step / 2
     desk = _plane_xy(u, v, k, rot, pos, desk_z)
-    grid = np.concatenate([desk, np.where(dark, 1.0, np.nan)[..., None]], axis=-1)
+    rim = _plane_xy(u, v, k, rot, pos, desk_z + interior[2])
     want = sorted((interior[0] + 2 * wall_m, interior[1] + 2 * wall_m), reverse=True)
+    everywhere = (-np.inf, np.inf, -np.inf, np.inf)
     out = []
-    for band in bands:
-        for cells in blobs_above(grid, 0.0, band, 0.5, min_cells=MIN_PART_CELLS):
+    for x0, x1, y0, y1 in bands:
+        inside = [
+            (xy[..., 0] >= x0) & (xy[..., 0] <= x1) & (xy[..., 1] >= y0) & (xy[..., 1] <= y1)
+            for xy in (desk, rim)
+        ]
+        flag = np.where(dark & (inside[0] | inside[1]), 1.0, np.nan)
+        grid = np.concatenate([desk, flag[..., None]], axis=-1)
+        for cells in blobs_above(grid, 0.0, everywhere, 0.5, min_cells=MIN_PART_CELLS):
             r, c = cells[:, 0], cells[:, 1]
-            xy = _plane_xy(u[r, c], v[r, c], k, rot, pos, desk_z + interior[2])
-            cx, cy, yaw, length, width = min_area_rect(xy)
+            cx, cy, yaw, length, width = _box_walls(rim[r, c], desk[r, c], pos[:2])
             if max(abs(length - want[0]), abs(width - want[1])) > BOX_SIZE_TOL_M:
                 continue
             if depth_world is not None:

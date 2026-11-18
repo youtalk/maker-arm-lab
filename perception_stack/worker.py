@@ -1,8 +1,10 @@
 """The perception worker (MS5 design section 4.2): parts and boxes from one overhead frame.
 
 It serves ``perception_protocol``'s wire on a REP socket. ``parts`` finds the depth blobs above
-the tray floor, prompts SAM 2.1 with one point per blob on a crop of the RGB frame, and turns
-each mask into a detection with ``rules``. ``boxes`` finds the dark box outlines with ``rules``
+the tray floor and prompts SAM 2.1, in one batch on a crop of the RGB frame, with one point per
+``rules.PROMPT_GRID_M`` square of each blob, so touching parts in one blob each get a prompt. It
+keeps the distinct masks (``rules.distinct_masks``), turns each into a detection with ``rules``
+and drops a mask larger than any base-class part (a prompt in a gap returns the background). ``boxes`` finds the dark box outlines with ``rules``
 alone. ``marker``, ``wrist`` and ``lift`` reply ``unsupported``: no loop runs in MS5.
 
     perception_stack/.venv/bin/python perception_stack/worker.py --rig rig.json
@@ -167,13 +169,12 @@ class Worker:
         cx, cy = rig["tray_centre"]
         hx, hy = rig["tray_interior"][0] / 2, rig["tray_interior"][1] / 2
         region = (cx - hx, cx + hx, cy - hy, cy + hy)
-        # ponytail: one prompt per depth blob; touching parts merge. Split large blobs if the
-        # cluster read misses (task 9)
         blobs = rules.blobs_above(world, floor_z, region)
         if not blobs:
             return {"type": "parts", "detections": []}, {}
-        centroids = np.array([np.nanmean(world[b[:, 0], b[:, 1]], axis=0) for b in blobs])
-        points = rules.project(centroids, k, rot, pos)
+        prompts = [rules.grid_prompts(world[b[:, 0], b[:, 1]].astype(np.float64)) for b in blobs]
+        owner = np.repeat(np.arange(len(blobs)), [len(p) for p in prompts])
+        points = rules.project(np.concatenate(prompts), k, rot, pos)
         corners = np.array(
             [(x, y, z) for x in region[:2] for y in region[2:] for z in (floor_z, floor_z + 0.03)]
         )
@@ -184,18 +185,25 @@ class Worker:
         y1 = min(int(np.ceil(px[:, 1].max())) + CROP_MARGIN_PX, h)
         masks = self.segmenter.masks(rgb[y0:y1, x0:x1], points - [x0, y0])
         dh, dw = depth.shape
-        detections = []
-        for mask, blob in zip(masks, blobs, strict=True):
+        cells = []
+        for mask in masks:
             rows, cols = np.nonzero(mask)
-            if len(rows) == 0:
-                continue
             pixels = np.stack([rows + y0, cols + x0], axis=-1)
             drows = np.minimum((pixels[:, 0] + 0.5) * dh / h, dh - 1).astype(int)
             dcols = np.minimum((pixels[:, 1] + 0.5) * dw / w, dw - 1).astype(int)
+            cells.append((pixels, drows, dcols))
+        scores = [np.isfinite(world[r, c, 2]).mean() if len(r) else 0.0 for _, r, c in cells]
+        longest = [m + rules.MASK_FOOTPRINT_MARGIN_M for m in rules.PART_MAX_FOOTPRINT_M]
+        detections = []
+        for i in rules.distinct_masks(masks, scores):
+            pixels, drows, dcols = cells[i]
             heights = world[drows, dcols, 2] - floor_z
+            blob = blobs[owner[i]]
             top = float(np.percentile(world[blob[:, 0], blob[:, 1], 2] - floor_z, 90))
             xy = rules.mask_xy(pixels, depth[drows, dcols], k, rot, pos, floor_z + top)
-            detections.append(rules.part_detection(xy, heights, floor_z))
+            det = rules.part_detection(xy, heights, floor_z)
+            if det["size"][0] <= longest[0] and det["size"][1] <= longest[1]:
+                detections.append(det)
         detections.sort(key=lambda d: -d["score"])
         return {"type": "parts", "detections": detections}, {}
 

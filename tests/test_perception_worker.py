@@ -159,3 +159,56 @@ def test_the_rig_config_carries_the_box_wall_and_loads_an_older_rig_without_it(t
     del old["box_wall"]
     path.write_text(json.dumps(old))
     assert RigConfig.from_json(path).box_wall == pytest.approx(0.005)
+
+
+IPHONE_RGB = Pinhole(1920, 1440, 1450.0, 1450.0, 960.0, 720.0)
+IPHONE_DEPTH = Pinhole(256, 192, 1450.0 * 256 / 1920, 1450.0 * 256 / 1920, 128.0, 96.0)
+CLUSTER = [  # three parts in one depth blob, 1 to 1.5 mm apart
+    (0.20, -0.017, 0.0, 0.032, 0.016),
+    (0.20, 0.0, 0.0, 0.032, 0.016),
+    (0.2215, 0.0, math.pi / 2, 0.032, 0.008),
+]
+LEVELS = (120, 160, 200, 240)  # the desk, then each part's grey
+
+
+class LabelSegmenter:
+    """SAM as the cluster test needs it: the part under the point, or for a point in a gap the
+    whole background. It keeps the label of every prompt."""
+
+    def __init__(self):
+        self.labels = []
+
+    def masks(self, rgb, points):
+        label = np.abs(rgb[..., 1:2].astype(int) - np.array(LEVELS)).argmin(axis=-1)
+        out = np.zeros((len(points), *rgb.shape[:2]), bool)
+        for i, (x, y) in enumerate(points):
+            self.labels.append(int(label[int(y), int(x)]))
+            out[i] = label == self.labels[-1]
+        return out
+
+
+def test_touching_parts_in_one_depth_blob_each_give_one_detection():
+    rgb = np.full((1440, 1920, 3), LEVELS[0], np.uint8)
+    depth = np.full((192, 256), 800, np.uint16)
+    for level, (*pose, length, width) in zip(LEVELS[1:], CLUSTER, strict=True):
+        rgb[footprint(IPHONE_RGB, (*pose, length, width), 0.0096)] = level
+        # the LiDAR's coarse cells bridge the gaps: one blob
+        depth[footprint(IPHONE_DEPTH, (*pose, length + 0.003, width + 0.003), 0.0096)] = 790
+    world = worker.rules.deproject(depth, IPHONE_DEPTH.ros_k(), ROT, POS)
+    assert len(worker.rules.blobs_above(world, 0.0, (0.135, 0.265, -0.1, 0.1))) == 1
+    buf = io.BytesIO()
+    Image.fromarray(rgb).save(buf, "JPEG", quality=95)
+    seg = LabelSegmenter()
+    header = {
+        "type": "parts",
+        "camera": camera_block(IPHONE_RGB, POS, QUAT),
+        "depth_camera": camera_block(IPHONE_DEPTH, POS, QUAT),
+    }
+    arrays = {"rgb_jpeg": np.frombuffer(buf.getvalue(), np.uint8), "depth": depth}
+    reply, _ = worker.Worker(seg, RIG).handle(header, arrays)
+    assert reply["type"] == "parts", reply
+    assert sorted(set(seg.labels)) == [0, 1, 2, 3]  # every part was prompted, and a gap
+    found = [d["centre"][:2] for d in reply["detections"]]
+    assert len(found) == len(CLUSTER), found
+    for part in CLUSTER:
+        assert min(math.dist(f, part[:2]) for f in found) < 0.003

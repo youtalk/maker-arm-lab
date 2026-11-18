@@ -52,6 +52,13 @@ def test_the_classes_are_the_protocols():
     assert rules.PART_CLASSES == proto.PART_CLASSES
 
 
+def test_the_mask_footprint_limit_is_the_largest_base_class_part():
+    base = [p for p in parts._replayable() if parts.part_class(p) in parts.BASE_CLASSES]
+    longest = max(max(p.size[:2]) for p in base)
+    widest = max(min(p.size[:2]) for p in base)
+    assert rules.PART_MAX_FOOTPRINT_M == pytest.approx((longest, widest))
+
+
 def test_deprojecting_a_flat_desk_gives_z_zero():
     depth = scene([])
     depth[10, 10] = 0
@@ -130,19 +137,28 @@ BOX = (0.15, 0.20, 0.3, 0.095, 0.095)  # outer: 0.09 interior plus two 5 mm wall
 INTERIOR = (0.09, 0.09, 0.04)
 
 
-def luma_scene(boxes, plane_z=0.04):
-    """A bright desk with black boxes (cx, cy, yaw, length, width) whose rims are at plane_z."""
-    luma = np.full((480, 640), 200.0)
-    ray = rules.deproject(np.full((480, 640), 1000, np.uint16), K, ROT, POS)[..., :2] - POS[:2]
+def luma_scene(boxes, plane_z=0.04, k=K, size=(480, 640), pos=POS):
+    """A bright desk with solid black boxes (cx, cy, yaw, length, width), ``plane_z`` tall, cast
+    from a camera at ``pos``: it sees each box's top and the outer walls that face it."""
+    h, w = size
+    ray = rules.deproject(np.full((h, w), 1000, np.uint16), k, ROT, pos).astype(float) - pos
+    luma = np.full((h, w), 200.0)
     for cx, cy, yaw, length, width in boxes:
-        dx, dy = (
-            POS[0] + ray[..., 0] * (0.8 - plane_z) - cx,
-            POS[1] + ray[..., 1] * (0.8 - plane_z) - cy,
-        )
         c, s = math.cos(yaw), math.sin(yaw)
-        luma[(np.abs(dx * c + dy * s) <= length / 2) & (np.abs(dy * c - dx * s) <= width / 2)] = (
-            30.0
+        o = pos - np.array([cx, cy, 0.0])
+        t0, t1 = np.full((h, w), -np.inf), np.full((h, w), np.inf)
+        slabs = (
+            (o[0] * c + o[1] * s, ray[..., 0] * c + ray[..., 1] * s, length / 2),
+            (-o[0] * s + o[1] * c, -ray[..., 0] * s + ray[..., 1] * c, width / 2),
         )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            for oc, rc, lo, hi in (
+                *((a, b, -e, e) for a, b, e in slabs),
+                (o[2], ray[..., 2], 0.0, plane_z),
+            ):
+                a, b = (lo - oc) / rc, (hi - oc) / rc
+                t0, t1 = np.maximum(t0, np.minimum(a, b)), np.minimum(t1, np.maximum(a, b))
+        luma[(t1 >= t0) & (t1 > 0)] = 30.0
     return luma
 
 
@@ -180,6 +196,37 @@ def test_the_wall_parameter_sets_the_outer_size_the_rule_wants():
     assert len(boxes_in(luma, interior=(0.075, 0.075, 0.04), wall_m=0.0015)) == 1
     small = luma_scene([(0.15, 0.20, 0.0, 0.060, 0.060)])
     assert boxes_in(small, interior=(0.075, 0.075, 0.04), wall_m=0.005) == []
+
+
+HI_K = (1450.0, 0.0, 960.0, 0.0, 1450.0, 720.0, 0.0, 0.0, 1.0)  # the iPhone's 1920 x 1440
+HI_POS = np.array([0.16, 0.0, 0.80])
+
+
+@pytest.mark.parametrize(
+    "box",
+    [
+        (0.13, 0.18, 0.0),
+        (0.13, -0.18, 0.0),
+        (0.13, 0.22, 0.0),
+        (0.13, -0.22, 0.0),
+        (0.05, 0.22, 0.0),
+        (0.21, -0.22, math.radians(30.0)),
+        (0.05, 0.18, math.radians(-40.0)),
+    ],
+)
+def test_a_tall_box_is_centred_on_its_walls_not_on_its_parallax(box):
+    """A 0.075 m box seen from 0.8 m shows its near outer wall, and its far rim projects onto
+    the desk past the band: the box must still read within 3 mm and 2 degrees."""
+    interior, wall = (0.075, 0.075, 0.075), 0.0015
+    outer = interior[0] + 2 * wall
+    luma = luma_scene([(*box, outer, outer)], interior[2], HI_K, (1440, 1920), HI_POS)
+    half = math.hypot(interior[0], interior[1]) / 2  # the worker's band margin
+    bands = [(0.05 - half, 0.21 + half, 0.18 - half, 0.22 + half)]
+    bands.append((bands[0][0], bands[0][1], -bands[0][3], -bands[0][2]))
+    found = rules.box_detections(luma, HI_K, ROT, HI_POS, 0.0, bands, interior, wall_m=wall)
+    assert len(found) == 1
+    assert math.dist(found[0][:2], box[:2]) < 0.003
+    assert abs(math.degrees((found[0][2] - box[2] + math.pi / 4) % (math.pi / 2) - math.pi / 4)) < 2
 
 
 def test_a_mask_with_no_valid_depth_is_placed_by_the_floor_plane_ray():
