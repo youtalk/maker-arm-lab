@@ -13,7 +13,9 @@ frame of the same capture stamp (else the latest) and both cameras; the depth sh
 frame's pose (one ARKit frame, one optical frame). ``UvcWrist`` reads a V4L2 camera with
 OpenCV on its own thread and warps each frame to the simulated wrist view; ``WristFrames``
 checks each frame against the camera first, and a frame of another size (a camera that
-ignored the requested size) is dropped the same way. OpenCV comes from the ``real`` group and
+ignored the requested size) is dropped the same way. ``WristFrames.on_jpeg`` is the entry for
+the ROS wrist topic (a decode error raises, so ``relay`` drops the message). A rig with
+``wrist_dist`` undistorts each frame before the warp. OpenCV comes from the ``real`` group and
 is imported only there.
 """
 
@@ -43,7 +45,7 @@ K_REBUILD_PX = 0.5
 @dataclass(frozen=True)
 class Latest:
     view: np.ndarray  # (224, 224, 3) uint8, what the policy reads
-    raw: object  # the camera's own frame: JPEG bytes (overhead) or (H, W, 3) uint8 (wrist)
+    raw: object  # the camera's own frame: JPEG bytes (overhead) or (H, W, 3) uint8 (wrist, undistorted with dist)
     arrival_mono_ns: int
     stamp_ns: int | None  # the capture stamp; None for a camera without one
 

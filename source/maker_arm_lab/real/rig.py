@@ -56,11 +56,13 @@ class RigConfig:
     """The target view's shift back from the nominal camera, m: the release lean's B2 view the
     policy trained on. 0.0 is the MS7d camera."""
     wrist_k: tuple[float, ...] | None = None
-    """None: the wrist source already serves the simulated wrist view (the twin, wave 2)."""
+    """None: the wrist source already serves the simulated wrist view (the twin, wave 2). A K
+    given here is in the ROS/OpenCV convention (the centre of pixel (0, 0) at (0, 0)); read it
+    with ``Pinhole.from_ros_k``."""
     wrist_size: tuple[int, int] | None = None
     wrist_dist: tuple[float, ...] | None = None
-    """OpenCV's five distortion coefficients of the wrist camera (``scripts/real_wrist_intrinsics.py``).
-    None: the frames are not undistorted."""
+    """OpenCV's five distortion coefficients of the wrist camera
+    (``scripts/real_wrist_intrinsics.py``). None: the frames are not undistorted."""
     wrist_rot: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)  # INITIAL: A2 hand-eye
     """The real wrist camera's axes in the simulated mount's frame (``robots.frames``)."""
     wrist_device: str = "/dev/video0"  # INITIAL: A2 confirms the UVC device

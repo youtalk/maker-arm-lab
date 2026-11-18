@@ -3,9 +3,11 @@ checkerboard and ``scripts/real_wrist_intrinsics.py``'s one token line."""
 
 import io
 import json
+import math
 import os
 import subprocess
 import sys
+import time
 import types
 
 import numpy as np
@@ -40,6 +42,8 @@ def test_the_checkerboard_squares_are_208_px_and_the_board_fits_the_screen():
     dark = np.argwhere(img < 64)
     assert dark[:, 1].min() >= left and dark[:, 1].max() < 2360 - left
     assert dark[:, 0].min() >= top and dark[:, 0].max() < 1640
+    bar_row = img[(top + 7 * 208 + 1640) // 2]  # the scale bar: 100 mm at 264 ppi
+    assert (bar_row < 64).sum() == pytest.approx(100 / 25.4 * 264, abs=2)
 
 
 def test_the_rig_round_trips_wrist_dist(tmp_path):
@@ -178,29 +182,83 @@ def test_a_rendered_checker_frame_is_detected():
     assert found and len(corners) == 54
 
 
-def test_a_wrong_size_stream_ends_in_a_fail_that_names_the_size_and_calibrates_nothing():
-    cv2 = pytest.importorskip("cv2")
-    script = load_script(SCRIPT)
-    w, h = 640, 480
-    src = WristFrames(
+class Sub:
+    def __init__(self, error=None):
+        self.error, self.closed = error, 0
+
+    def close(self):
+        self.closed += 1
+
+
+def _source(w=640, h=480):
+    return WristFrames(
         Pinhole.from_ros_k(w, h, (1, 0, w / 2 - 0.5, 0, 1, h / 2 - 0.5, 0, 0, 1)), None
     )
+
+
+def _args(script, timeout_s):
+    return script.build_parser().parse_args(
+        ["--rig", "r", "--rig_out", "o", "--frames", "5", "--timeout_s", str(timeout_s)]
+    )
+
+
+def test_a_wrong_size_stream_ends_early_in_a_fail_that_names_the_size():
+    cv2 = pytest.importorskip("cv2")
+    script = load_script(SCRIPT)
+    src = _source()
     buf = io.BytesIO()
     Image.fromarray(np.zeros((240, 320, 3), np.uint8)).save(buf, "JPEG")
-    src.on_jpeg(JpegFrame(Arrival(1, 2, 3), buf.getvalue(), "wrist_camera"))
-
-    class Sub:
-        error, closed = None, 0
-
-        def close(self):
-            self.closed += 1
-
-    sub = Sub()
-    args = script.build_parser().parse_args(
-        ["--rig", "r", "--rig_out", "o", "--frames", "5", "--timeout_s", "0.2"]
-    )
-    kept, reason = script.wait_for_views(src, sub, cv2, (9, 6), args)
+    for i in range(script.DROP_FAIL):
+        src.on_jpeg(JpegFrame(Arrival(1, 2, 3 + i), buf.getvalue(), "wrist_camera"))
+    sub, t0 = Sub(), time.monotonic()
+    kept, reason = script.wait_for_views(src, sub, cv2, (9, 6), _args(script, 30))
     assert kept == [] and "320x240" in reason and sub.closed == 1
+    assert time.monotonic() - t0 < 5
+
+
+def test_a_stream_with_no_frame_ends_on_the_silent_rule(monkeypatch):
+    cv2 = pytest.importorskip("cv2")
+    script = load_script(SCRIPT)
+    monkeypatch.setattr(script, "SILENT_FAIL_S", 0.3)
+    sub, t0 = Sub("qos mismatch"), time.monotonic()
+    kept, reason = script.wait_for_views(
+        _source(), sub, cv2, (9, 6), _args(script, 30), "/wrist_camera/image_raw/compressed"
+    )
+    assert kept == [] and sub.closed == 1 and time.monotonic() - t0 < 5
+    assert "no frame arrived on /wrist_camera/image_raw/compressed" in reason
+    assert "qos mismatch" in reason
+
+
+def test_ctrl_c_ends_in_one_fail_token(monkeypatch, capsys):
+    script = load_script(SCRIPT)
+
+    def interrupted(args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(script, "_run", interrupted)
+    code = script.main(["--rig", "r", "--rig_out", "o"])
+    lines = capsys.readouterr().out.splitlines()
+    assert code != 0 and len(lines) == 1 and lines[0].startswith("WRIST_K_FAIL ")
+    assert json.loads(lines[0].split(" ", 1)[1])["reason"] == "interrupted"
+
+
+def test_a_missing_output_folder_fails_before_the_session(tmp_path, monkeypatch):
+    script = load_script(SCRIPT)
+    monkeypatch.setitem(sys.modules, "maker_arm_lab.real.ros", types.ModuleType("ros"))
+    args = script.build_parser().parse_args(
+        ["--rig", "r", "--rig_out", str(tmp_path / "nope" / "out.json")]
+    )
+    token, code = script._run(args)
+    assert token.startswith("WRIST_K_FAIL ") and "rig_out" in token and code == 1
+
+
+def test_a_640x480_camera_at_70_degrees_covers_three_quarters_of_the_wrist_view():
+    from maker_arm_lab.real.camera_model import wrist_warp
+
+    fx = 320 / math.tan(math.radians(35))
+    cam = Pinhole.from_ros_k(640, 480, (fx, 0, 319.5, 0, fx, 239.5, 0, 0, 1))
+    assert len(cam.fov_deg()) == 2
+    assert wrist_warp(cam).coverage == pytest.approx(0.75, abs=0.02)
 
 
 def test_run_on_a_wrong_size_stream_returns_one_fail_line_and_writes_no_rig(tmp_path, monkeypatch):
