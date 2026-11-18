@@ -200,7 +200,52 @@ def test_still_accepts_a_still_board_and_rejects_a_moving_one():
     assert script.still(hist, 0.5) is True
     moved = [*hist[:2], hist[2] + np.float32([1.0, 0.0])]
     assert script.still(moved, 0.5) is False
+    one_off = hist[2].copy()
+    one_off[0, 0, 0] += 2.0  # one corner off by 2 px, the median still
+    assert script.still([*hist[:2], one_off], 0.5) is True
     assert script.still(hist[:2], 0.5) is False
+
+
+def test_collect_keeps_a_still_run_and_counts_moving_and_repeated_frames():
+    script = load_script(SCRIPT)
+    base = np.random.default_rng(2).uniform(50, 500, (54, 1, 2)).astype(np.float32)
+    shifts = [0, 0, 0, 0, 30, 60, 90, None, 100, 100, 100]  # None: no board in the frame
+    script_iter = iter(enumerate(shifts, 1))
+    pending = []
+
+    class Frames:
+        latest = None
+
+        def get(self):
+            nxt = next(script_iter, None)
+            if nxt is not None:
+                i, shift = nxt
+                pending.append(None if shift is None else base + np.float32([shift, 0]))
+                self.latest = types.SimpleNamespace(
+                    raw=np.zeros((4, 4, 3), np.uint8), arrival_mono_ns=i
+                )
+            return self.latest
+
+    class Cv2:
+        COLOR_RGB2GRAY, TERM_CRITERIA_EPS, TERM_CRITERIA_MAX_ITER = 0, 1, 2
+
+        def cvtColor(self, raw, code):
+            return raw
+
+        def findChessboardCorners(self, gray, board):
+            c = pending[-1]
+            return c is not None, c
+
+        def cornerSubPix(self, gray, corners, *a):
+            return corners
+
+    src = types.SimpleNamespace(frames=Frames(), dropped=0, error=None)
+    counts = {}
+    kept, reason = script.collect(
+        src, Sub(), Cv2(), (9, 6), 100, 0.0, 1.0, still_n=3, still_px=0.5, counts=counts
+    )
+    assert len(kept) == 2 and counts == {"moving": 3, "same_pose": 1}
+    assert reason is None or "frames" in reason
 
 
 def test_an_existing_save_dir_fails_before_the_session(tmp_path, monkeypatch):
@@ -219,6 +264,22 @@ def test_an_existing_save_dir_fails_before_the_session(tmp_path, monkeypatch):
     )
     token, code = script._run(args)
     assert token.startswith("WRIST_K_FAIL ") and "save_dir" in token and code == 1
+
+
+def test_a_save_dir_without_a_parent_and_a_small_still_n_fail_before_the_session(
+    tmp_path, monkeypatch
+):
+    script = load_script(SCRIPT)
+    monkeypatch.setitem(sys.modules, "maker_arm_lab.real.ros", types.ModuleType("ros"))
+    out = str(tmp_path / "out.json")
+    args = script.build_parser().parse_args(
+        ["--rig", "r", "--rig_out", out, "--save_dir", str(tmp_path / "no" / "views")]
+    )
+    token, code = script._run(args)
+    assert token.startswith("WRIST_K_FAIL ") and "save_dir" in token and code == 1
+    args = script.build_parser().parse_args(["--rig", "r", "--rig_out", out, "--still_n", "1"])
+    token, code = script._run(args)
+    assert token.startswith("WRIST_K_FAIL ") and "still_n" in token and code == 2
 
 
 def test_views_json_lists_every_kept_view(tmp_path):

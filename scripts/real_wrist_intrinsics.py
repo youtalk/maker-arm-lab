@@ -12,8 +12,9 @@ Keep the ROS Python path in ``PYTHONPATH``: replacing it drops rclpy. The iPad s
 several tilts. The gripper jaws can block image corners, so the operator covers the corners
 the camera can see. The script reads ``WRIST_TOPIC`` through ``real.ros.ConduitSubscriber``.
 A frame becomes a view when ``cv2.findChessboardCorners`` succeeds, the board was also found
-in the last ``--still_n`` frames with no corner moving more than ``--still_px``, and at least
-``--gap_s`` seconds of arrival time passed since the last view. After ``--frames`` views it
+in the last ``--still_n`` frames with the median corner moving no more than ``--still_px``, and at least
+``--gap_s`` seconds of arrival time passed since the last view and its mean corner
+displacement from every earlier view is at least ``--min_move_px``. After ``--frames`` views it
 solves with ``cv2.calibrateCameraExtended``, drops the views whose own error is above
 ``OUTLIER_X`` times the median and 0.5 px (once, if ``--min_views`` remain) and solves again.
 It saves each view as ``view_NN.png`` and ``views.json`` (corners, error, ``dropped``) in
@@ -52,6 +53,8 @@ PROGRESS_S = 5.0
 OUTLIER_X = 3.0
 """A view whose rms is above this times the median view rms (and 0.5 px) is dropped."""
 OUTLIER_MIN_PX = 0.5
+MIN_MOVE_PX = 20.0
+"""Least mean corner displacement of a new view from every kept view, px."""
 
 
 class TokenArgumentParser(argparse.ArgumentParser):
@@ -75,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gap_s", type=float, default=1.0, help="least arrival gap of kept frames")
     p.add_argument("--still_n", type=int, default=3, help="frames the board must hold still")
     p.add_argument("--still_px", type=float, default=0.5, help="largest corner move when still")
+    p.add_argument("--min_move_px", type=float, default=MIN_MOVE_PX, help="least move per view")
     p.add_argument("--min_views", type=int, default=15, help="least views to allow an outlier drop")
     p.add_argument(
         "--save_dir", default=None, help="folder for the views (default next to rig_out)"
@@ -85,32 +89,40 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def still(history: Sequence[np.ndarray], still_px: float, still_n: int = 3) -> bool:
-    """True when the last ``still_n`` corner arrays (N, 1, 2) exist and no corner moved more
-    than ``still_px`` between consecutive ones."""
+    """True when the last ``still_n`` corner arrays (N, 1, 2) exist and the median corner
+    moved no more than ``still_px`` between consecutive ones."""
     if len(history) < still_n:
         return False
     last = history[-still_n:]
     return all(
-        float(np.linalg.norm(b.reshape(-1, 2) - a.reshape(-1, 2), axis=1).max()) <= still_px
+        float(np.median(np.linalg.norm(b.reshape(-1, 2) - a.reshape(-1, 2), axis=1))) <= still_px
         for a, b in pairwise(last)
     )
 
 
-def _progress(seen, kept, src, frames, moving=0):
+def _progress(seen, kept, src, frames, counts):
     print(
-        f"frames seen {seen}, views kept {kept}/{frames}, moving {moving}, "
-        f"dropped {src.dropped}, error {src.error}",
+        f"frames seen {seen}, views kept {kept}/{frames}, moving {counts['moving']}, "
+        f"same_pose {counts['same_pose']}, dropped {src.dropped}, error {src.error}",
         file=sys.stderr,
         flush=True,
     )
 
 
+def _move(a, b):
+    """Mean corner displacement between two corner arrays, px."""
+    return float(np.linalg.norm(a.reshape(-1, 2) - b.reshape(-1, 2), axis=1).mean())
+
+
 def collect(
     src, subscriber, cv2, board, frames, gap_s, timeout_s, topic="the wrist topic",
-    still_n=3, still_px=0.5,
+    still_n=3, still_px=0.5, min_move_px=MIN_MOVE_PX, counts=None,
 ):  # fmt: skip
-    """([(RGB frame, corners)] of the kept views, the reason the wait ended early or None)."""
-    kept, seen, moving, last_seen, last_kept, history = [], 0, 0, None, None, []
+    """([(RGB frame, corners)] of the kept views, the reason the wait ended early or None).
+    ``counts``, if given, receives the frames rejected as ``moving`` and as ``same_pose``."""
+    counts = {} if counts is None else counts
+    counts.update(moving=0, same_pose=0)
+    kept, seen, last_seen, last_kept, history = [], 0, None, None, []
     start = last_print = time.monotonic()
     end = start + timeout_s
     while len(kept) < frames and time.monotonic() < end:
@@ -118,7 +130,7 @@ def collect(
         now = time.monotonic()
         if now - last_print >= PROGRESS_S:
             last_print = now
-            _progress(seen, len(kept), src, frames, moving)
+            _progress(seen, len(kept), src, frames, counts)
         latest = src.frames.get()
         if latest is None:
             if src.dropped >= DROP_FAIL:
@@ -142,25 +154,29 @@ def collect(
         )  # fmt: skip
         history = [*history, corners][-still_n:]
         if len(history) >= still_n and not still(history, still_px, still_n):
-            moving += 1
+            counts["moving"] += 1
             continue
         if last_kept is not None and (last_seen - last_kept) / 1e9 < gap_s:
             continue
         if len(history) < still_n:
             continue
+        if any(_move(corners, c) < min_move_px for _, c in kept):
+            counts["same_pose"] += 1
+            continue
         kept.append((latest.raw.copy(), corners))
         last_kept = last_seen
-        _progress(seen, len(kept), src, frames, moving)
+        _progress(seen, len(kept), src, frames, counts)
     return kept, None
 
 
 def wait_for_views(src, sub, cv2, board, args, topic="the wrist topic"):
     """(kept views, None), or (what was kept, the reason it fell short). Closes ``sub``;
     the reason quotes the source's and the subscriber's ``error``."""
+    counts = {}
     try:
         kept, early = collect(
             src, sub, cv2, board, args.frames, args.gap_s, args.timeout_s, topic,
-            args.still_n, args.still_px,
+            args.still_n, args.still_px, args.min_move_px, counts,
         )  # fmt: skip
     finally:
         sub.close()
@@ -168,7 +184,8 @@ def wait_for_views(src, sub, cv2, board, args, topic="the wrist topic"):
         return kept, None
     reason = early or f"{len(kept)} of {args.frames} frames with the board before the timeout"
     causes = [e for e in (src.error, sub.error) if e and e not in reason]
-    return kept, "; ".join([reason, *causes])
+    tally = f"rejected as moving {counts['moving']}, as same_pose {counts['same_pose']}"
+    return kept, "; ".join([reason, tally, *causes])
 
 
 @dataclasses.dataclass(frozen=True)
@@ -247,6 +264,8 @@ def _run(args) -> tuple[str, int]:
     board = _pair(args.board, "x")
     if args.frames < 5:
         return "WRIST_K_FAIL " + json.dumps({"reason": "usage", "detail": "--frames >= 5"}), 2
+    if args.still_n < 2:
+        return "WRIST_K_FAIL " + json.dumps({"reason": "usage", "detail": "--still_n >= 2"}), 2
     out_path = Path(args.rig_out).expanduser()
     if not out_path.parent.is_dir():
         detail = f"{out_path.parent} is not a folder"
@@ -259,8 +278,8 @@ def _run(args) -> tuple[str, int]:
         if args.save_dir
         else out_path.with_name(out_path.stem + "_views")
     )
-    if save_dir.exists():
-        detail = f"{save_dir} exists"
+    if save_dir.exists() or not save_dir.parent.is_dir():
+        detail = f"{save_dir} exists" if save_dir.exists() else f"{save_dir.parent} is not a folder"
         return "WRIST_K_FAIL " + json.dumps({"reason": "save_dir", "detail": detail}), 1
     rig = RigConfig.from_json(Path(args.rig).expanduser())
     # The source reads only the size of this placeholder camera.
@@ -275,8 +294,12 @@ def _run(args) -> tuple[str, int]:
             save_views(save_dir, rgbs, corners)
         return "WRIST_K_FAIL " + json.dumps({"reason": reason}), 1
     calib = calibrate_views(corners, board, args.square, (w, h), args.min_views)
-    save_views(save_dir, rgbs, corners, calib)
     k, dist, rms = calib.k, calib.dist, calib.rms_px
+    try:
+        save_views(save_dir, rgbs, corners, calib)
+    except OSError as err:
+        detail = f"{err}; K {json.dumps(k)}, dist {json.dumps(dist)}, rms_px {rms}"
+        return "WRIST_K_FAIL " + json.dumps({"reason": "save_dir", "detail": detail}), 1
     cam = Pinhole.from_ros_k(w, h, k)
     rig = dataclasses.replace(rig, wrist_k=k, wrist_size=(w, h), wrist_dist=dist)
     warp = wrist_warp(cam, quat_matrix(rig.wrist_rot).T)
