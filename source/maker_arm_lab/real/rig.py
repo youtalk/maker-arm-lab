@@ -72,6 +72,13 @@ class RigConfig:
     tracking_params: dict = field(default_factory=lambda: {"tau_th": [2.0] * 6})  # INITIAL: A1
     tray_lean_deg: float = 30.0
     desk_z: float = 0.0
+    tray_centre: tuple[float, float] = (0.195, 0.0)  # INITIAL: task 9 measures it
+    tray_interior: tuple[float, float] = (0.13, 0.20)  # INITIAL: task 9 measures it
+    tray_floor_z: float = 0.0  # INITIAL: task 9 measures it
+    box_interior: tuple[float, float, float] = desk_boxes.interior(4)  # INITIAL: task 9
+    ipad_z: float = 0.0061  # INITIAL: task 9 measures it
+    """The iPad's screen glass above the desk, m. The tray interior is (x, y) in the base
+    frame; the tray stands at ``tray_centre``."""
     caps: dict | None = None
     """The session's reduced caps: ``{"tau_max": [7], "kp": [7], "kd": [7]}``, each a scale in
     (0, 1] of ``maker_arm_rs.profile()``'s per-joint value (``reduced_profile``). None, or a
