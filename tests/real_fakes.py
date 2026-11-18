@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+import types
 
 import numpy as np
 import zmq
@@ -178,6 +179,29 @@ class FakeOverhead:
         camera, pose = sim_overhead()
         header = {"camera": camera_block(camera, pose.pos, pose.quat()), "depth_camera": None}
         return FrameBundle(header, {"rgb_jpeg": np.frombuffer(latest.raw, dtype=np.uint8)})
+
+
+class _Stream:
+    """A ``LatestFrame`` that serves the next stamp on each ``get`` and repeats the last."""
+
+    def __init__(self, source, stamps):
+        self.source, self.stamps = source, list(stamps)
+
+    def get(self):
+        s = self.source
+        stamp = self.stamps.pop(0) if len(self.stamps) > 1 else self.stamps[0]
+        return Latest(s.view, s.raw, time.monotonic_ns() - int(s.age_s * 1e9), stamp)
+
+
+class StreamOverhead(FakeOverhead):
+    """A ``ConduitOverhead`` whose frames arrive with the given capture stamps (a repeated
+    stamp is one frame seen twice), with a warp that covers ``coverage`` of the view."""
+
+    def __init__(self, stamps, coverage=0.9, age_s=0.0):
+        super().__init__(age_s)
+        self.frames = _Stream(self, stamps)
+        self.warp = types.SimpleNamespace(coverage=coverage)
+        self.rebuilds, self.k_drift = 0, 0.0
 
 
 class FakeWrist:
