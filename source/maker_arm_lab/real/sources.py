@@ -34,9 +34,9 @@ from maker_arm_lab.real.frames import CameraInfo, DepthFrame, FrameBundle, JpegF
 from maker_arm_lab.real.perceive import camera_block
 
 DEPTH_KEEP = 8
+"""Depth frames kept to match a JPEG's stamp."""
 K_REBUILD_PX = 0.5
 """A camera info whose fx, fy, cx or cy moves more than this many pixels rebuilds the warp."""
-"""Depth frames kept to match a JPEG's stamp."""
 
 
 @dataclass(frozen=True)
