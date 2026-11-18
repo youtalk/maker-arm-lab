@@ -79,6 +79,9 @@ class RigConfig:
     ipad_z: float = 0.0061  # INITIAL: task 9 measures it
     """The iPad's screen glass above the desk, m. The tray interior is (x, y) in the base
     frame; the tray stands at ``tray_centre``."""
+    tag_offset: tuple[float, float, float] | None = None
+    """The gripper tag's centre in the ``grasp_center`` frame, m (``scripts/real_register_base.py``
+    writes it; sensing-owned). None until the base is registered."""
     caps: dict | None = None
     """The session's reduced caps: ``{"tau_max": [7], "kp": [7], "kd": [7]}``, each a scale in
     (0, 1] of ``maker_arm_rs.profile()``'s per-joint value (``reduced_profile``). None, or a

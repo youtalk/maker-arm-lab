@@ -195,6 +195,7 @@ def test_the_script_writes_layouts_and_templates(tmp_path):
     assert json.loads(lines[0].split(" ", 1)[1])["unmatched"] == ["odd gear"]
     names = sorted(p.name for p in out.iterdir())
     assert names == [
+        "board.png",
         "cluster0.json",
         "cluster0.png",
         "empty.png",
