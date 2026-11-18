@@ -69,7 +69,9 @@ def checker_png(
 
 
 SPARSE_MIN_GAP_M = 0.035
+SPARSE_MIN_FOOTPRINT_GAP_M = 0.010
 CLUSTER_GAP_M = 0.001
+TRAY_EDGE_MARGIN_M = 0.005
 TEMPLATE_GREY = (90, 90, 90)  # INITIAL: task 9 measures what reads best on the iPad
 DRAW_TRIES = 5000
 KINDS = ("sparse", "cluster", "heap")
@@ -165,8 +167,8 @@ def footprint_gap(a: TruthPart, b: TruthPart) -> float:
 
 
 def footprint_inside_tray(p: TruthPart, rig: RigConfig) -> bool:
-    d = _part_corners(p) - rig.tray_centre
-    return bool((np.abs(d) <= np.asarray(rig.tray_interior) / 2 + 1e-12).all())
+    """The footprint lies inside the tray interior by ``TRAY_EDGE_MARGIN_M``."""
+    return _inside(p.name, p.x, p.y, p.yaw, rig)
 
 
 def _truth(name: str, x: float, y: float, yaw: float, rig: RigConfig, on_screen: bool):
@@ -177,7 +179,7 @@ def _truth(name: str, x: float, y: float, yaw: float, rig: RigConfig, on_screen:
 
 def _inside(name, x, y, yaw, rig) -> bool:
     d = _corners(x, y, yaw, _size(name)) - rig.tray_centre
-    return bool((np.abs(d) <= np.asarray(rig.tray_interior) / 2).all())
+    return bool((np.abs(d) <= np.asarray(rig.tray_interior) / 2 - TRAY_EDGE_MARGIN_M).all())
 
 
 def draw_layout(
@@ -192,7 +194,7 @@ def draw_layout(
         nan = float("nan")
         return Layout(name, kind, [_truth(n, nan, nan, nan, rig, False) for n in names], boxes)
     cx, cy = rig.tray_centre
-    hx, hy = (v / 2 for v in rig.tray_interior)
+    hx, hy = (v / 2 - TRAY_EDGE_MARGIN_M for v in rig.tray_interior)
     placed: list[TruthPart] = []
     for n in names:
         for _ in range(DRAW_TRIES):
@@ -207,7 +209,8 @@ def draw_layout(
             cand = _truth(n, x, y, yaw, rig, True)
             if kind == "sparse":
                 ok = all(
-                    math.dist((x, y), (q.x, q.y)) >= SPARSE_MIN_GAP_M and footprint_gap(cand, q) > 0
+                    math.dist((x, y), (q.x, q.y)) >= SPARSE_MIN_GAP_M
+                    and footprint_gap(cand, q) >= SPARSE_MIN_FOOTPRINT_GAP_M
                     for q in placed
                 )
             else:

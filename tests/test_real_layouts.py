@@ -14,7 +14,9 @@ from maker_arm_lab.real.camera_model import Pose
 from maker_arm_lab.real.layouts import (
     CLUSTER_GAP_M,
     IPAD_AIR_11,
+    SPARSE_MIN_FOOTPRINT_GAP_M,
     SPARSE_MIN_GAP_M,
+    TRAY_EDGE_MARGIN_M,
     Layout,
     TruthPart,
     draw_layout,
@@ -36,6 +38,7 @@ def test_a_sparse_layout_keeps_its_parts_apart_and_inside_the_tray():
     assert len(lay.parts) == len(NAMES)
     for a, b in itertools.combinations(lay.parts, 2):
         assert math.dist((a.x, a.y), (b.x, b.y)) >= SPARSE_MIN_GAP_M
+        assert footprint_gap(a, b) >= SPARSE_MIN_FOOTPRINT_GAP_M - 1e-12
     for p in lay.parts:
         assert footprint_inside_tray(p, rig)
         assert p.z > rig.ipad_z
@@ -200,3 +203,38 @@ def test_the_script_writes_layouts_and_templates(tmp_path):
         "sparse0.png",
     ]
     assert len(Layout.from_json(out / "heap0.json").parts) == 5
+
+
+def test_every_footprint_keeps_the_edge_margin_on_the_owners_tray():
+    rig = RigConfig(tray_interior=(0.14, 0.18))
+    for seed in range(8):
+        for kind in ("sparse", "cluster"):
+            lay = draw_layout(random.Random(seed), kind, NAMES, rig, kind)
+            for p in lay.parts:
+                d = np.abs(_corners_of(p) - rig.tray_centre)
+                assert (d <= np.asarray(rig.tray_interior) / 2 - TRAY_EDGE_MARGIN_M + 1e-12).all()
+            img = template_png(lay, rig)
+            assert img.size == (2360, 1640)
+    s = nominal_screen_pose(rig)
+    for dx, dy in itertools.product((-1, 1), repeat=2):
+        c = [rig.tray_centre[0] + dx * 0.07, rig.tray_centre[1] + dy * 0.09, rig.ipad_z]
+        u, v = IPAD_AIR_11.to_px(s.to_camera(c)[:2])
+        assert 0 < u < 2360 and 0 < v < 1640
+
+
+def _corners_of(p):
+    from maker_arm_lab.real.layouts import _part_corners
+
+    return _part_corners(p)
+
+
+def test_a_rig_json_without_the_new_fields_loads_with_defaults(tmp_path):
+    path = tmp_path / "rig.json"
+    data = json.loads(RigConfig().to_json())
+    for k in ("tray_centre", "tray_interior", "tray_floor_z", "box_interior", "ipad_z"):
+        del data[k]
+    path.write_text(json.dumps(data))
+    rig = RigConfig.from_json(path)
+    assert rig.tray_interior == (0.13, 0.20) and rig.ipad_z == 0.0061
+    assert rig.tray_centre == (0.195, 0.0) and rig.tray_floor_z == 0.0
+    assert rig.box_interior == RigConfig().box_interior
