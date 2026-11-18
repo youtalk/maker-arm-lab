@@ -58,6 +58,9 @@ class RigConfig:
     wrist_k: tuple[float, ...] | None = None
     """None: the wrist source already serves the simulated wrist view (the twin, wave 2)."""
     wrist_size: tuple[int, int] | None = None
+    wrist_dist: tuple[float, ...] | None = None
+    """OpenCV's five distortion coefficients of the wrist camera (``scripts/real_wrist_intrinsics.py``).
+    None: the frames are not undistorted."""
     wrist_rot: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)  # INITIAL: A2 hand-eye
     """The real wrist camera's axes in the simulated mount's frame (``robots.frames``)."""
     wrist_device: str = "/dev/video0"  # INITIAL: A2 confirms the UVC device

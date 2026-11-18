@@ -23,6 +23,7 @@ import io
 import threading
 import time
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -162,10 +163,26 @@ class ConduitOverhead:
 class WristFrames:
     """The wrist camera's frames: ``camera`` is its raw frame's pinhole; ``warp`` None means
     the camera already serves the simulated 224x224 wrist view. A frame that is not
-    ``camera``'s size, or whose warp raises, is dropped (``dropped``, ``error``)."""
+    ``camera``'s size, or whose warp raises, is dropped (``dropped``, ``error``). With ``dist``
+    (OpenCV's coefficients for ``camera``'s K) each frame is undistorted, to the same K, before
+    the warp; OpenCV is imported only then."""
 
-    def __init__(self, camera: Pinhole, warp: ViewWarp | None):
+    def __init__(self, camera: Pinhole, warp: ViewWarp | None, dist: Sequence[float] | None = None):
         self.camera, self.warp = camera, warp
+        self._maps: tuple[np.ndarray, np.ndarray] | None = None
+        if dist is not None:
+            import cv2
+
+            k = np.array(camera.ros_k()).reshape(3, 3)
+            self._maps = cv2.initUndistortRectifyMap(
+                k,
+                np.asarray(dist, np.float64),
+                None,
+                k,
+                (camera.width, camera.height),
+                cv2.CV_32FC1,
+            )
+            self._cv2 = cv2
         self.frames = LatestFrame()
         self.dropped = 0
         self.error: str | None = None
@@ -184,6 +201,8 @@ class WristFrames:
             )
             return
         try:
+            if self._maps is not None:
+                rgb = self._cv2.remap(rgb, *self._maps, self._cv2.INTER_LINEAR)
             view = rgb if self.warp is None else self.warp.apply(rgb)
         except Exception as err:  # noqa: BLE001 -- the capture thread must keep running
             self.dropped += 1
@@ -195,10 +214,16 @@ class WristFrames:
 class UvcWrist(WristFrames):
     """A V4L2 wrist camera, read with OpenCV on its own thread."""
 
-    def __init__(self, device: str, camera: Pinhole, warp: ViewWarp | None):
+    def __init__(
+        self,
+        device: str,
+        camera: Pinhole,
+        warp: ViewWarp | None,
+        dist: Sequence[float] | None = None,
+    ):
         import cv2
 
-        super().__init__(camera, warp)
+        super().__init__(camera, warp, dist)
         self._cv2 = cv2
         self._cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
         if not self._cap.isOpened():

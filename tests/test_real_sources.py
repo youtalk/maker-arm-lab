@@ -176,3 +176,15 @@ def test_a_wrong_size_wrist_jpeg_is_dropped_and_named():
     src = WristFrames(Pinhole.from_ros_k(640, 480, K_640), None)
     src.on_jpeg(JpegFrame(Arrival(1, 2, 3), _jpeg(np.zeros((240, 320, 3), np.uint8)), "w"))
     assert src.frames.get() is None and src.dropped == 1 and "320x240" in src.error
+
+
+def test_a_wrist_jpeg_is_undistorted_when_the_source_has_dist():
+    pytest.importorskip("cv2")
+    rgb = np.zeros((480, 640, 3), np.uint8)
+    rgb[:, 100:110] = 255  # a straight vertical line; barrel undistortion bends it
+    camera = Pinhole.from_ros_k(640, 480, K_640)
+    plain, fixed = WristFrames(camera, None), WristFrames(camera, None, (-0.3, 0, 0, 0, 0))
+    for src in (plain, fixed):
+        src.on_jpeg(JpegFrame(Arrival(1, 2, 3), _jpeg(rgb), "wrist_camera"))
+    assert fixed.frames.get().raw.shape == (480, 640, 3)
+    assert np.abs(fixed.frames.get().raw.astype(int) - plain.frames.get().raw).mean() > 1.0
