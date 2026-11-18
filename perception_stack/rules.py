@@ -27,7 +27,11 @@ SLOPE_MIN = 0.5  # INITIAL: plan task 9 (the sparse read) measures it
 BOX_MIN_HEIGHT_M = 0.02  # INITIAL: plan task 9 (the sparse read) measures it
 BOX_SIZE_TOL_M = 0.015  # INITIAL: plan task 9 (the sparse read) measures it
 BOX_DARK_MAX = 80  # INITIAL: plan task 9 (the sparse read) measures it
-BOX_WALLS_M = 0.010  # two simulator walls of 5 mm (layout.TRAY_WALL)
+BOX_WALL_M = (
+    0.005  # INITIAL: plan task 9 (the sparse read) measures it; the real boxes have 1-2 mm walls
+)
+BOX_DEPTH_MIN_CELLS = 3
+"""Valid depth cells a box component needs before its depth rim is checked."""
 
 
 def _intrinsics(k):
@@ -53,6 +57,31 @@ def project(points: np.ndarray, k, rot, pos) -> np.ndarray:
     fx, fy, cx, cy = _intrinsics(k)
     cam = (np.asarray(points, dtype=np.float64) - np.asarray(pos)) @ np.asarray(rot)
     return np.stack([cx + fx * cam[:, 0] / cam[:, 2], cy + fy * cam[:, 1] / cam[:, 2]], axis=-1)
+
+
+def _plane_xy(u, v, k, rot, pos, plane_z) -> np.ndarray:
+    """(..., 2) world xy where the rays through pixel positions (u, v) (lab convention, a pixel's
+    centre is at +0.5) meet the plane z = ``plane_z``."""
+    fx, fy, cx, cy = _intrinsics(k)
+    ray = np.stack([(u - cx) / fx, (v - cy) / fy, np.ones(np.shape(u))], axis=-1)
+    ray = ray @ np.asarray(rot, dtype=np.float64).T
+    pos = np.asarray(pos, dtype=np.float64)
+    return pos[:2] + ray[..., :2] * ((plane_z - pos[2]) / ray[..., 2:3])
+
+
+def mask_xy(pixels: np.ndarray, depth_mm_at_pixels: np.ndarray, k, rot, pos, plane_z: float):
+    """(N, 2) world xy of the (row, col) ``pixels`` of a mask: deprojected with the depth where
+    it is valid, and the ray meeting the plane z = ``plane_z`` (the floor plus the part height)
+    where it is 0."""
+    pixels = np.asarray(pixels)
+    u, v = pixels[:, 1] + 0.5, pixels[:, 0] + 0.5
+    on_plane = _plane_xy(u, v, k, rot, pos, plane_z)
+    d = np.asarray(depth_mm_at_pixels, dtype=np.float64)
+    fx, fy, cx, cy = _intrinsics(k)
+    z = d / 1000.0
+    cam = np.stack([(u - cx) / fx * z, (v - cy) / fy * z, z], axis=-1)
+    seen = (cam @ np.asarray(rot, dtype=np.float64).T + np.asarray(pos, dtype=np.float64))[:, :2]
+    return np.where((d > 0)[:, None], seen, on_plane)
 
 
 def blobs_above(
@@ -162,8 +191,9 @@ def part_detection(xy: np.ndarray, heights: np.ndarray, floor_z: float) -> dict:
     """A wire detection from a part's mask: (N, 2) world xy of its cells and (N,) heights above
     ``floor_z`` (NaN where the depth is invalid). The height is clamped to at least
     ``MIN_PART_HEIGHT_M`` so a noisy mask never gives a flat part."""
-    cx, cy, yaw, length, width = min_area_rect(xy)
+    _, _, yaw, length, width = min_area_rect(xy)
     height = max(_height(heights), MIN_PART_HEIGHT_M)
+    cx, cy = xy.mean(axis=0)  # the spec's centre is the mask centroid
     along = (xy[:, 0] - cx) * math.cos(yaw) + (xy[:, 1] - cy) * math.sin(yaw)
     size = (length, width, height)
     return {
@@ -176,31 +206,48 @@ def part_detection(xy: np.ndarray, heights: np.ndarray, floor_z: float) -> dict:
 
 
 def box_detections(
-    world: np.ndarray,
     rgb_luma: np.ndarray,
+    k,
+    rot: np.ndarray,
+    pos: np.ndarray,
     desk_z: float,
     bands: Sequence[tuple[float, float, float, float]],
     interior: tuple[float, float, float],
+    depth_world: np.ndarray | None = None,
+    wall_m: float = BOX_WALL_M,
+    step: int = 4,
 ) -> list[list[float]]:
-    """(x, y, yaw) of each box in the side ``bands`` (x_min, x_max, y_min, y_max). A blob more
-    than ``BOX_MIN_HEIGHT_M`` above the desk is a box when its rectangle's outer size is the
-    ``interior`` plus two walls within ``BOX_SIZE_TOL_M`` and the mean luma of the frame inside
-    it is at most ``BOX_DARK_MAX``. Looking only at the bands keeps a dark part in the tray
-    from reading as a box."""
-    want = sorted((interior[0] + BOX_WALLS_M, interior[1] + BOX_WALLS_M), reverse=True)
+    """(x, y, yaw) of each box: the dark outline in the (H, W) luma frame, against the desk.
+
+    The frame is block-averaged by ``step`` for speed. Dark blocks (at most ``BOX_DARK_MAX``)
+    whose desk-plane projection lies in a side band (x_min, x_max, y_min, y_max) form 4-connected
+    components. Each component's blocks are projected onto the rim plane, z = ``desk_z`` +
+    ``interior[2]``, and a minimum-area rectangle is fitted. It is a box when its outer size is
+    the interior plus two ``wall_m`` walls within ``BOX_SIZE_TOL_M``. ``depth_world`` (the
+    ``deproject`` output, optional) is only a check: with at least ``BOX_DEPTH_MIN_CELLS`` valid
+    cells in the component, the highest must rise more than ``BOX_MIN_HEIGHT_M`` above the desk
+    (the rim is a thin part of the component, so the median would read the box floor). With no
+    valid depth the box stands on the outline alone. Looking only at the bands keeps a dark part
+    in the tray from reading as a box."""
+    h, w = (rgb_luma.shape[0] // step) * step, (rgb_luma.shape[1] // step) * step
+    blocks = rgb_luma[:h, :w].astype(np.float64).reshape(h // step, step, w // step, step)
+    dark = blocks.mean(axis=(1, 3)) <= BOX_DARK_MAX
+    v, u = np.mgrid[0 : h // step, 0 : w // step] * step + step / 2
+    desk = _plane_xy(u, v, k, rot, pos, desk_z)
+    grid = np.concatenate([desk, np.where(dark, 1.0, np.nan)[..., None]], axis=-1)
+    want = sorted((interior[0] + 2 * wall_m, interior[1] + 2 * wall_m), reverse=True)
     out = []
     for band in bands:
-        for cells in blobs_above(world, desk_z, band, BOX_MIN_HEIGHT_M):
-            xy = world[cells[:, 0], cells[:, 1], :2]
+        for cells in blobs_above(grid, 0.0, band, 0.5, min_cells=MIN_PART_CELLS):
+            r, c = cells[:, 0], cells[:, 1]
+            xy = _plane_xy(u[r, c], v[r, c], k, rot, pos, desk_z + interior[2])
             cx, cy, yaw, length, width = min_area_rect(xy)
             if max(abs(length - want[0]), abs(width - want[1])) > BOX_SIZE_TOL_M:
                 continue
-            c, s = math.cos(yaw), math.sin(yaw)
-            dx, dy = world[..., 0] - cx, world[..., 1] - cy
-            with np.errstate(invalid="ignore"):
-                inside = (np.abs(dx * c + dy * s) <= length / 2) & (
-                    np.abs(dy * c - dx * s) <= width / 2
-                )
-            if inside.any() and rgb_luma[inside].mean() <= BOX_DARK_MAX:
-                out.append([cx, cy, yaw])
+            if depth_world is not None:
+                z = depth_world[(r * step + step // 2), (c * step + step // 2), 2]
+                z = z[np.isfinite(z)]
+                if len(z) >= BOX_DEPTH_MIN_CELLS and z.max() - desk_z <= BOX_MIN_HEIGHT_M:
+                    continue
+            out.append([cx, cy, yaw])
     return out

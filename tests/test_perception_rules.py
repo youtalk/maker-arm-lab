@@ -3,6 +3,7 @@
 import ast
 import math
 import random
+import sys
 
 import mujoco
 import numpy as np
@@ -126,30 +127,73 @@ def test_a_ramp_scores_one_and_a_flat_top_zero():
 
 BANDS = [(0.05, 0.25, 0.14, 0.26)]
 BOX = (0.15, 0.20, 0.3, 0.095, 0.095)  # outer: 0.09 interior plus two 5 mm walls
+INTERIOR = (0.09, 0.09, 0.04)
 
 
-def box_scene(extra=()):
+def luma_scene(boxes, plane_z=0.04):
+    """A bright desk with black boxes (cx, cy, yaw, length, width) whose rims are at plane_z."""
+    luma = np.full((480, 640), 200.0)
+    ray = rules.deproject(np.full((480, 640), 1000, np.uint16), K, ROT, POS)[..., :2] - POS[:2]
+    for cx, cy, yaw, length, width in boxes:
+        dx, dy = (
+            POS[0] + ray[..., 0] * (0.8 - plane_z) - cx,
+            POS[1] + ray[..., 1] * (0.8 - plane_z) - cy,
+        )
+        c, s = math.cos(yaw), math.sin(yaw)
+        luma[(np.abs(dx * c + dy * s) <= length / 2) & (np.abs(dy * c - dx * s) <= width / 2)] = (
+            30.0
+        )
+    return luma
+
+
+def boxes_in(luma, depth=None, interior=INTERIOR, **kw):
+    world = None if depth is None else rules.deproject(depth, K, ROT, POS)
+    return rules.box_detections(luma, K, ROT, POS, 0.0, BANDS, interior, world, **kw)
+
+
+def test_a_black_box_with_no_depth_is_found_from_its_outline():
+    box = (0.15, 0.20, 0.3, 0.095, 0.095)
+    found = boxes_in(luma_scene([box]), np.zeros((480, 640), np.uint16))
+    assert len(found) == 1 and math.dist(found[0][:2], box[:2]) < 0.005
+    # a long box shows its heading
+    long_box = (0.15, 0.20, 0.5, 0.12, 0.08)
+    found = boxes_in(luma_scene([long_box]), interior=(0.11, 0.07, 0.04))
+    assert math.dist(found[0][:2], long_box[:2]) < 0.005
+    assert abs(math.degrees(found[0][2] - 0.5)) < 2
+
+
+def test_a_box_with_a_valid_depth_rim_is_found_and_a_flat_dark_mat_is_not():
+    luma = luma_scene([BOX])
     ring = [(0.04, BOX), (0.0, (0.15, 0.20, 0.3, 0.085, 0.085))]
-    return rules.deproject(scene(ring + list(extra)), K, ROT, POS)
+    assert len(boxes_in(luma, scene(ring))) == 1
+    assert boxes_in(luma, scene([])) == []  # dark, but nothing rises above the desk
 
 
-def test_a_box_in_the_band_is_found_and_a_dark_part_in_the_tray_is_not():
-    part = (0.0096, (0.20, 0.0, 0.0, 0.032, 0.016))
-    world = box_scene([part])
-    luma = np.full(world.shape[:2], 200.0)
-    dx, dy = world[..., 0] - 0.15, world[..., 1] - 0.20
-    luma[(np.abs(dx) < 0.05) & (np.abs(dy) < 0.05)] = 30.0  # the box is black
-    luma[np.abs(world[..., 1]) < 0.03] = 20.0  # so is the part's side of the tray
-    boxes = rules.box_detections(world, luma, 0.0, BANDS, (0.09, 0.09, 0.04))
-    assert len(boxes) == 1 and math.dist(boxes[0][:2], (0.15, 0.20)) < 0.005
-    # a bright box, a box of the wrong size and a dark part in the band are not boxes
-    assert (
-        rules.box_detections(world, np.full(luma.shape, 200.0), 0.0, BANDS, (0.09, 0.09, 0.04))
-        == []
-    )
-    assert rules.box_detections(world, luma, 0.0, BANDS, (0.14, 0.14, 0.04)) == []
-    small = rules.deproject(scene([(0.0096, (0.2, 0.2, 0, 0.032, 0.016))]), K, ROT, POS)
-    assert rules.box_detections(small, np.zeros(luma.shape), 0.0, BANDS, (0.09, 0.09, 0.04)) == []
+def test_a_dark_part_in_the_tray_or_in_a_band_is_not_a_box():
+    tray_part = luma_scene([(0.20, 0.0, 0.0, 0.032, 0.016)], plane_z=0.0096)
+    assert boxes_in(tray_part) == []
+    assert boxes_in(luma_scene([(0.2, 0.2, 0.0, 0.032, 0.016)], plane_z=0.0096)) == []
+
+
+def test_the_wall_parameter_sets_the_outer_size_the_rule_wants():
+    luma = luma_scene([(0.15, 0.20, 0.0, 0.078, 0.078)])
+    assert len(boxes_in(luma, interior=(0.075, 0.075, 0.04), wall_m=0.0015)) == 1
+    small = luma_scene([(0.15, 0.20, 0.0, 0.060, 0.060)])
+    assert boxes_in(small, interior=(0.075, 0.075, 0.04), wall_m=0.005) == []
+
+
+def test_a_mask_with_no_valid_depth_is_placed_by_the_floor_plane_ray():
+    truth = (0.17, -0.02, 0.4, 0.032, 0.016)
+    depth = scene([(rules.BRICK_HEIGHT_M, truth)])
+    rows, cols = np.nonzero(depth != 800)
+    pixels = np.stack([rows, cols], axis=-1)
+    xy = rules.mask_xy(pixels, np.zeros(len(pixels)), K, ROT, POS, rules.BRICK_HEIGHT_M)
+    det = rules.part_detection(xy, np.full(len(xy), np.nan), 0.0)
+    assert det["centre"][:2] == pytest.approx(truth[:2], abs=0.002)
+    assert det["centre"][2] == pytest.approx(rules.BRICK_HEIGHT_M / 2)
+    # with valid depth the same pixels deproject directly
+    seen = rules.mask_xy(pixels, depth[rows, cols], K, ROT, POS, 0.0)
+    assert seen.mean(axis=0) == pytest.approx(truth[:2], abs=0.002)
 
 
 def test_the_rules_import_only_numpy_and_the_stdlib():
@@ -160,8 +204,6 @@ def test_the_rules_import_only_numpy_and_the_stdlib():
             names |= {a.name.split(".")[0] for a in node.names}
         elif isinstance(node, ast.ImportFrom):
             names.add(node.module.split(".")[0])
-    import sys
-
     assert names <= set(sys.stdlib_module_names) | {"numpy"}
 
 
