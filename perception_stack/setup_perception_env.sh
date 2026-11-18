@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # The perception worker's venv (MS5 design section 4.2): CUDA torch and the segmentation
-# model, apart from the lab's uv venv and the LeRobot venv. It targets the Jetson Thor, where
-# the worker runs beside the loop (MS5 design decision M8).
+# model, apart from the lab's uv venv and the LeRobot venv. The worker runs on the Jetson Thor,
+# beside the loop (MS5 design decision M8), or on Machine A, an x86_64 Linux host with a CUDA
+# GPU. Any other host is refused.
 set -euo pipefail
 cd "$(dirname "$0")"
-if [[ "$(uname -m)" != "aarch64" || ! -e /etc/nv_tegra_release ]]; then
-    echo "setup_perception_env.sh: the worker venv targets the Jetson Thor" >&2
+thor=0
+if [[ -e /etc/nv_tegra_release ]]; then
+    thor=1
+elif [[ "$(uname -m)" != "x86_64" || "$(uname -s)" != "Linux" ]]; then
+    echo "setup_perception_env.sh: the worker venv targets the Jetson Thor or an x86_64 Linux host" >&2
     exit 1
 fi
 # A JetPack shell profile exports LD_LIBRARY_PATH=/usr/local/cuda/lib64. That directory takes
@@ -41,10 +45,11 @@ GIT_CONFIG_GLOBAL=/dev/null SAM2_BUILD_CUDA=0 uv pip install --python .venv/bin/
     --no-build-isolation \
     "sam-2 @ git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4" \
     "huggingface_hub>=0.23" "pillow>=10" "pyzmq>=26" pytest
-.venv/bin/python -c "
-import torch, sam2
+THOR=$thor .venv/bin/python -c "
+import os, torch, sam2
 assert torch.cuda.is_available(), 'no CUDA device'
-assert torch.cuda.get_device_capability() == (11, 0), torch.cuda.get_device_capability()
+if os.environ['THOR'] == '1':
+    assert torch.cuda.get_device_capability() == (11, 0), torch.cuda.get_device_capability()
 x = torch.ones(256, 256, device='cuda')
 print('torch', torch.__version__, 'cuda', torch.version.cuda, 'check', float((x @ x).sum()),
       'sam2 ok')

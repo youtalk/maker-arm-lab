@@ -76,6 +76,7 @@ class RigConfig:
     tray_interior: tuple[float, float] = (0.13, 0.20)  # INITIAL: task 9 measures it
     tray_floor_z: float = 0.0  # INITIAL: task 9 measures it
     box_interior: tuple[float, float, float] = desk_boxes.interior(4)  # INITIAL: task 9
+    box_wall: float = 0.005  # INITIAL: plan task 9 measures it; the real boxes have 1-2 mm walls
     ipad_z: float = 0.0061  # INITIAL: task 9 measures it
     """The iPad's screen glass above the desk, m. The tray interior is (x, y) in the base
     frame; the tray stands at ``tray_centre``."""
