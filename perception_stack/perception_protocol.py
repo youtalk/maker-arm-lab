@@ -7,7 +7,8 @@ framing is the same: a UTF-8 JSON header, then (name, npy bytes) frame pairs.
 
 Every request that carries an image carries its camera (``camera_header``): ``k`` (row-major
 3x3), ``size`` (width, height) and ``pose`` (world from camera, ROS optical frame: ``pos``
-and ``quat`` (w, x, y, z)). World is the arm's base frame.
+and ``quat`` (w, x, y, z)). ``k`` uses the lab convention, the centre of pixel (0, 0) at
+(0.5, 0.5), as ``real.perceive.camera_block`` writes it. World is the arm's base frame.
 
     hello   {protocol}                                  -> hello_ack {protocol, worker_id}
     boxes   {camera, depth_camera} + rgb_jpeg[, depth]   -> boxes {poses: [[x, y, yaw], ...]}
