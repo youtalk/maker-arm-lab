@@ -49,6 +49,8 @@ MuJoCo-only members (the Isaac env has none of these; core/ reads them through g
         class_to_box's), env.destination_mask (N, K, M) bool (the grader's correct boxes of each
         part) and env.part_box_sets(i) (the teacher's box_sets); the rig's stash
         env.oracle_marker_box names the box its teacher sends the marker's part to
+    env.set_part_poses(i, poses) (MS5 sensing, heap mode): every part of env i at one
+        (x, y, z, yaw) of a truth layout, still, then the images of env i refreshed
     perceived state (MS7c design section 6, heap mode): env.marker_points (N, 3) float32, NaN
         by default and after the env's reset; a finite row is the frozen marker that
         stamp_markers() draws in place of target_part's live centre; the recording rig's
@@ -1279,6 +1281,18 @@ class MjLegoSortEnv:
             m.geom_contype[geoms] = 0
             m.geom_conaffinity[geoms] = 0
             self.parked[i, b] = True
+
+    def set_part_poses(self, i: int, poses: Sequence[tuple[float, float, float, float]]) -> None:
+        """Stand part ``b`` of env ``i`` at ``poses[b]`` = (x, y, z, yaw), still, with a yaw-only
+        quaternion and its collider and gravity back, then refresh env ``i``'s state and images."""
+        m, d, h = self.models[i], self.datas[i], self.handles
+        self._unpark(i, range(len(poses)))
+        for b, (x, y, z, yaw) in enumerate(poses):
+            adr, dof = h.brick_qpos[b], h.brick_dof[b]
+            d.qpos[adr : adr + 7] = (x, y, z, math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0))
+            d.qvel[dof : dof + 6] = 0.0
+        mujoco.mj_forward(m, d)
+        self._refresh([i], images=True)
 
     def _unpark(self, i: int, parts) -> None:
         """Give parked ``parts`` of env ``i`` their colliders and gravity back; they stay where
