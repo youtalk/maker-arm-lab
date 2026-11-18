@@ -197,11 +197,18 @@ class StreamOverhead(FakeOverhead):
     """A ``ConduitOverhead`` whose frames arrive with the given capture stamps (a repeated
     stamp is one frame seen twice), with a warp that covers ``coverage`` of the view."""
 
-    def __init__(self, stamps, coverage=0.9, age_s=0.0):
+    def __init__(self, stamps, coverage=0.9, age_s=0.0, depth=True):
         super().__init__(age_s)
+        self.depth, self.depth_camera, self.dropped = depth, None, 0
         self.frames = _Stream(self, stamps)
         self.warp = types.SimpleNamespace(coverage=coverage)
         self.rebuilds, self.k_drift = 0, 0.0
+
+    def bundle(self, latest):
+        out = super().bundle(latest)
+        if self.depth:
+            out.arrays["depth"] = np.full((4, 4), 500, dtype=np.uint16)
+        return out
 
 
 class FakeWrist:

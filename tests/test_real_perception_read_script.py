@@ -107,6 +107,37 @@ def test_run_read_times_out_without_frames():
         worker.close()
 
 
+def test_run_read_times_out_when_no_bundle_carries_depth():
+    clock = FakeClock()
+    worker = FakeWorker()
+    try:
+        with pytest.raises(TimeoutError, match="0 of 3 frames with depth.*depth/image_raw"):
+            read.run_read(
+                StreamOverhead([1, 2, 3], depth=False),
+                WorkerClient(worker.endpoint),
+                _layout(),
+                3,
+                None,
+                timeout_s=5.0,
+                clock=clock,
+                sleep=clock.sleep,
+            )
+    finally:
+        kinds = worker.kinds()
+        worker.close()
+    assert kinds == ["hello"]
+
+
+def test_a_rig_with_a_k_and_no_size_fails_before_the_session(tmp_path):
+    rig = tmp_path / "rig.json"
+    rig.write_text(json.dumps({"overhead_k": [500, 0, 320, 0, 500, 240, 0, 0, 1]}))
+    lay = tmp_path / "lay.json"
+    lay.write_text(_layout().to_json())
+    code, tokens = _run(READ, ["--rig", rig, "--layout", lay, "--out", tmp_path / "o.json"])
+    assert code == 1 and len(tokens) == 1
+    assert tokens[0].startswith("PERCEPTION_READ_FAIL") and '"rig"' in tokens[0]
+
+
 def test_a_screen_pose_moves_the_truth_it_reads_against(tmp_path):
     rig = RigConfig()
     nominal = nominal_screen_pose(rig)
@@ -173,7 +204,9 @@ def test_the_verdict_adds_the_calibration_error_to_the_bias_rows(tmp_path):
     path = _write(tmp_path, "s0", x=0.2055)  # 5.5 mm bias in x against a 6.5 mm limit
     assert _verdict(path, rms="0")[1] == "PERCEPTION_PASS"
     code, token, out = _verdict(path, rms="2")
-    assert token == "PERCEPTION_FAIL" and code == 1 and out["rows"] == ["pos_bias_mm.x"]
+    assert token == "PERCEPTION_FAIL" and code == 1 and out["rows"] == ["pos_bias_checked_mm.x"]
+    assert out["table"]["pos_bias_mm"][0] == pytest.approx(5.5, abs=0.1)
+    assert out["table"]["pos_bias_checked_mm"][0] == pytest.approx(7.5, abs=0.1)
 
 
 def test_the_verdict_fails_on_one_row_over_its_limit(tmp_path):
@@ -183,4 +216,4 @@ def test_the_verdict_fails_on_one_row_over_its_limit(tmp_path):
 
 def test_a_read_that_measured_nothing_fails(tmp_path):
     _, token, out = _verdict(_write(tmp_path, "s0", detect=False))
-    assert token == "PERCEPTION_FAIL" and "pos_bias_mm.x" in out["rows"]
+    assert token == "PERCEPTION_FAIL" and "pos_bias_checked_mm.x" in out["rows"]

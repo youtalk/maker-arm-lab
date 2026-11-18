@@ -13,7 +13,9 @@ The script subscribes to the iPhone's Conduit stream, warps each new frame, asks
 the boxes and the parts, and matches them against the truth layout (``real.knob_read``). With
 ``--screen`` (from ``real_screen_pose.py``) the truth is the layout moved by the screen's
 measured pose. ``--out`` gets the per-frame detections, the knob table, ``k_drift``,
-``rebuilds``, the warp's ``coverage`` and the p50 and p95 of arrival minus capture stamp. With
+``rebuilds``, the warp's ``coverage`` and the p50 and p95 of arrival minus capture stamp (these
+include the offset between the iPhone's clock and the host's). A frame counts only when its
+bundle carries depth, which the worker needs for the parts. With
 ``--save_dir`` it also writes the warped 224 view (``view_NNN.png``) and the raw JPEG
 (``raw_NNN.jpg``) of frame 0 and of every fifth frame. Prints exactly one
 ``PERCEPTION_READ_OK {table}`` or ``PERCEPTION_READ_FAIL {reason}`` line and leaves through
@@ -36,6 +38,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "source"))
 
 SAVE_EVERY = 5
+DEPTH_TOPIC = "/conduit/camera/wide/depth/image_raw"  # real.ros.NAMESPACE + TOPICS["depth"]
 
 
 class TokenArgumentParser(argparse.ArgumentParser):
@@ -103,15 +106,21 @@ def run_read(
     while len(rows) < frames:
         latest = overhead.frames.get()
         key = latest and (latest.arrival_mono_ns if latest.stamp_ns is None else latest.stamp_ns)
-        if latest is None or key in seen:
+        bundle = latest and key not in seen and overhead.bundle(latest)
+        if not bundle or "depth" not in bundle.arrays:
             if clock() > end:
-                raise TimeoutError(f"{len(rows)} of {frames} frames in {timeout_s} s")
+                raise TimeoutError(
+                    f"{len(rows)} of {frames} frames with depth in {timeout_s} s; "
+                    f"dropped {getattr(overhead, 'dropped', 0)}, "
+                    f"camera info {'yes' if getattr(overhead, 'camera', 1) else 'no'}, "
+                    f"depth {'yes' if getattr(overhead, 'depth_camera', 1) else 'no'} "
+                    f"(depth comes on {DEPTH_TOPIC})"
+                )
             sleep(0.01)
             continue
         seen.add(key)
         if save_dir is not None and len(rows) % SAVE_EVERY == 0:
             _save(Path(save_dir), len(rows), latest)
-        bundle = overhead.bundle(latest)
         boxes = client.call("boxes", bundle.header, bundle.arrays)[0].get("poses", [])
         detections = client.call("parts", bundle.header, bundle.arrays)[0].get("detections", [])
         results.append(FrameResult(layout, detections, boxes))
@@ -136,7 +145,6 @@ def run_read(
 def _run(args) -> tuple[str, int]:
     if args.frames < 1:
         return "PERCEPTION_READ_FAIL " + json.dumps({"reason": "usage: --frames >= 1"}), 2
-    from maker_arm_lab.real import ros
     from maker_arm_lab.real.camera_model import Pinhole, Pose
     from maker_arm_lab.real.layouts import Layout
     from maker_arm_lab.real.perceive import WorkerClient
@@ -149,8 +157,13 @@ def _run(args) -> tuple[str, int]:
     rig = RigConfig.from_json(Path(args.rig).expanduser())
     layout = truth_layout(rig, Layout.from_json(Path(args.layout).expanduser()), args.screen)
     camera = None
+    if rig.overhead_k is not None and rig.overhead_size is None:
+        detail = "overhead_k is set but overhead_size is not"
+        return "PERCEPTION_READ_FAIL " + json.dumps({"reason": "rig", "detail": detail}), 1
     if rig.overhead_k is not None:
         camera = Pinhole.from_ros_k(*rig.overhead_size, rig.overhead_k)
+    from maker_arm_lab.real import ros  # rclpy: only once the inputs are checked
+
     overhead = ConduitOverhead(
         Pose.from_pos_quat(rig.overhead_pos, rig.overhead_quat),
         camera,
@@ -161,6 +174,8 @@ def _run(args) -> tuple[str, int]:
     sub = ros.ConduitSubscriber(
         on_jpeg=overhead.on_jpeg,
         on_info=overhead.on_info,
+        on_depth=overhead.on_depth,
+        on_depth_info=overhead.on_depth_info,
         on_error=overhead.on_error,
     ).start()
     try:

@@ -5,8 +5,9 @@
 
 Each READ.json is the ``--out`` of ``real_perception_read.py``. The frames of every sparse and
 cluster read pool into one knob table (``real.knob_read``), which is judged against the
-limits. ``--check_rms_mm`` is the calibration error of the overhead camera: each axis's
-``pos_bias_mm`` grows by it before it meets its limit. A row with no sample fails. A heap read
+limits. ``--check_rms_mm`` is the calibration error of the overhead camera: the table keeps the
+measured ``pos_bias_mm`` and adds ``pos_bias_checked_mm`` (each axis's |bias| plus it), which
+meets the ``pos_bias_mm`` limit. A row with no sample fails. A heap read
 has no truth positions: its detection and poured counts go under ``report_only``. Prints
 exactly one ``PERCEPTION_PASS {table, rows}`` or ``PERCEPTION_FAIL {table, rows}`` line (a
 usage or input error prints ``PERCEPTION_FAIL {reason}``) and leaves through ``os._exit``.
@@ -59,8 +60,10 @@ def _run(args) -> tuple[str, int]:
             frames += rows
             period = read["box_period"]
     table = knob_table(frames, period)
-    table["pos_bias_mm"] = [abs(b) + args.check_rms_mm for b in table["pos_bias_mm"]]
-    ok, over = verdict(table)
+    checked = [abs(b) + args.check_rms_mm for b in table["pos_bias_mm"]]
+    table["pos_bias_checked_mm"] = checked
+    ok, over = verdict({**table, "pos_bias_mm": checked})
+    over = [r.replace("pos_bias_mm", "pos_bias_checked_mm") for r in over]
     payload = {"table": table, "rows": over, "report_only": report_only}
     return ("PERCEPTION_PASS " if ok else "PERCEPTION_FAIL ") + json.dumps(payload), 0 if ok else 1
 
